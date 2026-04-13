@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate {
+final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
     let workspaceStore: HolyWorkspaceStore
 
     init(ghostty: Ghostty.App, initialConfig: Ghostty.SurfaceConfiguration? = nil) {
@@ -21,11 +21,15 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         window.minSize = NSSize(width: 920, height: 620)
         window.title = "Holy Ghostty"
         window.titlebarAppearsTransparent = true
-        window.toolbarStyle = .unified
         window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.fullScreenPrimary, .managed]
         window.setFrameAutosaveName("HolyGhosttyWorkspaceWindow")
+
+        let toolbar = NSToolbar(identifier: "HolyGhosttyToolbar")
+        toolbar.displayMode = .iconOnly
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
 
         let hostingController = NSHostingController(
             rootView: HolyWorkspaceRootView(store: workspaceStore)
@@ -35,6 +39,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
 
         super.init(window: window)
         window.delegate = self
+        toolbar.delegate = self
 
         if let initialConfig {
             _ = createSession(from: initialConfig)
@@ -102,5 +107,19 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         all.first(where: { $0.window?.isMainWindow ?? false })
         ?? all.first(where: { $0.window?.isKeyWindow ?? false })
         ?? all.last
+    }
+
+    // MARK: - NSToolbarDelegate
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace]
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        []
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        nil
     }
 }
