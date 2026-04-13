@@ -5,6 +5,7 @@ extension Ghostty {
     /// to perform app-global operations.
     protocol Delegate {
         /// Look up a surface within the application by ID.
+        @MainActor
         func ghosttySurface(id: UUID) -> SurfaceView?
     }
 }

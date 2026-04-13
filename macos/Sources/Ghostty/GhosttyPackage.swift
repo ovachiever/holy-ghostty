@@ -372,6 +372,11 @@ extension Notification.Name {
     static let ghosttyDidUpdateScrollbar = Notification.Name("com.mitchellh.ghostty.didUpdateScrollbar")
     static let ScrollbarKey = ghosttyDidUpdateScrollbar.rawValue + ".scrollbar"
 
+    /// Notification sent when a command finishes in a surface.
+    static let ghosttyCommandDidFinish = Notification.Name("com.mitchellh.ghostty.commandDidFinish")
+    static let CommandExitCodeKey = ghosttyCommandDidFinish.rawValue + ".exitCode"
+    static let CommandDurationKey = ghosttyCommandDidFinish.rawValue + ".duration"
+
     /// Focus the search field
     static let ghosttySearchFocus = Notification.Name("com.mitchellh.ghostty.searchFocus")
 }

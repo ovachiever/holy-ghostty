@@ -1,12 +1,30 @@
-# Inspector Subsystem
+# holy-ghostty/src/inspector Scope Guide
 
-The inspector is a feature of Ghostty that works similar to a
-browser's developer tools. It allows the user to inspect and modify the
-terminal state.
+This file applies only to this local subtree.
 
-- See the full C API by finding `dcimgui.h` in the `.zig-cache` folder
-  in the root: `find . -type f -name dcimgui.h`. Use the newest version.
-- See full examples of how to use every widget by loading this file:
-  <https://raw.githubusercontent.com/ocornut/imgui/refs/heads/master/imgui_demo.cpp>
-- On macOS, run builds with `-Demit-macos-app=false` to verify API usage.
-- There are no unit tests in this package.
+## Scope
+- Local path: `holy-ghostty/src/inspector/`.
+- Nearest ancestor guide: `holy-ghostty/AGENTS.md`.
+
+## Current Scope Signals
+- Local manifests: none detected in this directory.
+- Nearest owning manifest directory: `holy-ghostty/` with `Makefile`, `build.zig`.
+- Allowed external helper reference here: `agent-do` only when the task truly needs automation beyond normal shell or editor work.
+
+## Local Layout
+- `widgets/` - checked-in subtree
+- `Inspector.zig` - checked-in root file
+- `main.zig` - checked-in root file
+- `units.zig` - checked-in root file
+- `widgets.zig` - checked-in root file
+
+## Working Rules
+- Keep instructions local to this subtree and tied to files that are actually checked in here.
+- Keep unrelated non-engineering language out of this file.
+- Prefer the nearest owning manifest and parent guide over assumptions carried in from sibling projects.
+- If this scope contains only docs, templates, or generated assets, document that plainly and avoid inventing a runtime.
+
+## Validation
+- Validate through `holy-ghostty/` rather than treating this folder as a standalone package.
+- `zig build`
+- `zig build test`

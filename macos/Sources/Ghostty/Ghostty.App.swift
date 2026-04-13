@@ -6,6 +6,7 @@ protocol GhosttyAppDelegate: AnyObject {
     #if os(macOS)
     /// Called when a callback needs access to a specific surface. This should return nil
     /// when the surface is no longer valid.
+    @MainActor
     func findSurface(forUUID uuid: UUID) -> Ghostty.SurfaceView?
     #endif
 }
@@ -436,6 +437,7 @@ extension Ghostty {
         }
 
         /// Determine if a given notification should be presented to the user when Ghostty is running in the foreground.
+        @MainActor
         func shouldPresentNotification(notification: UNNotification) -> Bool {
             let userInfo = notification.request.content.userInfo
 
@@ -958,7 +960,9 @@ extension Ghostty {
 
         private static func closeAllWindows(_ app: ghostty_app_t, target: ghostty_target_s) {
             guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else { return }
-            appDelegate.closeAllWindows(nil)
+            Task { @MainActor in
+                appDelegate.closeAllWindows(nil)
+            }
         }
 
         private static func toggleFullscreen(
@@ -1421,6 +1425,15 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
+
+                NotificationCenter.default.post(
+                    name: .ghosttyCommandDidFinish,
+                    object: surfaceView,
+                    userInfo: [
+                        Foundation.Notification.Name.CommandExitCodeKey: Int(v.exit_code),
+                        Foundation.Notification.Name.CommandDurationKey: UInt64(v.duration),
+                    ]
+                )
 
                 // Determine if we even care about command finish notifications
                 guard let config = (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config else { return }
@@ -2217,6 +2230,7 @@ extension Ghostty {
         // MARK: User Notifications
 
         /// Handle a received user notification. This is called when a user notification is clicked or dismissed by the user
+        @MainActor
         func handleUserNotification(response: UNNotificationResponse) {
             let userInfo = response.notification.request.content.userInfo
             guard let uuidString = userInfo["surface"] as? String,

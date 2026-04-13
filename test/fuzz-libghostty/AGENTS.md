@@ -1,48 +1,30 @@
-# AFL++ Fuzzer for Libghostty
+# holy-ghostty/test/fuzz-libghostty Scope Guide
 
-- Build all fuzzer with `zig build`
-- The list of available fuzzers is in `build.zig` (search for `fuzzers`).
-- Run a specific fuzzer with `zig build run-<name>` (e.g. `zig build run-parser`)
-- Corpus directories follow the naming convention `corpus/<fuzzer>-<variant>`
-  (e.g. `corpus/parser-initial`, `corpus/stream-cmin`).
-- Do NOT run `afl-tmin` unless explicitly requested — it is very slow.
-- After running `afl-cmin`, run `corpus/sanitize-filenames.sh`
-  before committing to replace colons with underscores (colons are invalid
-  on Windows NTFS).
+This file applies only to this local subtree.
 
-## Important: stdin-based input
+## Scope
+- Local path: `holy-ghostty/test/fuzz-libghostty/`.
+- Nearest ancestor guide: `holy-ghostty/AGENTS.md`.
 
-The instrumented binaries (`afl.c` harness) read fuzz input from **stdin**,
-not from a file argument. This affects how you invoke AFL++ tools:
+## Current Scope Signals
+- Local manifests: `build.zig`.
+- Nearest owning manifest directory: `holy-ghostty/test/fuzz-libghostty/` with `build.zig`.
+- Allowed external helper reference here: `agent-do` only when the task truly needs automation beyond normal shell or editor work.
 
-- **`afl-fuzz`**: Uses shared-memory fuzzing automatically; `@@` works
-  because AFL writes directly to shared memory, bypassing file I/O.
-- **`afl-showmap`**: Must pipe input via stdin, **not** `@@`:
+## Local Layout
+- `src/` - main source tree
+- `corpus/` - checked-in subtree
+- `build.zig` - checked-in root file
+- `build.zig.zon` - checked-in root file
+- `README.md` - checked-in root file
+- `replay-crashes.nu` - checked-in root file
 
-  ```sh
-  cat testcase | afl-showmap -o map.txt -- zig-out/bin/fuzz-stream
-  ```
+## Working Rules
+- Keep instructions local to this subtree and tied to files that are actually checked in here.
+- Keep unrelated non-engineering language out of this file.
+- Prefer the nearest owning manifest and parent guide over assumptions carried in from sibling projects.
+- If this scope contains only docs, templates, or generated assets, document that plainly and avoid inventing a runtime.
 
-- **`afl-cmin`**: Do **not** use `@@`. Requires `AFL_NO_FORKSRV=1` with
-  the bash version due to a bug in the Python `afl-cmin` (AFL++ 4.35c):
-
-  ```sh
-  AFL_NO_FORKSRV=1 /opt/homebrew/Cellar/afl++/4.35c/libexec/afl-cmin.bash \
-    -i afl-out/fuzz-stream/default/queue -o corpus/stream-cmin \
-    -- zig-out/bin/fuzz-stream
-  ```
-
-If you pass `@@` or a filename argument, `afl-showmap`/`afl-cmin`
-will see only ~4 tuples (the C main paths) and produce useless results.
-
-## Replaying crashes
-
-Use `replay-crashes.nu` (Nushell) to list or replay AFL++ crash files.
-
-- **List all crash files:** `nu replay-crashes.nu --list`
-- **JSON output (for structured processing):** `nu replay-crashes.nu --json`
-  Returns an array of objects with `fuzzer`, `file`, `binary`, and `replay_cmd`.
-- **Filter by fuzzer:** `nu replay-crashes.nu --list --fuzzer stream`
-- **Replay all crashes:** `nu replay-crashes.nu`
-  Pipes each crash file into its fuzzer binary via stdin and exits non-zero
-  if any crashes still reproduce.
+## Validation
+- `zig build`
+- `zig build test`

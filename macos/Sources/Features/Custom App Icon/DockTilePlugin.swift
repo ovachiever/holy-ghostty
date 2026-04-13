@@ -89,10 +89,6 @@ class DockTilePlugin: NSObject, NSDockTilePlugIn {
                 NSWorkspace.shared.setIcon(nil, forFile: appBundlePath)
             }
 
-            #if DEBUG
-            // Use the `Blueprint` icon to distinguish Debug from Release builds.
-            appIcon = pluginBundle.image(forResource: "BlueprintImage")!
-            #else
             // Get the composed icon from the app bundle.
             if let appBundlePath,
                 let iconRep = NSWorkspace.shared.icon(forFile: appBundlePath)
@@ -108,7 +104,6 @@ class DockTilePlugin: NSObject, NSDockTilePlugIn {
                 // fall back to a bundled icon.
                 appIcon = pluginBundle.image(forResource: "AppIconImage")!
             }
-            #endif
         } else {
             // Use the bundled icon to keep the corner radius consistent with pre-Tahoe apps.
             appIcon = pluginBundle.image(forResource: "AppIconImage")!

@@ -339,6 +339,7 @@ class AppDelegate: NSObject,
         self.hiddenState = .init()
     }
 
+    @MainActor
     func applicationDidBecomeActive(_ notification: Notification) {
         // If we're back manually then clear the hidden state because macOS handles it.
         self.hiddenState = nil
@@ -351,9 +352,12 @@ class AppDelegate: NSObject,
             // is possible to have other windows in a few scenarios:
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
-            if TerminalController.all.isEmpty && derivedConfig.initialWindow {
+            if HolyWorkspaceWindowController.all.isEmpty &&
+                TerminalController.all.isEmpty &&
+                derivedConfig.initialWindow
+            {
                 undoManager.disableUndoRegistration()
-                _ = TerminalController.newWindow(ghostty)
+                openWorkspaceWindow()
                 undoManager.enableUndoRegistration()
             }
         }
@@ -430,6 +434,7 @@ class AppDelegate: NSObject,
 
     /// This is called when the application is already open and someone double-clicks the icon
     /// or clicks the dock icon.
+    @MainActor
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         // If we have visible windows then we allow macOS to do its default behavior
         // of focusing one of them.
@@ -439,7 +444,7 @@ class AppDelegate: NSObject,
         // This is possible with flag set to false if there a race where the
         // window is still initializing and is not visible but the user clicked
         // the dock icon.
-        guard TerminalController.all.isEmpty else { return true }
+        guard HolyWorkspaceWindowController.all.isEmpty && TerminalController.all.isEmpty else { return true }
 
         // If the application isn't active yet then we don't want to process
         // this because we're not ready. This happens sometimes in Xcode runs
@@ -447,10 +452,11 @@ class AppDelegate: NSObject,
         guard applicationHasBecomeActive else { return true }
 
         // No visible windows, open a new one.
-        _ = TerminalController.newWindow(ghostty)
+        openWorkspaceWindow()
         return false
     }
 
+    @MainActor
     func application(_ sender: NSApplication, openFile filename: String) -> Bool {
         // Ghostty will validate as well but we can avoid creating an entirely new
         // surface by doing our own validation here. We can also show a useful error
@@ -515,12 +521,13 @@ class AppDelegate: NSObject,
 
         switch ghostty.config.macosDockDropBehavior {
         case .new_tab:
-            _ = TerminalController.newTab(
-                ghostty,
-                from: TerminalController.preferredParent?.window,
-                withBaseConfig: config
-            )
-        case .new_window: _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
+            if let workspace = preferredWorkspace(createIfNeeded: false) {
+                workspace.createSession(from: config)
+            } else {
+                openWorkspaceWindow(initialConfig: config)
+            }
+        case .new_window:
+            openWorkspaceWindow(initialConfig: config)
         }
 
         return true
@@ -721,23 +728,34 @@ class AppDelegate: NSObject,
         }
     }
 
+    @MainActor
     @objc private func ghosttyNewWindow(_ notification: Notification) {
         let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
         let config = configAny as? Ghostty.SurfaceConfiguration
-        _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
+        if let surfaceView = notification.object as? Ghostty.SurfaceView,
+           let workspace = surfaceView.window?.windowController as? HolyWorkspaceWindowController {
+            workspace.createSession(from: config)
+        } else {
+            if let workspace = preferredWorkspace(createIfNeeded: false) {
+                workspace.createSession(from: config)
+            } else {
+                openWorkspaceWindow(initialConfig: config)
+            }
+        }
     }
 
+    @MainActor
     @objc private func ghosttyNewTab(_ notification: Notification) {
         guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
-        guard let window = surfaceView.window else { return }
-
-        // We only want to listen to new tabs if the focused parent is
-        // a regular terminal controller.
-        guard window.windowController is TerminalController else { return }
-
         let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
         let config = configAny as? Ghostty.SurfaceConfiguration
+        if let workspace = surfaceView.window?.windowController as? HolyWorkspaceWindowController {
+            workspace.createSession(from: config)
+            return
+        }
 
+        guard let window = surfaceView.window else { return }
+        guard window.windowController is TerminalController else { return }
         _ = TerminalController.newTab(ghostty, from: window, withBaseConfig: config)
     }
 
@@ -895,6 +913,7 @@ class AppDelegate: NSObject,
 
     // MARK: - UNUserNotificationCenterDelegate
 
+    @MainActor
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive: UNNotificationResponse,
@@ -904,6 +923,7 @@ class AppDelegate: NSObject,
         withCompletionHandler()
     }
 
+    @MainActor
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent: UNNotification,
@@ -916,7 +936,14 @@ class AppDelegate: NSObject,
 
     // MARK: - GhosttyAppDelegate
 
+    @MainActor
     func findSurface(forUUID uuid: UUID) -> Ghostty.SurfaceView? {
+        for workspace in HolyWorkspaceWindowController.all {
+            if let view = workspace.findSurface(id: uuid) {
+                return view
+            }
+        }
+
         for c in TerminalController.all {
             for view in c.surfaceTree where view.id == uuid {
                 return view
@@ -959,18 +986,25 @@ class AppDelegate: NSObject,
         // UpdateSimulator.happyPath.simulate(with: updateViewModel)
     }
 
+    @MainActor
     @IBAction func newWindow(_ sender: Any?) {
-        _ = TerminalController.newWindow(ghostty)
+        if let workspace = preferredWorkspace(createIfNeeded: true) {
+            workspace.createSession(from: nil)
+        }
     }
 
+    @MainActor
     @IBAction func newTab(_ sender: Any?) {
-        _ = TerminalController.newTab(
-            ghostty,
-            from: TerminalController.preferredParent?.window
-        )
+        if let workspace = preferredWorkspace(createIfNeeded: false) {
+            workspace.createSession(from: nil)
+        } else {
+            openWorkspaceWindow()
+        }
     }
 
+    @MainActor
     @IBAction func closeAllWindows(_ sender: Any?) {
+        HolyWorkspaceWindowController.all.forEach { $0.close() }
         TerminalController.closeAllWindows()
         AboutController.shared.hide()
     }
@@ -986,6 +1020,41 @@ class AppDelegate: NSObject,
 
     @IBAction func toggleSecureInput(_ sender: Any) {
         setSecureInput(.toggle)
+    }
+
+    @discardableResult
+    @MainActor
+    private func openWorkspaceWindow(
+        initialConfig: Ghostty.SurfaceConfiguration? = nil
+    ) -> HolyWorkspaceWindowController {
+        if let controller = HolyWorkspaceWindowController.preferred {
+            if let initialConfig {
+                controller.createSession(from: initialConfig)
+            } else {
+                controller.showAndActivate()
+            }
+            return controller
+        }
+
+        let controller = HolyWorkspaceWindowController(
+            ghostty: ghostty,
+            initialConfig: initialConfig
+        )
+        controller.showAndActivate()
+        return controller
+    }
+
+    @MainActor
+    private func preferredWorkspace(
+        createIfNeeded: Bool,
+        initialConfig: Ghostty.SurfaceConfiguration? = nil
+    ) -> HolyWorkspaceWindowController? {
+        if let preferred = HolyWorkspaceWindowController.preferred {
+            return preferred
+        }
+
+        guard createIfNeeded else { return nil }
+        return openWorkspaceWindow(initialConfig: initialConfig)
     }
 
     @IBAction func toggleQuickTerminal(_ sender: Any) {
