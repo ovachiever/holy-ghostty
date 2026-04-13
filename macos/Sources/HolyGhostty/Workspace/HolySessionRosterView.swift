@@ -78,10 +78,17 @@ private struct HolyRosterRow: View {
                     .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
                     .lineLimit(1)
 
-                Text(statusLine)
+                Text(contextLine)
                     .font(.system(size: 10, weight: .regular))
-                    .foregroundStyle(attentionColor.opacity(0.8))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
                     .lineLimit(1)
+
+                if needsAttentionLine {
+                    Text(statusLine)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(attentionColor)
+                        .lineLimit(1)
+                }
             }
 
             Spacer(minLength: 0)
@@ -112,6 +119,31 @@ private struct HolyRosterRow: View {
         )
         .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .onTapGesture(perform: onSelect)
+    }
+
+    private var contextLine: String {
+        let repo = session.gitSnapshot?.repositoryName
+        let branch = session.ownership.branchDisplayName
+
+        if let repo {
+            return "\(repo) · \(branch)"
+        }
+
+        if let dir = session.workingDirectory {
+            let short = URL(fileURLWithPath: dir).lastPathComponent
+            return "\(short) · \(branch)"
+        }
+
+        return branch
+    }
+
+    private var needsAttentionLine: Bool {
+        switch coordination.attention {
+        case .conflict, .failure, .needsInput:
+            return true
+        case .watch, .none, .done:
+            return false
+        }
     }
 
     private var statusLine: String {

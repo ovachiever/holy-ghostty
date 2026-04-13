@@ -42,13 +42,21 @@ struct HolySessionDetailView: View {
                 .foregroundStyle(HolyGhosttyTheme.textPrimary)
                 .lineLimit(1)
 
-            if let objective = session.record.launchSpec.objective,
-               !objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(objective)
-                    .font(.system(size: 11))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+            Rectangle()
+                .fill(HolyGhosttyTheme.border)
+                .frame(width: 1, height: 12)
+
+            if let dir = session.workingDirectory {
+                Text(URL(fileURLWithPath: dir).lastPathComponent)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
                     .lineLimit(1)
             }
+
+            Text(session.ownership.branchDisplayName)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(HolyGhosttyTheme.accentSoft)
+                .lineLimit(1)
 
             Spacer()
 
