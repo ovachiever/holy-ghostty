@@ -68,11 +68,16 @@ struct HolySessionDetailView: View {
     // MARK: - Status Bar (thin footer with key metrics)
 
     private func statusBar(_ session: HolySession) -> some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 14) {
             statusItem(session.statusText, color: phaseColor(for: session))
-            statusItem(session.runtime.displayName, color: HolyGhosttyTheme.textTertiary)
-            statusItem(session.ownership.branchDisplayName, color: branchColor(for: session))
-            statusItem(session.changeSummaryText, color: changeColor(for: session))
+
+            if let branch = session.gitSnapshot?.branchDisplayName {
+                statusItem(branch, color: branchColor(for: session))
+            }
+
+            if let git = session.gitSnapshot, !git.isClean {
+                statusItem(session.changeSummaryText, color: changeColor(for: session))
+            }
 
             Spacer()
 
@@ -81,7 +86,7 @@ struct HolySessionDetailView: View {
                 .foregroundStyle(HolyGhosttyTheme.textTertiary)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 6)
+        .padding(.vertical, 5)
         .background(HolyGhosttyTheme.bgElevated)
     }
 

@@ -196,10 +196,10 @@ struct HolyContextPanelView: View {
 
     private func sectionLabel(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(HolyGhosttyTheme.textTertiary)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(HolyGhosttyTheme.halo.opacity(0.55))
             .textCase(.uppercase)
-            .tracking(0.5)
+            .tracking(0.6)
     }
 
     private func contextRow(_ key: String, _ value: String) -> some View {

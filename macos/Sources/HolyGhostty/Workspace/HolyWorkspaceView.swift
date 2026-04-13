@@ -18,7 +18,7 @@ struct HolyWorkspaceRootView: View {
 
                 HSplitView {
                     HolySessionRosterView(store: store)
-                        .frame(minWidth: 200, idealWidth: 260, maxWidth: 340, maxHeight: .infinity)
+                        .frame(minWidth: 220, idealWidth: 320, maxWidth: 440, maxHeight: .infinity)
                         .background(HolyGhosttyTheme.bgElevated)
 
                     HolySessionDetailView(
@@ -95,46 +95,43 @@ struct HolyWorkspaceRootView: View {
                 }
             }
 
+            Button { store.presentComposer() } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .buttonStyle(HolyGhosttyActionButtonStyle())
+
             Spacer()
 
             Menu {
-                templateSection(title: "Built-In Templates", templates: store.builtInTemplates)
+                Section("Templates") {
+                    templateSection(title: "Built-In", templates: store.builtInTemplates)
 
-                if !store.savedTemplates.isEmpty {
+                    if !store.savedTemplates.isEmpty {
+                        Divider()
+                        templateSection(title: "Saved", templates: store.savedTemplates)
+                    }
+                }
+
+                Divider()
+
+                Button { store.presentHistory() } label: {
+                    Label("Session History", systemImage: "clock")
+                }
+
+                if let selected = store.selectedSession {
                     Divider()
-                    templateSection(title: "Saved Templates", templates: store.savedTemplates)
+                    Button("Duplicate Session") { store.duplicate(selected) }
+                    Button("Archive Session") { store.close(selected) }
                 }
             } label: {
-                Image(systemName: "square.stack.3d.up")
+                Image(systemName: "line.3.horizontal")
                     .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(HolyGhosttyActionButtonStyle())
-
-            Button { store.presentHistory() } label: {
-                Image(systemName: "clock")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(HolyGhosttyActionButtonStyle())
-
-            if let selected = store.selectedSession {
-                Menu {
-                    Button("Duplicate") { store.duplicate(selected) }
-                    Button("Archive") { store.close(selected) }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .buttonStyle(HolyGhosttyActionButtonStyle())
-            }
-
-            Button { store.presentComposer() } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .medium))
             }
             .buttonStyle(HolyGhosttyActionButtonStyle())
         }
         .padding(.horizontal, 16)
-        .padding(.top, 10)
+        .padding(.top, 6)
         .padding(.bottom, 6)
         .background(HolyGhosttyTheme.bgElevated)
     }

@@ -115,8 +115,8 @@ struct HolyGhosttySurfaceFrame<Content: View>: View {
                         lineWidth: halo ? 1 : 0.5
                     )
             )
-            .shadow(color: halo ? HolyGhosttyTheme.halo.opacity(0.08) : .clear, radius: 20, x: 0, y: 0)
-            .shadow(color: halo ? HolyGhosttyTheme.halo.opacity(0.04) : .clear, radius: 44, x: 0, y: 4)
+            .shadow(color: halo ? HolyGhosttyTheme.halo.opacity(0.15) : .clear, radius: 16, x: 0, y: 0)
+            .shadow(color: halo ? HolyGhosttyTheme.halo.opacity(0.08) : .clear, radius: 36, x: 0, y: 2)
     }
 }
 
