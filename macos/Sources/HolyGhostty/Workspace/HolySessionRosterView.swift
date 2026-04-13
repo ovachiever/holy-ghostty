@@ -44,7 +44,8 @@ struct HolySessionRosterView: View {
                                 compact: compact,
                                 onSelect: { store.selectedSessionID = session.id },
                                 onDuplicate: { store.duplicate(session) },
-                                onArchive: { store.close(session) }
+                                onArchive: { store.close(session) },
+                                onRename: { store.rename(session, to: $0) }
                             )
                         }
                     }
@@ -67,34 +68,39 @@ private struct HolyRosterRow: View {
     let onSelect: () -> Void
     let onDuplicate: () -> Void
     let onArchive: () -> Void
+    let onRename: (String) -> Void
+
+    @State private var isRenaming = false
+    @State private var renameText = ""
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             HolyGhosttyStatusDot(color: attentionColor)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(session.title)
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                    .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
-                    .lineLimit(1)
-
-                Text(contextLine)
-                    .font(.system(size: 10, weight: .regular))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                    .lineLimit(1)
-
-                if needsAttentionLine {
-                    Text(statusLine)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(attentionColor)
+            if isRenaming {
+                TextField("Session name", text: $renameText, onCommit: commitRename)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white)
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    displayLine
                         .lineLimit(1)
+
+                    if needsAttentionLine {
+                        Text(statusLine)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(attentionColor)
+                            .lineLimit(1)
+                    }
                 }
             }
 
             Spacer(minLength: 0)
 
-            if !compact {
+            if !compact && !isRenaming {
                 Menu {
+                    Button("Rename") { startRename() }
                     Button("Duplicate", action: onDuplicate)
                     Button("Archive", action: onArchive)
                 } label: {
@@ -121,20 +127,33 @@ private struct HolyRosterRow: View {
         .onTapGesture(perform: onSelect)
     }
 
-    private var contextLine: String {
-        let repo = session.gitSnapshot?.repositoryName
-        let branch = session.ownership.branchDisplayName
+    // Single-line display: "Claude — Custom_Coding"
+    private var displayLine: some View {
+        HStack(spacing: 0) {
+            Text(session.runtime.displayName)
+                .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
 
-        if let repo {
-            return "\(repo) · \(branch)"
+            if let project = projectName {
+                Text("  —  ")
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+
+                Text(project)
+                    .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+                    .foregroundStyle(isSelected ? HolyGhosttyTheme.textPrimary : HolyGhosttyTheme.textSecondary)
+            }
         }
+    }
 
+    private var projectName: String? {
+        if let repo = session.gitSnapshot?.repositoryName {
+            return repo
+        }
         if let dir = session.workingDirectory {
-            let short = URL(fileURLWithPath: dir).lastPathComponent
-            return "\(short) · \(branch)"
+            return URL(fileURLWithPath: dir).lastPathComponent
         }
-
-        return branch
+        return nil
     }
 
     private var needsAttentionLine: Bool {
@@ -151,6 +170,19 @@ private struct HolyRosterRow: View {
             return coordination.summary
         }
         return session.primarySignalHeadline
+    }
+
+    private func startRename() {
+        renameText = session.title
+        isRenaming = true
+    }
+
+    private func commitRename() {
+        let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            onRename(trimmed)
+        }
+        isRenaming = false
     }
 
     private var attentionColor: Color {

@@ -157,6 +157,11 @@ final class HolyWorkspaceStore: ObservableObject {
         refreshDraftLaunchGuardrail()
     }
 
+    func rename(_ session: HolySession, to newTitle: String) {
+        session.rename(to: newTitle)
+        persist()
+    }
+
     func duplicate(_ session: HolySession) {
         var launchSpec = session.record.launchSpec
         launchSpec.title = "\(session.title) Copy"

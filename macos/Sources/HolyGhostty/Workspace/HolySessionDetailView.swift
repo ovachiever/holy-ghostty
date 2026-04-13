@@ -37,26 +37,22 @@ struct HolySessionDetailView: View {
         HStack(alignment: .center, spacing: 8) {
             HolyGhosttyStatusDot(color: attentionColor)
 
-            Text(session.title)
+            Text(session.runtime.displayName)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(HolyGhosttyTheme.textPrimary)
                 .lineLimit(1)
 
-            Rectangle()
-                .fill(HolyGhosttyTheme.border)
-                .frame(width: 1, height: 12)
+            if let project = session.gitSnapshot?.repositoryName
+                ?? session.workingDirectory.map({ URL(fileURLWithPath: $0).lastPathComponent }) {
+                Text("—")
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
 
-            if let dir = session.workingDirectory {
-                Text(URL(fileURLWithPath: dir).lastPathComponent)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                Text(project)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(HolyGhosttyTheme.textPrimary)
                     .lineLimit(1)
             }
-
-            Text(session.ownership.branchDisplayName)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(HolyGhosttyTheme.accentSoft)
-                .lineLimit(1)
 
             Spacer()
 
