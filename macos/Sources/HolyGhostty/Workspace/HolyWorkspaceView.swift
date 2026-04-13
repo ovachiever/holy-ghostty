@@ -67,6 +67,12 @@ struct HolyWorkspaceRootView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
+            Image("HolyGhosttyLogo")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(height: 24)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+
             Text("Holy Ghostty")
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundStyle(HolyGhosttyTheme.halo)
