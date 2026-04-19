@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Native macOS shell · Real Ghostty surfaces · Session ownership · Worktree guardrails · Archive and relaunch
+  Native macOS shell · Real Ghostty surfaces · Session ownership · Worktree guardrails · Budget intelligence · Task inbox · Focus/Grid/Diff modes · Durable SQLite persistence
 </p>
 
 <p align="center">
@@ -18,6 +18,8 @@
   <a href="./docs/holy-ghostty/engineering-spec.md">Engineering Spec</a>
   ·
   <a href="./docs/holy-ghostty/request-vs-current-state.md">Vision vs Current State</a>
+  ·
+  <a href="./docs/holy-ghostty/roadmap.md">Roadmap</a>
   ·
   <a href="./CHANGELOG.md">Changelog</a>
 </p>
@@ -29,20 +31,26 @@ Holy Ghostty is a macOS-first product fork of Ghostty. The terminal core remains
 Holy Ghostty is not a new terminal emulator core. It is a Ghostty-based operator shell for:
 
 - live Shell, Claude, Codex, and OpenCode sessions
-- session launch templates
+- session launch templates with budget configuration
 - managed or attached git worktrees
 - pre-launch ownership guardrails
 - git-aware coordination and overlap detection
-- archive, history, and relaunch workflows
-- native notifications for needs-input, failure, collision, drift, and completion
+- structured runtime telemetry (activity kind, stall/loop detection, command/file extraction)
+- budget intelligence (token/cost tracking, burn rate, exhaustion projection, enforcement)
+- external task inbox (GitHub, Linear, Jira, manual)
+- archive, history, and relaunch workflows with recovery context
+- native notifications for needs-input, failure, collision, drift, stalls, loops, budget warnings, and completion
+- durable SQLite persistence with schema migrations and an append-only event ledger
 
 Current product shape:
 
 - left rail for active sessions
 - center live Ghostty surface
-- right-side operational inspector
-- new-session composer
-- searchable session history
+- right-side operational inspector with telemetry, budget analytics, event timeline, and coordination
+- new-session composer with task linking and budget controls
+- searchable session history with recovery context and telemetry
+- task inbox for external work items
+- focus mode, grid mode, and diff mode for multi-session operation
 
 ## Quick Start
 
@@ -73,31 +81,38 @@ Primary Holy Ghostty docs live under [`docs/holy-ghostty`](./docs/holy-ghostty).
 - [User guide and tutorial](./docs/holy-ghostty/README.md)
 - [Engineering spec](./docs/holy-ghostty/engineering-spec.md)
 - [Requested vision vs current state](./docs/holy-ghostty/request-vs-current-state.md)
+- [Roadmap](./docs/holy-ghostty/roadmap.md)
+- [v0.2 implementation plan](./docs/holy-ghostty/v0.2-implementation-plan.md)
+- [Interoperability notes](./docs/holy-ghostty/agent-sessions-interoperability.md)
 - [Changelog](./CHANGELOG.md)
 
 ## Current Strengths
 
 - Real embedded Ghostty surfaces inside a native macOS shell
 - Session-oriented workflow instead of tab-oriented workflow
-- Worktree-aware launch strategies
+- Durable SQLite persistence with schema migrations and event ledger
+- Separated session supervisor architecture
+- Worktree-aware launch strategies with recovery validation and orphan cleanup
 - Blocking shared-worktree guardrails
 - Warning-level shared-branch guardrails with explicit override
-- Runtime-aware heuristics for multiple agent tools
-- Archive and relaunch history
-- Native notification path for important session transitions
+- Structured runtime telemetry (activity kind, stall/loop detection, command/file extraction)
+- Budget intelligence with token/cost tracking, burn rate, projection, and enforcement
+- External task inbox (GitHub, Linear, Jira, manual) with task-to-session launching
+- Focus, grid, and diff display modes
+- Archive and relaunch history with recovery context and event timeline
+- Native notifications for failures, needs-input, collisions, drift, stalls, loops, budget warnings, and completion
+- `agent-sessions` compatibility views for future cross-tool interoperability
 
 ## Current Limitations
 
-Holy Ghostty is already usable, but it is not the full end-state of the original platform vision.
+Holy Ghostty is usable and substantially complete, but some areas remain for future work:
 
-Still missing:
-
-- durable database and event ledger
-- cost and budget intelligence
-- grid mode, diff mode, and focus mode
-- deeper structured runtime telemetry
-- external task-system integration
-- a fully split session supervisor architecture
+- deeper structured runtime telemetry via an embedded VT/PTY bridge (current system is inference-based)
+- dependency chains and automated session orchestration
+- broadcast input across sessions
+- status updates pushed back to external task sources
+- settings and preferences surface for budgets, notifications, and templates
+- signing, notarization, and distribution path
 
 ## Repo Layout
 

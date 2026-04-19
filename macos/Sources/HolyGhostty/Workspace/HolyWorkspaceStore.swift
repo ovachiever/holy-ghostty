@@ -1,36 +1,42 @@
-import AppKit
 import Combine
 import Foundation
-import UserNotifications
 
 @MainActor
 final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var sessions: [HolySession] = []
     @Published private(set) var savedTemplates: [HolySessionTemplate] = []
     @Published private(set) var archivedSessions: [HolyArchivedSession] = []
+    @Published private(set) var externalTasks: [HolyExternalTaskRecord] = []
     @Published private(set) var coordinationBySessionID: [UUID: HolySessionCoordination] = [:]
     @Published private(set) var draftLaunchGuardrail: HolyLaunchGuardrail = .clear
     @Published private(set) var draftOwnershipPreview: HolySessionOwnership?
     @Published private(set) var draftLaunchGuardrailRefreshing: Bool = false
     @Published var selectedSessionID: UUID? {
-        didSet { persist() }
+        didSet {
+            guard !suppressAutomaticSelectionPersistence,
+                  oldValue != selectedSessionID else { return }
+            persist(pendingEvents: selectionEvents(from: oldValue, to: selectedSessionID))
+        }
     }
     @Published var selectedArchivedSessionID: UUID?
+    @Published var selectedTaskID: UUID?
     @Published var composerPresented: Bool = false
     @Published var composerBusy: Bool = false
     @Published var composerErrorMessage: String?
     @Published var historyPresented: Bool = false
+    @Published var tasksPresented: Bool = false
     @Published var draft: HolySessionDraft = .init()
 
-    private let ghostty: Ghostty.App
-    private let seedDefaultSession: Bool
-    private let alertCoordinator = HolyWorkspaceAlertCoordinator()
+    private let sessionSupervisor: HolySessionSupervisor
     private var sessionObservationCancellables: Set<AnyCancellable> = []
     private var draftLaunchGuardrailTask: Task<Void, Never>?
+    private var suppressAutomaticSelectionPersistence = false
 
     init(ghostty: Ghostty.App, seedDefaultSession: Bool = true) {
-        self.ghostty = ghostty
-        self.seedDefaultSession = seedDefaultSession
+        self.sessionSupervisor = HolySessionSupervisor(
+            ghostty: ghostty,
+            seedDefaultSession: seedDefaultSession
+        )
         restore()
     }
 
@@ -42,6 +48,11 @@ final class HolyWorkspaceStore: ObservableObject {
     var selectedArchivedSession: HolyArchivedSession? {
         guard let selectedArchivedSessionID else { return archivedSessions.first }
         return archivedSessions.first(where: { $0.id == selectedArchivedSessionID }) ?? archivedSessions.first
+    }
+
+    var selectedTask: HolyExternalTaskRecord? {
+        guard let selectedTaskID else { return externalTasks.first }
+        return externalTasks.first(where: { $0.id == selectedTaskID }) ?? externalTasks.first
     }
 
     var builtInTemplates: [HolySessionTemplate] {
@@ -71,60 +82,52 @@ final class HolyWorkspaceStore: ObservableObject {
         return count == 1 ? "1 archived" : "\(count) archived"
     }
 
+    var taskCountText: String {
+        let count = externalTasks.count
+        return count == 1 ? "1 task" : "\(count) tasks"
+    }
+
     func coordination(for session: HolySession) -> HolySessionCoordination {
         coordinationBySessionID[session.id] ?? .empty
     }
 
     func restore() {
-        guard let app = ghostty.app else { return }
-
-        let snapshot = HolyWorkspacePersistence.load()
-        let restored = snapshot.sessions.map { HolySession(record: $0, app: app) }
-        savedTemplates = snapshot.templates
-        archivedSessions = snapshot.archivedSessions.sorted { $0.archivedAt > $1.archivedAt }
-        selectedArchivedSessionID = archivedSessions.first?.id
-
-        if restored.isEmpty {
-            guard seedDefaultSession, archivedSessions.isEmpty else {
-                sessions = []
-                selectedSessionID = nil
-                persist()
-                return
-            }
-
-            let session = HolySession(
-                record: .init(launchSpec: .interactiveShell()),
-                app: app
-            )
-            sessions = [session]
-            selectedSessionID = session.id
-            bindSessions()
-            persist()
-            return
-        }
-
-        sessions = restored
-        selectedSessionID = snapshot.selectedSessionID ?? restored.first?.id
-        bindSessions()
-        persist()
+        let restoration = sessionSupervisor.restoreWorkspace()
+        applySessionStoreState(restoration.state)
+        loadTasks()
+        persist(pendingEvents: restoration.pendingEvents)
     }
 
     @discardableResult
-    func createSession(with launchSpec: HolySessionLaunchSpec) -> HolySession? {
-        guard let app = ghostty.app else { return nil }
-        let session = HolySession(record: .init(launchSpec: launchSpec), app: app)
-        sessions.append(session)
-        bindSessions()
-        selectedSessionID = session.id
+    func createSession(
+        with launchSpec: HolySessionLaunchSpec,
+        origin: HolySessionEventOrigin = .directLaunch,
+        sourceTemplateID: UUID? = nil,
+        relaunchedFrom archivedSession: HolyArchivedSession? = nil
+    ) -> HolySession? {
+        guard let result = sessionSupervisor.createSession(
+            with: launchSpec,
+            in: currentSessionStoreState,
+            origin: origin,
+            sourceTemplateID: sourceTemplateID,
+            relaunchedFrom: archivedSession
+        ) else {
+            return nil
+        }
+
+        let previousSelectedSessionID = selectedSessionID
+        applySessionStoreState(result.state)
         composerBusy = false
         composerErrorMessage = nil
         composerPresented = false
         draftLaunchGuardrail = .clear
         draftOwnershipPreview = nil
         draft = .init()
-        persist()
+        var pendingEvents = result.pendingEvents
+        pendingEvents.append(contentsOf: selectionEvents(from: previousSelectedSessionID, to: result.sessionID))
+        persist(pendingEvents: pendingEvents)
         refreshDraftLaunchGuardrail()
-        return session
+        return sessions.first(where: { $0.id == result.sessionID })
     }
 
     @discardableResult
@@ -135,7 +138,10 @@ final class HolyWorkspaceStore: ObservableObject {
             HolySessionLaunchSpec.interactiveShell(title: nextShellTitle())
         }
 
-        return createSession(with: launchSpec)
+        return createSession(
+            with: launchSpec,
+            origin: baseConfig == nil ? .directLaunch : .surfaceClone
+        )
     }
 
     func close(_ session: HolySession) {
@@ -143,17 +149,12 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func archive(_ session: HolySession) {
-        let archived = session.archiveSnapshot()
-        archivedSessions.removeAll { $0.sourceSessionID == session.id }
-        archivedSessions.insert(archived, at: 0)
-        selectedArchivedSessionID = archived.id
-
-        sessions.removeAll { $0.id == session.id }
-        bindSessions()
-        if selectedSessionID == session.id {
-            selectedSessionID = sessions.first?.id
-        }
-        persist()
+        let previousSelectedSessionID = selectedSessionID
+        let result = sessionSupervisor.archive(session, in: currentSessionStoreState)
+        applySessionStoreState(result.state)
+        var pendingEvents = result.pendingEvents
+        pendingEvents.append(contentsOf: selectionEvents(from: previousSelectedSessionID, to: selectedSessionID))
+        persist(pendingEvents: pendingEvents)
         refreshDraftLaunchGuardrail()
     }
 
@@ -174,11 +175,11 @@ final class HolyWorkspaceStore: ObservableObject {
             )
             launchSpec.workspace = workspace
             launchSpec.workingDirectory = nil
-            resolveAndCreateSession(with: launchSpec)
+            resolveAndCreateSession(with: launchSpec, origin: .duplicate)
             return
         }
 
-        _ = createSession(with: launchSpec)
+        _ = createSession(with: launchSpec, origin: .duplicate)
     }
 
     func presentComposer() {
@@ -193,6 +194,10 @@ final class HolyWorkspaceStore: ObservableObject {
         presentComposer(with: makeDraft(from: archivedSession.record.launchSpec))
     }
 
+    func presentComposer(using task: HolyExternalTaskRecord) {
+        presentComposer(with: makeDraft(from: task))
+    }
+
     func applyTemplateToDraft(_ template: HolySessionTemplate) {
         draft = makeDraft(from: template.launchSpec)
         composerErrorMessage = nil
@@ -200,18 +205,24 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func launchTemplate(_ template: HolySessionTemplate) {
-        attemptLaunch(using: makeDraft(from: template.launchSpec))
+        attemptLaunch(
+            using: makeDraft(from: template.launchSpec),
+            origin: .templateLaunch,
+            sourceTemplateID: template.id
+        )
     }
 
     func relaunch(_ archivedSession: HolyArchivedSession) {
-        attemptLaunch(using: makeDraft(from: archivedSession.record.launchSpec))
+        attemptLaunch(
+            using: makeDraft(from: archivedSession.record.launchSpec),
+            origin: .archiveRelaunch,
+            relaunchedFrom: archivedSession
+        )
     }
 
     func deleteArchive(_ archivedSession: HolyArchivedSession) {
-        archivedSessions.removeAll { $0.id == archivedSession.id }
-        if selectedArchivedSessionID == archivedSession.id {
-            selectedArchivedSessionID = archivedSessions.first?.id
-        }
+        let result = sessionSupervisor.deleteArchive(archivedSession, in: currentSessionStoreState)
+        applySessionStoreState(result.state)
         persist()
         refreshDraftLaunchGuardrail()
     }
@@ -221,35 +232,88 @@ final class HolyWorkspaceStore: ObservableObject {
         historyPresented = true
     }
 
-    func saveDraftAsTemplate() {
-        let templateLaunchSpec = draft.launchSpec.normalizedForTemplate
-        let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = title.isEmpty ? draft.runtime.displayName : title
-        let summary = draft.objective.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
-            ?? "Reusable \(draft.runtime.displayName) session template."
+    func presentTasks() {
+        selectedTaskID = selectedTask?.id ?? externalTasks.first?.id
+        tasksPresented = true
+    }
 
-        let template = HolySessionTemplate(
-            name: name,
-            summary: summary,
-            launchSpec: templateLaunchSpec
+    func createTask() {
+        let task = HolyExternalTaskRecord(
+            preferredWorkingDirectory: contextualWorkingDirectory,
+            preferredRepositoryRoot: contextualRepositoryRoot
+        )
+        externalTasks.insert(task, at: 0)
+        selectedTaskID = task.id
+        persistTasks()
+    }
+
+    func upsertTask(_ task: HolyExternalTaskRecord) {
+        let normalizedTask = task.normalized()
+        var updatedTask = normalizedTask
+        updatedTask = HolyExternalTaskRecord(
+            id: normalizedTask.id,
+            sourceKind: normalizedTask.sourceKind,
+            sourceLabel: normalizedTask.sourceLabel,
+            externalID: normalizedTask.externalID,
+            canonicalURL: normalizedTask.canonicalURL,
+            title: normalizedTask.title,
+            summary: normalizedTask.summary,
+            preferredRuntime: normalizedTask.preferredRuntime,
+            preferredWorkingDirectory: normalizedTask.preferredWorkingDirectory,
+            preferredRepositoryRoot: normalizedTask.preferredRepositoryRoot,
+            preferredCommand: normalizedTask.preferredCommand,
+            preferredInitialInput: normalizedTask.preferredInitialInput,
+            status: normalizedTask.status,
+            linkedSessionID: normalizedTask.linkedSessionID,
+            linkedSessionTitle: normalizedTask.linkedSessionTitle,
+            linkedSessionPhase: normalizedTask.linkedSessionPhase,
+            createdAt: normalizedTask.createdAt,
+            updatedAt: .now,
+            lastImportedAt: normalizedTask.lastImportedAt
         )
 
-        savedTemplates.append(template)
-        savedTemplates.sort {
-            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        if let index = externalTasks.firstIndex(where: { $0.id == updatedTask.id }) {
+            externalTasks[index] = updatedTask
+        } else {
+            externalTasks.insert(updatedTask, at: 0)
         }
+
+        selectedTaskID = updatedTask.id
+        reconcileExternalTasks()
+    }
+
+    func deleteTask(_ task: HolyExternalTaskRecord) {
+        externalTasks.removeAll { $0.id == task.id }
+        if selectedTaskID == task.id {
+            selectedTaskID = externalTasks.first?.id
+        }
+        persistTasks()
+    }
+
+    func launchTask(_ task: HolyExternalTaskRecord) {
+        attemptLaunch(using: makeDraft(from: task), origin: .directLaunch)
+    }
+
+    func saveDraftAsTemplate() {
+        let result = sessionSupervisor.saveTemplate(from: draft, in: currentSessionStoreState)
+        applySessionStoreState(result.state)
         persist()
     }
 
     func createFromDraft() {
-        attemptLaunch(using: draft)
+        attemptLaunch(using: draft, origin: .directLaunch)
     }
 
     func refreshDraftLaunchGuardrail() {
         refreshDraftLaunchGuardrail(for: draft)
     }
 
-    func resolveAndCreateSession(with launchSpec: HolySessionLaunchSpec) {
+    func resolveAndCreateSession(
+        with launchSpec: HolySessionLaunchSpec,
+        origin: HolySessionEventOrigin = .directLaunch,
+        sourceTemplateID: UUID? = nil,
+        relaunchedFrom archivedSession: HolyArchivedSession? = nil
+    ) {
         guard !composerBusy else { return }
         composerBusy = true
         composerErrorMessage = nil
@@ -259,7 +323,12 @@ final class HolyWorkspaceStore: ObservableObject {
                 let resolved = try await HolyWorktreeManager.shared.prepareLaunchSpec(launchSpec)
                 await MainActor.run {
                     guard let self else { return }
-                    _ = self.createSession(with: resolved)
+                    _ = self.createSession(
+                        with: resolved,
+                        origin: origin,
+                        sourceTemplateID: sourceTemplateID,
+                        relaunchedFrom: archivedSession
+                    )
                 }
             } catch {
                 await MainActor.run {
@@ -270,7 +339,12 @@ final class HolyWorkspaceStore: ObservableObject {
         }
     }
 
-    private func attemptLaunch(using draft: HolySessionDraft) {
+    private func attemptLaunch(
+        using draft: HolySessionDraft,
+        origin: HolySessionEventOrigin,
+        sourceTemplateID: UUID? = nil,
+        relaunchedFrom archivedSession: HolyArchivedSession? = nil
+    ) {
         guard !composerBusy else { return }
 
         draftLaunchGuardrailTask?.cancel()
@@ -299,7 +373,12 @@ final class HolyWorkspaceStore: ObservableObject {
             do {
                 let resolved = try await HolyWorktreeManager.shared.prepareLaunchSpec(draft.launchSpec)
                 await MainActor.run {
-                    _ = self.createSession(with: resolved)
+                    _ = self.createSession(
+                        with: resolved,
+                        origin: origin,
+                        sourceTemplateID: sourceTemplateID,
+                        relaunchedFrom: archivedSession
+                    )
                 }
             } catch {
                 await MainActor.run {
@@ -410,14 +489,50 @@ final class HolyWorkspaceStore: ObservableObject {
         return .init(guardrail: guardrail, ownershipPreview: ownershipPreview)
     }
 
-    private func persist() {
-        let snapshot = HolyWorkspaceSnapshot(
-            sessions: sessions.map(\.record),
-            selectedSessionID: selectedSessionID,
-            templates: savedTemplates,
-            archivedSessions: archivedSessions
+    private func persist(pendingEvents: [HolySessionEventDraft] = []) {
+        sessionSupervisor.persist(
+            state: currentSessionStoreState,
+            attentionBySessionID: coordinationBySessionID.mapValues(\.attention),
+            pendingEvents: pendingEvents
         )
-        HolyWorkspacePersistence.save(snapshot)
+    }
+
+    private var currentSessionStoreState: HolySessionStoreState {
+        .init(
+            sessions: sessions,
+            savedTemplates: savedTemplates,
+            archivedSessions: archivedSessions,
+            selectedSessionID: selectedSessionID,
+            selectedArchivedSessionID: selectedArchivedSessionID
+        )
+    }
+
+    private func applySessionStoreState(_ state: HolySessionStoreState) {
+        suppressAutomaticSelectionPersistence = true
+        sessions = state.sessions
+        savedTemplates = state.savedTemplates
+        archivedSessions = state.archivedSessions
+        selectedArchivedSessionID = state.selectedArchivedSessionID
+        selectedSessionID = state.selectedSessionID
+        suppressAutomaticSelectionPersistence = false
+        bindSessions()
+        reconcileExternalTasks()
+    }
+
+    private func selectionEvents(from previousSessionID: UUID?, to nextSessionID: UUID?) -> [HolySessionEventDraft] {
+        guard previousSessionID != nextSessionID,
+              let nextSessionID,
+              let session = sessions.first(where: { $0.id == nextSessionID }) else {
+            return []
+        }
+
+        return [
+            .selected(
+                session: session,
+                previousSessionID: previousSessionID,
+                attention: coordinationBySessionID[nextSessionID]?.attention
+            ),
+        ]
     }
 
     private func nextShellTitle() -> String {
@@ -440,6 +555,32 @@ final class HolyWorkspaceStore: ObservableObject {
         )
     }
 
+    private func makeDraft(from task: HolyExternalTaskRecord) -> HolySessionDraft {
+        let workingDirectory = task.preferredWorkingDirectory
+            ?? task.preferredRepositoryRoot
+            ?? contextualWorkingDirectory
+
+        let launchSpec = HolySessionLaunchSpec(
+            runtime: task.preferredRuntime,
+            title: task.title,
+            objective: task.summary.nilIfBlank,
+            task: task.reference,
+            budget: nil,
+            workingDirectory: workingDirectory,
+            command: task.preferredCommand,
+            initialInput: task.preferredInitialInput,
+            waitAfterCommand: false,
+            environment: [:],
+            workspace: nil
+        )
+
+        return HolySessionDraft(
+            launchSpec: launchSpec,
+            contextualWorkingDirectory: contextualWorkingDirectory,
+            contextualRepositoryRoot: contextualRepositoryRoot
+        )
+    }
+
     private func presentComposer(with draft: HolySessionDraft) {
         self.draft = draft
         composerBusy = false
@@ -448,6 +589,88 @@ final class HolyWorkspaceStore: ObservableObject {
         draftOwnershipPreview = nil
         composerPresented = true
         refreshDraftLaunchGuardrail(for: draft)
+    }
+
+    private func loadTasks() {
+        externalTasks = HolyTaskRepository.load()
+        selectedTaskID = selectedTask?.id ?? externalTasks.first?.id
+        reconcileExternalTasks(persistIfChanged: false)
+    }
+
+    private func persistTasks() {
+        HolyTaskRepository.save(externalTasks)
+    }
+
+    private func reconcileExternalTasks(persistIfChanged: Bool = true) {
+        guard !externalTasks.isEmpty else { return }
+
+        var nextTasks: [HolyExternalTaskRecord] = []
+        nextTasks.reserveCapacity(externalTasks.count)
+
+        for task in externalTasks {
+            var nextTask = task.normalized()
+
+            if let session = sessions.first(where: { $0.record.launchSpec.task?.id == task.id }) {
+                nextTask.linkedSessionID = session.id
+                nextTask.linkedSessionTitle = session.title
+                nextTask.linkedSessionPhase = session.phase
+                nextTask.status = taskStatus(for: session.phase)
+            } else if let archivedSession = archivedSessions.first(where: { $0.record.launchSpec.task?.id == task.id }) {
+                nextTask.linkedSessionID = archivedSession.sourceSessionID
+                nextTask.linkedSessionTitle = archivedSession.title
+                nextTask.linkedSessionPhase = archivedSession.phase
+                nextTask.status = taskStatus(for: archivedSession.phase)
+            } else {
+                nextTask.linkedSessionID = nil
+                nextTask.linkedSessionTitle = nil
+                nextTask.linkedSessionPhase = nil
+            }
+
+            if nextTask != task {
+                nextTask = HolyExternalTaskRecord(
+                    id: nextTask.id,
+                    sourceKind: nextTask.sourceKind,
+                    sourceLabel: nextTask.sourceLabel,
+                    externalID: nextTask.externalID,
+                    canonicalURL: nextTask.canonicalURL,
+                    title: nextTask.title,
+                    summary: nextTask.summary,
+                    preferredRuntime: nextTask.preferredRuntime,
+                    preferredWorkingDirectory: nextTask.preferredWorkingDirectory,
+                    preferredRepositoryRoot: nextTask.preferredRepositoryRoot,
+                    preferredCommand: nextTask.preferredCommand,
+                    preferredInitialInput: nextTask.preferredInitialInput,
+                    status: nextTask.status,
+                    linkedSessionID: nextTask.linkedSessionID,
+                    linkedSessionTitle: nextTask.linkedSessionTitle,
+                    linkedSessionPhase: nextTask.linkedSessionPhase,
+                    createdAt: nextTask.createdAt,
+                    updatedAt: .now,
+                    lastImportedAt: nextTask.lastImportedAt
+                )
+            }
+
+            nextTasks.append(nextTask)
+        }
+
+        guard nextTasks != externalTasks else { return }
+        externalTasks = nextTasks
+        if persistIfChanged {
+            persistTasks()
+        }
+    }
+
+    private func taskStatus(for phase: HolySessionPhase) -> HolyExternalTaskStatus {
+        switch phase {
+        case .active, .working:
+            return .active
+        case .waitingInput:
+            return .waitingInput
+        case .completed:
+            return .done
+        case .failed:
+            return .failed
+        }
     }
 
     private func makeDraftOwnershipPreview(
@@ -587,15 +810,26 @@ final class HolyWorkspaceStore: ObservableObject {
 
         for session in sessions {
             session.objectWillChange
-                .sink { [weak self] _ in
+                .sink { [weak self, weak session] _ in
                     Task { @MainActor [weak self] in
-                        self?.recomputeCoordination()
+                        guard let self, let session else { return }
+                        self.handleSessionMutation(for: session)
                     }
                 }
                 .store(in: &sessionObservationCancellables)
         }
 
         recomputeCoordination()
+        sessionSupervisor.sessionBindingsDidChange(for: currentSessionStoreState)
+    }
+
+    private func handleSessionMutation(for session: HolySession) {
+        recomputeCoordination()
+        sessionSupervisor.sessionDidMutate(
+            session,
+            in: currentSessionStoreState,
+            attentionBySessionID: coordinationBySessionID.mapValues(\.attention)
+        )
     }
 
     private func recomputeCoordination() {
@@ -604,7 +838,10 @@ final class HolyWorkspaceStore: ObservableObject {
             next[session.id] = makeCoordination(for: session)
         }
 
-        alertCoordinator.reconcile(sessions: sessions, coordinationBySessionID: next)
+        sessionSupervisor.reconcileAlerts(
+            sessions: sessions,
+            coordinationBySessionID: next
+        )
 
         if next != coordinationBySessionID {
             coordinationBySessionID = next
@@ -625,12 +862,14 @@ final class HolyWorkspaceStore: ObservableObject {
                     for: session.phase,
                     hasBlockingConflict: false,
                     hasSharedBranch: false,
-                    hasOwnershipDrift: session.hasBranchOwnershipDrift
+                    hasOwnershipDrift: session.hasBranchOwnershipDrift,
+                    runtimeActivityKind: session.runtimeTelemetry.activityKind
                 ),
                 summary: summary(
                     for: session.phase,
                     hasOwnershipDrift: session.hasBranchOwnershipDrift,
-                    ownershipStatusText: session.ownershipStatusText
+                    ownershipStatusText: session.ownershipStatusText,
+                    runtimeActivityKind: session.runtimeTelemetry.activityKind
                 ),
                 sharedWorktreeSessionIDs: [],
                 sharedWorktreeSessionTitles: [],
@@ -699,16 +938,20 @@ final class HolyWorkspaceStore: ObservableObject {
                 for: session.phase,
                 hasBlockingConflict: !orderedSharedWorktreeIDs.isEmpty || !orderedOverlapFiles.isEmpty,
                 hasSharedBranch: !orderedSharedBranchIDs.isEmpty,
-                hasOwnershipDrift: session.hasBranchOwnershipDrift
+                hasOwnershipDrift: session.hasBranchOwnershipDrift,
+                runtimeActivityKind: session.runtimeTelemetry.activityKind
             ),
             summary: summary(
-                for: session.phase,
-                sharedWorktreeCount: orderedSharedWorktreeIDs.count,
-                sharedBranchCount: orderedSharedBranchIDs.count,
-                overlappingFileCount: orderedOverlapFiles.count,
-                overlappingSessionCount: orderedOverlapIDs.count,
-                hasOwnershipDrift: session.hasBranchOwnershipDrift,
-                ownershipStatusText: session.ownershipStatusText
+                .init(
+                    phase: session.phase,
+                    sharedWorktreeCount: orderedSharedWorktreeIDs.count,
+                    sharedBranchCount: orderedSharedBranchIDs.count,
+                    overlappingFileCount: orderedOverlapFiles.count,
+                    overlappingSessionCount: orderedOverlapIDs.count,
+                    hasOwnershipDrift: session.hasBranchOwnershipDrift,
+                    ownershipStatusText: session.ownershipStatusText,
+                    runtimeActivityKind: session.runtimeTelemetry.activityKind
+                )
             ),
             sharedWorktreeSessionIDs: orderedSharedWorktreeIDs,
             sharedWorktreeSessionTitles: orderedSharedWorktreeIDs.map(title(forSessionID:)),
@@ -724,11 +967,13 @@ final class HolyWorkspaceStore: ObservableObject {
         for phase: HolySessionPhase,
         hasBlockingConflict: Bool,
         hasSharedBranch: Bool,
-        hasOwnershipDrift: Bool
+        hasOwnershipDrift: Bool,
+        runtimeActivityKind: HolySessionActivityKind
     ) -> HolySessionAttention {
         if phase == .failed { return .failure }
         if hasBlockingConflict { return .conflict }
         if phase == .waitingInput { return .needsInput }
+        if runtimeActivityKind == .stalled || runtimeActivityKind == .looping { return .watch }
         if hasOwnershipDrift || hasSharedBranch || phase == .working { return .watch }
         if phase == .completed { return .done }
         return .none
@@ -737,51 +982,55 @@ final class HolyWorkspaceStore: ObservableObject {
     private func summary(
         for phase: HolySessionPhase,
         hasOwnershipDrift: Bool,
-        ownershipStatusText: String
+        ownershipStatusText: String,
+        runtimeActivityKind: HolySessionActivityKind
     ) -> String {
         summary(
-            for: phase,
-            sharedWorktreeCount: 0,
-            sharedBranchCount: 0,
-            overlappingFileCount: 0,
-            overlappingSessionCount: 0,
-            hasOwnershipDrift: hasOwnershipDrift,
-            ownershipStatusText: ownershipStatusText
+            .init(
+                phase: phase,
+                sharedWorktreeCount: 0,
+                sharedBranchCount: 0,
+                overlappingFileCount: 0,
+                overlappingSessionCount: 0,
+                hasOwnershipDrift: hasOwnershipDrift,
+                ownershipStatusText: ownershipStatusText,
+                runtimeActivityKind: runtimeActivityKind
+            )
         )
     }
 
-    private func summary(
-        for phase: HolySessionPhase,
-        sharedWorktreeCount: Int,
-        sharedBranchCount: Int,
-        overlappingFileCount: Int,
-        overlappingSessionCount: Int,
-        hasOwnershipDrift: Bool,
-        ownershipStatusText: String
-    ) -> String {
-        if overlappingFileCount > 0 {
-            return overlappingFileCount == 1
-                ? "1 overlapping file across \(overlappingSessionCount) session"
-                : "\(overlappingFileCount) overlapping files across \(overlappingSessionCount) sessions"
+    private func summary(_ context: HolyCoordinationSummaryContext) -> String {
+        if context.overlappingFileCount > 0 {
+            return context.overlappingFileCount == 1
+                ? "1 overlapping file across \(context.overlappingSessionCount) session"
+                : "\(context.overlappingFileCount) overlapping files across \(context.overlappingSessionCount) sessions"
         }
 
-        if sharedWorktreeCount > 0 {
-            return sharedWorktreeCount == 1
+        if context.sharedWorktreeCount > 0 {
+            return context.sharedWorktreeCount == 1
                 ? "Shared worktree with 1 session"
-                : "Shared worktree with \(sharedWorktreeCount) sessions"
+                : "Shared worktree with \(context.sharedWorktreeCount) sessions"
         }
 
-        if sharedBranchCount > 0 {
-            return sharedBranchCount == 1
+        if context.sharedBranchCount > 0 {
+            return context.sharedBranchCount == 1
                 ? "Shared branch ownership with 1 session"
-                : "Shared branch ownership with \(sharedBranchCount) sessions"
+                : "Shared branch ownership with \(context.sharedBranchCount) sessions"
         }
 
-        if hasOwnershipDrift {
-            return ownershipStatusText
+        if context.hasOwnershipDrift {
+            return context.ownershipStatusText
         }
 
-        switch phase {
+        if context.runtimeActivityKind == .looping {
+            return "Session appears to be repeating the same work."
+        }
+
+        if context.runtimeActivityKind == .stalled {
+            return "Session has not made visible progress recently."
+        }
+
+        switch context.phase {
         case .active:
             return "No active coordination issues."
         case .working:
@@ -817,145 +1066,15 @@ private struct HolyDraftLaunchAssessment {
     let ownershipPreview: HolySessionOwnership?
 }
 
-@MainActor
-private final class HolyWorkspaceAlertCoordinator {
-    private var authorizationRequested = false
-    private var hasEstablishedBaseline = false
-    private var previousStates: [UUID: HolySessionAlertState] = [:]
-
-    func reconcile(
-        sessions: [HolySession],
-        coordinationBySessionID: [UUID: HolySessionCoordination]
-    ) {
-        requestAuthorizationIfNeeded()
-
-        let nextStates = Dictionary(
-            uniqueKeysWithValues: sessions.map { session in
-                (
-                    session.id,
-                    HolySessionAlertState(
-                        phase: session.phase,
-                        hasBlockingConflict: coordinationBySessionID[session.id]?.hasBlockingConflict == true,
-                        hasBranchOwnershipDrift: session.hasBranchOwnershipDrift
-                    )
-                )
-            }
-        )
-
-        guard hasEstablishedBaseline else {
-            previousStates = nextStates
-            hasEstablishedBaseline = true
-            return
-        }
-
-        for session in sessions {
-            guard let previous = previousStates[session.id],
-                  let current = nextStates[session.id] else {
-                continue
-            }
-
-            let coordination = coordinationBySessionID[session.id] ?? .empty
-            notifyIfNeeded(
-                for: session,
-                previous: previous,
-                current: current,
-                coordination: coordination
-            )
-        }
-
-        previousStates = nextStates
-    }
-
-    private func requestAuthorizationIfNeeded() {
-        guard !authorizationRequested else { return }
-        authorizationRequested = true
-
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, error in
-            if let error {
-                AppDelegate.logger.error("Holy Ghostty notification authorization failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
-
-    private func notifyIfNeeded(
-        for session: HolySession,
-        previous: HolySessionAlertState,
-        current: HolySessionAlertState,
-        coordination: HolySessionCoordination
-    ) {
-        if !previous.hasBlockingConflict && current.hasBlockingConflict {
-            deliver(
-                for: session,
-                title: "Session collision detected",
-                body: coordination.summary,
-                requestAttention: true
-            )
-            return
-        }
-
-        if previous.phase != .failed && current.phase == .failed {
-            deliver(
-                for: session,
-                title: "Agent failed",
-                body: session.primarySignalDetail,
-                requestAttention: true
-            )
-            return
-        }
-
-        if previous.phase != .waitingInput && current.phase == .waitingInput {
-            deliver(
-                for: session,
-                title: "Agent needs input",
-                body: session.primarySignalDetail,
-                requestAttention: true
-            )
-            return
-        }
-
-        if !previous.hasBranchOwnershipDrift && current.hasBranchOwnershipDrift {
-            deliver(
-                for: session,
-                title: "Branch ownership drift",
-                body: session.ownershipStatusText,
-                requestAttention: true
-            )
-            return
-        }
-
-        if previous.phase != .completed && current.phase == .completed {
-            deliver(
-                for: session,
-                title: "Agent completed",
-                body: session.primarySignalDetail,
-                requestAttention: false
-            )
-        }
-    }
-
-    private func deliver(
-        for session: HolySession,
-        title: String,
-        body: String,
-        requestAttention: Bool
-    ) {
-        let message = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        session.surfaceView.showUserNotification(
-            title: title,
-            body: message.isEmpty ? session.missionDisplay : message,
-            requireFocus: true
-        )
-
-        if requestAttention {
-            NSApp.requestUserAttention(.informationalRequest)
-        }
-    }
-}
-
-private struct HolySessionAlertState {
+private struct HolyCoordinationSummaryContext {
     let phase: HolySessionPhase
-    let hasBlockingConflict: Bool
-    let hasBranchOwnershipDrift: Bool
+    let sharedWorktreeCount: Int
+    let sharedBranchCount: Int
+    let overlappingFileCount: Int
+    let overlappingSessionCount: Int
+    let hasOwnershipDrift: Bool
+    let ownershipStatusText: String
+    let runtimeActivityKind: HolySessionActivityKind
 }
 
 private extension String {

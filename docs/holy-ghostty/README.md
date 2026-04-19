@@ -1,6 +1,6 @@
 # Holy Ghostty
 
-Last updated: 2026-04-13
+Last updated: 2026-04-18
 
 Holy Ghostty is a macOS-native control surface for agentic coding sessions built on top of real Ghostty terminal surfaces. It replaces the "too many tabs, too little awareness" workflow with a single mission-control window that keeps live terminal sessions, launch policy, worktree ownership, git context, notifications, templates, and session history in one place.
 
@@ -312,3 +312,6 @@ Current limitations:
 
 - Engineering spec: `docs/holy-ghostty/engineering-spec.md`
 - Request vs current state: `docs/holy-ghostty/request-vs-current-state.md`
+- Roadmap: `docs/holy-ghostty/roadmap.md`
+- v0.2 implementation plan: `docs/holy-ghostty/v0.2-implementation-plan.md`
+- Interoperability notes: `docs/holy-ghostty/agent-sessions-interoperability.md`

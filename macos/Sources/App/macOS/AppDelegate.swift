@@ -196,6 +196,9 @@ class AppDelegate: NSObject,
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        HolyDatabase.bootstrapIfNeeded()
+        HolyMigrationService.importLegacyWorkspaceIfNeeded()
+
         // System settings overrides
         UserDefaults.ghostty.register(defaults: [
             // Disable this so that repeated key events make it through to our terminal views.
@@ -354,8 +357,7 @@ class AppDelegate: NSObject,
             //   - if we're restoring from persisted state
             if HolyWorkspaceWindowController.all.isEmpty &&
                 TerminalController.all.isEmpty &&
-                derivedConfig.initialWindow
-            {
+                derivedConfig.initialWindow {
                 undoManager.disableUndoRegistration()
                 openWorkspaceWindow()
                 undoManager.enableUndoRegistration()

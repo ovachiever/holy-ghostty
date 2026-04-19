@@ -144,14 +144,20 @@ struct HolySessionHistorySheet: View {
 
                         actionBar(for: archived)
                         metadataSection(for: archived)
+                        recoverySection(for: archived)
 
                         if let git = archived.gitSnapshot {
                             gitSection(for: git)
                         }
 
-                        if !archived.signals.isEmpty || archived.commandTelemetry.runCount > 0 {
+                        if archived.runtimeTelemetry.isMeaningful
+                            || !archived.signals.isEmpty
+                            || archived.commandTelemetry.runCount > 0
+                            || archived.budgetTelemetry.hasUsage {
                             telemetrySection(for: archived)
                         }
+
+                        timelineSection(for: archived)
 
                         if !archived.preview.isEmpty {
                             outputSection(for: archived)
@@ -181,7 +187,7 @@ struct HolySessionHistorySheet: View {
                 store.relaunch(archived)
                 store.historyPresented = false
             } label: {
-                Label("Relaunch", systemImage: "arrow.clockwise")
+                Label(archived.relaunchActionTitle, systemImage: "arrow.clockwise")
             }
             .buttonStyle(HolyGhosttyActionButtonStyle())
 
@@ -211,6 +217,24 @@ struct HolySessionHistorySheet: View {
 
             if let command = archived.record.launchSpec.command {
                 detailRow("Command", command)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func recoverySection(for archived: HolyArchivedSession) -> some View {
+        if let recoveryReason = archived.recoveryReason {
+            VStack(alignment: .leading, spacing: 6) {
+                detailSectionLabel("Recovery")
+                detailRow("Reason", recoveryReason)
+
+                if let cleanupSummary = archived.recoveryCleanupSummary {
+                    detailRow("Cleanup", cleanupSummary)
+                }
+
+                if let suggestedAction = archived.recoverySuggestedAction {
+                    detailRow("Next Step", suggestedAction)
+                }
             }
         }
     }
@@ -246,6 +270,49 @@ struct HolySessionHistorySheet: View {
         VStack(alignment: .leading, spacing: 6) {
             detailSectionLabel("Telemetry")
 
+            if archived.runtimeTelemetry.isMeaningful {
+                detailRow("Activity", archived.runtimeTelemetry.activityKind.displayName)
+
+                if let headline = archived.runtimeTelemetry.headline, !headline.isEmpty {
+                    detailRow("Runtime", headline)
+                }
+
+                if let progressPercent = archived.runtimeTelemetry.progressPercent {
+                    detailRow("Progress", "\(progressPercent)%")
+                }
+
+                if let command = archived.runtimeTelemetry.command, !command.isEmpty {
+                    detailRow("Command", command)
+                }
+
+                if let filePath = archived.runtimeTelemetry.filePath, !filePath.isEmpty {
+                    detailRow("File", filePath)
+                }
+
+                if let nextStepHint = archived.runtimeTelemetry.nextStepHint, !nextStepHint.isEmpty {
+                    detailRow("Next", nextStepHint)
+                }
+
+                if let artifactSummary = archived.runtimeTelemetry.artifactSummary, !artifactSummary.isEmpty {
+                    detailRow("Artifact", artifactSummary)
+                }
+
+                if let artifactPath = archived.runtimeTelemetry.artifactPath,
+                   !artifactPath.isEmpty,
+                   artifactPath != archived.runtimeTelemetry.filePath {
+                    detailRow("Artifact Path", artifactPath)
+                }
+
+                if let stagnantSeconds = archived.runtimeTelemetry.stagnantSeconds, stagnantSeconds > 0 {
+                    detailRow("Stagnant", "\(stagnantSeconds)s")
+                }
+
+                if let repeatedEvidenceCount = archived.runtimeTelemetry.repeatedEvidenceCount,
+                   repeatedEvidenceCount > 1 {
+                    detailRow("Repeats", "\(repeatedEvidenceCount)x")
+                }
+            }
+
             if !archived.signals.isEmpty {
                 ForEach(Array(archived.signals.prefix(3).enumerated()), id: \.offset) { _, signal in
                     detailRow(signal.kind.displayName, signal.headline)
@@ -256,7 +323,25 @@ struct HolySessionHistorySheet: View {
                 detailRow("Runs", "\(archived.commandTelemetry.runCount) (\(archived.commandTelemetry.successCount) ok)")
                 detailRow("Last", archived.commandTelemetry.lastOutcomeText)
             }
+
+            if archived.budgetTelemetry.hasUsage {
+                if let totalTokens = archived.budgetTelemetry.resolvedTotalTokens {
+                    detailRow("Tokens", formattedTokenCount(totalTokens))
+                }
+
+                if let estimatedCostUSD = archived.budgetTelemetry.estimatedCostUSD {
+                    detailRow("Cost", String(format: "$%.2f", estimatedCostUSD))
+                }
+            }
         }
+    }
+
+    private func timelineSection(for archived: HolyArchivedSession) -> some View {
+        HolySessionTimelineSection(
+            sessionID: archived.sourceSessionID,
+            refreshID: timelineRefreshID(for: archived),
+            limit: 12
+        )
     }
 
     private func outputSection(for archived: HolyArchivedSession) -> some View {
@@ -311,6 +396,21 @@ struct HolySessionHistorySheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private func formattedTokenCount(_ value: Int) -> String {
+        value.formatted(.number.grouping(.automatic))
+    }
+
+    private func timelineRefreshID(for archived: HolyArchivedSession) -> String {
+        let runtimeUpdatedAt = archived.runtimeTelemetry.lastUpdatedAt?.timeIntervalSince1970 ?? 0
+        return [
+            archived.sourceSessionID.uuidString,
+            String(archived.archivedAt.timeIntervalSince1970),
+            String(archived.lastActivityAt.timeIntervalSince1970),
+            String(runtimeUpdatedAt),
+            archived.phase.rawValue,
+        ].joined(separator: "-")
     }
 
     private func ensureSelection() {

@@ -6,6 +6,7 @@ struct HolySessionDetailView: View {
     let coordination: HolySessionCoordination
     let ghosttyApp: Ghostty.App?
     var focusMode: Bool = false
+    var splitSurface: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -79,6 +80,14 @@ struct HolySessionDetailView: View {
                 statusItem(session.changeSummaryText, color: changeColor(for: session))
             }
 
+            if session.budget.isConfigured || session.budgetTelemetry.hasUsage {
+                statusItem(session.budgetSummaryText, color: budgetColor(for: session))
+            }
+
+            if let runtimeSummary = session.runtimeTelemetrySummaryText {
+                statusItem(runtimeSummary, color: runtimeColor(for: session.runtimeTelemetry.activityKind))
+            }
+
             Spacer()
 
             Text(session.activityAt.formatted(date: .omitted, time: .shortened))
@@ -102,7 +111,7 @@ struct HolySessionDetailView: View {
     @ViewBuilder
     private func activeSurface(session: HolySession) -> some View {
         if let ghosttyApp {
-            Ghostty.SurfaceWrapper(surfaceView: session.surfaceView)
+            Ghostty.SurfaceWrapper(surfaceView: session.surfaceView, isSplit: splitSurface)
                 .environmentObject(ghosttyApp)
                 .ghosttyLastFocusedSurface(Weak(session.surfaceView))
         } else {
@@ -147,5 +156,35 @@ struct HolySessionDetailView: View {
         guard let gitSnapshot = session.gitSnapshot else { return HolyGhosttyTheme.textTertiary }
         if gitSnapshot.hasConflicts { return HolyGhosttyTheme.danger }
         return gitSnapshot.isClean ? HolyGhosttyTheme.success : HolyGhosttyTheme.warning
+    }
+
+    private func budgetColor(for session: HolySession) -> Color {
+        switch session.budgetStatus {
+        case .none:
+            return HolyGhosttyTheme.textTertiary
+        case .healthy:
+            return HolyGhosttyTheme.success
+        case .warning:
+            return HolyGhosttyTheme.warning
+        case .exceeded:
+            return HolyGhosttyTheme.danger
+        }
+    }
+
+    private func runtimeColor(for kind: HolySessionActivityKind) -> Color {
+        switch kind {
+        case .approval:
+            return HolyGhosttyTheme.warning
+        case .stalled, .looping:
+            return HolyGhosttyTheme.warning
+        case .failure:
+            return HolyGhosttyTheme.danger
+        case .completion:
+            return HolyGhosttyTheme.success
+        case .progress, .reading, .editing, .command:
+            return HolyGhosttyTheme.accent
+        case .idle:
+            return HolyGhosttyTheme.textTertiary
+        }
     }
 }

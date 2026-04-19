@@ -61,8 +61,8 @@ actor HolyGitClient {
         let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
 
         return HolyGitCommandResult(
-            stdout: String(decoding: stdoutData, as: UTF8.self),
-            stderr: String(decoding: stderrData, as: UTF8.self),
+            stdout: String(bytes: stdoutData, encoding: .utf8) ?? "",
+            stderr: String(bytes: stderrData, encoding: .utf8) ?? "",
             exitCode: process.terminationStatus
         )
     }

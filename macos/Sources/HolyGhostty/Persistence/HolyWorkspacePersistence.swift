@@ -15,7 +15,7 @@ enum HolyWorkspacePersistence {
 
         do {
             let data = try Data(contentsOf: url)
-            return try JSONDecoder.holyWorkspace.decode(HolyWorkspaceSnapshot.self, from: data)
+            return try HolyPersistenceCoders.jsonDecoder.decode(HolyWorkspaceSnapshot.self, from: data)
         } catch {
             quarantineCorruptSnapshot(at: url)
             logger.error("Failed to load Holy workspace state: \(error.localizedDescription, privacy: .public)")
@@ -25,12 +25,9 @@ enum HolyWorkspacePersistence {
 
     static func save(_ snapshot: HolyWorkspaceSnapshot) {
         do {
-            try FileManager.default.createDirectory(
-                at: containerDirectory,
-                withIntermediateDirectories: true
-            )
+            try HolyDatabasePaths.ensureContainerDirectory()
 
-            let data = try JSONEncoder.holyWorkspace.encode(snapshot)
+            let data = try HolyPersistenceCoders.jsonEncoder.encode(snapshot)
             try data.write(to: stateURL, options: [.atomic])
         } catch {
             logger.error("Failed to save Holy workspace state: \(error.localizedDescription, privacy: .public)")
@@ -38,16 +35,11 @@ enum HolyWorkspacePersistence {
     }
 
     private static var containerDirectory: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.mitchellh.ghostty"
-        return appSupport
-            .appendingPathComponent(bundleID, isDirectory: true)
-            .appendingPathComponent("HolyGhostty", isDirectory: true)
+        HolyDatabasePaths.containerDirectory
     }
 
     private static var stateURL: URL {
-        containerDirectory.appendingPathComponent("workspace-state.json", isDirectory: false)
+        HolyDatabasePaths.legacyWorkspaceStateURL
     }
 
     private static func quarantineCorruptSnapshot(at url: URL) {
@@ -64,21 +56,4 @@ enum HolyWorkspacePersistence {
             logger.error("Failed to quarantine corrupt Holy workspace snapshot: \(error.localizedDescription, privacy: .public)")
         }
     }
-}
-
-private extension JSONEncoder {
-    static let holyWorkspace: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return encoder
-    }()
-}
-
-private extension JSONDecoder {
-    static let holyWorkspace: JSONDecoder = {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
-    }()
 }

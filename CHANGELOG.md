@@ -8,7 +8,52 @@ The format is intentionally simple and release-oriented.
 
 - No unreleased changes yet.
 
-## 0.1
+## 0.2.0 (2026-04-18)
+
+The Foundation Release. Replaces fragile JSON-only persistence with a durable SQLite database, introduces an append-only event ledger, splits the monolithic workspace store into distinct subsystems, and adds budget intelligence, structured telemetry, display modes, and an external task inbox.
+
+### Added
+
+- SQLite database layer with WAL journal mode, schema versioning, and 5 migrations
+- Append-only session event ledger with typed events (imported, restored, recovered, created, archived, relaunched, selected, runtimeUpdated, artifactDetected)
+- Event timeline UI in both the live inspector and archived session views
+- Session supervisor (`HolySessionSupervisor`) owning lifecycle orchestration, alert coordination, worktree recovery, and orphan cleanup
+- Workspace repository facade with dual-write (database + JSON) during transition
+- Migration service for one-shot import of legacy JSON state into the database
+- Budget intelligence: per-session budget model, budget parser (token/cost extraction from terminal output), budget samples ledger, runtime rollups, exhaustion projection, enforcement policies (warn, requireApproval)
+- Budget UI sections in the composer, inspector, and history views
+- Structured runtime telemetry parser: activity kind inference (idle, approval, progress, reading, editing, command, stalled, looping, failure, completion), command extraction, file path extraction, next-step hint detection, artifact detection, stall/loop detection
+- Runtime telemetry sections in the inspector and history views
+- External task inbox with GitHub, Linear, Jira, and manual task support
+- Task CRUD, task-to-session launching, linked session tracking, canonical URL opening
+- Task inbox sheet with split-view search, list, and detail editor
+- Focus display mode (Cmd+Shift+F): full-screen single session with floating status overlay
+- Grid display mode (Cmd+Shift+G): 2x2/2x3 tiled session previews with selection and promotion
+- Diff display mode (Cmd+Shift+D): side-by-side session comparison with branch, file overlap, and phase analysis
+- Worktree recovery evaluation (directory existence, git validity, repository match, branch match)
+- Orphaned managed worktree cleanup
+- `agent-sessions` compatibility views (4 versioned read-only SQL views)
+- Shared persistence coders for JSON and ISO8601 timestamps
+- In-memory session store state struct with mutation/event pairing
+- Agent-sessions interoperability design document
+- Roadmap document (v0.2 through v1.0)
+
+### Changed
+
+- Workspace store delegates lifecycle operations to the session supervisor instead of handling them inline
+- All launch paths now carry event provenance (origin, source template ID, relaunched-from session ID)
+- Session selection emits selection events to the event ledger
+- Session composer includes budget configuration (token limit, cost limit, enforcement policy) and linked task display
+- History sheet shows recovery context, runtime telemetry, budget telemetry, and event timeline
+- Inspector shows runtime telemetry, budget analytics, event timeline, and task source
+- Archived sessions now include budget telemetry, runtime telemetry, recovery reason, and cleanup summary
+- Launch specs now include optional task reference and budget
+- Session drafts include linked task, budget fields, and budget validation
+- Sessions track preview stability (signature, first-observed time, repeat count) for stall/loop detection
+- Alert coordinator now fires on stalls, loops, and budget warnings in addition to existing triggers
+- Worktree manager includes recovery evaluation, orphan cleanup, and improved error handling on creation
+
+## 0.1 (2026-04-16)
 
 Initial public release of Holy Ghostty as a macOS-native agentic coding session control surface built on Ghostty.
 

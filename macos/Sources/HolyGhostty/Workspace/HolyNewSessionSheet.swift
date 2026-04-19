@@ -28,10 +28,12 @@ struct HolyNewSessionSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     templateStrip
+                    taskSection
                     runtimePicker
                     labeledField("Title", text: $draft.title, placeholder: "Untitled Session")
                     labeledField("Mission", text: $draft.objective, placeholder: "What should this session accomplish?")
                     workspaceSection
+                    budgetSection
                     guardrailSection
                     commandSection
                     initialInputSection
@@ -132,6 +134,26 @@ struct HolyNewSessionSheet: View {
 
     // MARK: - Runtime
 
+    @ViewBuilder
+    private var taskSection: some View {
+        if let linkedTask = draft.linkedTask {
+            VStack(alignment: .leading, spacing: 6) {
+                sectionLabel("Task")
+                helperText(
+                    "\(linkedTask.sourceSummary) · \(linkedTask.title)",
+                    tint: HolyGhosttyTheme.halo
+                )
+
+                let summary = (linkedTask.summary ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !summary.isEmpty {
+                    Text(summary)
+                        .font(.system(size: 10))
+                        .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                }
+            }
+        }
+    }
+
     private var runtimePicker: some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionLabel("Runtime")
@@ -193,6 +215,37 @@ struct HolyNewSessionSheet: View {
     }
 
     // MARK: - Guardrails
+
+    private var budgetSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionLabel("Budget")
+
+            HStack(spacing: 10) {
+                labeledField("Token Limit", text: $draft.tokenBudget, placeholder: "25000")
+                labeledField("Cost Limit USD", text: $draft.costBudgetUSD, placeholder: "15")
+            }
+
+            let hasBudget = draft.budget != nil
+            if hasBudget {
+                Picker("Budget Policy", selection: $draft.budgetEnforcementPolicy) {
+                    ForEach(HolySessionBudgetEnforcementPolicy.allCases, id: \.self) { policy in
+                        Text(policy.displayName).tag(policy)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                helperText(budgetSummaryText)
+            } else {
+                Text("Optional. Use this to set hard expectations for agent spend.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+            }
+
+            if !draft.hasValidBudgetInput {
+                helperText("Budget values must be numeric.", tint: HolyGhosttyTheme.danger)
+            }
+        }
+    }
 
     @ViewBuilder
     private var guardrailSection: some View {
@@ -381,7 +434,7 @@ struct HolyNewSessionSheet: View {
 
     private var canCreate: Bool {
         let hasTitle = !draft.launchSpec.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if !hasTitle || isBusy || isCheckingLaunchOwnership { return false }
+        if !hasTitle || isBusy || isCheckingLaunchOwnership || !draft.hasValidBudgetInput { return false }
 
         let hasRequiredWorkspaceFields: Bool
         switch draft.workspaceStrategy {
@@ -443,6 +496,20 @@ struct HolyNewSessionSheet: View {
             "\(ownership.source.displayName): \(ownership.summary)",
             "Branch: \(ownership.branchDisplayName)",
         ].joined(separator: " · ")
+    }
+
+    private var budgetSummaryText: String {
+        var components: [String] = []
+        if let tokenLimit = draft.budget?.tokenLimit {
+            components.append("\(tokenLimit.formatted(.number.grouping(.automatic))) tokens")
+        }
+        if let costLimitUSD = draft.budget?.costLimitUSD {
+            components.append(String(format: "$%.2f", costLimitUSD))
+        }
+        if draft.budget != nil {
+            components.append(draft.budgetEnforcementPolicy.displayName)
+        }
+        return components.joined(separator: " · ")
     }
 
     static func parseEnvironment(_ text: String) -> [String: String] {

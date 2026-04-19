@@ -12,6 +12,8 @@ final class HolySession: ObservableObject, Identifiable {
     @Published private(set) var preview: String = ""
     @Published private(set) var signals: [HolySessionSignal] = []
     @Published private(set) var commandTelemetry: HolySessionCommandTelemetry = .empty
+    @Published private(set) var budgetTelemetry: HolySessionBudgetTelemetry = .empty
+    @Published private(set) var runtimeTelemetry: HolySessionRuntimeTelemetry = .empty
     @Published private(set) var gitSnapshot: HolyGitSnapshot?
     @Published private(set) var activityAt: Date
 
@@ -19,6 +21,9 @@ final class HolySession: ObservableObject, Identifiable {
     private var gitRefreshTask: Task<Void, Never>?
     private var lastGitRefreshDirectory: String?
     private var lastGitRefreshAt: Date = .distantPast
+    private var previewEvidenceSignature: String?
+    private var previewEvidenceFirstObservedAt: Date = .now
+    private var repeatedPreviewEvidenceCount = 0
 
     init(record: HolySessionRecord, app: ghostty_app_t) {
         self.id = record.id
@@ -40,6 +45,10 @@ final class HolySession: ObservableObject, Identifiable {
 
     var runtime: HolySessionRuntime {
         record.launchSpec.runtime
+    }
+
+    var budget: HolySessionBudget {
+        record.launchSpec.budget ?? .none
     }
 
     var workingDirectory: String? {
@@ -106,6 +115,109 @@ final class HolySession: ObservableObject, Identifiable {
         record.launchSpec.objective ?? "No mission defined"
     }
 
+    var budgetStatus: HolySessionBudgetStatus {
+        guard budget.isConfigured else { return .none }
+
+        let tokenUtilization = utilization(used: budgetTelemetry.resolvedTotalTokens, limit: budget.tokenLimit)
+        let costUtilization = utilization(used: budgetTelemetry.estimatedCostUSD, limit: budget.costLimitUSD)
+        let utilization = max(tokenUtilization ?? 0, costUtilization ?? 0)
+
+        if utilization >= 1 {
+            return .exceeded
+        }
+
+        if utilization >= budget.warningThreshold {
+            return .warning
+        }
+
+        return .healthy
+    }
+
+    var budgetSummaryText: String {
+        let parts = [
+            budgetTelemetry.resolvedTotalTokens.map(Self.tokenCountText),
+            budgetTelemetry.estimatedCostUSD.map(Self.currencyText),
+        ].compactMap { $0 }
+
+        if !parts.isEmpty {
+            return parts.joined(separator: " · ")
+        }
+
+        if budget.isConfigured {
+            return "Budget configured, no usage detected yet"
+        }
+
+        return "No budget configured"
+    }
+
+    var budgetRemainingText: String {
+        guard budget.isConfigured else { return "No limit" }
+
+        var parts: [String] = []
+        if let tokenLimit = budget.tokenLimit {
+            let used = budgetTelemetry.resolvedTotalTokens ?? 0
+            let remaining = max(0, tokenLimit - used)
+            parts.append("\(Self.tokenCountText(remaining)) left")
+        }
+
+        if let costLimitUSD = budget.costLimitUSD {
+            let used = budgetTelemetry.estimatedCostUSD ?? 0
+            let remaining = max(0, costLimitUSD - used)
+            parts.append("\(Self.currencyText(remaining)) left")
+        }
+
+        return parts.isEmpty ? "No limit" : parts.joined(separator: " · ")
+    }
+
+    var budgetBurnRateText: String {
+        let elapsedMinutes = max(1 / 60, activityAt.timeIntervalSince(record.createdAt) / 60)
+        var parts: [String] = []
+
+        if let totalTokens = budgetTelemetry.resolvedTotalTokens, totalTokens > 0 {
+            parts.append("\(Self.tokenCountText(Int(Double(totalTokens) / elapsedMinutes)))/min")
+        }
+
+        if let estimatedCostUSD = budgetTelemetry.estimatedCostUSD, estimatedCostUSD > 0 {
+            let hourly = estimatedCostUSD / max(1 / 3600, activityAt.timeIntervalSince(record.createdAt) / 3600)
+            parts.append("\(Self.currencyText(hourly))/hr")
+        }
+
+        return parts.isEmpty ? "Unknown" : parts.joined(separator: " · ")
+    }
+
+    var runtimeTelemetrySummaryText: String? {
+        guard runtimeTelemetry.isMeaningful else { return nil }
+
+        var segments: [String] = []
+        if let headline = runtimeTelemetry.headline, !headline.isEmpty {
+            segments.append(headline)
+        }
+        if segments.isEmpty, let artifactSummary = runtimeTelemetry.artifactSummary, !artifactSummary.isEmpty {
+            segments.append(artifactSummary)
+        }
+        if segments.isEmpty, let progressPercent = runtimeTelemetry.progressPercent {
+            segments.append("\(progressPercent)%")
+        }
+
+        if segments.isEmpty, let command = runtimeTelemetry.command, !command.isEmpty {
+            segments.append(command)
+        }
+
+        if segments.isEmpty,
+           let filePath = runtimeTelemetry.filePath,
+           !filePath.isEmpty {
+            segments.append(filePath)
+        }
+
+        if segments.isEmpty,
+           let nextStepHint = runtimeTelemetry.nextStepHint,
+           !nextStepHint.isEmpty {
+            segments.append(nextStepHint)
+        }
+
+        return segments.isEmpty ? nil : segments.joined(separator: " · ")
+    }
+
     var primarySignal: HolySessionSignal? {
         signals.first ?? commandTelemetry.recentSignal
     }
@@ -140,6 +252,8 @@ final class HolySession: ObservableObject, Identifiable {
             preview: preview,
             signals: signals,
             commandTelemetry: commandTelemetry,
+            budgetTelemetry: budgetTelemetry,
+            runtimeTelemetry: runtimeTelemetry,
             gitSnapshot: gitSnapshot,
             lastKnownWorkingDirectory: workingDirectory,
             lastActivityAt: activityAt,
@@ -151,14 +265,44 @@ final class HolySession: ObservableObject, Identifiable {
         let previousPreview = preview
         let previousPhase = phase
         let nextPreview = Self.previewText(from: surfaceView.cachedVisibleContents.get())
-        let nextSignals = Self.detectSignals(runtime: runtime, surfaceView: surfaceView, preview: nextPreview)
+        var nextSignals = Self.detectSignals(runtime: runtime, surfaceView: surfaceView, preview: nextPreview)
+        let previewStability = updatePreviewStability(for: nextPreview)
+        let nextBudgetTelemetry = HolySessionBudgetParser.updatedTelemetry(
+            from: nextPreview,
+            current: budgetTelemetry
+        )
+        let effectiveBudgetTelemetry = nextBudgetTelemetry ?? budgetTelemetry
+        if let budgetSignal = Self.budgetSignal(for: budget, telemetry: effectiveBudgetTelemetry) {
+            nextSignals.insert(budgetSignal, at: 0)
+        }
         let nextPhase = Self.classifyPhase(surfaceView: surfaceView, signals: nextSignals)
+        let nextRuntimeTelemetry = HolySessionRuntimeTelemetryParser.telemetry(
+            from: .init(
+                runtime: runtime,
+                surfaceView: surfaceView,
+                preview: nextPreview,
+                signals: nextSignals,
+                phase: nextPhase,
+                stability: previewStability
+            ),
+            current: runtimeTelemetry
+        )
 
         preview = nextPreview
         signals = nextSignals
         phase = nextPhase
+        if let nextBudgetTelemetry {
+            budgetTelemetry = nextBudgetTelemetry
+        }
+        if let nextRuntimeTelemetry {
+            runtimeTelemetry = nextRuntimeTelemetry
+        }
 
-        if previousPreview != nextPreview || previousPhase != nextPhase || surfaceView.progressReport != nil {
+        if previousPreview != nextPreview
+            || previousPhase != nextPhase
+            || nextBudgetTelemetry != nil
+            || nextRuntimeTelemetry != nil
+            || surfaceView.progressReport != nil {
             markUpdated()
         }
 
@@ -238,6 +382,51 @@ final class HolySession: ObservableObject, Identifiable {
     private func markUpdated(at date: Date = .init()) {
         activityAt = date
         record.updatedAt = date
+    }
+
+    private func updatePreviewStability(for preview: String) -> HolySessionPreviewStability {
+        let evidence = Self.lastMeaningfulLine(from: preview) ?? preview
+        let signature = Self.normalizedEvidenceSignature(from: evidence)
+
+        guard let signature else {
+            previewEvidenceSignature = nil
+            previewEvidenceFirstObservedAt = .now
+            repeatedPreviewEvidenceCount = 0
+            return .init(repeatedEvidenceCount: 0, stagnantDuration: 0)
+        }
+
+        if previewEvidenceSignature == signature {
+            repeatedPreviewEvidenceCount += 1
+        } else {
+            previewEvidenceSignature = signature
+            previewEvidenceFirstObservedAt = .now
+            repeatedPreviewEvidenceCount = 1
+        }
+
+        return .init(
+            repeatedEvidenceCount: repeatedPreviewEvidenceCount,
+            stagnantDuration: Date().timeIntervalSince(previewEvidenceFirstObservedAt)
+        )
+    }
+
+    private func utilization(used: Int?, limit: Int?) -> Double? {
+        guard let used, let limit, limit > 0 else { return nil }
+        return Double(used) / Double(limit)
+    }
+
+    private func utilization(used: Double?, limit: Double?) -> Double? {
+        guard let used, let limit, limit > 0 else { return nil }
+        return used / limit
+    }
+
+    private static func utilization(used: Int?, limit: Int?) -> Double? {
+        guard let used, let limit, limit > 0 else { return nil }
+        return Double(used) / Double(limit)
+    }
+
+    private static func utilization(used: Double?, limit: Double?) -> Double? {
+        guard let used, let limit, limit > 0 else { return nil }
+        return used / limit
     }
 
     private static func previewText(from content: String) -> String {
@@ -407,6 +596,32 @@ final class HolySession: ObservableObject, Identifiable {
         }
     }
 
+    private static func budgetSignal(
+        for budget: HolySessionBudget,
+        telemetry: HolySessionBudgetTelemetry
+    ) -> HolySessionSignal? {
+        guard budget.isConfigured,
+              budget.enforcementPolicy == .requireApproval,
+              budgetStatus(for: budget, telemetry: telemetry) == .exceeded else {
+            return nil
+        }
+
+        let detailParts = [
+            telemetry.resolvedTotalTokens.map(tokenCountText),
+            telemetry.estimatedCostUSD.map(currencyText),
+        ].compactMap { $0 }
+
+        let detail = detailParts.isEmpty
+            ? "Budget exceeded. Operator approval is required to continue."
+            : "\(detailParts.joined(separator: " · ")) used. Operator approval is required to continue."
+
+        return .init(
+            kind: .approval,
+            headline: "Budget approval required",
+            detail: detail
+        )
+    }
+
     private static func progressHeadline(for report: Ghostty.Action.ProgressReport?) -> String {
         guard let report else { return "Progress reported" }
 
@@ -434,6 +649,40 @@ final class HolySession: ObservableObject, Identifiable {
             .last(where: { !$0.isEmpty })
     }
 
+    private static func normalizedEvidenceSignature(from evidence: String) -> String? {
+        let normalized = evidence
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        guard !normalized.isEmpty,
+              normalized != "interactive shell ready." else {
+            return nil
+        }
+
+        return normalized
+    }
+
+    private static func budgetStatus(
+        for budget: HolySessionBudget,
+        telemetry: HolySessionBudgetTelemetry
+    ) -> HolySessionBudgetStatus {
+        guard budget.isConfigured else { return .none }
+
+        let tokenUtilization = utilization(used: telemetry.resolvedTotalTokens, limit: budget.tokenLimit)
+        let costUtilization = utilization(used: telemetry.estimatedCostUSD, limit: budget.costLimitUSD)
+        let utilization = max(tokenUtilization ?? 0, costUtilization ?? 0)
+
+        if utilization >= 1 {
+            return .exceeded
+        }
+
+        if utilization >= budget.warningThreshold {
+            return .warning
+        }
+
+        return .healthy
+    }
+
     private static func rank(for kind: HolySessionSignalKind) -> Int {
         switch kind {
         case .approval: return 0
@@ -445,5 +694,29 @@ final class HolySession: ObservableObject, Identifiable {
         case .completion: return 6
         case .coordination: return 7
         }
+    }
+
+    private static func tokenCountText(_ value: Int) -> String {
+        if value >= 1_000_000 {
+            return String(format: "%.1fM tokens", Double(value) / 1_000_000)
+        }
+
+        if value >= 1_000 {
+            return String(format: "%.1fK tokens", Double(value) / 1_000)
+        }
+
+        return "\(value) tokens"
+    }
+
+    private static func currencyText(_ value: Double) -> String {
+        if value >= 100 {
+            return String(format: "$%.0f", value)
+        }
+
+        if value >= 10 {
+            return String(format: "$%.1f", value)
+        }
+
+        return String(format: "$%.2f", value)
     }
 }

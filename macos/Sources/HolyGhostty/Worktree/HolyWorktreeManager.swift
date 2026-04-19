@@ -77,6 +77,221 @@ actor HolyWorktreeManager {
         return managedWorktreeURL(repositoryRoot: repositoryRoot, branchName: branch).path
     }
 
+    nonisolated static func recoveryIssue(for launchSpec: HolySessionLaunchSpec) -> String? {
+        recoveryEvaluation(for: launchSpec).issue
+    }
+
+    nonisolated static func recoveryEvaluation(for launchSpec: HolySessionLaunchSpec) -> HolyWorktreeRecoveryEvaluation {
+        let strategy = launchSpec.workspace?.strategy ?? .directDirectory
+        let workingDirectory = launchSpec.workingDirectory?.holyTrimmed.nilIfEmpty
+
+        guard let workingDirectory else {
+            switch strategy {
+            case .createManagedWorktree:
+                return .init(
+                    issue: "Recovery archived this session because no restorable managed worktree path was recorded.",
+                    cleanupSummary: nil
+                )
+            case .attachExistingWorktree:
+                return .init(
+                    issue: "Recovery archived this session because no attached worktree path was recorded.",
+                    cleanupSummary: nil
+                )
+            case .directDirectory:
+                return .empty
+            }
+        }
+
+        let standardizedPath = URL(fileURLWithPath: workingDirectory).standardizedFileURL.path
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: standardizedPath, isDirectory: &isDirectory)
+        guard exists, isDirectory.boolValue else {
+            switch strategy {
+            case .createManagedWorktree:
+                return .init(
+                    issue: "Recovery archived this session because its managed worktree is missing: \(standardizedPath)",
+                    cleanupSummary: nil
+                )
+            case .attachExistingWorktree:
+                return .init(
+                    issue: "Recovery archived this session because its attached worktree is no longer available: \(standardizedPath)",
+                    cleanupSummary: nil
+                )
+            case .directDirectory:
+                return .init(
+                    issue: "Recovery archived this session because its working directory no longer exists: \(standardizedPath)",
+                    cleanupSummary: nil
+                )
+            }
+        }
+
+        guard strategy != .directDirectory else {
+            return .empty
+        }
+
+        guard let snapshot = recoverySnapshot(for: standardizedPath) else {
+            let cleanupSummary = cleanupInvalidManagedWorktreeIfPossible(at: standardizedPath)
+            switch strategy {
+            case .createManagedWorktree:
+                return .init(
+                    issue: "Recovery archived this session because its managed worktree is no longer a valid git worktree: \(standardizedPath)",
+                    cleanupSummary: cleanupSummary
+                )
+            case .attachExistingWorktree:
+                return .init(
+                    issue: "Recovery archived this session because its attached worktree is no longer a valid git worktree: \(standardizedPath)",
+                    cleanupSummary: cleanupSummary
+                )
+            case .directDirectory:
+                return .empty
+            }
+        }
+
+        if snapshot.worktreePath != standardizedPath {
+            switch strategy {
+            case .createManagedWorktree:
+                return .init(
+                    issue: "Recovery archived this session because its managed worktree path resolved to `\(snapshot.worktreePath)` instead of `\(standardizedPath)`.",
+                    cleanupSummary: nil
+                )
+            case .attachExistingWorktree:
+                return .init(
+                    issue: "Recovery archived this session because the attached path is no longer the worktree root: \(standardizedPath)",
+                    cleanupSummary: nil
+                )
+            case .directDirectory:
+                return .empty
+            }
+        }
+
+        if let expectedRepositoryRoot = launchSpec.workspace?.repositoryRoot?.holyTrimmed.nilIfEmpty {
+            let normalizedExpectedRepositoryRoot = URL(fileURLWithPath: expectedRepositoryRoot).standardizedFileURL.path
+            if snapshot.repositoryRoot != normalizedExpectedRepositoryRoot {
+                let observed = snapshot.repositoryRoot
+                switch strategy {
+                case .createManagedWorktree:
+                    return .init(
+                        issue: "Recovery archived this session because its managed worktree now points at a different repository: expected `\(normalizedExpectedRepositoryRoot)`, observed `\(observed)`.",
+                        cleanupSummary: nil
+                    )
+                case .attachExistingWorktree:
+                    return .init(
+                        issue: "Recovery archived this session because the attached worktree now points at a different repository: expected `\(normalizedExpectedRepositoryRoot)`, observed `\(observed)`.",
+                        cleanupSummary: nil
+                    )
+                case .directDirectory:
+                    return .empty
+                }
+            }
+        }
+
+        let expectedBranchName = launchSpec.workspace?.branchName?.holyTrimmed.nilIfEmpty
+        if strategy == .createManagedWorktree, expectedBranchName == nil {
+            return .init(
+                issue: "Recovery archived this session because no managed branch was recorded for its worktree.",
+                cleanupSummary: nil
+            )
+        }
+
+        if let expectedBranchName {
+            if snapshot.isDetachedHead {
+                switch strategy {
+                case .createManagedWorktree:
+                    return .init(
+                        issue: "Recovery archived this session because its managed worktree is now in Detached HEAD instead of `\(expectedBranchName)`.",
+                        cleanupSummary: nil
+                    )
+                case .attachExistingWorktree:
+                    return .init(
+                        issue: "Recovery archived this session because the attached worktree is now in Detached HEAD instead of `\(expectedBranchName)`.",
+                        cleanupSummary: nil
+                    )
+                case .directDirectory:
+                    return .empty
+                }
+            }
+
+            if snapshot.branch != expectedBranchName {
+                switch strategy {
+                case .createManagedWorktree:
+                    return .init(
+                        issue: "Recovery archived this session because its managed worktree switched branches: expected `\(expectedBranchName)`, observed `\(snapshot.branch)`.",
+                        cleanupSummary: nil
+                    )
+                case .attachExistingWorktree:
+                    return .init(
+                        issue: "Recovery archived this session because the attached worktree switched branches: expected `\(expectedBranchName)`, observed `\(snapshot.branch)`.",
+                        cleanupSummary: nil
+                    )
+                case .directDirectory:
+                    return .empty
+                }
+            }
+        }
+
+        return .empty
+    }
+
+    nonisolated static func cleanupOrphanedManagedWorktrees(referencedPaths: [String]) -> [String] {
+        let fileManager = FileManager.default
+        let containerURL = managedWorktreeContainerDirectory()
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: containerURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return []
+        }
+
+        let normalizedReferencedPaths = Set(referencedPaths.map {
+            URL(fileURLWithPath: $0).standardizedFileURL.path
+        })
+        let repoContainerURLs = (try? fileManager.contentsOfDirectory(
+            at: containerURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        var summaries: [String] = []
+        for repoContainerURL in repoContainerURLs {
+            guard (try? repoContainerURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                continue
+            }
+
+            let worktreeURLs = (try? fileManager.contentsOfDirectory(
+                at: repoContainerURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+
+            for worktreeURL in worktreeURLs {
+                guard (try? worktreeURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                    continue
+                }
+
+                let path = worktreeURL.standardizedFileURL.path
+                guard !normalizedReferencedPaths.contains(path) else { continue }
+
+                if let snapshot = recoverySnapshot(for: path) {
+                    guard gitWorktreeIsClean(path),
+                          removeGitWorktree(snapshot: snapshot) else {
+                        continue
+                    }
+
+                    pruneEmptyManagedParents(for: worktreeURL)
+                    summaries.append("Removed orphaned managed worktree `\(path)`.")
+                    continue
+                }
+
+                guard cleanupInvalidManagedWorktreeIfPossible(at: path) != nil else {
+                    continue
+                }
+
+                summaries.append("Removed invalid orphaned managed worktree directory `\(path)`.")
+            }
+        }
+
+        return summaries
+    }
+
     private func prepareDirectLaunchSpec(_ launchSpec: HolySessionLaunchSpec) throws -> HolySessionLaunchSpec {
         guard let directory = launchSpec.workingDirectory?.holyTrimmed, !directory.isEmpty else {
             throw HolyWorktreeManagerError.missingWorkingDirectory
@@ -122,17 +337,17 @@ actor HolyWorktreeManager {
 
         let worktreeURL = Self.managedWorktreeURL(repositoryRoot: repositoryRoot, branchName: branchName)
         if FileManager.default.fileExists(atPath: worktreeURL.path) {
-            guard let existingSnapshot = await HolyGitClient.shared.snapshot(for: worktreeURL.path) else {
-                throw HolyWorktreeManagerError.occupiedManagedPath(worktreeURL.path)
-            }
+            if let existingSnapshot = await HolyGitClient.shared.snapshot(for: worktreeURL.path) {
+                guard existingSnapshot.repositoryRoot == repositoryRoot else {
+                    throw HolyWorktreeManagerError.occupiedManagedPath(worktreeURL.path)
+                }
 
-            guard existingSnapshot.repositoryRoot == repositoryRoot else {
-                throw HolyWorktreeManagerError.occupiedManagedPath(worktreeURL.path)
-            }
-
-            if !existingSnapshot.isDetachedHead,
-               !existingSnapshot.branch.isEmpty,
-               existingSnapshot.branch != branchName {
+                if !existingSnapshot.isDetachedHead,
+                   !existingSnapshot.branch.isEmpty,
+                   existingSnapshot.branch != branchName {
+                    throw HolyWorktreeManagerError.occupiedManagedPath(worktreeURL.path)
+                }
+            } else if Self.cleanupInvalidManagedWorktreeIfPossible(at: worktreeURL.path) == nil {
                 throw HolyWorktreeManagerError.occupiedManagedPath(worktreeURL.path)
             }
         } else {
@@ -142,15 +357,25 @@ actor HolyWorktreeManager {
             )
 
             if branchExists(branchName, in: repositoryRoot) {
-                try runGit(
-                    arguments: ["-C", repositoryRoot, "worktree", "add", worktreeURL.path, branchName],
-                    context: "attach existing branch \(branchName)"
-                )
+                do {
+                    try runGit(
+                        arguments: ["-C", repositoryRoot, "worktree", "add", worktreeURL.path, branchName],
+                        context: "attach existing branch \(branchName)"
+                    )
+                } catch {
+                    _ = Self.cleanupInvalidManagedWorktreeIfPossible(at: worktreeURL.path)
+                    throw error
+                }
             } else {
-                try runGit(
-                    arguments: ["-C", repositoryRoot, "worktree", "add", "-b", branchName, worktreeURL.path],
-                    context: "create managed branch \(branchName)"
-                )
+                do {
+                    try runGit(
+                        arguments: ["-C", repositoryRoot, "worktree", "add", "-b", branchName, worktreeURL.path],
+                        context: "create managed branch \(branchName)"
+                    )
+                } catch {
+                    _ = Self.cleanupInvalidManagedWorktreeIfPossible(at: worktreeURL.path)
+                    throw error
+                }
             }
         }
 
@@ -194,6 +419,76 @@ actor HolyWorktreeManager {
     }
 
     private func runGitCommand(arguments: [String]) -> HolyWorktreeGitCommandResult {
+        Self.runGitCommand(arguments: arguments, logger: logger)
+    }
+
+    private nonisolated static func cleanupInvalidManagedWorktreeIfPossible(at path: String) -> String? {
+        let standardizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard pathIsInsideManagedContainer(standardizedPath) else { return nil }
+
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: standardizedPath) else {
+            return nil
+        }
+
+        do {
+            try fileManager.removeItem(atPath: standardizedPath)
+            pruneEmptyManagedParents(for: URL(fileURLWithPath: standardizedPath))
+            return "Removed invalid managed worktree directory `\(standardizedPath)`."
+        } catch {
+            return nil
+        }
+    }
+
+    private nonisolated static func recoverySnapshot(for path: String) -> HolyWorktreeRecoverySnapshot? {
+        let worktreeResult = runGitCommand(arguments: ["-C", path, "rev-parse", "--show-toplevel"], logger: nil)
+        guard worktreeResult.exitCode == 0,
+              let worktreePath = worktreeResult.stdout.holyTrimmed.nilIfEmpty else {
+            return nil
+        }
+
+        let commonDirResult = runGitCommand(
+            arguments: ["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            logger: nil
+        )
+        guard commonDirResult.exitCode == 0,
+              let commonGitDirectory = commonDirResult.stdout.holyTrimmed.nilIfEmpty else {
+            return nil
+        }
+
+        let branchResult = runGitCommand(arguments: ["-C", path, "branch", "--show-current"], logger: nil)
+        let branch = branchResult.stdout.holyTrimmed
+        let isDetachedHead = branch.isEmpty
+
+        return .init(
+            repositoryRoot: repositoryRoot(from: commonGitDirectory, fallback: worktreePath),
+            worktreePath: URL(fileURLWithPath: worktreePath).standardizedFileURL.path,
+            branch: branch,
+            isDetachedHead: isDetachedHead
+        )
+    }
+
+    private nonisolated static func gitWorktreeIsClean(_ path: String) -> Bool {
+        let result = runGitCommand(
+            arguments: ["-C", path, "status", "--porcelain=v1", "--untracked-files=all"],
+            logger: nil
+        )
+        guard result.exitCode == 0 else { return false }
+        return result.stdout.holyTrimmed.isEmpty
+    }
+
+    private nonisolated static func removeGitWorktree(snapshot: HolyWorktreeRecoverySnapshot) -> Bool {
+        let result = runGitCommand(
+            arguments: ["-C", snapshot.repositoryRoot, "worktree", "remove", "--force", snapshot.worktreePath],
+            logger: nil
+        )
+        return result.exitCode == 0
+    }
+
+    private nonisolated static func runGitCommand(
+        arguments: [String],
+        logger: Logger?
+    ) -> HolyWorktreeGitCommandResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         process.arguments = arguments
@@ -207,15 +502,47 @@ actor HolyWorktreeManager {
             try process.run()
             process.waitUntilExit()
         } catch {
-            logger.error("Failed to start git command: \(arguments.joined(separator: " "), privacy: .public) - \(error.localizedDescription, privacy: .public)")
+            logger?.error("Failed to start git command: \(arguments.joined(separator: " "), privacy: .public) - \(error.localizedDescription, privacy: .public)")
             return .init(stdout: "", stderr: error.localizedDescription, exitCode: 1)
         }
 
         return .init(
-            stdout: String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
-            stderr: String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
+            stdout: String(bytes: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+            stderr: String(bytes: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
             exitCode: process.terminationStatus
         )
+    }
+
+    private nonisolated static func repositoryRoot(from commonGitDirectory: String, fallback worktreePath: String) -> String {
+        let commonURL = URL(fileURLWithPath: commonGitDirectory)
+
+        if commonURL.lastPathComponent == ".git" {
+            return commonURL.deletingLastPathComponent().path
+        }
+
+        return URL(fileURLWithPath: worktreePath).standardizedFileURL.path
+    }
+
+    private nonisolated static func pathIsInsideManagedContainer(_ path: String) -> Bool {
+        let containerPath = managedWorktreeContainerDirectory().standardizedFileURL.path
+        return path == containerPath || path.hasPrefix(containerPath + "/")
+    }
+
+    private nonisolated static func pruneEmptyManagedParents(for worktreeURL: URL) {
+        let fileManager = FileManager.default
+        let containerPath = managedWorktreeContainerDirectory().standardizedFileURL.path
+        var currentURL = worktreeURL.deletingLastPathComponent()
+
+        while currentURL.standardizedFileURL.path.hasPrefix(containerPath + "/") {
+            let path = currentURL.standardizedFileURL.path
+            guard let contents = try? fileManager.contentsOfDirectory(atPath: path),
+                  contents.isEmpty else {
+                break
+            }
+
+            try? fileManager.removeItem(atPath: path)
+            currentURL = currentURL.deletingLastPathComponent()
+        }
     }
 
     private nonisolated static func managedWorktreeURL(repositoryRoot: String, branchName: String) -> URL {
@@ -271,6 +598,20 @@ private struct HolyWorktreeGitCommandResult {
     let stdout: String
     let stderr: String
     let exitCode: Int32
+}
+
+private struct HolyWorktreeRecoverySnapshot {
+    let repositoryRoot: String
+    let worktreePath: String
+    let branch: String
+    let isDetachedHead: Bool
+}
+
+struct HolyWorktreeRecoveryEvaluation {
+    let issue: String?
+    let cleanupSummary: String?
+
+    static let empty = Self(issue: nil, cleanupSummary: nil)
 }
 
 private extension String {

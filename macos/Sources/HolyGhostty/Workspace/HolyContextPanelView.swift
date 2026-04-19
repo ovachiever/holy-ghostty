@@ -10,6 +10,9 @@ struct HolyContextPanelView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         missionSection(session)
+                        runtimeSection(session)
+                        budgetSection(session)
+                        timelineSection(session)
                         coordinationSection(session)
                         gitSection(session)
                         outputSection(session)
@@ -40,6 +43,10 @@ struct HolyContextPanelView: View {
                 .foregroundStyle(HolyGhosttyTheme.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if let task = session.record.launchSpec.task {
+                contextRow("Task", "\(task.sourceSummary) · \(task.title)")
+            }
+
             if !session.signals.isEmpty, let signal = session.signals.first {
                 HStack(spacing: 4) {
                     Circle()
@@ -56,6 +63,122 @@ struct HolyContextPanelView: View {
     }
 
     // MARK: - Coordination (only when there's something to report)
+
+    @ViewBuilder
+    private func runtimeSection(_ session: HolySession) -> some View {
+        if session.runtimeTelemetry.isMeaningful {
+            let telemetry = session.runtimeTelemetry
+
+            VStack(alignment: .leading, spacing: 6) {
+                sectionLabel("Runtime")
+
+                contextRow("Activity", telemetry.activityKind.displayName)
+
+                if let headline = telemetry.headline, !headline.isEmpty {
+                    contextRow("Headline", headline)
+                }
+
+                if let progressPercent = telemetry.progressPercent {
+                    contextRow("Progress", "\(progressPercent)%")
+                }
+
+                if let command = telemetry.command, !command.isEmpty {
+                    contextRow("Command", command)
+                }
+
+                if let filePath = telemetry.filePath, !filePath.isEmpty {
+                    contextRow("File", filePath)
+                }
+
+                if let nextStepHint = telemetry.nextStepHint, !nextStepHint.isEmpty {
+                    contextRow("Next Step", nextStepHint)
+                }
+
+                if let artifactSummary = telemetry.artifactSummary, !artifactSummary.isEmpty {
+                    contextRow("Artifact", artifactSummary)
+                }
+
+                if let artifactPath = telemetry.artifactPath,
+                   !artifactPath.isEmpty,
+                   artifactPath != telemetry.filePath {
+                    contextRow("Artifact Path", artifactPath)
+                }
+
+                if let stagnantSeconds = telemetry.stagnantSeconds, stagnantSeconds > 0 {
+                    contextRow("Stagnant", "\(stagnantSeconds)s")
+                }
+
+                if let repeatedEvidenceCount = telemetry.repeatedEvidenceCount,
+                   repeatedEvidenceCount > 1 {
+                    contextRow("Repeats", "\(repeatedEvidenceCount)x")
+                }
+
+                if let evidence = telemetry.evidence ?? telemetry.detail, !evidence.isEmpty {
+                    Text(evidence)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                        .lineLimit(3)
+                        .padding(.top, 2)
+                }
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(runtimeTint(for: telemetry.activityKind).opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(runtimeTint(for: telemetry.activityKind).opacity(0.15), lineWidth: 0.5)
+            )
+        }
+    }
+
+    private func budgetSection(_ session: HolySession) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionLabel("Budget")
+
+            contextRow("Status", session.budgetStatus.displayName)
+            contextRow("Usage", session.budgetSummaryText)
+            contextRow("Remaining", session.budgetRemainingText)
+
+            if session.budgetTelemetry.hasUsage {
+                contextRow("Burn Rate", session.budgetBurnRateText)
+
+                if let evidence = session.budgetTelemetry.evidence, !evidence.isEmpty {
+                    Text(evidence)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                        .lineLimit(3)
+                        .padding(.top, 2)
+                }
+            }
+
+            if session.budget.isConfigured {
+                HolyBudgetIntelligenceSection(
+                    sessionID: session.id,
+                    runtime: session.runtime,
+                    budget: session.budget,
+                    refreshID: budgetRefreshID(for: session)
+                )
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(budgetTint(for: session).opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .stroke(budgetTint(for: session).opacity(0.15), lineWidth: 0.5)
+        )
+    }
+
+    private func timelineSection(_ session: HolySession) -> some View {
+        HolySessionTimelineSection(
+            sessionID: session.id,
+            refreshID: timelineRefreshID(for: session)
+        )
+    }
 
     @ViewBuilder
     private func coordinationSection(_ session: HolySession) -> some View {
@@ -182,6 +305,10 @@ struct HolyContextPanelView: View {
             contextRow("Owner", session.ownership.label)
             contextRow("Directory", session.workingDirectory ?? "Unassigned")
 
+            if let task = session.record.launchSpec.task {
+                contextRow("Task Source", task.sourceSummary)
+            }
+
             if let command = session.record.launchSpec.command {
                 contextRow("Command", command)
             }
@@ -228,6 +355,23 @@ struct HolyContextPanelView: View {
         }
     }
 
+    private func runtimeTint(for kind: HolySessionActivityKind) -> Color {
+        switch kind {
+        case .approval:
+            return HolyGhosttyTheme.warning
+        case .stalled, .looping:
+            return HolyGhosttyTheme.warning
+        case .failure:
+            return HolyGhosttyTheme.danger
+        case .completion:
+            return HolyGhosttyTheme.success
+        case .progress, .reading, .editing, .command:
+            return HolyGhosttyTheme.accent
+        case .idle:
+            return HolyGhosttyTheme.textTertiary
+        }
+    }
+
     private func fileColor(_ category: HolyGitFileChangeCategory) -> Color {
         switch category {
         case .added, .copied:                        return HolyGhosttyTheme.success
@@ -236,5 +380,24 @@ struct HolyContextPanelView: View {
         case .conflicted:                            return HolyGhosttyTheme.danger
         case .untracked, .unknown:                   return HolyGhosttyTheme.textTertiary
         }
+    }
+
+    private func budgetTint(for session: HolySession) -> Color {
+        switch session.budgetStatus {
+        case .none: return HolyGhosttyTheme.textTertiary
+        case .healthy: return HolyGhosttyTheme.success
+        case .warning: return HolyGhosttyTheme.warning
+        case .exceeded: return HolyGhosttyTheme.danger
+        }
+    }
+
+    private func timelineRefreshID(for session: HolySession) -> String {
+        let runtimeUpdatedAt = session.runtimeTelemetry.lastUpdatedAt?.timeIntervalSince1970 ?? 0
+        return "\(session.id.uuidString)-\(session.activityAt.timeIntervalSince1970)-\(runtimeUpdatedAt)-\(session.phase.rawValue)"
+    }
+
+    private func budgetRefreshID(for session: HolySession) -> String {
+        let budgetUpdatedAt = session.budgetTelemetry.lastUpdatedAt?.timeIntervalSince1970 ?? 0
+        return "\(session.id.uuidString)-\(session.activityAt.timeIntervalSince1970)-\(budgetUpdatedAt)-\(session.budgetStatus.rawValue)"
     }
 }

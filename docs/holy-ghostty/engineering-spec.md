@@ -1,12 +1,12 @@
 # Holy Ghostty Engineering Spec
 
-Last updated: 2026-04-13
+Last updated: 2026-04-18
 
 This document describes Holy Ghostty as it exists today in the repository. It is an as-is engineering spec, not a forward-looking design document.
 
 ## 1. Purpose
 
-Holy Ghostty is a macOS-native shell built around Ghostty terminal surfaces for running and supervising agentic coding sessions. The Holy layer adds session orchestration, launch policy, worktree management, git-aware coordination, runtime heuristics, archive/history, templates, and native alerts without replacing Ghostty's terminal core.
+Holy Ghostty is a macOS-native shell built around Ghostty terminal surfaces for running and supervising agentic coding sessions. The Holy layer adds session orchestration, launch policy, worktree management, git-aware coordination, runtime heuristics, structured telemetry, budget intelligence, an external task inbox, an append-only event ledger, archive/history, templates, and native alerts without replacing Ghostty's terminal core.
 
 ## 2. Scope And Current Boundary
 
@@ -19,14 +19,6 @@ Current boundary:
 - Add Holy-specific orchestration and presentation in SwiftUI and AppKit
 - Avoid deep Zig core changes unless the host truly needs more structured signals
 
-Not currently implemented:
-
-- dedicated database layer
-- durable event ledger
-- cost tracking system
-- grid mode or diff mode
-- deep issue-system integrations
-
 ## 3. High-Level Architecture
 
 Architecture layers:
@@ -36,7 +28,7 @@ Architecture layers:
 2. Existing macOS host integration
    - The macOS app embeds Ghostty surfaces and manages app lifecycle.
 3. Holy Ghostty shell
-   - Adds the mission-control UI, session model, persistence, git/worktree logic, launch guardrails, heuristics, archive, templates, and alerts.
+   - Adds the mission-control UI, session model, persistence, git/worktree logic, launch guardrails, heuristics, structured telemetry, budget intelligence, task inbox, event ledger, archive, templates, and alerts.
 
 Primary Holy code root:
 
@@ -76,14 +68,15 @@ Responsibilities:
 
 - render the overall Holy shell
 - present the header
-- compose the three-zone layout
-- manage sheet presentation for session creation and history
+- compose the layout for the active display mode
+- manage sheet presentation for session creation, history, and task inbox
 
-Primary layout pattern:
+Display modes (selectable via toolbar or keyboard shortcuts):
 
-- left roster rail
-- center selected session detail and live surface
-- right context inspector
+- Standard: left roster, center session surface, right inspector
+- Focus: full-screen single session with floating status overlay
+- Grid: 2x2 or 2x3 tiled session previews with selection and promotion
+- Diff: side-by-side comparison of two sessions with branch, file overlap, and phase analysis
 
 ### Design system
 
@@ -110,42 +103,31 @@ This file defines most Holy-specific data structures and enums.
 
 Important enums:
 
-- `HolySessionRuntime`
-  - `shell`
-  - `claude`
-  - `codex`
-  - `opencode`
-- `HolySessionPhase`
-  - `active`
-  - `working`
-  - `waitingInput`
-  - `completed`
-  - `failed`
-- `HolySessionAttention`
-  - `none`
-  - `watch`
-  - `needsInput`
-  - `failure`
-  - `conflict`
-  - `done`
-- `HolyWorkspaceStrategy`
-  - `directDirectory`
-  - `attachExistingWorktree`
-  - `createManagedWorktree`
+- `HolySessionRuntime`: shell, claude, codex, opencode
+- `HolySessionPhase`: active, working, waitingInput, completed, failed
+- `HolySessionAttention`: none, watch, needsInput, failure, conflict, done
+- `HolyWorkspaceStrategy`: directDirectory, attachExistingWorktree, createManagedWorktree
+- `HolySessionBudgetStatus`: none, healthy, warning, exceeded
+- `HolySessionBudgetEnforcementPolicy`: warn, requireApproval
+- `HolySessionActivityKind`: idle, approval, progress, reading, editing, command, stalled, looping, failure, completion
 
 Important structs:
 
-- `HolySessionLaunchSpec`
+- `HolySessionLaunchSpec` (now includes optional task reference and budget)
 - `HolySessionRecord`
-- `HolySessionDraft`
+- `HolySessionDraft` (now includes linked task, budget fields, and budget validation)
 - `HolySessionTemplate`
-- `HolyArchivedSession`
+- `HolyArchivedSession` (now includes budget telemetry, runtime telemetry, recovery reason, and cleanup summary)
 - `HolyWorkspaceSnapshot`
 - `HolySessionOwnership`
 - `HolySessionCoordination`
 - `HolySessionSignal`
 - `HolySessionCommandTelemetry`
 - `HolyLaunchGuardrail`
+- `HolySessionBudget`
+- `HolySessionBudgetTelemetry`
+- `HolySessionRuntimeTelemetry`
+- `HolyExternalTaskReference`
 
 ## 5. Session Model
 
@@ -162,14 +144,21 @@ Each `HolySession` owns:
 - preview text
 - signals
 - command telemetry
+- budget telemetry (parsed from terminal output)
+- runtime telemetry (inferred activity kind, commands, files, artifacts, stall/loop detection)
 - git snapshot
 - activity timestamp
+- preview stability tracking (signature, first-observed time, repeat count)
 
 Derived state is refreshed from:
 
 - surface state changes
 - command-finished notifications
 - a repeating timer at roughly 1.25 seconds
+- budget parser (extracts token/cost figures from preview text)
+- runtime telemetry parser (infers activity kind, detects stalls and loops)
+
+Budget enforcement: when a session's enforcement policy is `requireApproval` and the budget is exceeded, a budget signal is inserted into the session's signal list.
 
 ## 6. Runtime Detection And Heuristics
 
@@ -196,88 +185,271 @@ Each adapter provides:
 - failure headline mapping
 - completion markers
 
-The current heuristic model is based on:
+### Structured runtime telemetry
 
-- visible terminal preview text
-- Ghostty surface and process state
-- adapter marker matching
-- generic fallback heuristics
+- `macos/Sources/HolyGhostty/Telemetry/HolySessionRuntimeTelemetryParser.swift`
 
-Important current limitation:
+The telemetry parser infers structured activity from terminal preview text, signals, and phase:
 
-This is not yet a structured embedded telemetry bridge. It is a useful runtime-classification layer, but it is still heuristic.
+- Activity kind classification (idle, approval, progress, reading, editing, command, stalled, looping, failure, completion)
+- Command extraction (xcodebuild, git, npm, cargo, etc.)
+- File path extraction
+- Next-step hint detection ("press enter", "[y/n]", etc.)
+- Artifact detection ("created", "wrote", etc.)
+- Stall detection (same evidence signature persisting beyond a threshold)
+- Loop detection (same evidence signature repeating)
 
-## 7. Workspace Store And Orchestration
+This is not yet a structured embedded telemetry bridge. It is a useful runtime-classification layer that combines adapter markers with inference from terminal output.
+
+## 7. Budget Intelligence
+
+### Budget parser
+
+- `macos/Sources/HolyGhostty/Budget/HolySessionBudgetParser.swift`
+
+Regex-based parser that extracts token counts and cost figures from terminal preview text. Parses input/output/total tokens and dollar costs.
+
+### Budget repository
+
+- `macos/Sources/HolyGhostty/Budget/HolyBudgetIntelligenceRepository.swift`
+
+Records budget samples to the `budget_samples` table and computes analytics:
+
+- Appends samples only when usage has changed or 300 seconds have elapsed
+- Per-runtime rollups (total tokens, total cost across all sessions)
+- Per-session intelligence (sample count, rollup, projected exhaustion date)
+- Exhaustion projection by linear extrapolation of burn rate against limits
+
+## 8. External Task Inbox
+
+### Task models
+
+- `macos/Sources/HolyGhostty/Tasks/HolyTaskModels.swift`
+
+Defines the external task data model:
+
+- `HolyTaskSourceKind`: manual, githubIssue, linearIssue, jiraIssue, genericURL (auto-inferred from canonical URL)
+- `HolyExternalTaskStatus`: inbox, claimed, active, waitingInput, done, failed, archived
+- `HolyExternalTaskReference`: lightweight reference attached to a launch spec
+- `HolyExternalTaskRecord`: full task record with preferred runtime, working directory, linked session, status
+
+### Task repository
+
+- `macos/Sources/HolyGhostty/Tasks/HolyTaskRepository.swift`
+
+CRUD for the `tasks` table. Loads and saves all tasks as a batch within a transaction.
+
+### Task inbox UI
+
+- `macos/Sources/HolyGhostty/Workspace/HolyTaskInboxSheet.swift`
+
+Split-view task management: search, list, detail editor. Supports creating, editing, saving, launching into sessions, opening canonical URLs, and deleting tasks.
+
+## 9. Session Supervisor
+
+- `macos/Sources/HolyGhostty/Supervisor/HolySessionSupervisor.swift`
+
+The supervisor owns lifecycle orchestration that was previously embedded in `HolyWorkspaceStore`. It handles:
+
+- workspace restore (including worktree recovery evaluation and orphan cleanup)
+- session creation (with event provenance tracking)
+- session archive
+- archive deletion
+- template saving
+- persistence (writing to both database and JSON during the transition period)
+- scheduled persistence (debounced)
+- alert coordination
+
+### Alert coordinator
+
+The supervisor contains an internal `HolySessionAlertCoordinator` that delivers macOS notifications based on state transitions:
+
+- collision detected
+- phase becomes failed
+- phase becomes waiting for input
+- branch ownership drift
+- session stalled
+- session looping
+- budget warning or exceeded
+- phase becomes completed
+
+### Worktree recovery
+
+The supervisor evaluates whether worktree-backed sessions can be restored by checking directory existence, git validity, repository match, and branch match. Sessions whose worktrees have disappeared are archived with a recovery reason.
+
+### Orphan cleanup
+
+The supervisor scans the managed worktree container and removes orphaned worktrees (those not referenced by any active or archived session) if they are clean.
+
+## 10. Workspace Store And Orchestration
 
 Main orchestration lives in:
 
 - `macos/Sources/HolyGhostty/Workspace/HolyWorkspaceStore.swift`
 
-The store is currently the central application brain. It combines several concerns that may eventually split into separate subsystems.
-
-Current responsibilities:
+The store delegates lifecycle operations to the `HolySessionSupervisor` and manages:
 
 - active session list
-- session selection
+- session selection (with event emission)
 - templates
 - archives
+- external tasks
 - composer state
 - history state
+- task inbox state
 - draft evaluation
 - launch guardrails
 - ownership preview
-- session creation
+- session creation (delegated to supervisor)
 - duplication
-- archive and relaunch
-- persistence restore and save
+- archive and relaunch (delegated to supervisor)
+- task management (create, upsert, delete, launch)
+- external task reconciliation (updating linked session state)
 - coordination recomputation
-- alert delivery
 
-Important as-is note:
+All launch paths now carry event provenance: origin, source template ID, relaunched-from session ID.
 
-There is no separate supervisor process or database-backed session orchestration layer yet. `HolyWorkspaceStore` is intentionally doing a lot of work today.
+## 11. Database Layer
 
-## 8. Persistence
+### Database engine
 
-Persistence code:
+- `macos/Sources/HolyGhostty/Database/HolyDatabase.swift`
+
+Core SQLite connection wrapper using the system `SQLite3` framework directly. Configures WAL journal mode, foreign keys, and busy timeout. Provides execute, query, transaction, and user-version APIs.
+
+### Schema and migrations
+
+- `macos/Sources/HolyGhostty/Database/HolyDatabaseMigrator.swift`
+- `macos/Sources/HolyGhostty/Database/HolyDatabaseModels.swift`
+
+Sequential schema migration runner with 5 migrations:
+
+1. Full initial schema (sessions, events, git_snapshots, templates, alerts, annotations, indexes, and `agent-sessions` compatibility views)
+2. `latest_budget_json` column on sessions
+3. `latest_runtime_telemetry_json` column on sessions
+4. `budget_samples` table
+5. `tasks` table
+
+Current schema version: 5.
+
+### Database paths
+
+- `macos/Sources/HolyGhostty/Database/HolyDatabasePaths.swift`
+
+Database location:
+
+```text
+~/Library/Application Support/<bundle-id>/HolyGhostty/holy-ghostty.sqlite3
+```
+
+Also defines the legacy JSON snapshot path for migration discovery.
+
+### Compatibility views
+
+The schema includes four read-only SQL views for future `agent-sessions` interoperability:
+
+- `agent_sessions_sessions_v1`
+- `agent_sessions_resume_targets_v1`
+- `agent_sessions_events_v1`
+- `agent_sessions_annotations_v1`
+
+See `docs/holy-ghostty/agent-sessions-interoperability.md` for the contract.
+
+## 12. Event Ledger
+
+### Event model
+
+- `macos/Sources/HolyGhostty/Events/HolySessionEvent.swift`
+
+Append-only session event log with typed events:
+
+- imported, restored, recovered, created, archived, relaunched, selected, runtimeUpdated, artifactDetected
+
+Each event carries a rich payload (runtime, title, mission, working directory, git info, telemetry fields, recovery reason) and tracks its origin (legacyJSON, workspaceRestore, directLaunch, templateLaunch, archiveRelaunch, duplicate, surfaceClone, defaultSeed).
+
+### Event repository
+
+- `macos/Sources/HolyGhostty/Events/HolySessionEventRepository.swift`
+
+Appends events with monotonically increasing per-session sequence numbers. Queries recent events for timeline display.
+
+### Timeline UI
+
+- `macos/Sources/HolyGhostty/Workspace/HolySessionTimelineSection.swift`
+
+SwiftUI view rendering a session's event timeline with colored badges, timestamps, titles, and details. Used in both the live inspector and archived session views.
+
+## 13. Persistence
+
+### Database persistence
+
+- `macos/Sources/HolyGhostty/Persistence/HolyWorkspaceDatabasePersistence.swift`
+
+The primary persistence layer. Saves and loads the full workspace state from SQLite:
+
+- upsert active sessions with live telemetry projections
+- upsert archived sessions with git snapshots
+- save templates
+- manage `app_state` key-value pairs (selected session, ordering)
+- trigger budget sample recording and event appending within each save transaction
+
+### JSON persistence (legacy, dual-write)
 
 - `macos/Sources/HolyGhostty/Persistence/HolyWorkspacePersistence.swift`
 
-Current persistence model:
+JSON snapshot persistence remains for backward compatibility during the transition. The workspace repository writes to both database and JSON on every save.
 
-- JSON snapshot based
-- app-support scoped
-- restores workspace state on launch
-- quarantines corrupt snapshots
+### Workspace repository
 
-Current state path pattern:
+- `macos/Sources/HolyGhostty/Supervisor/HolyWorkspaceRepository.swift`
+
+Facade that loads from database first, triggers migration from JSON if needed, then falls back to JSON. Saves to both destinations during the transition period.
+
+### Migration service
+
+- `macos/Sources/HolyGhostty/Supervisor/HolyMigrationService.swift`
+
+One-shot service that imports the legacy JSON workspace state into the database on first run.
+
+### Shared coders
+
+- `macos/Sources/HolyGhostty/Persistence/HolyPersistenceCoders.swift`
+
+Shared JSON and timestamp encoding/decoding utilities using ISO8601 with fractional seconds.
+
+## 14. Persistence Paths
+
+Database:
+
+```text
+~/Library/Application Support/<bundle-id>/HolyGhostty/holy-ghostty.sqlite3
+```
+
+Legacy JSON snapshot:
 
 ```text
 ~/Library/Application Support/<bundle-id>/HolyGhostty/workspace-state.json
 ```
 
-Corrupt state pattern:
+Corrupt state quarantine:
 
 ```text
 ~/Library/Application Support/<bundle-id>/HolyGhostty/workspace-state.corrupt-<timestamp>.json
 ```
 
-Persisted snapshot currently includes:
+Managed worktrees:
 
-- session records
-- selected session ID
-- templates
-- archived sessions
+```text
+~/Library/Application Support/<bundle-id>/HolyGhostty/ManagedWorktrees/<repo>-<hash>/<branch>
+```
 
-Not currently present:
+## 15. Session Store
 
-- SQLite schema
-- event sourcing
-- durable alert history
-- cost ledgers
-- searchable event timeline
+- `macos/Sources/HolyGhostty/Store/HolySessionStore.swift`
 
-## 9. Templates
+Defines the in-memory state struct (`HolySessionStoreState`) that the workspace store operates on. Holds sessions, templates, archives, and selected IDs. Provides a snapshot property for persistence and pairs mutations with pending events via `HolySessionStoreMutationResult`.
+
+## 16. Templates
 
 Template catalog:
 
@@ -294,7 +466,7 @@ Built-in templates:
 
 Templates capture reusable launch state for repeatable session setup.
 
-## 10. Git Model
+## 17. Git Model
 
 Git snapshot model:
 
@@ -316,15 +488,7 @@ Tracked git context includes:
 - staged/unstaged/untracked/conflicted counts
 - changed files
 
-Derived display helpers include:
-
-- repository name
-- worktree name
-- branch display name
-- sync status text
-- change summary text
-
-## 11. Worktree Management
+## 18. Worktree Management
 
 Worktree management code:
 
@@ -336,20 +500,13 @@ Supported launch ownership patterns:
 - attach existing worktree
 - create managed worktree
 
-Managed worktree location pattern:
+New in v0.2:
 
-```text
-~/Library/Application Support/<bundle-id>/HolyGhostty/ManagedWorktrees/<repo>-<hash>/<branch>
-```
+- `recoveryEvaluation(for:)`: validates whether a worktree-backed session can be restored (checks directory existence, git validity, repository match, branch match)
+- `cleanupOrphanedManagedWorktrees(referencedPaths:)`: removes orphaned managed worktrees not referenced by any session
+- Improved worktree creation with cleanup on failure
 
-Current manager responsibilities:
-
-- validate direct launches
-- validate and attach existing worktrees
-- create managed worktrees
-- produce ownership metadata used by sessions and guardrails
-
-## 12. Launch Guardrails
+## 19. Launch Guardrails
 
 Launch guardrails are evaluated before session creation.
 
@@ -365,7 +522,7 @@ Severity:
 
 Guardrails are derived from the active session set and the current draft.
 
-## 13. Coordination Model
+## 20. Coordination Model
 
 Coordination is recomputed across active sessions.
 
@@ -385,11 +542,9 @@ Attention is derived from phase and coordination. Current rough ordering:
 - completed
 - calm/none
 
-This coordination model is one of the product's key implemented features.
+## 21. Alerts
 
-## 14. Alerts
-
-Alert logic currently lives inside `HolyWorkspaceStore` via an internal coordinator.
+Alert logic lives in `HolySessionSupervisor` via an internal coordinator.
 
 Current alert transport:
 
@@ -403,47 +558,41 @@ Current alert triggers:
 - phase becomes failed
 - phase becomes waiting for input
 - branch ownership drift
+- session stalled (new in v0.2)
+- session looping (new in v0.2)
+- budget warning or exceeded (new in v0.2)
 - phase becomes completed
 
-Important limitation:
-
-The current alert system is runtime and transition based. There is not yet a durable alert ledger.
-
-## 15. Views And User-Facing Surfaces
+## 22. Views And User-Facing Surfaces
 
 ### Session roster
 
 - `macos/Sources/HolyGhostty/Workspace/HolySessionRosterView.swift`
 
-Responsibilities:
-
-- display live active sessions
-- sort by attention and recent activity
-- expose a compact operational summary
+Displays live active sessions sorted by attention and recent activity.
 
 ### Session detail
 
 - `macos/Sources/HolyGhostty/Workspace/HolySessionDetailView.swift`
 
-Responsibilities:
-
-- display the currently selected session
-- render the live `Ghostty.SurfaceView`
-- show high-level session header and status
+Displays the currently selected session with the live `Ghostty.SurfaceView` and session header/status.
 
 ### Context inspector
 
 - `macos/Sources/HolyGhostty/Workspace/HolyContextPanelView.swift`
 
-Responsibilities:
+Displays:
 
-- mission
+- mission (with task source if linked)
 - runtime and signal
+- runtime telemetry (activity kind, headline, progress, command, file, next step hint, artifact, stagnant/repeat counters)
 - command telemetry
+- budget status, usage, remaining, burn rate, evidence
+- budget intelligence (ledger, projection, runtime spend rollup)
 - ownership state
 - coordination summary
-- git state
-- changed files
+- git state and changed files
+- session event timeline
 - output preview
 - environment
 
@@ -451,26 +600,64 @@ Responsibilities:
 
 - `macos/Sources/HolyGhostty/Workspace/HolyNewSessionSheet.swift`
 
-Responsibilities:
+Collects launch state with:
 
-- collect launch state
-- expose built-in and saved templates
-- expose workspace strategy selection
-- show live ownership preview and guardrails
+- template selection
+- workspace strategy
+- linked task display (when composing from a task)
+- budget configuration (token limit, cost limit, enforcement policy, validation)
+- live ownership preview and guardrails
 
 ### History sheet
 
 - `macos/Sources/HolyGhostty/Workspace/HolySessionHistorySheet.swift`
 
-Responsibilities:
+Archived session search, inspection, relaunch, and deletion. Now includes:
 
-- archived session search
-- archive inspection
-- relaunch
-- edit-and-relaunch
-- archive deletion
+- recovery section (recovery reason, cleanup summary, suggested action)
+- runtime telemetry section
+- budget telemetry section
+- session event timeline
 
-## 16. Integration Into Ghostty Host
+### Task inbox sheet
+
+- `macos/Sources/HolyGhostty/Workspace/HolyTaskInboxSheet.swift`
+
+Split-view task management with search, list, and detail editor. Supports creating, editing, launching into sessions, opening canonical URLs, and deleting tasks.
+
+### Budget intelligence section
+
+- `macos/Sources/HolyGhostty/Workspace/HolyBudgetIntelligenceSection.swift`
+
+Shows budget analytics in the context panel: sample count, exhaustion projection, runtime spend rollup.
+
+### Session timeline section
+
+- `macos/Sources/HolyGhostty/Workspace/HolySessionTimelineSection.swift`
+
+Renders a session's event timeline with colored badges, timestamps, titles, and details.
+
+## 23. Display Modes
+
+The workspace view supports four display modes, selectable via toolbar or keyboard shortcuts:
+
+### Standard mode
+
+The default three-zone layout: left roster, center session surface, right inspector.
+
+### Focus mode (Cmd+Shift+F)
+
+Full-screen single session with a floating status overlay showing session title, phase, and action buttons.
+
+### Grid mode (Cmd+Shift+G)
+
+Tiled session previews (2x2 or 2x3) with selection, phase badges, and promote-to-focus action.
+
+### Diff mode (Cmd+Shift+D)
+
+Side-by-side comparison of two sessions showing terminal surfaces, signals, git summaries, and a comparison summary (branch conflict, file overlap, phase mismatch).
+
+## 24. Integration Into Ghostty Host
 
 Holy Ghostty integrates into the existing Ghostty macOS app.
 
@@ -483,9 +670,7 @@ Important integration behavior:
 - surface lookup checks `HolyWorkspaceWindowController.all` first
 - legacy terminal controllers still exist as fallback
 
-This means Holy Ghostty is currently an alternative shell layered into the macOS host, not a ground-up separate app architecture.
-
-## 17. Build And Install
+## 25. Build And Install
 
 Upstream build:
 
@@ -502,7 +687,7 @@ zig build -Demit-macos-app=false
 macOS app build:
 
 ```bash
-xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug SYMROOT=build build
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug SYMROOT=build
 ```
 
 Install script:
@@ -515,20 +700,25 @@ Installed bundle path:
 /Applications/Holy Ghostty.app
 ```
 
-## 18. Known Current Limitations
+## 26. Module Map
 
-This spec describes a working app, but not the full intended end-state.
-
-Known current limitations:
-
-- JSON snapshot persistence instead of a durable DB/event system
-- heuristic runtime detection instead of deep embedded structured telemetry
-- no budget or token cost subsystem
-- no grid mode, focus mode, or diff mode
-- no external issue/task integration
-- store orchestration remains centralized in one large workspace store
-- alert history is not persisted
-
-## 19. Roadmap Context
-
-The current implementation came out of a larger incubation and planning phase, but this document is intentionally the public as-is spec. Treat the checked-in app behavior and the docs in `docs/holy-ghostty/` as the source of truth for the public repo.
+```text
+macos/Sources/HolyGhostty/
+├── App/                    # Window controller, app shell
+├── Adapters/               # Runtime-specific heuristic adapters
+├── Budget/                 # Budget parsing and intelligence repository
+├── Database/               # SQLite engine, migrator, schema, paths
+├── DesignSystem/           # Shared colors, spacing, styling
+├── Domain/                 # Core data model (enums, structs)
+├── Events/                 # Event model and event repository
+├── Git/                    # Git snapshot model and client
+├── Persistence/            # JSON persistence, DB persistence, coders
+├── Session/                # Live session model
+├── Store/                  # In-memory state struct
+├── Supervisor/             # Lifecycle orchestration, migration, workspace repository
+├── Tasks/                  # External task models and repository
+├── Templates/              # Built-in and custom template catalog
+├── Telemetry/              # Runtime telemetry parser
+├── Workspace/              # All SwiftUI views (roster, detail, inspector, composer, history, task inbox, timeline, budget, display modes)
+└── Worktree/               # Worktree creation, validation, recovery, cleanup
+```

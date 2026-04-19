@@ -282,6 +282,133 @@ struct HolySessionCommandTelemetry: Codable, Equatable {
     }
 }
 
+enum HolySessionBudgetStatus: String, Codable {
+    case none
+    case healthy
+    case warning
+    case exceeded
+
+    var displayName: String {
+        switch self {
+        case .none: "No Budget"
+        case .healthy: "Within Budget"
+        case .warning: "Budget Watch"
+        case .exceeded: "Budget Exceeded"
+        }
+    }
+}
+
+enum HolySessionBudgetEnforcementPolicy: String, Codable, CaseIterable {
+    case warn
+    case requireApproval
+
+    var displayName: String {
+        switch self {
+        case .warn:
+            return "Warn"
+        case .requireApproval:
+            return "Require Approval"
+        }
+    }
+}
+
+struct HolySessionBudget: Codable, Equatable {
+    var tokenLimit: Int?
+    var costLimitUSD: Double?
+    var warningThreshold: Double = 0.8
+    var enforcementPolicy: HolySessionBudgetEnforcementPolicy = .warn
+
+    static let none = Self()
+
+    var isConfigured: Bool {
+        tokenLimit != nil || costLimitUSD != nil
+    }
+}
+
+struct HolySessionBudgetTelemetry: Codable, Equatable {
+    var inputTokens: Int?
+    var outputTokens: Int?
+    var totalTokens: Int?
+    var estimatedCostUSD: Double?
+    var lastUpdatedAt: Date?
+    var evidence: String?
+
+    static let empty = Self()
+
+    var resolvedTotalTokens: Int? {
+        if let totalTokens {
+            return totalTokens
+        }
+
+        guard inputTokens != nil || outputTokens != nil else { return nil }
+        return (inputTokens ?? 0) + (outputTokens ?? 0)
+    }
+
+    var hasUsage: Bool {
+        resolvedTotalTokens != nil || estimatedCostUSD != nil
+    }
+}
+
+enum HolySessionActivityKind: String, Codable {
+    case idle
+    case approval
+    case progress
+    case reading
+    case editing
+    case command
+    case stalled
+    case looping
+    case failure
+    case completion
+
+    var displayName: String {
+        switch self {
+        case .idle: "Idle"
+        case .approval: "Needs Approval"
+        case .progress: "Progress"
+        case .reading: "Reading"
+        case .editing: "Editing"
+        case .command: "Command"
+        case .stalled: "Stalled"
+        case .looping: "Looping"
+        case .failure: "Failure"
+        case .completion: "Complete"
+        }
+    }
+}
+
+struct HolySessionRuntimeTelemetry: Codable, Equatable {
+    var activityKind: HolySessionActivityKind = .idle
+    var headline: String?
+    var detail: String?
+    var command: String?
+    var filePath: String?
+    var nextStepHint: String?
+    var artifactSummary: String?
+    var artifactPath: String?
+    var progressPercent: Int?
+    var stagnantSeconds: Int?
+    var repeatedEvidenceCount: Int?
+    var lastUpdatedAt: Date?
+    var evidence: String?
+
+    static let empty = Self()
+
+    var isMeaningful: Bool {
+        activityKind != .idle
+            || headline != nil
+            || detail != nil
+            || command != nil
+            || filePath != nil
+            || nextStepHint != nil
+            || artifactSummary != nil
+            || artifactPath != nil
+            || progressPercent != nil
+            || stagnantSeconds != nil
+            || repeatedEvidenceCount != nil
+    }
+}
+
 struct HolyArchivedSession: Codable, Identifiable, Equatable {
     let id: UUID
     let sourceSessionID: UUID
@@ -290,10 +417,14 @@ struct HolyArchivedSession: Codable, Identifiable, Equatable {
     var preview: String
     var signals: [HolySessionSignal]
     var commandTelemetry: HolySessionCommandTelemetry
+    var budgetTelemetry: HolySessionBudgetTelemetry
+    var runtimeTelemetry: HolySessionRuntimeTelemetry
     var gitSnapshot: HolyGitSnapshot?
     var lastKnownWorkingDirectory: String?
     var lastActivityAt: Date
     var archivedAt: Date
+    var recoveryReason: String?
+    var recoveryCleanupSummary: String?
 
     init(
         id: UUID = UUID(),
@@ -303,10 +434,14 @@ struct HolyArchivedSession: Codable, Identifiable, Equatable {
         preview: String,
         signals: [HolySessionSignal],
         commandTelemetry: HolySessionCommandTelemetry,
+        budgetTelemetry: HolySessionBudgetTelemetry,
+        runtimeTelemetry: HolySessionRuntimeTelemetry,
         gitSnapshot: HolyGitSnapshot?,
         lastKnownWorkingDirectory: String?,
         lastActivityAt: Date,
-        archivedAt: Date = .init()
+        archivedAt: Date = .init(),
+        recoveryReason: String? = nil,
+        recoveryCleanupSummary: String? = nil
     ) {
         self.id = id
         self.sourceSessionID = sourceSessionID
@@ -315,10 +450,70 @@ struct HolyArchivedSession: Codable, Identifiable, Equatable {
         self.preview = preview
         self.signals = signals
         self.commandTelemetry = commandTelemetry
+        self.budgetTelemetry = budgetTelemetry
+        self.runtimeTelemetry = runtimeTelemetry
         self.gitSnapshot = gitSnapshot
         self.lastKnownWorkingDirectory = lastKnownWorkingDirectory
         self.lastActivityAt = lastActivityAt
         self.archivedAt = archivedAt
+        self.recoveryReason = recoveryReason
+        self.recoveryCleanupSummary = recoveryCleanupSummary
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case sourceSessionID
+        case record
+        case phase
+        case preview
+        case signals
+        case commandTelemetry
+        case budgetTelemetry
+        case runtimeTelemetry
+        case gitSnapshot
+        case lastKnownWorkingDirectory
+        case lastActivityAt
+        case archivedAt
+        case recoveryReason
+        case recoveryCleanupSummary
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        sourceSessionID = try container.decode(UUID.self, forKey: .sourceSessionID)
+        record = try container.decode(HolySessionRecord.self, forKey: .record)
+        phase = try container.decode(HolySessionPhase.self, forKey: .phase)
+        preview = try container.decodeIfPresent(String.self, forKey: .preview) ?? ""
+        signals = try container.decodeIfPresent([HolySessionSignal].self, forKey: .signals) ?? []
+        commandTelemetry = try container.decodeIfPresent(HolySessionCommandTelemetry.self, forKey: .commandTelemetry) ?? .empty
+        budgetTelemetry = try container.decodeIfPresent(HolySessionBudgetTelemetry.self, forKey: .budgetTelemetry) ?? .empty
+        runtimeTelemetry = try container.decodeIfPresent(HolySessionRuntimeTelemetry.self, forKey: .runtimeTelemetry) ?? .empty
+        gitSnapshot = try container.decodeIfPresent(HolyGitSnapshot.self, forKey: .gitSnapshot)
+        lastKnownWorkingDirectory = try container.decodeIfPresent(String.self, forKey: .lastKnownWorkingDirectory)
+        lastActivityAt = try container.decodeIfPresent(Date.self, forKey: .lastActivityAt) ?? record.updatedAt
+        archivedAt = try container.decodeIfPresent(Date.self, forKey: .archivedAt) ?? .init()
+        recoveryReason = try container.decodeIfPresent(String.self, forKey: .recoveryReason)
+        recoveryCleanupSummary = try container.decodeIfPresent(String.self, forKey: .recoveryCleanupSummary)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(sourceSessionID, forKey: .sourceSessionID)
+        try container.encode(record, forKey: .record)
+        try container.encode(phase, forKey: .phase)
+        try container.encode(preview, forKey: .preview)
+        try container.encode(signals, forKey: .signals)
+        try container.encode(commandTelemetry, forKey: .commandTelemetry)
+        try container.encode(budgetTelemetry, forKey: .budgetTelemetry)
+        try container.encode(runtimeTelemetry, forKey: .runtimeTelemetry)
+        try container.encode(gitSnapshot, forKey: .gitSnapshot)
+        try container.encode(lastKnownWorkingDirectory, forKey: .lastKnownWorkingDirectory)
+        try container.encode(lastActivityAt, forKey: .lastActivityAt)
+        try container.encode(archivedAt, forKey: .archivedAt)
+        try container.encodeIfPresent(recoveryReason, forKey: .recoveryReason)
+        try container.encodeIfPresent(recoveryCleanupSummary, forKey: .recoveryCleanupSummary)
     }
 
     var runtime: HolySessionRuntime {
@@ -376,6 +571,23 @@ struct HolyArchivedSession: Codable, Identifiable, Equatable {
 
     var changeSummaryText: String {
         gitSnapshot?.changeSummaryText ?? "No git context"
+    }
+
+    var relaunchActionTitle: String {
+        recoveryReason == nil ? "Relaunch" : "Retry Launch"
+    }
+
+    var recoverySuggestedAction: String? {
+        guard recoveryReason != nil else { return nil }
+
+        switch record.launchSpec.workspace?.strategy ?? .directDirectory {
+        case .createManagedWorktree:
+            return "Retry launch after Holy Ghostty repairs or recreates the managed worktree."
+        case .attachExistingWorktree:
+            return "Repair or recreate the external worktree, then retry launch."
+        case .directDirectory:
+            return "Restore the missing directory or update the launch path, then retry launch."
+        }
     }
 
     var primarySignal: HolySessionSignal? {
@@ -630,6 +842,8 @@ struct HolySessionLaunchSpec: Codable, Equatable {
     var runtime: HolySessionRuntime
     var title: String
     var objective: String?
+    var task: HolyExternalTaskReference?
+    var budget: HolySessionBudget?
     var workingDirectory: String?
     var command: String?
     var initialInput: String?
@@ -642,6 +856,8 @@ struct HolySessionLaunchSpec: Codable, Equatable {
             runtime: .shell,
             title: title,
             objective: nil,
+            task: nil,
+            budget: nil,
             workingDirectory: nil,
             command: nil,
             initialInput: nil,
@@ -655,6 +871,8 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         runtime: HolySessionRuntime = .shell,
         title: String,
         objective: String? = nil,
+        task: HolyExternalTaskReference? = nil,
+        budget: HolySessionBudget? = nil,
         workingDirectory: String?,
         command: String?,
         initialInput: String?,
@@ -665,6 +883,8 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         self.runtime = runtime
         self.title = title
         self.objective = objective
+        self.task = task
+        self.budget = budget
         self.workingDirectory = workingDirectory
         self.command = command
         self.initialInput = initialInput
@@ -677,6 +897,8 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         self.runtime = .shell
         self.title = fallbackTitle
         self.objective = nil
+        self.task = nil
+        self.budget = nil
         self.workingDirectory = config.workingDirectory
         self.command = config.command
         self.initialInput = config.initialInput
@@ -706,6 +928,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
 
     var normalizedForTemplate: Self {
         var copy = self
+        copy.task = nil
         copy.workingDirectory = nil
         if var workspace = copy.workspace {
             workspace.repositoryRoot = nil
@@ -812,6 +1035,10 @@ struct HolySessionDraft: Equatable {
     var runtime: HolySessionRuntime = .shell
     var title: String = ""
     var objective: String = ""
+    var linkedTask: HolyExternalTaskReference?
+    var tokenBudget: String = ""
+    var costBudgetUSD: String = ""
+    var budgetEnforcementPolicy: HolySessionBudgetEnforcementPolicy = .warn
     var workspaceStrategy: HolySessionWorkspaceStrategy = .directDirectory
     var workingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     var repositoryRoot: String = FileManager.default.homeDirectoryForCurrentUser.path
@@ -835,6 +1062,10 @@ struct HolySessionDraft: Equatable {
         runtime = launchSpec.runtime
         title = launchSpec.title
         objective = launchSpec.objective ?? ""
+        linkedTask = launchSpec.task
+        tokenBudget = launchSpec.budget?.tokenLimit.map { String($0) } ?? ""
+        costBudgetUSD = launchSpec.budget?.costLimitUSD.map { Self.costString(from: $0) } ?? ""
+        budgetEnforcementPolicy = launchSpec.budget?.enforcementPolicy ?? .warn
         workingDirectory = launchSpec.workingDirectory ?? fallbackWorkingDirectory
         command = launchSpec.command ?? ""
         initialInput = launchSpec.initialInput ?? ""
@@ -857,6 +1088,8 @@ struct HolySessionDraft: Equatable {
             runtime: runtime,
             title: title.isEmpty ? runtime.displayName : title,
             objective: objective.nilIfBlank,
+            task: linkedTask,
+            budget: budget,
             workingDirectory: workingDirectory.nilIfBlank,
             command: command.nilIfBlank,
             initialInput: initialInput.nilIfBlank,
@@ -879,6 +1112,57 @@ struct HolySessionDraft: Equatable {
                 branchName: branchName.nilIfBlank
             )
         }
+    }
+
+    var budget: HolySessionBudget? {
+        let tokenLimit = Self.parseInteger(tokenBudget)
+        let costLimitUSD = Self.parseCurrency(costBudgetUSD)
+        let budget = HolySessionBudget(
+            tokenLimit: tokenLimit,
+            costLimitUSD: costLimitUSD,
+            warningThreshold: 0.8,
+            enforcementPolicy: budgetEnforcementPolicy
+        )
+        return budget.isConfigured ? budget : nil
+    }
+
+    var hasValidBudgetInput: Bool {
+        if !tokenBudget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           Self.parseInteger(tokenBudget) == nil {
+            return false
+        }
+
+        if !costBudgetUSD.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           Self.parseCurrency(costBudgetUSD) == nil {
+            return false
+        }
+
+        return true
+    }
+
+    private static func parseInteger(_ value: String) -> Int? {
+        let cleaned = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ",", with: "")
+        guard !cleaned.isEmpty else { return nil }
+        return Int(cleaned)
+    }
+
+    private static func parseCurrency(_ value: String) -> Double? {
+        let cleaned = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ",", with: "")
+            .replacingOccurrences(of: "$", with: "")
+        guard !cleaned.isEmpty else { return nil }
+        return Double(cleaned)
+    }
+
+    private static func costString(from value: Double) -> String {
+        if value.rounded() == value {
+            return String(format: "%.0f", value)
+        }
+
+        return String(format: "%.2f", value)
     }
 }
 
