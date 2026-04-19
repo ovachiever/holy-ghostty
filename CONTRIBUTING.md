@@ -12,7 +12,11 @@ Holy Ghostty is a product fork of [Ghostty](https://github.com/ghostty-org/ghost
 ## Getting Started
 
 ```bash
-# Build the macOS app
+# Prerequisites: macOS 15+, Xcode 26+ with Metal Toolchain, Zig 0.15.2 (not 0.16)
+xcodebuild -downloadComponent MetalToolchain  # one-time setup
+
+# Build the Zig core, then the macOS app
+zig build -Demit-xcframework
 xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug SYMROOT=build build
 
 # Install locally
@@ -27,6 +31,8 @@ If you only need the Zig core (no macOS app bundle):
 ```bash
 zig build -Demit-macos-app=false
 ```
+
+**Zig version matters.** Zig is pre-1.0. Minor versions (0.15 to 0.16) carry breaking API changes. Use exactly **Zig 0.15.2**. Install from https://ziglang.org/download/.
 
 See [HACKING.md](HACKING.md) for upstream Zig build details and extra dependency requirements.
 

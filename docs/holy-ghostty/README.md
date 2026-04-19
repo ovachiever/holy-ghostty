@@ -49,9 +49,12 @@ There are also two major auxiliary flows:
 
 ## Install And Launch
 
-Build and install the current app bundle:
+Prerequisites: macOS 15+, Xcode 26+ with Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`), Zig **0.15.2** (not 0.16; Zig minor versions are breaking).
+
+Build and install:
 
 ```bash
+zig build -Demit-xcframework
 xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug SYMROOT=build build
 scripts/install-holy-ghostty.sh Debug
 open -a "Holy Ghostty"

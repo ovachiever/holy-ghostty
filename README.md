@@ -52,12 +52,24 @@ Current product shape:
 - task inbox for external work items
 - focus mode, grid mode, and diff mode for multi-session operation
 
+## Prerequisites
+
+- macOS 15+ (Sequoia or later)
+- Xcode 26+ with the Metal Toolchain component (`xcodebuild -downloadComponent MetalToolchain`)
+- Zig **0.15.2** (not 0.16; Zig minor versions are breaking). Install from https://ziglang.org/download/
+
+Zig is pre-1.0. Do not substitute a newer minor version. The build will fail.
+
 ## Quick Start
 
-Build and install the app:
-
 ```bash
+# 1. Build the Zig core (produces GhosttyKit.xcframework)
+zig build -Demit-xcframework
+
+# 2. Build the macOS app
 xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug SYMROOT=build build
+
+# 3. Install and launch
 scripts/install-holy-ghostty.sh Debug
 open -a "Holy Ghostty"
 ```
