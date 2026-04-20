@@ -63,8 +63,14 @@ enum HolyTmuxCommandBuilder {
             createArguments.append(bootstrapCommand)
 
             let hasSessionArguments = tmuxPrefix + ["has-session", "-t", sessionName]
-            lines.append("\(shellCommand(hasSessionArguments)) 2>/dev/null || \(shellCommand(createArguments))")
-            lines.append(contentsOf: metadataCommands)
+            let ensureSessionCommand = "\(shellCommand(hasSessionArguments)) 2>/dev/null || \(shellCommand(createArguments))"
+
+            if metadataCommands.isEmpty {
+                lines.append(ensureSessionCommand)
+            } else {
+                let metadataScript = metadataCommands.joined(separator: "; ")
+                lines.append("if \(ensureSessionCommand); then \(metadataScript); else exit 1; fi")
+            }
         } else {
             lines.append("\(shellCommand(tmuxPrefix + ["has-session", "-t", sessionName])) >/dev/null")
         }
@@ -92,7 +98,7 @@ enum HolyTmuxCommandBuilder {
             shellScript = "exec ${SHELL:-/bin/zsh} -l"
         }
 
-        return shellCommand(["sh", "-lc", shellScript])
+        return "sh -lc \(posixQuote(shellScript))"
     }
 
     private static func tmuxPrefixArguments(for tmux: HolySessionTmuxSpec) -> [String] {
