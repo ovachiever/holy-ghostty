@@ -443,6 +443,39 @@ final class HolyWorkspaceStore: ObservableObject {
         remoteHostsPresented = false
     }
 
+    func launchRemoteTmuxSessions(_ sessions: [HolyDiscoveredTmuxSession], on host: HolyRemoteHostRecord) {
+        guard !sessions.isEmpty else { return }
+
+        for session in sessions {
+            let launchSpec = HolySessionLaunchSpec(
+                runtime: session.runtime ?? .shell,
+                title: session.displayTitle,
+                objective: session.objective,
+                budget: nil,
+                transport: .init(
+                    kind: .ssh,
+                    hostLabel: host.displayTitle,
+                    sshDestination: host.sshDestination
+                ),
+                tmux: .init(
+                    socketName: host.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
+                    sessionName: session.sessionName,
+                    createIfMissing: false
+                ),
+                workingDirectory: session.workingDirectory,
+                command: session.bootstrapCommand,
+                initialInput: nil,
+                waitAfterCommand: false,
+                environment: [:],
+                workspace: nil
+            )
+
+            _ = createSession(with: launchSpec, origin: .directLaunch)
+        }
+
+        remoteHostsPresented = false
+    }
+
     func saveDraftAsTemplate() {
         let result = sessionSupervisor.saveTemplate(from: draft, in: currentSessionStoreState)
         applySessionStoreState(result.state)

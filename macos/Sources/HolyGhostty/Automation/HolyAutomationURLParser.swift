@@ -19,6 +19,10 @@ enum HolyAutomationURLParser {
             host: host
         )
         let tmuxSessionName = trimmed(queryValue(named: "tmuxSession", in: components))
+        let tmuxSocketName = trimmed(queryValue(named: "tmuxSocket", in: components))
+        let createIfMissing = boolValue(
+            from: queryValue(named: "createIfMissing", in: components)
+        )
 
         let resolvedTitle = trimmed(queryValue(named: "title", in: components))
             ?? derivedTitle(runtime: runtime, host: host, tmuxSessionName: tmuxSessionName)
@@ -34,13 +38,10 @@ enum HolyAutomationURLParser {
                 hostLabel: host,
                 sshDestination: host
             ),
-            tmux: .init(
-                socketName: trimmed(queryValue(named: "tmuxSocket", in: components))
-                    ?? HolySessionTmuxSpec.defaultSocketName,
+            tmux: tmuxSpec(
                 sessionName: tmuxSessionName,
-                createIfMissing: boolValue(
-                    from: queryValue(named: "createIfMissing", in: components)
-                ) ?? true
+                socketName: tmuxSocketName,
+                createIfMissing: createIfMissing
             ),
             workingDirectory: trimmed(queryValue(named: "workingDirectory", in: components)),
             command: trimmed(
@@ -96,6 +97,22 @@ enum HolyAutomationURLParser {
         default:
             return nil
         }
+    }
+
+    private static func tmuxSpec(
+        sessionName: String?,
+        socketName: String?,
+        createIfMissing: Bool?
+    ) -> HolySessionTmuxSpec? {
+        guard sessionName != nil || socketName != nil || createIfMissing != nil else {
+            return nil
+        }
+
+        return .init(
+            socketName: socketName ?? HolySessionTmuxSpec.defaultSocketName,
+            sessionName: sessionName,
+            createIfMissing: createIfMissing ?? true
+        )
     }
 
     private static func derivedTitle(

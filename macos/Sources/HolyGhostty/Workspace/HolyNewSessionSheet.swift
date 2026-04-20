@@ -159,17 +159,23 @@ struct HolyNewSessionSheet: View {
 
                 helperText("Remote sessions attach through SSH and currently treat workspace ownership as direct-directory only.")
             } else {
-                helperText("Holy launches local sessions through tmux so they remain attachable after the app closes.")
+                helperText("Local sessions run as plain shells unless you explicitly enable tmux backing.")
             }
 
-            HStack(spacing: 10) {
-                labeledField("Tmux Socket", text: $draft.tmuxSocketName, placeholder: HolySessionTmuxSpec.defaultSocketName)
-                labeledField("Tmux Session", text: $draft.tmuxSessionName, placeholder: "Automatic")
-            }
-
-            Toggle("Create tmux session if missing", isOn: $draft.tmuxCreateIfMissing)
+            Toggle("Back this session with tmux", isOn: $draft.useTmuxBacking)
                 .font(.system(size: 11))
                 .tint(HolyGhosttyTheme.accent)
+
+            if draft.useTmuxBacking {
+                HStack(spacing: 10) {
+                    labeledField("Tmux Socket", text: $draft.tmuxSocketName, placeholder: HolySessionTmuxSpec.defaultSocketName)
+                    labeledField("Tmux Session", text: $draft.tmuxSessionName, placeholder: "Automatic")
+                }
+
+                Toggle("Create tmux session if missing", isOn: $draft.tmuxCreateIfMissing)
+                    .font(.system(size: 11))
+                    .tint(HolyGhosttyTheme.accent)
+            }
         }
     }
 

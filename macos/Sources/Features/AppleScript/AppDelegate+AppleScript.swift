@@ -349,14 +349,13 @@ extension NSApplication {
                 hostLabel: host,
                 sshDestination: host
             ),
-            tmux: .init(
-                socketName: stringArgument(named: "tmuxSocket", arguments: arguments)
-                    ?? HolySessionTmuxSpec.defaultSocketName,
+            tmux: tmuxSpec(
                 sessionName: tmuxSessionName,
+                socketName: stringArgument(named: "tmuxSocket", arguments: arguments),
                 createIfMissing: boolArgument(
                     named: "createIfMissing",
                     arguments: arguments
-                ) ?? true
+                )
             ),
             workingDirectory: stringArgument(named: "workingDirectory", arguments: arguments),
             command: stringArgument(named: "command", arguments: arguments),
@@ -488,11 +487,11 @@ extension NSApplication {
         return nil
     }
 
-    fileprivate func scriptTitle(
-        explicitTitle: String?,
-        runtime: HolySessionRuntime,
-        host: String?,
-        tmuxSessionName: String?
+fileprivate func scriptTitle(
+    explicitTitle: String?,
+    runtime: HolySessionRuntime,
+    host: String?,
+    tmuxSessionName: String?
     ) -> String {
         if let explicitTitle {
             return explicitTitle
@@ -506,10 +505,26 @@ extension NSApplication {
             return tmuxSessionName
         }
 
-        return runtime.displayName
+    return runtime.displayName
+}
+
+fileprivate func tmuxSpec(
+    sessionName: String?,
+    socketName: String?,
+    createIfMissing: Bool?
+) -> HolySessionTmuxSpec? {
+    guard sessionName != nil || socketName != nil || createIfMissing != nil else {
+        return nil
     }
 
-    fileprivate func holyWorkspaceController(for appDelegate: AppDelegate) -> HolyWorkspaceWindowController {
+    return .init(
+        socketName: socketName ?? HolySessionTmuxSpec.defaultSocketName,
+        sessionName: sessionName,
+        createIfMissing: createIfMissing ?? true
+    )
+}
+
+fileprivate func holyWorkspaceController(for appDelegate: AppDelegate) -> HolyWorkspaceWindowController {
         appDelegate.automationWorkspaceController()
     }
 }

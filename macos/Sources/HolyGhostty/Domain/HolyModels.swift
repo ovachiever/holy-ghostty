@@ -861,7 +861,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
             task: nil,
             budget: nil,
             transport: .local,
-            tmux: .holyManagedDefault,
+            tmux: nil,
             workingDirectory: nil,
             command: nil,
             initialInput: nil,
@@ -878,7 +878,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         task: HolyExternalTaskReference? = nil,
         budget: HolySessionBudget? = nil,
         transport: HolySessionTransportSpec = .local,
-        tmux: HolySessionTmuxSpec? = .holyManagedDefault,
+        tmux: HolySessionTmuxSpec? = nil,
         workingDirectory: String?,
         command: String?,
         initialInput: String?,
@@ -908,7 +908,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         self.task = nil
         self.budget = nil
         self.transport = .local
-        self.tmux = .holyManagedDefault
+        self.tmux = nil
         self.workingDirectory = config.workingDirectory
         self.command = config.command
         self.initialInput = config.initialInput
@@ -1048,6 +1048,7 @@ struct HolySessionDraft: Equatable {
     var transportKind: HolySessionTransportKind = .local
     var remoteHostLabel: String = ""
     var remoteHostDestination: String = ""
+    var useTmuxBacking: Bool = false
     var tmuxSocketName: String = HolySessionTmuxSpec.defaultSocketName
     var tmuxSessionName: String = ""
     var tmuxCreateIfMissing: Bool = true
@@ -1081,10 +1082,11 @@ struct HolySessionDraft: Equatable {
         transportKind = launchSpec.transport.kind
         remoteHostLabel = launchSpec.transport.hostLabel ?? ""
         remoteHostDestination = launchSpec.transport.sshDestination ?? ""
-        let tmuxSpec = (launchSpec.tmux ?? .holyManagedDefault).normalized
-        tmuxSocketName = tmuxSpec.socketName ?? ""
-        tmuxSessionName = tmuxSpec.sessionName ?? ""
-        tmuxCreateIfMissing = tmuxSpec.createIfMissing
+        let tmuxSpec = launchSpec.tmux?.normalized
+        useTmuxBacking = tmuxSpec != nil
+        tmuxSocketName = tmuxSpec?.socketName ?? HolySessionTmuxSpec.defaultSocketName
+        tmuxSessionName = tmuxSpec?.sessionName ?? ""
+        tmuxCreateIfMissing = tmuxSpec?.createIfMissing ?? true
         workingDirectory = launchSpec.workingDirectory ?? fallbackWorkingDirectory
         command = launchSpec.command ?? ""
         initialInput = launchSpec.initialInput ?? ""
@@ -1114,11 +1116,11 @@ struct HolySessionDraft: Equatable {
                 hostLabel: remoteHostLabel.nilIfBlank,
                 sshDestination: remoteHostDestination.nilIfBlank
             ),
-            tmux: .init(
+            tmux: useTmuxBacking ? .init(
                 socketName: tmuxSocketName.nilIfBlank,
                 sessionName: tmuxSessionName.nilIfBlank,
                 createIfMissing: tmuxCreateIfMissing
-            ),
+            ) : nil,
             workingDirectory: workingDirectory.nilIfBlank,
             command: command.nilIfBlank,
             initialInput: initialInput.nilIfBlank,

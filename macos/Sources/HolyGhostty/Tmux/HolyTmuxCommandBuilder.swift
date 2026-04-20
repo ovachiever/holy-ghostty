@@ -5,10 +5,13 @@ enum HolyTmuxCommandBuilder {
     static func realizedLaunchSpec(_ launchSpec: HolySessionLaunchSpec) -> HolySessionLaunchSpec {
         var copy = launchSpec
         copy.transport = copy.transport.normalized
+        if shouldDisableImplicitTmux(for: copy) {
+            copy.tmux = nil
+        }
 
-        var tmux = (copy.tmux ?? .holyManagedDefault).normalized
-        if tmux.sessionName == nil {
-            tmux.sessionName = suggestedSessionName(for: copy)
+        var tmux = copy.tmux?.normalized
+        if tmux?.sessionName == nil, tmux != nil {
+            tmux?.sessionName = suggestedSessionName(for: copy)
         }
         copy.tmux = tmux
         return copy
@@ -16,8 +19,10 @@ enum HolyTmuxCommandBuilder {
 
     static func surfaceConfiguration(for launchSpec: HolySessionLaunchSpec) -> Ghostty.SurfaceConfiguration {
         let realizedLaunchSpec = realizedLaunchSpec(launchSpec)
-        let launchCommand = command(for: realizedLaunchSpec)
         let hasTmuxSubstrate = realizedLaunchSpec.tmux?.normalized.sessionName?.holyTrimmed.nilIfEmpty != nil
+        let launchCommand = hasTmuxSubstrate
+            ? shellInput(for: realizedLaunchSpec)
+            : command(for: realizedLaunchSpec)
 
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = realizedLaunchSpec.transport.isRemote ? nil : realizedLaunchSpec.workingDirectory
@@ -52,6 +57,17 @@ enum HolyTmuxCommandBuilder {
     }
 
     static func command(for launchSpec: HolySessionLaunchSpec) -> String? {
+        launchScript(for: launchSpec, interactiveShellInput: false)
+    }
+
+    static func shellInput(for launchSpec: HolySessionLaunchSpec) -> String? {
+        launchScript(for: launchSpec, interactiveShellInput: true)
+    }
+
+    private static func launchScript(
+        for launchSpec: HolySessionLaunchSpec,
+        interactiveShellInput: Bool
+    ) -> String? {
         guard let tmux = launchSpec.tmux?.normalized,
               let sessionName = tmux.sessionName?.holyTrimmed.nilIfEmpty else {
             return launchSpec.command?.holyTrimmed.nilIfEmpty
@@ -84,17 +100,25 @@ enum HolyTmuxCommandBuilder {
 
         lines.append("exec \(shellCommand(tmuxPrefix + ["attach", "-t", sessionName]))")
         let localScript = lines.joined(separator: "; ")
-        let wrappedLocalCommand = shellCommand(["zsh", "-lc", localScript])
 
         if launchSpec.transport.isRemote {
             guard let destination = launchSpec.transport.sshDestination?.holyTrimmed.nilIfEmpty else {
-                return wrappedLocalCommand
+                return interactiveShellInput ? localScript : shellCommand(["zsh", "-lc", localScript])
             }
 
-            return shellCommand(["ssh", "-t", destination, wrappedLocalCommand])
+            if interactiveShellInput {
+                return shellCommand(["ssh", "-t", destination, localScript])
+            }
+
+            let remoteCommand = shellCommand(["zsh", "-lc", localScript])
+            return shellCommand(["ssh", "-t", destination, remoteCommand])
         }
 
-        return wrappedLocalCommand
+        if interactiveShellInput {
+            return localScript
+        }
+
+        return shellCommand(["zsh", "-lc", localScript])
     }
 
     private static func bootstrapCommand(for launchSpec: HolySessionLaunchSpec) -> String {
@@ -189,6 +213,31 @@ enum HolyTmuxCommandBuilder {
             .joined(separator: "-")
 
         return String(collapsed.prefix(24))
+    }
+
+    private static func shouldDisableImplicitTmux(for launchSpec: HolySessionLaunchSpec) -> Bool {
+        guard let tmux = launchSpec.tmux?.normalized,
+              let sessionName = tmux.sessionName?.holyTrimmed.nilIfEmpty,
+              sessionName.hasPrefix("holy-shell-shell-") else {
+            return false
+        }
+
+        guard launchSpec.runtime == .shell,
+              launchSpec.transport.kind == .local,
+              launchSpec.workspace == nil,
+              launchSpec.task == nil,
+              launchSpec.budget == nil,
+              launchSpec.command?.holyTrimmed.nilIfEmpty == nil,
+              launchSpec.initialInput?.holyTrimmed.nilIfEmpty == nil,
+              launchSpec.objective?.holyTrimmed.nilIfEmpty == nil else {
+            return false
+        }
+
+        guard launchSpec.resolvedTitle == "Shell" else {
+            return false
+        }
+
+        return tmux.socketName?.holyTrimmed.nilIfEmpty == HolySessionTmuxSpec.defaultSocketName
     }
 }
 

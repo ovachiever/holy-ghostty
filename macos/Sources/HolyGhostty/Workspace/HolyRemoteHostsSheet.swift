@@ -155,12 +155,29 @@ struct HolyRemoteHostsSheet: View {
     }
 
     private func actionBar(for host: HolyRemoteHostRecord) -> some View {
-        HStack(spacing: 6) {
+        let discoveredSessions = store.remoteSessions(for: host)
+        let holyManagedSessions = discoveredSessions.filter(\.isHolyManaged)
+
+        return HStack(spacing: 6) {
             Button("Save", action: saveEditor)
                 .buttonStyle(HolyGhosttyActionButtonStyle())
 
             Button("Refresh") { store.refreshRemoteSessions(for: host) }
                 .buttonStyle(HolyGhosttyActionButtonStyle())
+
+            if !discoveredSessions.isEmpty {
+                Button("Attach All") {
+                    store.launchRemoteTmuxSessions(discoveredSessions, on: host)
+                }
+                .buttonStyle(HolyGhosttyActionButtonStyle())
+            }
+
+            if !holyManagedSessions.isEmpty, holyManagedSessions.count != discoveredSessions.count {
+                Button("Attach Holy") {
+                    store.launchRemoteTmuxSessions(holyManagedSessions, on: host)
+                }
+                .buttonStyle(HolyGhosttyActionButtonStyle())
+            }
 
             Button("Delete") { store.deleteRemoteHost(host) }
                 .buttonStyle(HolyGhosttyActionButtonStyle())
@@ -455,7 +472,7 @@ private struct HolyDiscoveredRemoteSessionRow: View {
 
             Spacer(minLength: 8)
 
-            Button("Open", action: onLaunch)
+            Button("Attach", action: onLaunch)
                 .buttonStyle(HolyGhosttyActionButtonStyle())
         }
         .padding(12)
