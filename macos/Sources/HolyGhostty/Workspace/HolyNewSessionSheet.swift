@@ -29,6 +29,7 @@ struct HolyNewSessionSheet: View {
                 VStack(alignment: .leading, spacing: 14) {
                     templateStrip
                     taskSection
+                    executionSection
                     runtimePicker
                     labeledField("Title", text: $draft.title, placeholder: "Untitled Session")
                     labeledField("Mission", text: $draft.objective, placeholder: "What should this session accomplish?")
@@ -68,6 +69,11 @@ struct HolyNewSessionSheet: View {
         .onChange(of: draft.workspaceStrategy) { strategy in
             if strategy == .createManagedWorktree && draft.repositoryRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 draft.repositoryRoot = draft.workingDirectory
+            }
+        }
+        .onChange(of: draft.transportKind) { kind in
+            if kind == .ssh {
+                draft.workspaceStrategy = .directDirectory
             }
         }
         .onChange(of: draft.runtime) { newRuntime in
@@ -134,6 +140,39 @@ struct HolyNewSessionSheet: View {
 
     // MARK: - Runtime
 
+    private var executionSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionLabel("Execution")
+
+            Picker("Transport", selection: $draft.transportKind) {
+                ForEach(HolySessionTransportKind.allCases) { kind in
+                    Text(kind.displayName).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if draft.transportKind == .ssh {
+                HStack(spacing: 10) {
+                    labeledField("Host Label", text: $draft.remoteHostLabel, placeholder: "studio")
+                    labeledField("SSH Destination", text: $draft.remoteHostDestination, placeholder: "studio")
+                }
+
+                helperText("Remote sessions attach through SSH and currently treat workspace ownership as direct-directory only.")
+            } else {
+                helperText("Holy launches local sessions through tmux so they remain attachable after the app closes.")
+            }
+
+            HStack(spacing: 10) {
+                labeledField("Tmux Socket", text: $draft.tmuxSocketName, placeholder: HolySessionTmuxSpec.defaultSocketName)
+                labeledField("Tmux Session", text: $draft.tmuxSessionName, placeholder: "Automatic")
+            }
+
+            Toggle("Create tmux session if missing", isOn: $draft.tmuxCreateIfMissing)
+                .font(.system(size: 11))
+                .tint(HolyGhosttyTheme.accent)
+        }
+    }
+
     @ViewBuilder
     private var taskSection: some View {
         if let linkedTask = draft.linkedTask {
@@ -177,35 +216,47 @@ struct HolyNewSessionSheet: View {
         VStack(alignment: .leading, spacing: 6) {
             sectionLabel("Workspace Strategy")
 
-            Picker("Workspace Strategy", selection: $draft.workspaceStrategy) {
-                ForEach(HolySessionWorkspaceStrategy.allCases) { strategy in
-                    Text(strategy.displayName).tag(strategy)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            Text(draft.workspaceStrategy.subtitle)
-                .font(.system(size: 10))
-                .foregroundStyle(HolyGhosttyTheme.textTertiary)
-
-            if draft.workspaceStrategy == .createManagedWorktree {
-                labeledField("Repository Root", text: $draft.repositoryRoot, placeholder: "/Users/you/project")
-                labeledField("Managed Branch", text: $draft.branchName, placeholder: "holy/feature-name")
-
-                if let predictedPath = HolyWorktreeManager.predictedManagedWorktreePath(
-                    repositoryRoot: draft.repositoryRoot,
-                    branchName: draft.branchName,
-                    runtime: draft.runtime,
-                    title: draft.title
-                ) {
-                    helperText("Worktree: \(predictedPath)")
-                }
-            } else {
+            if draft.transportKind == .ssh {
                 labeledField(
-                    draft.workspaceStrategy == .attachExistingWorktree ? "Existing Worktree" : "Working Directory",
+                    "Remote Directory",
                     text: $draft.workingDirectory,
                     placeholder: "/Users/you/project"
                 )
+
+                Text("Remote tmux launches use the provided path as the tmux working directory when a new session has to be created.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+            } else {
+                Picker("Workspace Strategy", selection: $draft.workspaceStrategy) {
+                    ForEach(HolySessionWorkspaceStrategy.allCases) { strategy in
+                        Text(strategy.displayName).tag(strategy)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text(draft.workspaceStrategy.subtitle)
+                    .font(.system(size: 10))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+
+                if draft.workspaceStrategy == .createManagedWorktree {
+                    labeledField("Repository Root", text: $draft.repositoryRoot, placeholder: "/Users/you/project")
+                    labeledField("Managed Branch", text: $draft.branchName, placeholder: "holy/feature-name")
+
+                    if let predictedPath = HolyWorktreeManager.predictedManagedWorktreePath(
+                        repositoryRoot: draft.repositoryRoot,
+                        branchName: draft.branchName,
+                        runtime: draft.runtime,
+                        title: draft.title
+                    ) {
+                        helperText("Worktree: \(predictedPath)")
+                    }
+                } else {
+                    labeledField(
+                        draft.workspaceStrategy == .attachExistingWorktree ? "Existing Worktree" : "Working Directory",
+                        text: $draft.workingDirectory,
+                        placeholder: "/Users/you/project"
+                    )
+                }
             }
 
             if let ownershipPreview {
@@ -437,11 +488,15 @@ struct HolyNewSessionSheet: View {
         if !hasTitle || isBusy || isCheckingLaunchOwnership || !draft.hasValidBudgetInput { return false }
 
         let hasRequiredWorkspaceFields: Bool
-        switch draft.workspaceStrategy {
-        case .directDirectory, .attachExistingWorktree:
-            hasRequiredWorkspaceFields = !draft.workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .createManagedWorktree:
-            hasRequiredWorkspaceFields = !draft.repositoryRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if draft.transportKind == .ssh {
+            hasRequiredWorkspaceFields = draft.remoteHostDestination.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        } else {
+            switch draft.workspaceStrategy {
+            case .directDirectory, .attachExistingWorktree:
+                hasRequiredWorkspaceFields = !draft.workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .createManagedWorktree:
+                hasRequiredWorkspaceFields = !draft.repositoryRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
         }
         guard hasRequiredWorkspaceFields else { return false }
         return launchGuardrail.allowsLaunch(allowOverride: draft.allowOwnershipCollision)

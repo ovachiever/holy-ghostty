@@ -1,12 +1,12 @@
 # Holy Ghostty Engineering Spec
 
-Last updated: 2026-04-18
+Last updated: 2026-04-19
 
 This document describes Holy Ghostty as it exists today in the repository. It is an as-is engineering spec, not a forward-looking design document.
 
 ## 1. Purpose
 
-Holy Ghostty is a macOS-native shell built around Ghostty terminal surfaces for running and supervising agentic coding sessions. The Holy layer adds session orchestration, launch policy, worktree management, git-aware coordination, runtime heuristics, structured telemetry, budget intelligence, an external task inbox, an append-only event ledger, archive/history, templates, and native alerts without replacing Ghostty's terminal core.
+Holy Ghostty is a macOS-native shell built around Ghostty terminal surfaces for running and supervising agentic coding sessions. The Holy layer adds session orchestration, tmux-backed local and SSH launch policy, worktree management, git-aware coordination, runtime heuristics, structured telemetry, budget intelligence, an external task inbox, an append-only event ledger, archive/history, templates, remote host discovery, and native alerts without replacing Ghostty's terminal core.
 
 ## 2. Scope And Current Boundary
 
@@ -17,6 +17,7 @@ Current boundary:
 - Keep Ghostty terminal core behavior intact
 - Use the macOS host to embed and manage live `Ghostty.SurfaceView` instances
 - Add Holy-specific orchestration and presentation in SwiftUI and AppKit
+- Use tmux as the durable substrate for Holy-managed local and SSH sessions
 - Avoid deep Zig core changes unless the host truly needs more structured signals
 
 ## 3. High-Level Architecture
@@ -28,7 +29,7 @@ Architecture layers:
 2. Existing macOS host integration
    - The macOS app embeds Ghostty surfaces and manages app lifecycle.
 3. Holy Ghostty shell
-   - Adds the mission-control UI, session model, persistence, git/worktree logic, launch guardrails, heuristics, structured telemetry, budget intelligence, task inbox, event ledger, archive, templates, and alerts.
+   - Adds the mission-control UI, session model, persistence, tmux-backed launch substrate, git/worktree logic, launch guardrails, heuristics, structured telemetry, budget intelligence, task inbox, remote host discovery, event ledger, archive, templates, and alerts.
 
 Primary Holy code root:
 
@@ -113,9 +114,9 @@ Important enums:
 
 Important structs:
 
-- `HolySessionLaunchSpec` (now includes optional task reference and budget)
+- `HolySessionLaunchSpec` (now includes transport, tmux spec, optional task reference, and budget)
 - `HolySessionRecord`
-- `HolySessionDraft` (now includes linked task, budget fields, and budget validation)
+- `HolySessionDraft` (now includes linked task, budget fields, budget validation, transport, and tmux fields)
 - `HolySessionTemplate`
 - `HolyArchivedSession` (now includes budget telemetry, runtime telemetry, recovery reason, and cleanup summary)
 - `HolyWorkspaceSnapshot`
@@ -128,6 +129,8 @@ Important structs:
 - `HolySessionBudgetTelemetry`
 - `HolySessionRuntimeTelemetry`
 - `HolyExternalTaskReference`
+- `HolySessionTransportSpec`
+- `HolySessionTmuxSpec`
 
 ## 5. Session Model
 
@@ -143,6 +146,7 @@ Each `HolySession` owns:
 - current phase
 - preview text
 - signals
+- launch transport and tmux context through the session record
 - command telemetry
 - budget telemetry (parsed from terminal output)
 - runtime telemetry (inferred activity kind, commands, files, artifacts, stall/loop detection)
@@ -157,6 +161,7 @@ Derived state is refreshed from:
 - a repeating timer at roughly 1.25 seconds
 - budget parser (extracts token/cost figures from preview text)
 - runtime telemetry parser (infers activity kind, detects stalls and loops)
+- git client using either local process execution or SSH process execution depending on launch transport
 
 Budget enforcement: when a session's enforcement policy is `requireApproval` and the budget is exceeded, a budget signal is inserted into the session's signal list.
 
@@ -245,6 +250,56 @@ CRUD for the `tasks` table. Loads and saves all tasks as a batch within a transa
 
 Split-view task management: search, list, detail editor. Supports creating, editing, saving, launching into sessions, opening canonical URLs, and deleting tasks.
 
+## 8A. Automation And Durable Launch Substrate
+
+### Automation entrypoints
+
+- `macos/Sources/HolyGhostty/Automation/HolyAutomationURLParser.swift`
+- `macos/Sources/Features/AppleScript/AppDelegate+AppleScript.swift`
+- `macos/Ghostty.sdef`
+- `scripts/holy-spawn-session.sh`
+
+Holy Ghostty exposes three first-class automation paths for creating Holy sessions:
+
+- `holy-ghostty://spawn?...`
+- AppleScript `spawn`
+- the `scripts/holy-spawn-session.sh` helper, which wraps the URL scheme
+
+These paths create Holy sessions directly. They do not depend on tabs or simulated key presses.
+
+### Tmux-backed launch substrate
+
+- `macos/Sources/HolyGhostty/Tmux/HolyTmuxModels.swift`
+- `macos/Sources/HolyGhostty/Tmux/HolyTmuxCommandBuilder.swift`
+
+Holy-managed sessions are tmux-backed by default:
+
+- local sessions attach to a local tmux server
+- SSH sessions attach to a remote tmux server
+- tmux session/socket can be configured per launch
+- Holy writes metadata into tmux session options so later discovery can reconstruct operator-facing context
+
+This is the durable-session substrate that lets sessions survive Holy Ghostty shutdown and remain attachable from other clients.
+
+## 8B. Remote Hosts And Discovery
+
+- `macos/Sources/HolyGhostty/Remote/HolyRemoteModels.swift`
+- `macos/Sources/HolyGhostty/Remote/HolyRemoteHostRepository.swift`
+- `macos/Sources/HolyGhostty/Remote/HolyRemoteHostImportService.swift`
+- `macos/Sources/HolyGhostty/Remote/HolyRemoteTmuxDiscoveryService.swift`
+- `macos/Sources/HolyGhostty/Workspace/HolyRemoteHostsSheet.swift`
+
+Current remote-host model:
+
+- persistent host registry in SQLite
+- manual host creation
+- import from `~/.ssh/config`
+- import from Tailscale
+- per-host tmux socket selection
+- remote tmux discovery over SSH
+- Holy metadata readback from discovered tmux sessions
+- remote git enrichment for Holy-managed SSH sessions
+
 ## 9. Session Supervisor
 
 - `macos/Sources/HolyGhostty/Supervisor/HolySessionSupervisor.swift`
@@ -294,6 +349,7 @@ The store delegates lifecycle operations to the `HolySessionSupervisor` and mana
 - templates
 - archives
 - external tasks
+- remote hosts and discovered remote tmux sessions
 - composer state
 - history state
 - task inbox state
@@ -322,15 +378,16 @@ Core SQLite connection wrapper using the system `SQLite3` framework directly. Co
 - `macos/Sources/HolyGhostty/Database/HolyDatabaseMigrator.swift`
 - `macos/Sources/HolyGhostty/Database/HolyDatabaseModels.swift`
 
-Sequential schema migration runner with 5 migrations:
+Sequential schema migration runner with 6 migrations:
 
 1. Full initial schema (sessions, events, git_snapshots, templates, alerts, annotations, indexes, and `agent-sessions` compatibility views)
 2. `latest_budget_json` column on sessions
 3. `latest_runtime_telemetry_json` column on sessions
 4. `budget_samples` table
 5. `tasks` table
+6. `remote_hosts` table
 
-Current schema version: 5.
+Current schema version: 6.
 
 ### Database paths
 
@@ -354,6 +411,12 @@ The schema includes four read-only SQL views for future `agent-sessions` interop
 - `agent_sessions_annotations_v1`
 
 See `docs/holy-ghostty/agent-sessions-interoperability.md` for the contract.
+
+Additional persisted tables now include:
+
+- `budget_samples`
+- `tasks`
+- `remote_hosts`
 
 ## 12. Event Ledger
 
@@ -488,6 +551,11 @@ Tracked git context includes:
 - staged/unstaged/untracked/conflicted counts
 - changed files
 
+`HolyGitClient` now supports both:
+
+- local git inspection
+- SSH-based remote git inspection for SSH-backed Holy sessions
+
 ## 18. Worktree Management
 
 Worktree management code:
@@ -618,6 +686,18 @@ Archived session search, inspection, relaunch, and deletion. Now includes:
 - runtime telemetry section
 - budget telemetry section
 - session event timeline
+
+### Remote hosts sheet
+
+- `macos/Sources/HolyGhostty/Workspace/HolyRemoteHostsSheet.swift`
+
+Provides:
+
+- host registry management
+- SSH-config and Tailscale import
+- per-host discovery status
+- discovered remote tmux session list
+- direct attach into Holy sessions
 
 ### Task inbox sheet
 

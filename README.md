@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Native macOS shell · Real Ghostty surfaces · Session ownership · Worktree guardrails · Budget intelligence · Task inbox · Focus/Grid/Diff modes · Durable SQLite persistence
+  Native macOS shell · Real Ghostty surfaces · Tmux-backed durable sessions · Remote host discovery · Budget intelligence · Task inbox · Focus/Grid/Diff modes · Durable SQLite persistence
 </p>
 
 <p align="center">
@@ -32,12 +32,16 @@ Holy Ghostty is not a new terminal emulator core. It is a Ghostty-based operator
 
 - live Shell, Claude, Codex, and OpenCode sessions
 - session launch templates with budget configuration
+- tmux-backed local and SSH session launches
 - managed or attached git worktrees
 - pre-launch ownership guardrails
 - git-aware coordination and overlap detection
 - structured runtime telemetry (activity kind, stall/loop detection, command/file extraction)
 - budget intelligence (token/cost tracking, burn rate, exhaustion projection, enforcement)
 - external task inbox (GitHub, Linear, Jira, manual)
+- automation entrypoints via URL scheme, shell helper, and AppleScript
+- remote host registry with SSH config and Tailscale import
+- remote tmux discovery and attach
 - archive, history, and relaunch workflows with recovery context
 - native notifications for needs-input, failure, collision, drift, stalls, loops, budget warnings, and completion
 - durable SQLite persistence with schema migrations and an append-only event ledger
@@ -50,6 +54,7 @@ Current product shape:
 - new-session composer with task linking and budget controls
 - searchable session history with recovery context and telemetry
 - task inbox for external work items
+- remote hosts sheet for tmux discovery and attach
 - focus mode, grid mode, and diff mode for multi-session operation
 
 ## Prerequisites
@@ -104,12 +109,16 @@ Primary Holy Ghostty docs live under [`docs/holy-ghostty`](./docs/holy-ghostty).
 - Session-oriented workflow instead of tab-oriented workflow
 - Durable SQLite persistence with schema migrations and event ledger
 - Separated session supervisor architecture
+- Tmux-backed session substrate for local and SSH launches
 - Worktree-aware launch strategies with recovery validation and orphan cleanup
 - Blocking shared-worktree guardrails
 - Warning-level shared-branch guardrails with explicit override
 - Structured runtime telemetry (activity kind, stall/loop detection, command/file extraction)
 - Budget intelligence with token/cost tracking, burn rate, projection, and enforcement
 - External task inbox (GitHub, Linear, Jira, manual) with task-to-session launching
+- Automation entrypoints via `holy-ghostty://spawn`, `scripts/holy-spawn-session.sh`, and AppleScript `spawn`
+- Remote host registry with manual, SSH-config, and Tailscale import
+- Remote tmux discovery with Holy metadata readback and remote git enrichment over SSH
 - Focus, grid, and diff display modes
 - Archive and relaunch history with recovery context and event timeline
 - Native notifications for failures, needs-input, collisions, drift, stalls, loops, budget warnings, and completion
@@ -120,6 +129,7 @@ Primary Holy Ghostty docs live under [`docs/holy-ghostty`](./docs/holy-ghostty).
 Holy Ghostty is usable and substantially complete, but some areas remain for future work:
 
 - deeper structured runtime telemetry via an embedded VT/PTY bridge (current system is inference-based)
+- richer remote orchestration beyond manual host registry and tmux discovery
 - dependency chains and automated session orchestration
 - broadcast input across sessions
 - status updates pushed back to external task sources

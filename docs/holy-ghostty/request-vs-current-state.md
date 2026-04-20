@@ -1,6 +1,6 @@
 # Holy Ghostty: Requested Vision Vs Current State
 
-Last updated: 2026-04-18
+Last updated: 2026-04-19
 
 This document compares the original product request to the current app as it exists in the repository today.
 
@@ -26,7 +26,7 @@ The early product thesis also leaned on:
 
 ## 2. What Holy Ghostty Is Now
 
-Holy Ghostty is a working native macOS app that embeds real Ghostty terminal surfaces inside an agent-focused shell, backed by a durable SQLite database with an append-only event ledger, a separated supervisor architecture, budget intelligence, structured runtime telemetry, multiple display modes, and an external task inbox.
+Holy Ghostty is a working native macOS app that embeds real Ghostty terminal surfaces inside an agent-focused shell, backed by a durable SQLite database with an append-only event ledger, a separated supervisor architecture, tmux-backed local and SSH session launches, remote host discovery, budget intelligence, structured runtime telemetry, multiple display modes, and an external task inbox.
 
 Current product identity:
 
@@ -36,6 +36,11 @@ Current product identity:
 - a native session composer with budget configuration and task linking
 - a searchable archive and relaunch flow with recovery context
 - worktree-aware and branch-aware launch policy
+- tmux-backed launch substrate so sessions stay attachable after Holy Ghostty closes
+- automation entrypoints through URL scheme, shell helper, and AppleScript
+- remote host registry with manual, SSH-config, and Tailscale import
+- remote tmux discovery and attach, including Holy metadata readback
+- remote git enrichment for SSH-backed Holy sessions
 - git-aware session coordination
 - runtime-specific heuristics for Shell, Claude, Codex, and OpenCode
 - structured telemetry parsing (activity kind, stall/loop detection, command/file/artifact extraction)
@@ -67,6 +72,8 @@ Current product identity:
 | Focus mode | Full-screen single session with floating status overlay | Implemented | Functional scaffold |
 | Diff mode | Side-by-side session comparison with branch, file, and phase analysis | Implemented | Functional scaffold |
 | External task-system integration | Task inbox with GitHub, Linear, Jira, and manual task support, task-to-session launching | Implemented | Full CRUD and launch flow |
+| Durable tmux-backed sessions | Local and SSH launches are tmux-backed by default, with socket/session controls and metadata | Implemented | Sessions remain attachable after the app closes |
+| Replacing SSH/tmux macro workflows | URL scheme, shell helper, AppleScript spawn, remote host registry, and remote tmux discovery | Implemented | Holy can now act as a first-class tmux control plane instead of a tab macro target |
 | Dependency chains across agents | Not implemented | Missing | No automatic chaining today |
 | Broadcast input across sessions | Not implemented | Missing | No multi-send orchestration yet |
 | Durable production data layer | SQLite database with WAL, schema migrations, event ledger, budget samples, and compatibility views | Implemented | Replaced the v0.1 JSON-only persistence |
@@ -84,6 +91,8 @@ The supervisor split separated lifecycle orchestration from the workspace store,
 
 The event ledger now captures session lifecycle transitions with typed events and rich payloads, displayed in an inline timeline in both the live inspector and archived session views.
 
+Post-`v0.2.0`, the app also gained a tmux-backed execution substrate, URL/AppleScript automation entrypoints, a remote host registry, SSH-config and Tailscale import, remote tmux discovery, and remote git enrichment for SSH-backed Holy sessions.
+
 ## 5. Where The Current App Is Strong
 
 - live session orchestration with durable persistence
@@ -94,6 +103,8 @@ The event ledger now captures session lifecycle transitions with typed events an
 - budget intelligence with enforcement and projection
 - multiple display modes for different operational needs
 - external task inbox bridging work items to sessions
+- tmux-backed durable sessions that survive app shutdown
+- remote host discovery and tmux attach without tab macros
 - append-only event ledger for session history
 - real macOS packaging and installation
 - `agent-sessions` compatibility views for future interoperability
@@ -103,6 +114,7 @@ The event ledger now captures session lifecycle transitions with typed events an
 Remaining unfinished roads:
 
 - deeper structured runtime telemetry via an embedded VT/PTY bridge (current system is inference-based)
+- broader remote orchestration and remote policy beyond host registry plus tmux discovery
 - dependency chains and automated session orchestration
 - broadcast input across sessions
 - status updates pushed back to external task sources

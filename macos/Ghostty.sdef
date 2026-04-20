@@ -22,6 +22,9 @@
       <responds-to command="new tab">
         <cocoa method="handleNewTabScriptCommand:"/>
       </responds-to>
+      <responds-to command="spawn">
+        <cocoa method="handleLaunchHolySessionScriptCommand:"/>
+      </responds-to>
       <responds-to command="new surface configuration">
         <cocoa method="handleNewSurfaceConfigurationScriptCommand:"/>
       </responds-to>
@@ -179,6 +182,43 @@
         <cocoa key="configuration"/>
       </parameter>
       <result type="tab" description="The newly created tab."/>
+    </command>
+
+    <command name="spawn" code="HlyHSess" description="Create a first-class Holy Ghostty session in the workspace.">
+      <parameter name="named" code="HLsT" type="text" optional="yes" description="Operator-facing session title.">
+        <cocoa key="title"/>
+      </parameter>
+      <parameter name="runtime" code="HLsR" type="text" optional="yes" description="Runtime type such as shell, claude, codex, or opencode.">
+        <cocoa key="runtime"/>
+      </parameter>
+      <parameter name="objective" code="HLsO" type="text" optional="yes" description="Operator objective or mission text.">
+        <cocoa key="objective"/>
+      </parameter>
+      <parameter name="transport" code="HLsP" type="text" optional="yes" description="Transport type: local or ssh.">
+        <cocoa key="transport"/>
+      </parameter>
+      <parameter name="host" code="HLsH" type="text" optional="yes" description="SSH destination when using remote transport.">
+        <cocoa key="host"/>
+      </parameter>
+      <parameter name="working directory" code="HLsD" type="text" optional="yes" description="Initial working directory used when tmux needs to create the session.">
+        <cocoa key="workingDirectory"/>
+      </parameter>
+      <parameter name="bootstrap command" code="HLsC" type="text" optional="yes" description="Bootstrap command to run inside the tmux session before handing control to a login shell.">
+        <cocoa key="command"/>
+      </parameter>
+      <parameter name="initial input" code="HLsI" type="text" optional="yes" description="Input sent to the terminal after attach.">
+        <cocoa key="initialInput"/>
+      </parameter>
+      <parameter name="tmux session" code="HLsS" type="text" optional="yes" description="Target tmux session name.">
+        <cocoa key="tmuxSession"/>
+      </parameter>
+      <parameter name="tmux socket" code="HLsK" type="text" optional="yes" description="Optional tmux socket name. Defaults to Holy Ghostty's managed socket.">
+        <cocoa key="tmuxSocket"/>
+      </parameter>
+      <parameter name="create if missing" code="HLsM" type="boolean" optional="yes" description="Create the tmux session when it does not exist.">
+        <cocoa key="createIfMissing"/>
+      </parameter>
+      <result type="text" description="The created Holy session identifier."/>
     </command>
 
     <command name="split" code="GhstSplt" description="Split a terminal in the given direction.">

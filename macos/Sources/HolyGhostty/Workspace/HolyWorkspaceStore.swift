@@ -7,6 +7,11 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var savedTemplates: [HolySessionTemplate] = []
     @Published private(set) var archivedSessions: [HolyArchivedSession] = []
     @Published private(set) var externalTasks: [HolyExternalTaskRecord] = []
+    @Published private(set) var remoteHosts: [HolyRemoteHostRecord] = []
+    @Published private(set) var discoveredRemoteSessionsByHostID: [UUID: [HolyDiscoveredTmuxSession]] = [:]
+    @Published private(set) var remoteDiscoveryErrorsByHostID: [UUID: String] = [:]
+    @Published private(set) var remoteDiscoveryBusyHostIDs: Set<UUID> = []
+    @Published private(set) var remoteHostImportMessage: String?
     @Published private(set) var coordinationBySessionID: [UUID: HolySessionCoordination] = [:]
     @Published private(set) var draftLaunchGuardrail: HolyLaunchGuardrail = .clear
     @Published private(set) var draftOwnershipPreview: HolySessionOwnership?
@@ -20,11 +25,13 @@ final class HolyWorkspaceStore: ObservableObject {
     }
     @Published var selectedArchivedSessionID: UUID?
     @Published var selectedTaskID: UUID?
+    @Published var selectedRemoteHostID: UUID?
     @Published var composerPresented: Bool = false
     @Published var composerBusy: Bool = false
     @Published var composerErrorMessage: String?
     @Published var historyPresented: Bool = false
     @Published var tasksPresented: Bool = false
+    @Published var remoteHostsPresented: Bool = false
     @Published var draft: HolySessionDraft = .init()
 
     private let sessionSupervisor: HolySessionSupervisor
@@ -53,6 +60,11 @@ final class HolyWorkspaceStore: ObservableObject {
     var selectedTask: HolyExternalTaskRecord? {
         guard let selectedTaskID else { return externalTasks.first }
         return externalTasks.first(where: { $0.id == selectedTaskID }) ?? externalTasks.first
+    }
+
+    var selectedRemoteHost: HolyRemoteHostRecord? {
+        guard let selectedRemoteHostID else { return remoteHosts.first }
+        return remoteHosts.first(where: { $0.id == selectedRemoteHostID }) ?? remoteHosts.first
     }
 
     var builtInTemplates: [HolySessionTemplate] {
@@ -95,6 +107,7 @@ final class HolyWorkspaceStore: ObservableObject {
         let restoration = sessionSupervisor.restoreWorkspace()
         applySessionStoreState(restoration.state)
         loadTasks()
+        loadRemoteHosts()
         persist(pendingEvents: restoration.pendingEvents)
     }
 
@@ -166,6 +179,7 @@ final class HolyWorkspaceStore: ObservableObject {
     func duplicate(_ session: HolySession) {
         var launchSpec = session.record.launchSpec
         launchSpec.title = "\(session.title) Copy"
+        launchSpec.tmux?.sessionName = nil
 
         if var workspace = launchSpec.workspace,
            workspace.strategy == .createManagedWorktree {
@@ -237,6 +251,17 @@ final class HolyWorkspaceStore: ObservableObject {
         tasksPresented = true
     }
 
+    func presentRemoteHosts() {
+        selectedRemoteHostID = selectedRemoteHost?.id ?? remoteHosts.first?.id
+        remoteHostsPresented = true
+
+        if let host = selectedRemoteHost,
+           remoteSessions(for: host).isEmpty,
+           !isRemoteDiscoveryBusy(for: host) {
+            refreshRemoteSessions(for: host)
+        }
+    }
+
     func createTask() {
         let task = HolyExternalTaskRecord(
             preferredWorkingDirectory: contextualWorkingDirectory,
@@ -245,6 +270,31 @@ final class HolyWorkspaceStore: ObservableObject {
         externalTasks.insert(task, at: 0)
         selectedTaskID = task.id
         persistTasks()
+    }
+
+    func createRemoteHost() {
+        let host = HolyRemoteHostRecord()
+        remoteHosts.insert(host, at: 0)
+        selectedRemoteHostID = host.id
+        persistRemoteHosts()
+    }
+
+    func importRemoteHostsFromSSHConfig() {
+        Task { [weak self] in
+            let importedHosts = await HolyRemoteHostImportService.shared.importSSHConfigHosts()
+            await MainActor.run {
+                self?.mergeImportedRemoteHosts(importedHosts, sourceLabel: "SSH Config")
+            }
+        }
+    }
+
+    func importRemoteHostsFromTailscale() {
+        Task { [weak self] in
+            let importedHosts = await HolyRemoteHostImportService.shared.importTailscaleHosts()
+            await MainActor.run {
+                self?.mergeImportedRemoteHosts(importedHosts, sourceLabel: "Tailscale")
+            }
+        }
     }
 
     func upsertTask(_ task: HolyExternalTaskRecord) {
@@ -290,8 +340,107 @@ final class HolyWorkspaceStore: ObservableObject {
         persistTasks()
     }
 
+    func upsertRemoteHost(_ host: HolyRemoteHostRecord) {
+        let normalizedHost = HolyRemoteHostRecord(
+            id: host.id,
+            label: host.normalized().label,
+            sshDestination: host.normalized().sshDestination,
+            tmuxSocketName: host.normalized().tmuxSocketName,
+            createdAt: host.createdAt,
+            updatedAt: .now,
+            lastDiscoveredAt: host.lastDiscoveredAt
+        )
+
+        if let index = remoteHosts.firstIndex(where: { $0.id == normalizedHost.id }) {
+            remoteHosts[index] = normalizedHost
+        } else {
+            remoteHosts.insert(normalizedHost, at: 0)
+        }
+
+        selectedRemoteHostID = normalizedHost.id
+        persistRemoteHosts()
+    }
+
+    func deleteRemoteHost(_ host: HolyRemoteHostRecord) {
+        remoteHosts.removeAll { $0.id == host.id }
+        discoveredRemoteSessionsByHostID.removeValue(forKey: host.id)
+        remoteDiscoveryErrorsByHostID.removeValue(forKey: host.id)
+        remoteDiscoveryBusyHostIDs.remove(host.id)
+
+        if selectedRemoteHostID == host.id {
+            selectedRemoteHostID = remoteHosts.first?.id
+        }
+
+        persistRemoteHosts()
+    }
+
     func launchTask(_ task: HolyExternalTaskRecord) {
         attemptLaunch(using: makeDraft(from: task), origin: .directLaunch)
+    }
+
+    func remoteSessions(for host: HolyRemoteHostRecord) -> [HolyDiscoveredTmuxSession] {
+        discoveredRemoteSessionsByHostID[host.id] ?? []
+    }
+
+    func remoteDiscoveryError(for host: HolyRemoteHostRecord) -> String? {
+        remoteDiscoveryErrorsByHostID[host.id]
+    }
+
+    func isRemoteDiscoveryBusy(for host: HolyRemoteHostRecord) -> Bool {
+        remoteDiscoveryBusyHostIDs.contains(host.id)
+    }
+
+    func refreshRemoteSessions(for host: HolyRemoteHostRecord) {
+        remoteDiscoveryBusyHostIDs.insert(host.id)
+        remoteDiscoveryErrorsByHostID.removeValue(forKey: host.id)
+
+        Task { [weak self] in
+            do {
+                let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverSessionsThrowing(for: host)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.discoveredRemoteSessionsByHostID[host.id] = sessions
+                    self.remoteDiscoveryBusyHostIDs.remove(host.id)
+                    self.remoteDiscoveryErrorsByHostID.removeValue(forKey: host.id)
+                    self.markRemoteHostDiscovered(host.id)
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.discoveredRemoteSessionsByHostID[host.id] = []
+                    self.remoteDiscoveryBusyHostIDs.remove(host.id)
+                    self.remoteDiscoveryErrorsByHostID[host.id] = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func launchRemoteTmuxSession(_ session: HolyDiscoveredTmuxSession, on host: HolyRemoteHostRecord) {
+        let launchSpec = HolySessionLaunchSpec(
+            runtime: session.runtime ?? .shell,
+            title: session.displayTitle,
+            objective: session.objective,
+            budget: nil,
+            transport: .init(
+                kind: .ssh,
+                hostLabel: host.displayTitle,
+                sshDestination: host.sshDestination
+            ),
+            tmux: .init(
+                socketName: host.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
+                sessionName: session.sessionName,
+                createIfMissing: false
+            ),
+            workingDirectory: session.workingDirectory,
+            command: session.bootstrapCommand,
+            initialInput: nil,
+            waitAfterCommand: false,
+            environment: [:],
+            workspace: nil
+        )
+
+        _ = createSession(with: launchSpec, origin: .directLaunch)
+        remoteHostsPresented = false
     }
 
     func saveDraftAsTemplate() {
@@ -597,8 +746,74 @@ final class HolyWorkspaceStore: ObservableObject {
         reconcileExternalTasks(persistIfChanged: false)
     }
 
+    private func loadRemoteHosts() {
+        remoteHosts = HolyRemoteHostRepository.load()
+        selectedRemoteHostID = selectedRemoteHost?.id ?? remoteHosts.first?.id
+    }
+
     private func persistTasks() {
         HolyTaskRepository.save(externalTasks)
+    }
+
+    private func persistRemoteHosts() {
+        HolyRemoteHostRepository.save(remoteHosts)
+    }
+
+    private func mergeImportedRemoteHosts(_ importedHosts: [HolyRemoteHostRecord], sourceLabel: String) {
+        guard !importedHosts.isEmpty else {
+            remoteHostImportMessage = "No \(sourceLabel.lowercased()) hosts found."
+            return
+        }
+
+        var existingHostsByDestination: [String: HolyRemoteHostRecord] = [:]
+        for host in remoteHosts {
+            existingHostsByDestination[host.sshDestination.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] = host
+        }
+
+        var addedHosts = 0
+        for importedHost in importedHosts {
+            let normalizedHost = importedHost.normalized()
+            let key = normalizedHost.sshDestination.lowercased()
+
+            guard existingHostsByDestination[key] == nil else { continue }
+            remoteHosts.append(normalizedHost)
+            existingHostsByDestination[key] = normalizedHost
+            addedHosts += 1
+        }
+
+        remoteHosts.sort { lhs, rhs in
+            lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
+        }
+
+        if selectedRemoteHostID == nil {
+            selectedRemoteHostID = remoteHosts.first?.id
+        }
+
+        persistRemoteHosts()
+
+        if addedHosts == 0 {
+            remoteHostImportMessage = "No new \(sourceLabel.lowercased()) hosts to import."
+        } else if addedHosts == 1 {
+            remoteHostImportMessage = "Imported 1 host from \(sourceLabel)."
+        } else {
+            remoteHostImportMessage = "Imported \(addedHosts) hosts from \(sourceLabel)."
+        }
+    }
+
+    private func markRemoteHostDiscovered(_ hostID: UUID) {
+        guard let index = remoteHosts.firstIndex(where: { $0.id == hostID }) else { return }
+
+        remoteHosts[index] = HolyRemoteHostRecord(
+            id: remoteHosts[index].id,
+            label: remoteHosts[index].label,
+            sshDestination: remoteHosts[index].sshDestination,
+            tmuxSocketName: remoteHosts[index].tmuxSocketName,
+            createdAt: remoteHosts[index].createdAt,
+            updatedAt: .now,
+            lastDiscoveredAt: .now
+        )
+
+        persistRemoteHosts()
     }
 
     private func reconcileExternalTasks(persistIfChanged: Bool = true) {
@@ -677,6 +892,10 @@ final class HolyWorkspaceStore: ObservableObject {
         for draft: HolySessionDraft,
         intent: HolyDraftLaunchIntent
     ) -> HolySessionOwnership? {
+        guard draft.transportKind == .local else {
+            return nil
+        }
+
         let fallbackWorktreePath: String?
         switch draft.workspaceStrategy {
         case .createManagedWorktree:
@@ -711,6 +930,11 @@ final class HolyWorkspaceStore: ObservableObject {
         var spec = templateLaunchSpec
         let defaultWorkingDirectory = contextualWorkingDirectory
         let defaultRepositoryRoot = contextualRepositoryRoot
+
+        if spec.transport.isRemote {
+            spec.workspace = nil
+            return spec
+        }
 
         if spec.workingDirectory == nil,
            spec.workspace?.strategy != .createManagedWorktree {
@@ -751,6 +975,10 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private func draftIntent(for draft: HolySessionDraft) async -> HolyDraftLaunchIntent {
         let launchSpec = contextualizedLaunchSpec(from: draft.launchSpec)
+
+        guard draft.transportKind == .local else {
+            return .empty
+        }
 
         switch draft.workspaceStrategy {
         case .createManagedWorktree:

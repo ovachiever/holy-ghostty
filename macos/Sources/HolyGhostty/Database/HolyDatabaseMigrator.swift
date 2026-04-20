@@ -48,6 +48,11 @@ enum HolyDatabaseMigrator {
             label: "External task inbox",
             statements: schemaV5
         ),
+        .init(
+            version: 6,
+            label: "Remote host registry",
+            statements: schemaV6
+        ),
     ]
 
     private static let schemaV1: [String] = [
@@ -327,6 +332,24 @@ enum HolyDatabaseMigrator {
         """
         CREATE INDEX IF NOT EXISTS tasks_linked_session_idx
         ON tasks(linked_session_id, updated_at);
+        """,
+    ]
+
+    private static let schemaV6: [String] = [
+        """
+        CREATE TABLE IF NOT EXISTS remote_hosts (
+            id TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            ssh_destination TEXT NOT NULL,
+            tmux_socket_name TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_discovered_at TEXT
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS remote_hosts_updated_at_idx
+        ON remote_hosts(updated_at, created_at);
         """,
     ]
 }

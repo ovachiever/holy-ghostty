@@ -41,6 +41,7 @@ enum HolySessionEventOrigin: String, Codable {
     case legacyJSON = "legacy_json"
     case workspaceRestore = "workspace_restore"
     case directLaunch = "direct_launch"
+    case automation = "automation"
     case templateLaunch = "template_launch"
     case archiveRelaunch = "archive_relaunch"
     case duplicate = "duplicate"

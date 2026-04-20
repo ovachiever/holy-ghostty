@@ -303,7 +303,16 @@ struct HolyContextPanelView: View {
 
             contextRow("Runtime", session.runtime.displayName)
             contextRow("Owner", session.ownership.label)
+            contextRow("Transport", session.record.launchSpec.transport.summaryText)
             contextRow("Directory", session.workingDirectory ?? "Unassigned")
+
+            if session.record.launchSpec.transport.isRemote {
+                contextRow("Host", session.record.launchSpec.transport.destinationDisplayName)
+            }
+
+            if let tmux = session.record.launchSpec.tmux {
+                contextRow("Tmux", "\(tmux.serverLabel) · \(tmux.sessionDisplayName)")
+            }
 
             if let task = session.record.launchSpec.task {
                 contextRow("Task Source", task.sourceSummary)

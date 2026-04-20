@@ -364,9 +364,10 @@ final class HolySession: ObservableObject, Identifiable {
         }
 
         lastGitRefreshAt = .init()
+        let transport = record.launchSpec.transport
         gitRefreshTask?.cancel()
-        gitRefreshTask = Task { [weak self, currentDirectory] in
-            let snapshot = await HolyGitClient.shared.snapshot(for: currentDirectory)
+        gitRefreshTask = Task { [weak self, currentDirectory, transport] in
+            let snapshot = await HolyGitClient.shared.snapshot(for: currentDirectory, transport: transport)
             guard !Task.isCancelled else { return }
             self?.applyGitSnapshot(snapshot)
         }

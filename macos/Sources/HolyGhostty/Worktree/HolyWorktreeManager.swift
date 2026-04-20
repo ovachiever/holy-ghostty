@@ -39,17 +39,23 @@ actor HolyWorktreeManager {
     )
 
     func prepareLaunchSpec(_ launchSpec: HolySessionLaunchSpec) async throws -> HolySessionLaunchSpec {
+        if launchSpec.transport.isRemote {
+            var remoteLaunchSpec = launchSpec
+            remoteLaunchSpec.workspace = nil
+            return HolyTmuxCommandBuilder.realizedLaunchSpec(remoteLaunchSpec)
+        }
+
         guard let workspace = launchSpec.workspace else {
-            return try prepareDirectLaunchSpec(launchSpec)
+            return HolyTmuxCommandBuilder.realizedLaunchSpec(try prepareDirectLaunchSpec(launchSpec))
         }
 
         switch workspace.strategy {
         case .directDirectory:
-            return try prepareDirectLaunchSpec(launchSpec)
+            return HolyTmuxCommandBuilder.realizedLaunchSpec(try prepareDirectLaunchSpec(launchSpec))
         case .attachExistingWorktree:
-            return try await prepareAttachedWorktreeLaunchSpec(launchSpec)
+            return HolyTmuxCommandBuilder.realizedLaunchSpec(try await prepareAttachedWorktreeLaunchSpec(launchSpec))
         case .createManagedWorktree:
-            return try await prepareManagedWorktreeLaunchSpec(launchSpec)
+            return HolyTmuxCommandBuilder.realizedLaunchSpec(try await prepareManagedWorktreeLaunchSpec(launchSpec))
         }
     }
 

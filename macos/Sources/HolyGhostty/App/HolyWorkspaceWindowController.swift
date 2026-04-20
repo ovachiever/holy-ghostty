@@ -5,10 +5,15 @@ import SwiftUI
 final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
     let workspaceStore: HolyWorkspaceStore
 
-    init(ghostty: Ghostty.App, initialConfig: Ghostty.SurfaceConfiguration? = nil) {
+    init(
+        ghostty: Ghostty.App,
+        initialConfig: Ghostty.SurfaceConfiguration? = nil,
+        seedDefaultSession: Bool? = nil
+    ) {
+        let resolvedSeedDefaultSession = seedDefaultSession ?? (initialConfig == nil)
         self.workspaceStore = HolyWorkspaceStore(
             ghostty: ghostty,
-            seedDefaultSession: initialConfig == nil
+            seedDefaultSession: resolvedSeedDefaultSession
         )
 
         let window = NSWindow(
@@ -66,6 +71,19 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate,
     @discardableResult
     func createSession(from baseConfig: Ghostty.SurfaceConfiguration? = nil) -> HolySession? {
         let session = workspaceStore.createSession(from: baseConfig)
+        if let session {
+            workspaceStore.selectedSessionID = session.id
+            showAndActivate()
+        }
+        return session
+    }
+
+    @discardableResult
+    func createSession(
+        with launchSpec: HolySessionLaunchSpec,
+        origin: HolySessionEventOrigin = .directLaunch
+    ) -> HolySession? {
+        let session = workspaceStore.createSession(with: launchSpec, origin: origin)
         if let session {
             workspaceStore.selectedSessionID = session.id
             showAndActivate()

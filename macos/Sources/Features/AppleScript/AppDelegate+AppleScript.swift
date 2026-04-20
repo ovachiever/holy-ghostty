@@ -291,6 +291,90 @@ extension NSApplication {
         let fallbackWindow = ScriptWindow(primaryController: createdController)
         return ScriptTab(window: fallbackWindow, controller: createdController)
     }
+
+    /// Handler for the `launch holy session` AppleScript command.
+    ///
+    /// This creates a first-class Holy Ghostty session rather than a legacy
+    /// tab/window terminal. The resulting launch is tmux-backed by default.
+    @objc(handleLaunchHolySessionScriptCommand:)
+    func handleLaunchHolySessionScriptCommand(_ command: NSScriptCommand) -> NSString? {
+        guard validateScript(command: command) else { return nil }
+
+        guard let appDelegate = delegate as? AppDelegate else {
+            command.scriptErrorNumber = errAEEventFailed
+            command.scriptErrorString = "Ghostty app delegate is unavailable."
+            return nil
+        }
+
+        let arguments = command.evaluatedArguments ?? [:]
+
+        guard let runtime = runtimeValue(
+            from: stringArgument(named: "runtime", arguments: arguments),
+            command: command
+        ) else {
+            return nil
+        }
+
+        let host = stringArgument(named: "host", arguments: arguments)
+        guard let transport = transportValue(
+            from: stringArgument(named: "transport", arguments: arguments),
+            inferredFromHost: host,
+            command: command
+        ) else {
+            return nil
+        }
+
+        if transport == .ssh, host == nil {
+            command.scriptErrorNumber = errAEParamMissed
+            command.scriptErrorString = "SSH transport requires a host destination."
+            return nil
+        }
+
+        let tmuxSessionName = stringArgument(named: "tmuxSession", arguments: arguments)
+        let resolvedTitle = scriptTitle(
+            explicitTitle: stringArgument(named: "title", arguments: arguments),
+            runtime: runtime,
+            host: host,
+            tmuxSessionName: tmuxSessionName
+        )
+
+        let launchSpec = HolySessionLaunchSpec(
+            runtime: runtime,
+            title: resolvedTitle,
+            objective: stringArgument(named: "objective", arguments: arguments),
+            task: nil,
+            budget: nil,
+            transport: .init(
+                kind: transport,
+                hostLabel: host,
+                sshDestination: host
+            ),
+            tmux: .init(
+                socketName: stringArgument(named: "tmuxSocket", arguments: arguments)
+                    ?? HolySessionTmuxSpec.defaultSocketName,
+                sessionName: tmuxSessionName,
+                createIfMissing: boolArgument(
+                    named: "createIfMissing",
+                    arguments: arguments
+                ) ?? true
+            ),
+            workingDirectory: stringArgument(named: "workingDirectory", arguments: arguments),
+            command: stringArgument(named: "command", arguments: arguments),
+            initialInput: stringArgument(named: "initialInput", arguments: arguments),
+            waitAfterCommand: false,
+            environment: [:],
+            workspace: nil
+        )
+
+        let workspace = holyWorkspaceController(for: appDelegate)
+        guard let session = workspace.createSession(with: launchSpec, origin: .automation) else {
+            command.scriptErrorNumber = errAEEventFailed
+            command.scriptErrorString = "Failed to create Holy session."
+            return nil
+        }
+
+        return session.id.uuidString as NSString
+    }
 }
 
 // MARK: - Private Helpers
@@ -347,5 +431,91 @@ extension NSApplication {
         return tabGroup.windows
             .compactMap { $0.windowController as? BaseTerminalController }
             .first
+    }
+
+    fileprivate func stringArgument(
+        named name: String,
+        arguments: [String: Any]
+    ) -> String? {
+        (arguments[name] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+    }
+
+    fileprivate func boolArgument(
+        named name: String,
+        arguments: [String: Any]
+    ) -> Bool? {
+        (arguments[name] as? NSNumber)?.boolValue
+    }
+
+    fileprivate func runtimeValue(
+        from input: String?,
+        command: NSScriptCommand
+    ) -> HolySessionRuntime? {
+        guard let normalizedInput = input?.lowercased(), !normalizedInput.isEmpty else {
+            return .shell
+        }
+
+        if let runtime = HolySessionRuntime.allCases.first(where: {
+            $0.rawValue == normalizedInput || $0.displayName.lowercased() == normalizedInput
+        }) {
+            return runtime
+        }
+
+        command.scriptErrorNumber = errAECoercionFail
+        command.scriptErrorString = "Unknown runtime '\(normalizedInput)'."
+        return nil
+    }
+
+    fileprivate func transportValue(
+        from input: String?,
+        inferredFromHost host: String?,
+        command: NSScriptCommand
+    ) -> HolySessionTransportKind? {
+        guard let normalizedInput = input?.lowercased(), !normalizedInput.isEmpty else {
+            return host == nil ? .local : .ssh
+        }
+
+        if let transport = HolySessionTransportKind.allCases.first(where: {
+            $0.rawValue == normalizedInput || $0.displayName.lowercased() == normalizedInput
+        }) {
+            return transport
+        }
+
+        command.scriptErrorNumber = errAECoercionFail
+        command.scriptErrorString = "Unknown transport '\(normalizedInput)'."
+        return nil
+    }
+
+    fileprivate func scriptTitle(
+        explicitTitle: String?,
+        runtime: HolySessionRuntime,
+        host: String?,
+        tmuxSessionName: String?
+    ) -> String {
+        if let explicitTitle {
+            return explicitTitle
+        }
+
+        if let host, let tmuxSessionName {
+            return "\(host)/\(tmuxSessionName)"
+        }
+
+        if let tmuxSessionName {
+            return tmuxSessionName
+        }
+
+        return runtime.displayName
+    }
+
+    fileprivate func holyWorkspaceController(for appDelegate: AppDelegate) -> HolyWorkspaceWindowController {
+        appDelegate.automationWorkspaceController()
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }

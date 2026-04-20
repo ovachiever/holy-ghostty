@@ -844,6 +844,8 @@ struct HolySessionLaunchSpec: Codable, Equatable {
     var objective: String?
     var task: HolyExternalTaskReference?
     var budget: HolySessionBudget?
+    var transport: HolySessionTransportSpec
+    var tmux: HolySessionTmuxSpec?
     var workingDirectory: String?
     var command: String?
     var initialInput: String?
@@ -858,6 +860,8 @@ struct HolySessionLaunchSpec: Codable, Equatable {
             objective: nil,
             task: nil,
             budget: nil,
+            transport: .local,
+            tmux: .holyManagedDefault,
             workingDirectory: nil,
             command: nil,
             initialInput: nil,
@@ -873,6 +877,8 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         objective: String? = nil,
         task: HolyExternalTaskReference? = nil,
         budget: HolySessionBudget? = nil,
+        transport: HolySessionTransportSpec = .local,
+        tmux: HolySessionTmuxSpec? = .holyManagedDefault,
         workingDirectory: String?,
         command: String?,
         initialInput: String?,
@@ -885,6 +891,8 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         self.objective = objective
         self.task = task
         self.budget = budget
+        self.transport = transport
+        self.tmux = tmux
         self.workingDirectory = workingDirectory
         self.command = command
         self.initialInput = initialInput
@@ -899,6 +907,8 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         self.objective = nil
         self.task = nil
         self.budget = nil
+        self.transport = .local
+        self.tmux = .holyManagedDefault
         self.workingDirectory = config.workingDirectory
         self.command = config.command
         self.initialInput = config.initialInput
@@ -908,13 +918,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
     }
 
     var surfaceConfiguration: Ghostty.SurfaceConfiguration {
-        var config = Ghostty.SurfaceConfiguration()
-        config.workingDirectory = workingDirectory
-        config.command = command
-        config.initialInput = initialInput
-        config.waitAfterCommand = waitAfterCommand
-        config.environmentVariables = environment
-        return config
+        HolyTmuxCommandBuilder.surfaceConfiguration(for: self)
     }
 
     var resolvedTitle: String {
@@ -930,6 +934,8 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         var copy = self
         copy.task = nil
         copy.workingDirectory = nil
+        copy.tmux = copy.tmux?.normalized
+        copy.tmux?.sessionName = nil
         if var workspace = copy.workspace {
             workspace.repositoryRoot = nil
             workspace.branchName = nil
@@ -1039,6 +1045,12 @@ struct HolySessionDraft: Equatable {
     var tokenBudget: String = ""
     var costBudgetUSD: String = ""
     var budgetEnforcementPolicy: HolySessionBudgetEnforcementPolicy = .warn
+    var transportKind: HolySessionTransportKind = .local
+    var remoteHostLabel: String = ""
+    var remoteHostDestination: String = ""
+    var tmuxSocketName: String = HolySessionTmuxSpec.defaultSocketName
+    var tmuxSessionName: String = ""
+    var tmuxCreateIfMissing: Bool = true
     var workspaceStrategy: HolySessionWorkspaceStrategy = .directDirectory
     var workingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     var repositoryRoot: String = FileManager.default.homeDirectoryForCurrentUser.path
@@ -1066,6 +1078,13 @@ struct HolySessionDraft: Equatable {
         tokenBudget = launchSpec.budget?.tokenLimit.map { String($0) } ?? ""
         costBudgetUSD = launchSpec.budget?.costLimitUSD.map { Self.costString(from: $0) } ?? ""
         budgetEnforcementPolicy = launchSpec.budget?.enforcementPolicy ?? .warn
+        transportKind = launchSpec.transport.kind
+        remoteHostLabel = launchSpec.transport.hostLabel ?? ""
+        remoteHostDestination = launchSpec.transport.sshDestination ?? ""
+        let tmuxSpec = (launchSpec.tmux ?? .holyManagedDefault).normalized
+        tmuxSocketName = tmuxSpec.socketName ?? ""
+        tmuxSessionName = tmuxSpec.sessionName ?? ""
+        tmuxCreateIfMissing = tmuxSpec.createIfMissing
         workingDirectory = launchSpec.workingDirectory ?? fallbackWorkingDirectory
         command = launchSpec.command ?? ""
         initialInput = launchSpec.initialInput ?? ""
@@ -1090,6 +1109,16 @@ struct HolySessionDraft: Equatable {
             objective: objective.nilIfBlank,
             task: linkedTask,
             budget: budget,
+            transport: .init(
+                kind: transportKind,
+                hostLabel: remoteHostLabel.nilIfBlank,
+                sshDestination: remoteHostDestination.nilIfBlank
+            ),
+            tmux: .init(
+                socketName: tmuxSocketName.nilIfBlank,
+                sessionName: tmuxSessionName.nilIfBlank,
+                createIfMissing: tmuxCreateIfMissing
+            ),
             workingDirectory: workingDirectory.nilIfBlank,
             command: command.nilIfBlank,
             initialInput: initialInput.nilIfBlank,
@@ -1100,6 +1129,10 @@ struct HolySessionDraft: Equatable {
     }
 
     var workspaceSpec: HolySessionWorkspaceSpec? {
+        guard transportKind == .local else {
+            return nil
+        }
+
         switch workspaceStrategy {
         case .directDirectory:
             return nil

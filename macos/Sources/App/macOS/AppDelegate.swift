@@ -4,6 +4,7 @@ import UserNotifications
 import OSLog
 import Sparkle
 import GhosttyKit
+import Carbon
 
 class AppDelegate: NSObject,
                     ObservableObject,
@@ -170,6 +171,13 @@ class AppDelegate: NSObject,
     // MARK: - NSApplicationDelegate
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleGetURLEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL)
+        )
+
         #if DEBUG
         if
             let suite = UserDefaults.ghosttySuite,
@@ -334,6 +342,29 @@ class AppDelegate: NSObject,
                 NSApp.unhide(nil)
                 NSApp.arrangeInFront(nil)
             }
+        }
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        Task { @MainActor in
+            for url in urls {
+                self.handleHolyAutomationURL(url)
+            }
+        }
+    }
+
+    @objc
+    private func handleGetURLEvent(
+        _ event: NSAppleEventDescriptor,
+        withReplyEvent replyEvent: NSAppleEventDescriptor
+    ) {
+        guard let urlString = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: urlString) else {
+            return
+        }
+
+        Task { @MainActor in
+            self.handleHolyAutomationURL(url)
         }
     }
 
@@ -1047,6 +1078,28 @@ class AppDelegate: NSObject,
     }
 
     @MainActor
+    func automationWorkspaceController() -> HolyWorkspaceWindowController {
+        if let preferred = HolyWorkspaceWindowController.preferred {
+            return preferred
+        }
+
+        return HolyWorkspaceWindowController(
+            ghostty: ghostty,
+            initialConfig: nil,
+            seedDefaultSession: false
+        )
+    }
+
+    @discardableResult
+    @MainActor
+    func createAutomatedHolySession(
+        with launchSpec: HolySessionLaunchSpec,
+        origin: HolySessionEventOrigin = .automation
+    ) -> HolySession? {
+        automationWorkspaceController().createSession(with: launchSpec, origin: origin)
+    }
+
+    @MainActor
     private func preferredWorkspace(
         createIfNeeded: Bool,
         initialConfig: Ghostty.SurfaceConfiguration? = nil
@@ -1061,6 +1114,18 @@ class AppDelegate: NSObject,
 
     @IBAction func toggleQuickTerminal(_ sender: Any) {
         quickController.toggle()
+    }
+
+    @MainActor
+    private func handleHolyAutomationURL(_ url: URL) {
+        guard let launchSpec = HolyAutomationURLParser.launchSpec(from: url) else {
+            AppDelegate.logger.warning(
+                "Ignored unsupported automation URL: \(url.absoluteString, privacy: .public)"
+            )
+            return
+        }
+
+        _ = createAutomatedHolySession(with: launchSpec, origin: .automation)
     }
 
     /// Toggles visibility of all Ghosty Terminal windows. When hidden, activates Ghostty as the frontmost application

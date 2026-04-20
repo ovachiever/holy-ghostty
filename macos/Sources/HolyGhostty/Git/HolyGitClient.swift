@@ -9,24 +9,27 @@ actor HolyGitClient {
         category: "HolyGitClient"
     )
 
-    func snapshot(for directory: String?) -> HolyGitSnapshot? {
+    func snapshot(for directory: String?, transport: HolySessionTransportSpec = .local) -> HolyGitSnapshot? {
         guard let directory = directory?.holyTrimmed, !directory.isEmpty else {
             return nil
         }
 
+        switch transport.normalized.kind {
+        case .local:
+            return localSnapshot(for: directory)
+        case .ssh:
+            return remoteSnapshot(for: directory, transport: transport.normalized)
+        }
+    }
+
+    private func localSnapshot(for directory: String) -> HolyGitSnapshot? {
         guard let worktreeResult = runGit(arguments: ["-C", directory, "rev-parse", "--show-toplevel"]),
               worktreeResult.exitCode == 0,
-              let worktreePath = worktreeResult.stdout.holyTrimmed.nilIfEmpty else {
-            return nil
-        }
-
-        guard let commonDirResult = runGit(arguments: ["-C", directory, "rev-parse", "--path-format=absolute", "--git-common-dir"]),
+              let worktreePath = worktreeResult.stdout.holyTrimmed.nilIfEmpty,
+              let commonDirResult = runGit(arguments: ["-C", directory, "rev-parse", "--path-format=absolute", "--git-common-dir"]),
               commonDirResult.exitCode == 0,
-              let commonGitDirectory = commonDirResult.stdout.holyTrimmed.nilIfEmpty else {
-            return nil
-        }
-
-        guard let statusResult = runGit(arguments: ["-C", directory, "status", "--porcelain=v1", "--branch", "--untracked-files=all"]),
+              let commonGitDirectory = commonDirResult.stdout.holyTrimmed.nilIfEmpty,
+              let statusResult = runGit(arguments: ["-C", directory, "status", "--porcelain=v1", "--branch", "--untracked-files=all"]),
               statusResult.exitCode == 0 else {
             return nil
         }
@@ -39,9 +42,66 @@ actor HolyGitClient {
         )
     }
 
+    private func remoteSnapshot(for directory: String, transport: HolySessionTransportSpec) -> HolyGitSnapshot? {
+        guard let destination = transport.sshDestination?.holyTrimmed.nilIfEmpty,
+              let result = runRemoteGitSnapshot(directory: directory, destination: destination),
+              result.exitCode == 0 else {
+            return nil
+        }
+
+        let components = result.stdout
+            .split(separator: "\u{1F}", maxSplits: 2, omittingEmptySubsequences: false)
+            .map(String.init)
+        guard components.count == 3,
+              let worktreePath = components[0].holyTrimmed.nilIfEmpty,
+              let commonGitDirectory = components[1].holyTrimmed.nilIfEmpty else {
+            return nil
+        }
+
+        return parseStatusOutput(
+            components[2],
+            repositoryRoot: repositoryRoot(from: commonGitDirectory, fallback: worktreePath),
+            worktreePath: worktreePath,
+            commonGitDirectory: commonGitDirectory
+        )
+    }
+
     private func runGit(arguments: [String]) -> HolyGitCommandResult? {
+        runProcess(executablePath: "/usr/bin/git", arguments: arguments)
+    }
+
+    private func runRemoteGitSnapshot(directory: String, destination: String) -> HolyGitCommandResult? {
+        let script = """
+        setopt pipefail
+        working_directory=\(posixQuote(directory))
+        worktree_path=$(git -C "$working_directory" rev-parse --show-toplevel 2>/dev/null) || exit 1
+        common_git_directory=$(git -C "$working_directory" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 1
+        status_output=$(git -C "$working_directory" status --porcelain=v1 --branch --untracked-files=all 2>/dev/null) || exit 1
+        printf '%s\\x1f%s\\x1f%s' "$worktree_path" "$common_git_directory" "$status_output"
+        """
+
+        return runProcess(
+            executablePath: "/usr/bin/ssh",
+            arguments: [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=1",
+                destination,
+                "zsh",
+                "-lc",
+                script,
+            ]
+        )
+    }
+
+    private func runProcess(executablePath: String, arguments: [String]) -> HolyGitCommandResult? {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
 
         let stdout = Pipe()
@@ -273,6 +333,15 @@ actor HolyGitClient {
         default:
             return .unknown
         }
+    }
+
+    private func posixQuote(_ value: String) -> String {
+        if value.isEmpty {
+            return "''"
+        }
+
+        let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
+        return "'\(escaped)'"
     }
 }
 

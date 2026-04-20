@@ -1,55 +1,76 @@
 # Holy Ghostty
 
-Last updated: 2026-04-18
+Last updated: 2026-04-19
 
-Holy Ghostty is a macOS-native control surface for agentic coding sessions built on top of real Ghostty terminal surfaces. It replaces the "too many tabs, too little awareness" workflow with a single mission-control window that keeps live terminal sessions, launch policy, worktree ownership, git context, notifications, templates, and session history in one place.
+Holy Ghostty is a macOS-native control surface for agentic coding sessions built on real Ghostty terminal surfaces. The app is terminal-first, but sessions are no longer disposable tabs. They are durable, tmux-backed work units with launch policy, budget state, task linkage, event history, and remote attach paths.
 
-This README is the human-facing guide for the app as it exists today.
+This document is the human-facing guide for the app as it exists in the repository today.
 
 ## What It Is
 
-Holy Ghostty is not a new terminal emulator core. The terminal rendering, PTY handling, and emulation remain Ghostty. The Holy layer is a macOS shell around those surfaces that adds:
+Holy Ghostty keeps Ghostty's terminal core and adds a macOS shell around it with:
 
 - a live session roster
 - a focused active surface
-- a context and coordination inspector
-- session launch templates
+- a right-side operator inspector
+- tmux-backed local and SSH session launches
+- session templates
 - archive and relaunch history
-- worktree-aware launch policies
+- worktree-aware launch policy
 - git-aware coordination and collision detection
-- runtime-specific state heuristics for Shell, Claude, Codex, and OpenCode
-- native notifications when a session fails, needs input, collides, drifts, or completes
+- runtime-specific heuristics for Shell, Claude, Codex, and OpenCode
+- structured runtime telemetry, budget intelligence, and an append-only event ledger
+- an external task inbox
+- remote host discovery and remote tmux attach
 
 ## Current Product Shape
 
-The app opens into a three-part shell:
+The app opens into a mission-control shell:
 
-- Left rail: the live session roster, sorted by attention and recency
-- Center: the selected live Ghostty terminal surface
-- Right rail: the inspector for mission, telemetry, git status, coordination, ownership, preview text, and environment
+- Left rail: active sessions, sorted by urgency and recency
+- Center: the selected live Ghostty surface
+- Right rail: the operator inspector for telemetry, budget, git, coordination, timeline, and session context
 
-There are also two major auxiliary flows:
+Auxiliary flows:
 
-- New Session: the composer for creating a new agent or shell session
-- History: the archive for reviewing and relaunching past sessions
+- New Session: compose a local or remote tmux-backed session
+- Task Inbox: create or manage external work items and launch them into sessions
+- Remote Hosts: save hosts, import them from SSH config or Tailscale, and discover remote tmux sessions
+- History: review, search, and relaunch archived sessions
+
+Display modes:
+
+- Standard
+- Focus
+- Grid
+- Diff
 
 ## What You Can Do Today
 
-- Run real live terminal sessions inside a native macOS app
+- Run real live Ghostty terminals inside a native macOS app
 - Launch Shell, Claude, Codex, and OpenCode sessions
-- Save and reuse templates
+- Launch local sessions through tmux so they remain attachable after Holy Ghostty closes
+- Launch remote SSH sessions through tmux so they remain attachable from other machines
+- Save and reuse launch templates
 - Start sessions directly in a directory, attach an existing worktree, or create a managed worktree
 - Detect shared-worktree and shared-branch collisions before launch
-- Override shared-branch warnings when you really intend to share ownership
-- Track live git state for each session
-- See overlapping changed files and overlapping work between sessions
-- Archive completed or paused sessions
-- Search session history and relaunch archived sessions
-- Get macOS notifications for attention-worthy state changes
+- Track git state for local and remote sessions
+- See overlapping changed files and overlap risk between sessions
+- Use focus, grid, and diff modes for different operator tasks
+- Search session history and relaunch archived sessions with recovery context
+- Track runtime telemetry, budget usage, event timelines, and coordination state
+- Manage external tasks from GitHub, Linear, Jira, or manual entries
+- Import remote hosts from `~/.ssh/config` and Tailscale
+- Discover remote tmux sessions and attach them into first-class Holy sessions
+- Automate session creation through the `holy-ghostty://spawn` URL scheme, the `scripts/holy-spawn-session.sh` helper, or AppleScript `spawn`
 
 ## Install And Launch
 
-Prerequisites: macOS 15+, Xcode 26+ with Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`), Zig **0.15.2** (not 0.16; Zig minor versions are breaking).
+Prerequisites:
+
+- macOS 15+
+- Xcode 26+ with Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
+- Zig **0.15.2** (not 0.16; Zig minor versions are breaking)
 
 Build and install:
 
@@ -66,7 +87,7 @@ Installed app path:
 /Applications/Holy Ghostty.app
 ```
 
-If you only need the Zig core and not the macOS app bundle, the upstream repo build still works:
+If you only need the Zig core and not the macOS app bundle:
 
 ```bash
 zig build -Demit-macos-app=false
@@ -88,17 +109,22 @@ Open `Holy Ghostty.app`. If there is no saved workspace and no archive yet, the 
 
 Click `New Session`.
 
-In the composer you can set:
+The composer lets you define:
 
 - Runtime: `Shell`, `Claude`, `Codex`, or `OpenCode`
-- Title: the human label shown in the roster
-- Mission: the task or goal for the session
+- Title and mission
+- Transport: `Local` or `SSH`
+- Host destination for SSH sessions
 - Workspace strategy
 - Repository root or working directory
 - Branch
-- Launch command
+- Launch command or bootstrap command
 - Initial input
 - Environment variables
+- Budget policy
+- Tmux socket and tmux session name
+
+By default, Holy launches through tmux. That is intentional. The tmux server owns the durable session; Holy is the operator surface attached to it.
 
 ### 4. Pick the right workspace strategy
 
@@ -106,7 +132,7 @@ Holy Ghostty supports three launch strategies:
 
 #### Direct directory
 
-Use the directory exactly as provided. This is the lightest-weight option.
+Use the directory exactly as provided.
 
 Use it when:
 
@@ -126,7 +152,7 @@ Use it when:
 
 #### Create managed worktree
 
-Let Holy Ghostty create and own a dedicated worktree under Application Support.
+Let Holy Ghostty create and own a dedicated worktree.
 
 Use it when:
 
@@ -143,10 +169,10 @@ The composer checks the draft against active sessions before launch.
 
 Two important cases:
 
-- Shared worktree: blocking. Holy Ghostty will stop the launch.
-- Shared branch: warning. Holy Ghostty allows an explicit override, but treats it as a higher-risk action.
+- Shared worktree: blocking
+- Shared branch: warning with explicit override
 
-If the app warns you, read it. The point of the product is to prevent invisible session collisions before they happen.
+If the app warns you, read it. The whole point is to stop invisible collisions before they form.
 
 ### 6. Work with the live session
 
@@ -154,26 +180,53 @@ Once launched:
 
 - the session appears in the roster
 - the terminal becomes a real live Ghostty surface
-- the inspector shows ownership, git state, signals, command telemetry, preview text, and coordination info
+- the inspector shows mission, telemetry, budget, git state, tmux context, and coordination state
 
-The session phase can move through states such as active, working, waiting for input, completed, or failed. The app derives these from Ghostty state plus runtime-specific heuristics.
+The session phase can move through states such as active, working, waiting for input, completed, or failed. The app derives these from Ghostty state, runtime adapters, and telemetry parsing.
 
-### 7. Use templates
+### 7. Use display modes
 
-Holy Ghostty ships with built-ins and also lets you save your own launch setups.
+- `Command-N`: new session
+- `Command-Shift-T`: task inbox
+- `Command-Shift-R`: remote hosts
+- `Command-Shift-F`: focus mode
+- `Command-Shift-G`: grid mode
+- `Command-Shift-D`: diff mode
 
-Built-in templates include:
+Use:
 
-- Shell Workspace
-- Claude Code
-- Codex
-- OpenCode
-- Managed Claude Worktree
-- Managed Codex Worktree
+- Standard mode for everyday work
+- Focus mode when one session matters most
+- Grid mode when you need to watch multiple sessions at once
+- Diff mode when comparing two related sessions before merging or deciding which path to keep
 
-Use templates when you want repeatable session startup without re-entering command, mission, environment, and workspace choices.
+### 8. Use the task inbox
 
-### 8. Archive finished work
+Task Inbox is where work items become sessions.
+
+You can:
+
+- create manual tasks
+- store GitHub, Linear, Jira, or generic URL tasks
+- set preferred runtime, mission, and working directory
+- launch directly from a task into a session
+
+### 9. Use remote hosts
+
+Open `Remote Hosts` when you want Holy to work like a serious tmux control plane instead of a local-only app.
+
+You can:
+
+- add hosts manually
+- import hosts from `~/.ssh/config`
+- import hosts from Tailscale
+- choose a tmux socket per host
+- refresh discovered remote tmux sessions
+- attach a discovered session into a first-class Holy session
+
+Holy-managed tmux sessions carry metadata so discovery can reconstruct better labels and context than plain `tmux ls`.
+
+### 10. Archive finished work
 
 When a session is done, archive it.
 
@@ -185,8 +238,10 @@ Archive preserves:
 - timestamps
 - output preview
 - git snapshot
-- command telemetry
-- ownership and coordination context
+- runtime telemetry
+- budget telemetry
+- event timeline
+- recovery context
 
 The History sheet lets you:
 
@@ -194,122 +249,72 @@ The History sheet lets you:
 - inspect archived state
 - relaunch directly
 - relaunch into the editor flow
+- retry recovery-archived sessions
 - delete old archives
 
-### 9. Pay attention to the inspector
+## Automation
 
-The right rail is where Holy Ghostty becomes useful instead of just decorative.
+### URL scheme
 
-Read it for:
+Holy Ghostty registers:
 
-- current mission
-- runtime and session signal
-- command counts and last outcome
-- git branch and sync status
-- changed files
-- shared worktree or shared branch warnings
-- overlapping changed files
-- output preview
-- environment
+```text
+holy-ghostty://spawn?...query...
+```
 
-### 10. Let alerts interrupt you selectively
+Example:
 
-Holy Ghostty can surface macOS notifications when a session:
+```bash
+open 'holy-ghostty://spawn?host=studio&transport=ssh&tmuxSession=temp&title=studio%2Ftemp'
+```
 
-- fails
-- needs input
-- completes
-- drifts from reserved branch ownership
-- collides with another session
+### Shell helper
 
-Treat these as interrupt channels, not ambient decoration.
+The repo includes:
 
-## Feature Guide
+```bash
+scripts/holy-spawn-session.sh
+```
 
-### Supported runtimes
+Examples:
 
-#### Shell
+```bash
+./scripts/holy-spawn-session.sh --tmux-session temp --title temp
+./scripts/holy-spawn-session.sh --host studio --transport ssh --tmux-session temp --title studio/temp
+```
 
-Manual interactive shell session. Best for:
+### AppleScript
 
-- fallback manual work
-- repair work
-- commands you do not want an agent to own
-
-#### Claude
-
-Claude-oriented session defaults and markers.
-
-Best for:
-
-- long-form agent work
-- repository exploration
-- file-editing tasks
-
-#### Codex
-
-Codex-oriented session defaults and markers.
-
-Best for:
-
-- code changes
-- patch-driven iteration
-- terminal-native AI coding workflows
-
-#### OpenCode
-
-OpenCode-oriented session defaults and markers.
-
-Best for:
-
-- alternate agent workflows
-- experiments in parallel with other runtimes
-
-### Session coordination
-
-Holy Ghostty watches for:
-
-- shared worktrees
-- shared branches
-- overlapping changed files
-- branch ownership drift
-
-This is the current coordination model. It is one of the most important existing features and one of the clearest differences from "just a bunch of terminal tabs."
-
-### Archive and relaunch
-
-Archived sessions are first-class records, not discarded tabs. Use them to:
-
-- reconstruct why a session existed
-- revisit a prior branch or worktree context
-- relaunch a known-good setup
-- preserve operational history
+Holy Ghostty also exposes an AppleScript `spawn` command for first-class Holy sessions. Use this when replacing keyboard-macro workflows that previously targeted tabbed Ghostty windows.
 
 ## Best Practices
 
-- Prefer managed worktrees for agent-driven sessions.
+- Prefer managed worktrees for long-running agent sessions.
 - Treat shared-branch overrides as exceptional, not normal.
-- Use direct directory sessions for short manual work, not for long-running agent ownership.
-- Give every session a real mission so the roster remains legible.
+- Use direct directory sessions for short manual work, not for durable agent ownership.
+- Give every session a real mission so the roster stays legible.
+- Leave tmux enabled unless you intentionally want an ephemeral shell.
+- Use a dedicated tmux session name for anything you expect to revisit remotely.
+- Use the remote host registry instead of ad hoc SSH macros when you want repeatable attach and discovery.
 - Archive sessions once they stop being operationally active.
-- Save templates for repeated agent setups instead of hand-entering the same launch spec.
-- Read the inspector before relaunching an archived session so you understand ownership, branch, and git context.
-- Use a Shell session as your manual intervention lane while agents stay isolated in their own worktrees.
-- When two sessions overlap on files, resolve it early. Do not let both continue blindly.
+- Save templates for repeated launch patterns instead of hand-entering the same spec.
+- Read the inspector before relaunching an archived session so you understand ownership, branch, budget, and git context.
+- When two sessions overlap on files, resolve it early instead of hoping the merge will be obvious later.
 
 ## Current Limitations
 
-Holy Ghostty is useful today, but it is not the finished end-state of the original vision.
+Holy Ghostty is useful and substantially complete, but it is not finished.
 
 Current limitations:
 
-- Runtime detection is still heuristic and adapter-driven, not a fully structured embedded telemetry bridge.
-- Persistence is JSON snapshot based, not a durable SQLite event ledger.
-- There is no cost or token budget engine yet.
-- There is no grid mode, focus mode, or diff mode yet.
-- There is no deep external task-system integration yet.
-- The alert system is live and native, but not yet a persisted alert history.
-- The workspace store currently owns a lot of responsibilities that will likely split over time.
+- Runtime telemetry is still largely inference-based, not a full embedded VT/PTY event bridge.
+- Remote host discovery is registry-driven, not zero-config network discovery.
+- There is no dependency-chain orchestration between sessions yet.
+- There is no broadcast input across multiple sessions yet.
+- External task sources do not receive status writeback yet.
+- There is no full preferences surface for notifications, budgets, templates, and remote policy.
+- Signing, notarization, and release distribution are not finished.
+- Production hardening still needs more migration, restore, and degraded-mode testing.
 
 ## Where To Read More
 

@@ -120,7 +120,8 @@ final class HolySessionSupervisor {
         relaunchedFrom archivedSession: HolyArchivedSession? = nil
     ) -> HolySessionCreationResult? {
         guard let app = ghostty.app else { return nil }
-        let session = HolySession(record: .init(launchSpec: launchSpec), app: app)
+        let realizedLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
+        let session = HolySession(record: .init(launchSpec: realizedLaunchSpec), app: app)
 
         var nextState = state
         nextState.sessions.append(session)

@@ -6,7 +6,20 @@ The format is intentionally simple and release-oriented.
 
 ## Unreleased
 
-- No unreleased changes yet.
+Post-`0.2.0` mainline work currently includes:
+
+### Added
+
+- tmux-backed local and SSH session launches as the default Holy session substrate
+- Holy automation entrypoints via `holy-ghostty://spawn`, AppleScript `spawn`, and `scripts/holy-spawn-session.sh`
+- persistent remote host registry with schema migration `6`
+- host import from `~/.ssh/config` and Tailscale
+- remote tmux discovery and attach inside the `Remote Hosts` sheet
+
+### Changed
+
+- remote Holy sessions now enrich inspector/git state over SSH instead of staying local-only
+- public README and Holy docs now describe the current tmux/remote product shape instead of the older v0.2-only surface
 
 ## 0.2.0 (2026-04-18)
 

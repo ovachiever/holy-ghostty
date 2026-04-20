@@ -51,6 +51,9 @@ struct HolyWorkspaceRootView: View {
         .sheet(isPresented: $store.tasksPresented) {
             HolyTaskInboxSheet(store: store)
         }
+        .sheet(isPresented: $store.remoteHostsPresented) {
+            HolyRemoteHostsSheet(store: store)
+        }
         .onAppear(perform: focusSelectedSession)
         .onChange(of: store.selectedSessionID) { _ in focusSelectedSession() }
     }
@@ -101,6 +104,13 @@ struct HolyWorkspaceRootView: View {
             .buttonStyle(HolyGhosttyActionButtonStyle())
             .keyboardShortcut("t", modifiers: [.command, .shift])
 
+            Button { store.presentRemoteHosts() } label: {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .buttonStyle(HolyGhosttyActionButtonStyle())
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) {
                     toggleDisplayMode(.grid)
@@ -150,6 +160,10 @@ struct HolyWorkspaceRootView: View {
 
                 Button { store.presentTasks() } label: {
                     Label("Task Inbox", systemImage: "checklist")
+                }
+
+                Button { store.presentRemoteHosts() } label: {
+                    Label("Remote Hosts", systemImage: "server.rack")
                 }
 
                 Button { store.presentHistory() } label: {

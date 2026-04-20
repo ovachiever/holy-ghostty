@@ -1,8 +1,8 @@
 # Holy Ghostty Roadmap
 
-Last updated: 2026-04-18
+Last updated: 2026-04-19
 
-This roadmap starts from the released `v0.1` state and carries Holy Ghostty to the point where the remaining missing systems are complete and the product can be honestly described as production-ready.
+This roadmap starts from the released `v0.1` state, incorporates the shipped `v0.2.0` foundation release plus the current mainline tmux/remote work, and carries Holy Ghostty to the point where the remaining missing systems are complete and the product can be honestly described as production-ready.
 
 This is a product roadmap, not just a feature backlog. It is sequenced by dependency, operator value, and architectural leverage.
 
@@ -49,6 +49,15 @@ What v0.2 shipped:
 - worktree recovery evaluation and orphan cleanup
 - `agent-sessions` compatibility views
 
+What the current mainline adds after `v0.2.0`:
+
+- tmux-backed local and SSH session launches as the default substrate
+- Holy automation entrypoints via URL scheme, shell helper, and AppleScript `spawn`
+- remote host registry and persistence
+- host import from `~/.ssh/config` and Tailscale
+- remote tmux discovery and attach
+- remote git enrichment for SSH-backed Holy sessions
+
 ## v0.2: Foundation Release (shipped)
 
 All v0.2 deliverables were shipped, along with significant work from v0.3, v0.4, and v0.5.
@@ -87,6 +96,7 @@ Remaining v0.5 work:
 - post-completion triggers
 - broadcast input across sessions
 - relaunch from archived context into a new work item flow
+- richer remote orchestration policy beyond host registry and tmux discovery
 
 ## v1.0: Production-Ready Release
 
@@ -168,4 +178,4 @@ The original release train was:
 4. `v0.5` integrations: task-system integration and orchestration hooks (task inbox shipped in v0.2)
 5. `v1.0` production-ready: hardening, reliability, and honest completeness
 
-v0.2 delivered substantially ahead of the original plan. The remaining work concentrates on depth (deeper telemetry bridge, automation hooks, production hardening) rather than breadth.
+v0.2 delivered substantially ahead of the original plan, and the current mainline has already extended the product into a tmux-backed local/remote control plane. The remaining work concentrates on depth: deeper telemetry truth, stronger orchestration, task status writeback, and production hardening.
