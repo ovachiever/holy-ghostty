@@ -16,11 +16,18 @@ enum HolyTmuxCommandBuilder {
 
     static func surfaceConfiguration(for launchSpec: HolySessionLaunchSpec) -> Ghostty.SurfaceConfiguration {
         let realizedLaunchSpec = realizedLaunchSpec(launchSpec)
+        let launchCommand = command(for: realizedLaunchSpec)
+        let hasTmuxSubstrate = realizedLaunchSpec.tmux?.normalized.sessionName?.holyTrimmed.nilIfEmpty != nil
 
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = realizedLaunchSpec.transport.isRemote ? nil : realizedLaunchSpec.workingDirectory
-        config.command = command(for: realizedLaunchSpec)
-        config.initialInput = realizedLaunchSpec.initialInput
+        config.command = hasTmuxSubstrate ? nil : launchCommand
+        config.initialInput = hasTmuxSubstrate
+            ? combinedInitialInput(
+                primaryCommand: launchCommand,
+                trailingInput: realizedLaunchSpec.initialInput
+            )
+            : realizedLaunchSpec.initialInput
         config.waitAfterCommand = false
         config.environmentVariables = realizedLaunchSpec.environment
         return config
@@ -99,6 +106,25 @@ enum HolyTmuxCommandBuilder {
         }
 
         return "sh -lc \(posixQuote(shellScript))"
+    }
+
+    private static func combinedInitialInput(
+        primaryCommand: String?,
+        trailingInput: String?
+    ) -> String? {
+        let trimmedCommand = primaryCommand?.holyTrimmed.nilIfEmpty
+        let trimmedTrailingInput = trailingInput?.nilIfEmpty
+
+        switch (trimmedCommand, trimmedTrailingInput) {
+        case let (command?, trailingInput?):
+            return "\(command)\n\(trailingInput)"
+        case let (command?, nil):
+            return "\(command)\n"
+        case let (nil, trailingInput?):
+            return trailingInput
+        case (nil, nil):
+            return nil
+        }
     }
 
     private static func tmuxPrefixArguments(for tmux: HolySessionTmuxSpec) -> [String] {
