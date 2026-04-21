@@ -11,9 +11,9 @@ struct HolyRemoteHostRecord: Codable, Equatable, Identifiable {
 
     init(
         id: UUID = UUID(),
-        label: String = "Remote Host",
+        label: String = "Machine",
         sshDestination: String = "",
-        tmuxSocketName: String? = HolySessionTmuxSpec.defaultSocketName,
+        tmuxSocketName: String? = nil,
         createdAt: Date = .now,
         updatedAt: Date = .now,
         lastDiscoveredAt: Date? = nil
@@ -39,14 +39,14 @@ struct HolyRemoteHostRecord: Codable, Equatable, Identifiable {
 
     var tmuxSummary: String {
         let socketName = tmuxSocketName?.holyTrimmed.nilIfEmpty
-        return socketName.map { "tmux -L \($0)" } ?? "Default tmux server"
+        return socketName.map { "tmux -L \($0)" } ?? "Automatic: default tmux, then holy"
     }
 
     func normalized() -> HolyRemoteHostRecord {
         let normalizedDestination = sshDestination.holyTrimmed.nilIfEmpty ?? ""
         let normalizedLabel = label.holyTrimmed.nilIfEmpty
             ?? normalizedDestination.nilIfEmpty
-            ?? "Remote Host"
+            ?? "Machine"
 
         return .init(
             id: id,
@@ -138,6 +138,14 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
         }
 
         return segments.joined(separator: " · ")
+    }
+
+    var tmuxServerSummary: String {
+        if let tmuxSocketName = tmuxSocketName?.holyTrimmed.nilIfEmpty {
+            return "tmux -L \(tmuxSocketName)"
+        }
+
+        return "Default tmux server"
     }
 }
 

@@ -10,53 +10,51 @@ actor HolyRemoteTmuxDiscoveryService {
     )
 
     func discoverSessions(for host: HolyRemoteHostRecord) -> [HolyDiscoveredTmuxSession] {
-        let normalizedHost = host.normalized()
-        guard !normalizedHost.sshDestination.isEmpty else { return [] }
-
-        guard let result = runDiscovery(for: normalizedHost),
-              result.exitCode == 0 else {
+        do {
+            return try discoverSessionsThrowing(for: host)
+        } catch {
             return []
         }
-
-        if !result.stderr.holyTrimmed.isEmpty {
-            logger.notice("Remote discovery stderr for \(normalizedHost.sshDestination, privacy: .public): \(result.stderr, privacy: .public)")
-        }
-
-        let discoveredAt = Date.now
-        return parseSessions(
-            output: result.stdout,
-            host: normalizedHost,
-            discoveredAt: discoveredAt
-        )
     }
 
     func discoverSessionsThrowing(for host: HolyRemoteHostRecord) throws -> [HolyDiscoveredTmuxSession] {
         let normalizedHost = host.normalized()
         guard !normalizedHost.sshDestination.isEmpty else { return [] }
 
-        guard let result = runDiscovery(for: normalizedHost) else {
-            throw CocoaError(.executableNotLoadable)
-        }
+        for probeTarget in probeTargets(for: normalizedHost) {
+            guard let result = runDiscovery(for: normalizedHost, socketName: probeTarget.socketName) else {
+                throw CocoaError(.executableNotLoadable)
+            }
 
-        guard result.exitCode == 0 else {
-            throw NSError(
-                domain: "HolyRemoteTmuxDiscovery",
-                code: Int(result.exitCode),
-                userInfo: [
-                    NSLocalizedDescriptionKey: result.stderr.holyTrimmed.nilIfEmpty
-                        ?? "Failed to discover tmux sessions on \(normalizedHost.displayTitle).",
-                ]
+            guard result.exitCode == 0 else {
+                throw friendlyDiscoveryError(for: normalizedHost, result: result)
+            }
+
+            if !result.stderr.holyTrimmed.isEmpty {
+                logger.notice(
+                    "Remote discovery stderr for \(normalizedHost.sshDestination, privacy: .public): \(result.stderr, privacy: .public)"
+                )
+            }
+
+            let sessions = parseSessions(
+                output: result.stdout,
+                host: normalizedHost,
+                tmuxSocketName: probeTarget.socketName,
+                discoveredAt: .now
             )
+
+            if !sessions.isEmpty || probeTarget.isExplicit {
+                return sessions
+            }
         }
 
-        return parseSessions(
-            output: result.stdout,
-            host: normalizedHost,
-            discoveredAt: .now
-        )
+        return []
     }
 
-    private func runDiscovery(for host: HolyRemoteHostRecord) -> HolyRemoteCommandResult? {
+    private func runDiscovery(
+        for host: HolyRemoteHostRecord,
+        socketName: String?
+    ) -> HolyRemoteCommandResult? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         process.arguments = [
@@ -71,7 +69,7 @@ actor HolyRemoteTmuxDiscoveryService {
             host.sshDestination,
             "zsh",
             "-lc",
-            remoteDiscoveryScript(socketName: host.tmuxSocketName)
+            remoteDiscoveryScript(socketName: socketName)
         ]
 
         let stdout = Pipe()
@@ -100,6 +98,7 @@ actor HolyRemoteTmuxDiscoveryService {
     private func parseSessions(
         output: String,
         host: HolyRemoteHostRecord,
+        tmuxSocketName: String?,
         discoveredAt: Date
     ) -> [HolyDiscoveredTmuxSession] {
         output
@@ -115,7 +114,7 @@ actor HolyRemoteTmuxDiscoveryService {
                     hostID: host.id,
                     hostLabel: host.displayTitle,
                     hostDestination: host.sshDestination,
-                    tmuxSocketName: host.tmuxSocketName?.holyTrimmed.nilIfEmpty,
+                    tmuxSocketName: tmuxSocketName?.holyTrimmed.nilIfEmpty,
                     sessionName: fields[0],
                     title: fields[3].holyTrimmed.nilIfEmpty,
                     runtimeRawValue: fields[4].holyTrimmed.nilIfEmpty,
@@ -290,6 +289,46 @@ actor HolyRemoteTmuxDiscoveryService {
         let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
         return "'\(escaped)'"
     }
+
+    private func probeTargets(for host: HolyRemoteHostRecord) -> [HolyRemoteProbeTarget] {
+        if let explicitSocketName = host.tmuxSocketName?.holyTrimmed.nilIfEmpty {
+            return [.init(socketName: explicitSocketName, isExplicit: true)]
+        }
+
+        return [
+            .init(socketName: nil, isExplicit: false),
+            .init(socketName: HolySessionTmuxSpec.defaultSocketName, isExplicit: false),
+        ]
+    }
+
+    private func friendlyDiscoveryError(
+        for host: HolyRemoteHostRecord,
+        result: HolyRemoteCommandResult
+    ) -> NSError {
+        let stderr = result.stderr.holyTrimmed
+        let description: String
+
+        if stderr.localizedCaseInsensitiveContains("host key verification failed") {
+            description = "SSH trust failed for \(host.sshDestination). Run `ssh \(host.sshDestination)` in Terminal once and accept or refresh the host key."
+        } else if stderr.localizedCaseInsensitiveContains("could not resolve hostname") {
+            description = "Holy couldn't resolve \(host.sshDestination). Use a working SSH alias or reachable host name."
+        } else if stderr.localizedCaseInsensitiveContains("permission denied") {
+            description = "SSH login failed for \(host.sshDestination). Verify your SSH key or agent."
+        } else if stderr.localizedCaseInsensitiveContains("operation timed out")
+            || stderr.localizedCaseInsensitiveContains("connection timed out") {
+            description = "\(host.sshDestination) timed out. Check VPN/Tailscale reachability or choose another address."
+        } else if let stderr = stderr.nilIfEmpty {
+            description = stderr
+        } else {
+            description = "Failed to inspect tmux sessions on \(host.displayTitle)."
+        }
+
+        return NSError(
+            domain: "HolyRemoteTmuxDiscovery",
+            code: Int(result.exitCode),
+            userInfo: [NSLocalizedDescriptionKey: description]
+        )
+    }
 }
 
 private extension HolyRemoteTmuxDiscoveryService {
@@ -326,6 +365,11 @@ private struct HolyRemoteCommandResult {
     let stdout: String
     let stderr: String
     let exitCode: Int32
+}
+
+private struct HolyRemoteProbeTarget {
+    let socketName: String?
+    let isExplicit: Bool
 }
 
 private extension String {

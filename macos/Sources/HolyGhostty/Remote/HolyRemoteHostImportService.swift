@@ -41,7 +41,7 @@ actor HolyRemoteHostImportService {
                 HolyRemoteHostRecord(
                     label: $0,
                     sshDestination: $0,
-                    tmuxSocketName: HolySessionTmuxSpec.defaultSocketName
+                    tmuxSocketName: nil
                 )
             }
     }
@@ -90,7 +90,7 @@ actor HolyRemoteHostImportService {
                     return HolyRemoteHostRecord(
                         label: peer.displayLabel,
                         sshDestination: destination,
-                        tmuxSocketName: HolySessionTmuxSpec.defaultSocketName
+                        tmuxSocketName: nil
                     )
                 }
                 .sorted {

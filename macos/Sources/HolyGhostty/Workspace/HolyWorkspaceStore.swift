@@ -341,11 +341,12 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func upsertRemoteHost(_ host: HolyRemoteHostRecord) {
+        let normalized = host.normalized()
         let normalizedHost = HolyRemoteHostRecord(
             id: host.id,
-            label: host.normalized().label,
-            sshDestination: host.normalized().sshDestination,
-            tmuxSocketName: host.normalized().tmuxSocketName,
+            label: normalized.label,
+            sshDestination: normalized.sshDestination,
+            tmuxSocketName: normalized.tmuxSocketName,
             createdAt: host.createdAt,
             updatedAt: .now,
             lastDiscoveredAt: host.lastDiscoveredAt
@@ -427,7 +428,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 sshDestination: host.sshDestination
             ),
             tmux: .init(
-                socketName: host.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
+                socketName: session.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
                 sessionName: session.sessionName,
                 createIfMissing: false
             ),
@@ -458,7 +459,7 @@ final class HolyWorkspaceStore: ObservableObject {
                     sshDestination: host.sshDestination
                 ),
                 tmux: .init(
-                    socketName: host.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
+                    socketName: session.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
                     sessionName: session.sessionName,
                     createIfMissing: false
                 ),
@@ -780,8 +781,14 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     private func loadRemoteHosts() {
-        remoteHosts = HolyRemoteHostRepository.load()
+        let loadedHosts = HolyRemoteHostRepository.load()
+        let migratedHosts = loadedHosts.map(migrateRemoteHostIfNeeded(_:))
+        remoteHosts = migratedHosts
         selectedRemoteHostID = selectedRemoteHost?.id ?? remoteHosts.first?.id
+
+        if migratedHosts != loadedHosts {
+            persistRemoteHosts()
+        }
     }
 
     private func persistTasks() {
@@ -794,7 +801,7 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private func mergeImportedRemoteHosts(_ importedHosts: [HolyRemoteHostRecord], sourceLabel: String) {
         guard !importedHosts.isEmpty else {
-            remoteHostImportMessage = "No \(sourceLabel.lowercased()) hosts found."
+            remoteHostImportMessage = "No machines found in \(sourceLabel.lowercased())."
             return
         }
 
@@ -825,11 +832,11 @@ final class HolyWorkspaceStore: ObservableObject {
         persistRemoteHosts()
 
         if addedHosts == 0 {
-            remoteHostImportMessage = "No new \(sourceLabel.lowercased()) hosts to import."
+            remoteHostImportMessage = "No new machines found in \(sourceLabel.lowercased())."
         } else if addedHosts == 1 {
-            remoteHostImportMessage = "Imported 1 host from \(sourceLabel)."
+            remoteHostImportMessage = "Added 1 machine from \(sourceLabel)."
         } else {
-            remoteHostImportMessage = "Imported \(addedHosts) hosts from \(sourceLabel)."
+            remoteHostImportMessage = "Added \(addedHosts) machines from \(sourceLabel)."
         }
     }
 
@@ -847,6 +854,17 @@ final class HolyWorkspaceStore: ObservableObject {
         )
 
         persistRemoteHosts()
+    }
+
+    private func migrateRemoteHostIfNeeded(_ host: HolyRemoteHostRecord) -> HolyRemoteHostRecord {
+        var normalizedHost = host.normalized()
+
+        if normalizedHost.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines) == HolySessionTmuxSpec.defaultSocketName {
+            normalizedHost.tmuxSocketName = nil
+            normalizedHost.updatedAt = .now
+        }
+
+        return normalizedHost
     }
 
     private func reconcileExternalTasks(persistIfChanged: Bool = true) {

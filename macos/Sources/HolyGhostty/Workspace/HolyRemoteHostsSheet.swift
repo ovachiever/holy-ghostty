@@ -45,28 +45,28 @@ struct HolyRemoteHostsSheet: View {
     private var header: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Text("Remote Hosts")
+                Text("Machines")
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundStyle(HolyGhosttyTheme.halo)
 
-                Text(hostCountText)
+                Text(machineCountText)
                     .font(.system(size: 11))
                     .foregroundStyle(HolyGhosttyTheme.textTertiary)
 
                 Spacer()
 
-                Button("Import SSH") { store.importRemoteHostsFromSSHConfig() }
-                    .buttonStyle(HolyGhosttyActionButtonStyle())
-
-                Button("Import Tailscale") { store.importRemoteHostsFromTailscale() }
-                    .buttonStyle(HolyGhosttyActionButtonStyle())
+                Menu("Discover") {
+                    Button("From SSH Config") { store.importRemoteHostsFromSSHConfig() }
+                    Button("From Tailscale") { store.importRemoteHostsFromTailscale() }
+                }
+                .buttonStyle(HolyGhosttyActionButtonStyle())
 
                 if let selectedHost {
                     Button("Refresh") { store.refreshRemoteSessions(for: selectedHost) }
                         .buttonStyle(HolyGhosttyActionButtonStyle())
                 }
 
-                Button("New Host") { store.createRemoteHost() }
+                Button("Add Machine") { store.createRemoteHost() }
                     .buttonStyle(HolyGhosttyActionButtonStyle())
 
                 Button("Done") { store.remoteHostsPresented = false }
@@ -94,8 +94,8 @@ struct HolyRemoteHostsSheet: View {
         Group {
             if store.remoteHosts.isEmpty {
                 HolyGhosttyEmptyStateView(
-                    title: "No remote hosts yet",
-                    subtitle: "Add an SSH target and Holy Ghostty will discover tmux sessions on that host.",
+                    title: "No machines yet",
+                    subtitle: "Add or discover a machine and Holy Ghostty will inspect its tmux sessions over SSH.",
                     symbol: "server.rack"
                 )
                 .frame(maxHeight: .infinity)
@@ -108,6 +108,7 @@ struct HolyRemoteHostsSheet: View {
                                 isSelected: host.id == store.selectedRemoteHostID,
                                 isBusy: store.isRemoteDiscoveryBusy(for: host),
                                 sessionCount: store.remoteSessions(for: host).count,
+                                discoveryError: store.remoteDiscoveryError(for: host),
                                 onSelect: { store.selectedRemoteHostID = host.id }
                             )
                         }
@@ -145,8 +146,8 @@ struct HolyRemoteHostsSheet: View {
                 .scrollIndicators(.hidden)
             } else {
                 HolyGhosttyEmptyStateView(
-                    title: "No host selected",
-                    subtitle: "Choose a saved host to inspect its tmux sessions.",
+                    title: "No machine selected",
+                    subtitle: "Choose a saved machine to inspect its tmux sessions.",
                     symbol: "server.rack"
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -188,9 +189,9 @@ struct HolyRemoteHostsSheet: View {
 
     private func statusSection(for host: HolyRemoteHostRecord) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionLabel("Host")
+            sectionLabel("Machine")
             detailRow("SSH", host.subtitle)
-            detailRow("Tmux", host.tmuxSummary)
+            detailRow("Probe", host.tmuxSummary)
             detailRow("Last Seen", host.lastDiscoveredAt.map(Self.timestampString(from:)) ?? "Never")
 
             if let error = store.remoteDiscoveryError(for: host) {
@@ -198,8 +199,7 @@ struct HolyRemoteHostsSheet: View {
             } else if store.isRemoteDiscoveryBusy(for: host) {
                 detailRow("Discovery", "Refreshing…", color: HolyGhosttyTheme.halo)
             } else {
-                let sessions = store.remoteSessions(for: host)
-                let summary = sessions.isEmpty ? "No sessions discovered" : "\(sessions.count) sessions discovered"
+                let summary = discoverySummary(for: host)
                 detailRow("Discovery", summary)
             }
         }
@@ -211,11 +211,19 @@ struct HolyRemoteHostsSheet: View {
 
             labeledField("Label", text: editorBinding(\.label), placeholder: "studio")
             labeledField("SSH Destination", text: editorBinding(\.sshDestination), placeholder: "studio")
-            labeledField("Tmux Socket", text: editorOptionalBinding(\.tmuxSocketName), placeholder: HolySessionTmuxSpec.defaultSocketName)
 
-            Text("Leave the socket blank to use the default tmux server on the remote host.")
-                .font(.system(size: 11))
-                .foregroundStyle(HolyGhosttyTheme.textTertiary)
+            DisclosureGroup("Advanced") {
+                VStack(alignment: .leading, spacing: 8) {
+                    labeledField("Tmux Socket Override", text: editorOptionalBinding(\.tmuxSocketName), placeholder: "holy")
+
+                    Text("Leave this blank unless you need a specific tmux socket. Holy will check the default tmux server first, then the holy socket.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                }
+                .padding(.top, 4)
+            }
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(HolyGhosttyTheme.textSecondary)
         }
         .padding(12)
         .background(
@@ -234,10 +242,17 @@ struct HolyRemoteHostsSheet: View {
                     .tint(HolyGhosttyTheme.halo)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 10)
+            } else if let discoveryError = store.remoteDiscoveryError(for: host) {
+                HolyGhosttyEmptyStateView(
+                    title: "Can’t inspect this machine",
+                    subtitle: discoveryError,
+                    symbol: "exclamationmark.triangle"
+                )
+                .frame(maxWidth: .infinity)
             } else if store.remoteSessions(for: host).isEmpty {
                 HolyGhosttyEmptyStateView(
                     title: "No tmux sessions found",
-                    subtitle: "Refresh this host after starting tmux sessions remotely.",
+                    subtitle: emptyDiscoverySubtitle(for: host),
                     symbol: "rectangle.stack.badge.plus"
                 )
                 .frame(maxWidth: .infinity)
@@ -347,9 +362,30 @@ struct HolyRemoteHostsSheet: View {
         store.selectedRemoteHost
     }
 
-    private var hostCountText: String {
+    private var machineCountText: String {
         let count = store.remoteHosts.count
-        return count == 1 ? "1 host" : "\(count) hosts"
+        return count == 1 ? "1 machine" : "\(count) machines"
+    }
+
+    private func discoverySummary(for host: HolyRemoteHostRecord) -> String {
+        let sessions = store.remoteSessions(for: host)
+        if sessions.isEmpty {
+            return emptyDiscoverySubtitle(for: host)
+        }
+
+        return sessions.count == 1 ? "1 tmux session discovered" : "\(sessions.count) tmux sessions discovered"
+    }
+
+    private func emptyDiscoverySubtitle(for host: HolyRemoteHostRecord) -> String {
+        let explicitSocketName = host.tmuxSocketName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank
+
+        if explicitSocketName == nil {
+            return "No tmux sessions found on the default tmux server or the holy socket."
+        }
+
+        return "No tmux sessions found on \(host.tmuxSummary.lowercased())."
     }
 
     private static func timestampString(from date: Date) -> String {
@@ -365,6 +401,7 @@ private struct HolyRemoteHostRow: View {
     let isSelected: Bool
     let isBusy: Bool
     let sessionCount: Int
+    let discoveryError: String?
     let onSelect: () -> Void
 
     var body: some View {
@@ -381,9 +418,9 @@ private struct HolyRemoteHostRow: View {
                         .foregroundStyle(HolyGhosttyTheme.textSecondary)
                         .lineLimit(1)
 
-                    Text(host.tmuxSummary)
+                    Text(statusText)
                         .font(.system(size: 10))
-                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                        .foregroundStyle(statusColor)
                         .lineLimit(1)
                 }
 
@@ -415,6 +452,20 @@ private struct HolyRemoteHostRow: View {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .stroke(isSelected ? HolyGhosttyTheme.halo.opacity(0.4) : HolyGhosttyTheme.border, lineWidth: 0.8)
             )
+    }
+
+    private var statusText: String {
+        if let discoveryError = discoveryError?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank {
+            return discoveryError
+        }
+
+        return host.tmuxSummary
+    }
+
+    private var statusColor: Color {
+        discoveryError == nil ? HolyGhosttyTheme.textTertiary : HolyGhosttyTheme.danger
     }
 }
 
@@ -450,6 +501,11 @@ private struct HolyDiscoveredRemoteSessionRow: View {
                     .lineLimit(2)
 
                 Text(session.statusSummary)
+                    .font(.system(size: 10))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                    .lineLimit(1)
+
+                Text(session.tmuxServerSummary)
                     .font(.system(size: 10))
                     .foregroundStyle(HolyGhosttyTheme.textTertiary)
                     .lineLimit(1)
