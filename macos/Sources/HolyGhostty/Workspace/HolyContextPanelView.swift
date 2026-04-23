@@ -15,8 +15,8 @@ struct HolyContextPanelView: View {
                         timelineSection(session)
                         coordinationSection(session)
                         gitSection(session)
-                        outputSection(session)
                         launchSection(session)
+                        emptyRailFallback(session)
                     }
                     .padding(12)
                 }
@@ -34,30 +34,31 @@ struct HolyContextPanelView: View {
 
     // MARK: - Mission
 
+    @ViewBuilder
     private func missionSection(_ session: HolySession) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            sectionLabel("Mission")
+        if let task = session.record.launchSpec.task {
+            VStack(alignment: .leading, spacing: 6) {
+                sectionLabel("Mission")
 
-            Text(session.missionDisplay)
-                .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(HolyGhosttyTheme.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
+                Text(session.missionDisplay)
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(HolyGhosttyTheme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
 
-            if let task = session.record.launchSpec.task {
                 contextRow("Task", "\(task.sourceSummary) · \(task.title)")
-            }
 
-            if !session.signals.isEmpty, let signal = session.signals.first {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(signalColor(signal.kind))
-                        .frame(width: 5, height: 5)
-                    Text(signal.headline)
-                        .font(.system(size: 11))
-                        .foregroundStyle(signalColor(signal.kind))
-                        .lineLimit(2)
+                if !session.signals.isEmpty, let signal = session.signals.first {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(signalColor(signal.kind))
+                            .frame(width: 5, height: 5)
+                        Text(signal.headline)
+                            .font(.system(size: 11))
+                            .foregroundStyle(signalColor(signal.kind))
+                            .lineLimit(2)
+                    }
+                    .padding(.top, 2)
                 }
-                .padding(.top, 2)
             }
         }
     }
@@ -133,44 +134,47 @@ struct HolyContextPanelView: View {
         }
     }
 
+    @ViewBuilder
     private func budgetSection(_ session: HolySession) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            sectionLabel("Budget")
+        if session.budget.isConfigured || session.budgetTelemetry.hasUsage {
+            VStack(alignment: .leading, spacing: 6) {
+                sectionLabel("Budget")
 
-            contextRow("Status", session.budgetStatus.displayName)
-            contextRow("Usage", session.budgetSummaryText)
-            contextRow("Remaining", session.budgetRemainingText)
+                contextRow("Status", session.budgetStatus.displayName)
+                contextRow("Usage", session.budgetSummaryText)
+                contextRow("Remaining", session.budgetRemainingText)
 
-            if session.budgetTelemetry.hasUsage {
-                contextRow("Burn Rate", session.budgetBurnRateText)
+                if session.budgetTelemetry.hasUsage {
+                    contextRow("Burn Rate", session.budgetBurnRateText)
 
-                if let evidence = session.budgetTelemetry.evidence, !evidence.isEmpty {
-                    Text(evidence)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                        .lineLimit(3)
-                        .padding(.top, 2)
+                    if let evidence = session.budgetTelemetry.evidence, !evidence.isEmpty {
+                        Text(evidence)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                            .lineLimit(3)
+                            .padding(.top, 2)
+                    }
+                }
+
+                if session.budget.isConfigured {
+                    HolyBudgetIntelligenceSection(
+                        sessionID: session.id,
+                        runtime: session.runtime,
+                        budget: session.budget,
+                        refreshID: budgetRefreshID(for: session)
+                    )
                 }
             }
-
-            if session.budget.isConfigured {
-                HolyBudgetIntelligenceSection(
-                    sessionID: session.id,
-                    runtime: session.runtime,
-                    budget: session.budget,
-                    refreshID: budgetRefreshID(for: session)
-                )
-            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(budgetTint(for: session).opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(budgetTint(for: session).opacity(0.15), lineWidth: 0.5)
+            )
         }
-        .padding(8)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(budgetTint(for: session).opacity(0.06))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-            .stroke(budgetTint(for: session).opacity(0.15), lineWidth: 0.5)
-        )
     }
 
     private func timelineSection(_ session: HolySession) -> some View {
@@ -272,60 +276,65 @@ struct HolyContextPanelView: View {
         }
     }
 
-    // MARK: - Output Preview
+    // MARK: - Launch metadata (collapsed into Details)
 
-    @ViewBuilder
-    private func outputSection(_ session: HolySession) -> some View {
-        if !session.preview.isEmpty {
+    private func launchSection(_ session: HolySession) -> some View {
+        DisclosureGroup {
             VStack(alignment: .leading, spacing: 6) {
-                sectionLabel("Output")
+                contextRow("Runtime", session.displayRuntime.displayName)
+                contextRow("Owner", session.ownership.label)
+                contextRow("Transport", session.record.launchSpec.transport.summaryText)
+                contextRow("Directory", session.workingDirectory ?? "Unassigned")
 
-                Text(session.preview)
-                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                    .lineLimit(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-                    .padding(8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(HolyGhosttyTheme.bg)
-                    )
+                if session.record.launchSpec.transport.isRemote {
+                    contextRow("Host", session.record.launchSpec.transport.destinationDisplayName)
+                }
+
+                if let tmux = session.record.launchSpec.tmux {
+                    contextRow("Tmux", "\(tmux.serverLabel) · \(tmux.sessionDisplayName)")
+                }
+
+                if let task = session.record.launchSpec.task {
+                    contextRow("Task Source", task.sourceSummary)
+                }
+
+                if let command = session.record.launchSpec.command {
+                    contextRow("Command", command)
+                }
+
+                if session.commandTelemetry.runCount > 0 {
+                    contextRow("Runs", "\(session.commandTelemetry.runCount) (\(session.commandTelemetry.successCount) ok, \(session.commandTelemetry.failureCount) fail)")
+                }
             }
+            .padding(.top, 6)
+        } label: {
+            sectionLabel("Details")
         }
     }
 
-    // MARK: - Launch metadata (collapsed)
+    // MARK: - Empty-rail fallback
 
-    private func launchSection(_ session: HolySession) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            sectionLabel("Launch")
-
-            contextRow("Runtime", session.displayRuntime.displayName)
-            contextRow("Owner", session.ownership.label)
-            contextRow("Transport", session.record.launchSpec.transport.summaryText)
-            contextRow("Directory", session.workingDirectory ?? "Unassigned")
-
-            if session.record.launchSpec.transport.isRemote {
-                contextRow("Host", session.record.launchSpec.transport.destinationDisplayName)
-            }
-
-            if let tmux = session.record.launchSpec.tmux {
-                contextRow("Tmux", "\(tmux.serverLabel) · \(tmux.sessionDisplayName)")
-            }
-
-            if let task = session.record.launchSpec.task {
-                contextRow("Task Source", task.sourceSummary)
-            }
-
-            if let command = session.record.launchSpec.command {
-                contextRow("Command", command)
-            }
-
-            if session.commandTelemetry.runCount > 0 {
-                contextRow("Runs", "\(session.commandTelemetry.runCount) (\(session.commandTelemetry.successCount) ok, \(session.commandTelemetry.failureCount) fail)")
-            }
+    @ViewBuilder
+    private func emptyRailFallback(_ session: HolySession) -> some View {
+        if shouldShowEmptyFallback(session) {
+            Text("No external context yet.")
+                .font(.system(size: 11))
+                .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
         }
+    }
+
+    private func shouldShowEmptyFallback(_ session: HolySession) -> Bool {
+        let hasMission = session.record.launchSpec.task != nil
+        let hasRuntime = session.runtimeTelemetry.isMeaningful
+        let hasBudget = session.budget.isConfigured || session.budgetTelemetry.hasUsage
+        let hasCoordination = coordination.hasBlockingConflict
+            || coordination.hasSharedBranch
+            || session.hasBranchOwnershipDrift
+            || !coordination.overlappingFiles.isEmpty
+        let hasGit = session.gitSnapshot != nil
+        return !(hasMission || hasRuntime || hasBudget || hasCoordination || hasGit)
     }
 
     // MARK: - Primitives
