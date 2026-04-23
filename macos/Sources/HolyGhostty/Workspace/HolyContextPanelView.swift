@@ -228,45 +228,54 @@ struct HolyContextPanelView: View {
         }
     }
 
-    // MARK: - Git
+    // MARK: - Risk
 
     @ViewBuilder
     private func gitSection(_ session: HolySession) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionLabel("Repository")
+            sectionLabel("Risk")
 
             if let git = session.gitSnapshot {
                 contextRow("Branch", git.branchDisplayName)
-                contextRow("Changes", git.changeSummaryText)
 
                 if git.syncStatusText != "Up to date" {
                     contextRow("Sync", git.syncStatusText)
                 }
 
-                if !git.changedFiles.isEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(git.changedFiles.prefix(8).enumerated()), id: \.offset) { _, change in
-                            HStack(spacing: 6) {
-                                Text(change.category.displayName)
-                                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(fileColor(change.category))
-                                    .frame(width: 20, alignment: .leading)
+                if git.changedFiles.isEmpty {
+                    Text("No uncommitted changes.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                } else {
+                    Text(Self.riskSummary(for: git.changedFiles))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(HolyGhosttyTheme.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
 
-                                Text(change.path)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(Array(git.changedFiles.enumerated()), id: \.offset) { _, change in
+                                HStack(spacing: 6) {
+                                    Text(change.category.displayName)
+                                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(fileColor(change.category))
+                                        .frame(width: 20, alignment: .leading)
+
+                                    Text(change.path)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
                             }
                         }
-
-                        if git.changedFiles.count > 8 {
-                            Text("+\(git.changedFiles.count - 8) more")
-                                .font(.system(size: 10))
-                                .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                        }
+                        .padding(.top, 6)
+                    } label: {
+                        Text("Files (\(git.changedFiles.count))")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(HolyGhosttyTheme.textTertiary)
                     }
-                    .padding(.top, 2)
                 }
             } else {
                 Text("No repository detected")
@@ -274,6 +283,102 @@ struct HolyContextPanelView: View {
                     .foregroundStyle(HolyGhosttyTheme.textTertiary)
             }
         }
+    }
+
+    // MARK: - Risk classifier
+
+    private enum HolyRiskCategory: CaseIterable {
+        case project, deps, ci, scripts, config, tests, docs, source, other
+
+        var summaryNoun: String {
+            switch self {
+            case .project: return "project"
+            case .deps:    return "dependency"
+            case .ci:      return "CI"
+            case .scripts: return "script"
+            case .config:  return "config"
+            case .tests:   return "test"
+            case .docs:    return "doc"
+            case .source:  return "source"
+            case .other:   return "other"
+            }
+        }
+    }
+
+    private static let highSignalRiskOrder: [HolyRiskCategory] = [
+        .project, .deps, .ci, .scripts, .config
+    ]
+
+    private static func riskSummary(for files: [HolyGitFileChange]) -> String {
+        let count = files.count
+        let buckets = Dictionary(grouping: files, by: { riskCategory(for: $0.path) })
+            .mapValues { $0.count }
+
+        var parts: [String] = ["\(count) file\(count == 1 ? "" : "s") changed"]
+        for bucket in highSignalRiskOrder {
+            if let n = buckets[bucket], n > 0 {
+                parts.append("\(n) \(bucket.summaryNoun) file\(n == 1 ? "" : "s")")
+            }
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private static func riskCategory(for path: String) -> HolyRiskCategory {
+        let lower = path.lowercased()
+
+        if lower.contains(".xcodeproj/")
+            || lower.hasSuffix("project.pbxproj")
+            || lower.contains(".xcworkspace/")
+            || lower.hasSuffix("package.swift")
+            || lower.hasPrefix("build.zig")
+            || lower.hasSuffix("/build.zig")
+            || lower.hasSuffix("cmakelists.txt")
+            || lower == "makefile"
+            || lower.hasSuffix("/makefile") {
+            return .project
+        }
+
+        if lower.hasSuffix("package.resolved")
+            || lower.hasSuffix("cargo.toml") || lower.hasSuffix("cargo.lock")
+            || lower.hasSuffix("package.json") || lower.hasSuffix("package-lock.json")
+            || lower.hasSuffix("pnpm-lock.yaml") || lower.hasSuffix("yarn.lock")
+            || lower.hasSuffix("go.mod") || lower.hasSuffix("go.sum")
+            || lower.hasSuffix("pyproject.toml") || lower.hasSuffix("poetry.lock")
+            || lower.hasSuffix("gemfile") || lower.hasSuffix("gemfile.lock")
+            || (lower.contains("requirements") && lower.hasSuffix(".txt")) {
+            return .deps
+        }
+
+        if lower.hasPrefix(".github/workflows/")
+            || lower.hasPrefix(".circleci/")
+            || lower == ".gitlab-ci.yml" {
+            return .ci
+        }
+
+        if lower.hasPrefix("scripts/") || lower.hasSuffix(".sh") || lower.hasSuffix(".bash") {
+            return .scripts
+        }
+
+        if lower.contains("/tests/") || lower.contains("/test/")
+            || lower.contains("_test.") || lower.contains(".test.") {
+            return .tests
+        }
+
+        if lower.hasPrefix("docs/") || lower.hasSuffix(".md") || lower.hasSuffix(".mdx") || lower.hasSuffix(".rst") {
+            return .docs
+        }
+
+        if !lower.contains("/") && (lower.hasSuffix(".toml") || lower.hasSuffix(".yaml") || lower.hasSuffix(".yml") || lower.hasPrefix(".env")) {
+            return .config
+        }
+
+        let sourceExts = [".swift", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs",
+                          ".zig", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".m", ".mm",
+                          ".rb", ".java", ".kt", ".cs"]
+        if sourceExts.contains(where: { lower.hasSuffix($0) }) {
+            return .source
+        }
+        return .other
     }
 
     // MARK: - Launch metadata (collapsed into Details)
