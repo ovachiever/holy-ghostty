@@ -15,11 +15,20 @@ Post-`0.2.0` mainline work currently includes:
 - persistent remote host registry with schema migration `6`
 - host import from `~/.ssh/config` and Tailscale
 - remote tmux discovery and attach inside the `Remote Hosts` sheet
+- right-rail **Verification** section backed by OSC 133 command telemetry (last outcome, duration, elapsed since)
+- right-rail **Actions** row — Copy handoff, Copy diff, Duplicate, Archive
+- right-rail **Risk** summary — git changes bucketed by consequence (project / deps / CI / scripts / config / tests / docs / source), full file list behind a disclosure
+- external-peer intelligence in **Coordination** via `agent-do coord peers` subprocess probe
+- opinionated ASCII angel-ghost background watermark at 4% opacity, rendered by Ghostty's `background-image` config; extracted from an asset catalog data set into `~/Library/Application Support/Holy Ghostty/` on launch
 
 ### Changed
 
 - remote Holy sessions now enrich inspector/git state over SSH instead of staying local-only
 - public README and Holy docs now describe the current tmux/remote product shape instead of the older v0.2-only surface
+- right rail redesigned against a Prime Rule — only show what the terminal itself cannot. **Output** section removed (terminal is output); **Launch** collapsed into a `Details` disclosure; **Mission** gated behind a linked task; **Budget** gated behind configured budget or observed usage.
+- left-rail session rows split runtime and project into a two-line label with middle-truncation, replacing the old `Shell — Custom_Codi…` compound truncation
+- session action menu hides the `.borderlessButton` disclosure chevron for a clean ellipsis affordance
+- Holy defaults config (`background-image`, fit, position, opacity) loads before user config so `~/.config/ghostty/config` always wins on overrides
 
 ## 0.2.0 (2026-04-18)
 

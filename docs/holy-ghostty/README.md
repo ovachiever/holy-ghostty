@@ -1,6 +1,6 @@
 # Holy Ghostty
 
-Last updated: 2026-04-19
+Last updated: 2026-04-23
 
 Holy Ghostty is a macOS-native control surface for agentic coding sessions built on real Ghostty terminal surfaces. The app is terminal-first, but sessions are no longer disposable tabs. They are durable, tmux-backed work units with launch policy, budget state, task linkage, event history, and remote attach paths.
 
@@ -27,9 +27,9 @@ Holy Ghostty keeps Ghostty's terminal core and adds a macOS shell around it with
 
 The app opens into a mission-control shell:
 
-- Left rail: active sessions, sorted by urgency and recency
-- Center: the selected live Ghostty surface
-- Right rail: the operator inspector for telemetry, budget, git, coordination, timeline, and session context
+- Left rail: active sessions, sorted by urgency and recency. Each row stacks runtime on top with the project directory as a dim subtitle that middle-truncates on overflow.
+- Center: the selected live Ghostty surface. The Holy ASCII angel-ghost logo rides behind every surface as a 4% opacity watermark — an opinionated default baked into the app. Override via `~/.config/ghostty/config`.
+- Right rail: governed by a Prime Rule — only surface information the terminal itself cannot. The sections, top to bottom: **Mission** (linked task only), **Runtime** (active telemetry only), **Budget** (configured or with usage), **Timeline**, **Coordination** (internal collisions + external peers via `agent-do coord`), **Risk** (git state summarized by consequence — project / deps / CI / scripts / config — with the file list behind a disclosure), **Verification** (last command outcome from OSC 133 shell integration), **Actions** (Copy handoff · Copy diff · Duplicate · Archive), and a collapsed **Details** drawer for launch metadata.
 
 Auxiliary flows:
 

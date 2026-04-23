@@ -150,7 +150,7 @@ extension Ghostty {
             # Holy Ghostty opinionated defaults. Loaded before your user config,
             # so anything you set in ~/.config/ghostty/config overrides these.
             background-image = \(imageURL.path)
-            background-image-opacity = 0.10
+            background-image-opacity = 0.04
             background-image-fit = contain
             background-image-position = center
             background-image-repeat = false

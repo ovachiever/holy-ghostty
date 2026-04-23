@@ -48,9 +48,9 @@ Holy Ghostty is not a new terminal emulator core. It is a Ghostty-based operator
 
 Current product shape:
 
-- left rail for active sessions
-- center live Ghostty surface
-- right-side operational inspector with telemetry, budget analytics, event timeline, and coordination
+- left rail for active sessions, each row showing runtime on top and project directory as a dim middle-truncated subtitle
+- center live Ghostty surface with the ASCII angel-ghost logo riding behind at 4% opacity as an opinionated watermark (overridable via `~/.config/ghostty/config`)
+- right rail governed by a Prime Rule — only show what the terminal itself cannot: **Coordination** (collision intelligence plus external peers via `agent-do coord`), **Risk** (git state summarized by consequence — project / deps / CI / scripts / config — file list collapsed behind a disclosure), **Verification** (last command outcome from OSC 133 shell integration: exit code, duration, elapsed), **Actions** (Copy handoff · Copy diff · Duplicate · Archive), and a collapsed **Details** drawer for launch metadata
 - new-session composer with task linking and budget controls
 - searchable session history with recovery context and telemetry
 - task inbox for external work items
