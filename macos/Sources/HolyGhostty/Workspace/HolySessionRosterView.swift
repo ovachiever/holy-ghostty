@@ -110,6 +110,8 @@ private struct HolyRosterRow: View {
                         .foregroundStyle(HolyGhosttyTheme.textTertiary)
                 }
                 .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
                 .frame(width: 14, height: 14)
                 .opacity(isSelected ? 1 : 0.5)
             }
