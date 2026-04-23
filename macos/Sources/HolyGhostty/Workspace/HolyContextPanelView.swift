@@ -1,8 +1,13 @@
+import AppKit
 import SwiftUI
 
 struct HolyContextPanelView: View {
     let session: HolySession?
     let coordination: HolySessionCoordination
+    @ObservedObject var store: HolyWorkspaceStore
+
+    @State private var externalPeers: [HolyCoordPeer] = []
+    @State private var externalPeerError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -15,12 +20,16 @@ struct HolyContextPanelView: View {
                         timelineSection(session)
                         coordinationSection(session)
                         gitSection(session)
+                        verificationSection(session)
+                        actionsSection(session)
                         launchSection(session)
-                        emptyRailFallback(session)
                     }
                     .padding(12)
                 }
                 .scrollIndicators(.hidden)
+                .task(id: session.id) {
+                    await refreshExternalPeers()
+                }
             } else {
                 HolyGhosttyEmptyStateView(
                     title: "No context",
@@ -186,46 +195,64 @@ struct HolyContextPanelView: View {
 
     @ViewBuilder
     private func coordinationSection(_ session: HolySession) -> some View {
-        let hasIssues = coordination.hasBlockingConflict
+        let hasInternalIssues = coordination.hasBlockingConflict
             || coordination.hasSharedBranch
             || session.hasBranchOwnershipDrift
             || !coordination.overlappingFiles.isEmpty
+        let hasExternalPeers = !externalPeers.isEmpty
+        let hasIssues = hasInternalIssues || hasExternalPeers
 
         if hasIssues {
             VStack(alignment: .leading, spacing: 6) {
                 sectionLabel("Coordination")
 
-                Text(coordination.summary)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(coordination.hasBlockingConflict ? HolyGhosttyTheme.danger : HolyGhosttyTheme.warning)
+                if hasInternalIssues {
+                    Text(coordination.summary)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(coordination.hasBlockingConflict ? HolyGhosttyTheme.danger : HolyGhosttyTheme.warning)
 
-                if !coordination.sharedWorktreeSessionTitles.isEmpty {
-                    contextRow("Shared worktree", coordination.sharedWorktreeSessionTitles.joined(separator: ", "))
+                    if !coordination.sharedWorktreeSessionTitles.isEmpty {
+                        contextRow("Shared worktree", coordination.sharedWorktreeSessionTitles.joined(separator: ", "))
+                    }
+
+                    if !coordination.sharedBranchSessionTitles.isEmpty {
+                        contextRow("Shared branch", coordination.sharedBranchSessionTitles.joined(separator: ", "))
+                    }
+
+                    if !coordination.overlappingFiles.isEmpty {
+                        contextRow("Overlapping files", coordination.overlappingFiles.prefix(5).joined(separator: "\n"))
+                    }
                 }
 
-                if !coordination.sharedBranchSessionTitles.isEmpty {
-                    contextRow("Shared branch", coordination.sharedBranchSessionTitles.joined(separator: ", "))
-                }
-
-                if !coordination.overlappingFiles.isEmpty {
-                    contextRow("Overlapping files", coordination.overlappingFiles.prefix(5).joined(separator: "\n"))
+                if hasExternalPeers {
+                    if hasInternalIssues {
+                        Divider()
+                            .padding(.vertical, 2)
+                    }
+                    contextRow("Peers", externalPeers.map { $0.displayLabel }.joined(separator: ", "))
                 }
             }
             .padding(8)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(coordination.hasBlockingConflict
-                          ? HolyGhosttyTheme.danger.opacity(0.06)
-                          : HolyGhosttyTheme.warning.opacity(0.06))
+                    .fill(coordinationAccent(hasInternalIssues: hasInternalIssues).opacity(0.06))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(coordination.hasBlockingConflict
-                            ? HolyGhosttyTheme.danger.opacity(0.15)
-                            : HolyGhosttyTheme.warning.opacity(0.15),
+                    .stroke(coordinationAccent(hasInternalIssues: hasInternalIssues).opacity(0.15),
                             lineWidth: 0.5)
             )
         }
+    }
+
+    private func coordinationAccent(hasInternalIssues: Bool) -> Color {
+        if coordination.hasBlockingConflict {
+            return HolyGhosttyTheme.danger
+        }
+        if hasInternalIssues {
+            return HolyGhosttyTheme.warning
+        }
+        return HolyGhosttyTheme.accent
     }
 
     // MARK: - Risk
@@ -417,31 +444,6 @@ struct HolyContextPanelView: View {
         }
     }
 
-    // MARK: - Empty-rail fallback
-
-    @ViewBuilder
-    private func emptyRailFallback(_ session: HolySession) -> some View {
-        if shouldShowEmptyFallback(session) {
-            Text("No external context yet.")
-                .font(.system(size: 11))
-                .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 4)
-        }
-    }
-
-    private func shouldShowEmptyFallback(_ session: HolySession) -> Bool {
-        let hasMission = session.record.launchSpec.task != nil
-        let hasRuntime = session.runtimeTelemetry.isMeaningful
-        let hasBudget = session.budget.isConfigured || session.budgetTelemetry.hasUsage
-        let hasCoordination = coordination.hasBlockingConflict
-            || coordination.hasSharedBranch
-            || session.hasBranchOwnershipDrift
-            || !coordination.overlappingFiles.isEmpty
-        let hasGit = session.gitSnapshot != nil
-        return !(hasMission || hasRuntime || hasBudget || hasCoordination || hasGit)
-    }
-
     // MARK: - Primitives
 
     private func sectionLabel(_ text: String) -> some View {
@@ -523,4 +525,255 @@ struct HolyContextPanelView: View {
         let budgetUpdatedAt = session.budgetTelemetry.lastUpdatedAt?.timeIntervalSince1970 ?? 0
         return "\(session.id.uuidString)-\(session.activityAt.timeIntervalSince1970)-\(budgetUpdatedAt)-\(session.budgetStatus.rawValue)"
     }
+
+    // MARK: - Verification
+
+    @ViewBuilder
+    private func verificationSection(_ session: HolySession) -> some View {
+        let telemetry = session.commandTelemetry
+        if telemetry.runCount > 0 {
+            VStack(alignment: .leading, spacing: 6) {
+                sectionLabel("Verification")
+
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(verificationColor(for: telemetry))
+                        .frame(width: 6, height: 6)
+                    Text(telemetry.lastOutcomeText)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(verificationColor(for: telemetry))
+                }
+
+                if telemetry.lastDurationNanoseconds != nil {
+                    contextRow("Duration", telemetry.lastDurationText)
+                }
+
+                if let completedAt = telemetry.lastCompletedAt {
+                    contextRow("When", Self.relativeTimeText(for: completedAt))
+                }
+
+                contextRow("Runs", "\(telemetry.runCount) (\(telemetry.successCount) ok, \(telemetry.failureCount) fail)")
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(verificationColor(for: telemetry).opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(verificationColor(for: telemetry).opacity(0.15), lineWidth: 0.5)
+            )
+        }
+    }
+
+    private func verificationColor(for telemetry: HolySessionCommandTelemetry) -> Color {
+        guard let exitCode = telemetry.lastExitCode else {
+            return HolyGhosttyTheme.textTertiary
+        }
+        return exitCode == 0 ? HolyGhosttyTheme.success : HolyGhosttyTheme.danger
+    }
+
+    private static func relativeTimeText(for date: Date) -> String {
+        let seconds = Int(Date().timeIntervalSince(date))
+        if seconds < 5 { return "just now" }
+        if seconds < 60 { return "\(seconds)s ago" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h ago" }
+        let days = hours / 24
+        return "\(days)d ago"
+    }
+
+    // MARK: - Actions
+
+    @ViewBuilder
+    private func actionsSection(_ session: HolySession) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionLabel("Actions")
+
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)],
+                spacing: 6
+            ) {
+                actionButton("Copy handoff", systemImage: "doc.on.clipboard") {
+                    copyHandoff(for: session)
+                }
+                actionButton("Copy diff", systemImage: "square.on.square") {
+                    Task { await copyDiff(for: session) }
+                }
+                actionButton("Duplicate", systemImage: "plus.square.on.square") {
+                    store.duplicate(session)
+                }
+                actionButton("Archive", systemImage: "archivebox", role: .destructive) {
+                    store.archive(session)
+                }
+            }
+        }
+    }
+
+    private func actionButton(
+        _ title: String,
+        systemImage: String,
+        role: ButtonRole? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(role: role, action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 10, weight: .medium))
+                .labelStyle(.titleAndIcon)
+                .frame(maxWidth: .infinity)
+                .lineLimit(1)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+    }
+
+    private func copyHandoff(for session: HolySession) {
+        let lines: [String] = [
+            "Session: \(session.displayTitle)",
+            "Runtime: \(session.displayRuntime.displayName)",
+            "Phase: \(session.phase.rawValue)",
+            "Directory: \(session.workingDirectory ?? "—")",
+            session.gitSnapshot.map { "Branch: \($0.branchDisplayName)" } ?? "Branch: —",
+            session.gitSnapshot.map { "Changes: \(Self.riskSummary(for: $0.changedFiles))" } ?? "",
+            session.signals.first.map { "Signal: \($0.headline)" } ?? "",
+        ].filter { !$0.isEmpty }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(lines.joined(separator: "\n"), forType: .string)
+    }
+
+    private func copyDiff(for session: HolySession) async {
+        guard let directory = session.workingDirectory, !directory.isEmpty else { return }
+        let output = await Self.runSubprocess(
+            executable: "/usr/bin/git",
+            arguments: ["-C", directory, "diff", "--no-color"]
+        )
+        guard let text = output?.stdout, !text.isEmpty else { return }
+        await MainActor.run {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+        }
+    }
+
+    // MARK: - External peer probe (agent-do coord)
+
+    private func refreshExternalPeers() async {
+        let result = await Self.runSubprocess(
+            executable: "/usr/bin/env",
+            arguments: ["agent-do", "coord", "peers"],
+            timeoutSeconds: 3
+        )
+        guard let result, result.exitCode == 0 else {
+            await MainActor.run {
+                externalPeers = []
+                externalPeerError = result == nil ? "agent-do not available" : nil
+            }
+            return
+        }
+        let peers = HolyCoordPeer.parse(result.stdout)
+        await MainActor.run {
+            externalPeers = peers
+            externalPeerError = nil
+        }
+    }
+
+    fileprivate struct SubprocessOutput {
+        let stdout: String
+        let stderr: String
+        let exitCode: Int32
+    }
+
+    fileprivate static func runSubprocess(
+        executable: String,
+        arguments: [String],
+        timeoutSeconds: Double = 5
+    ) async -> SubprocessOutput? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = arguments
+
+                let stdoutPipe = Pipe()
+                let stderrPipe = Pipe()
+                process.standardOutput = stdoutPipe
+                process.standardError = stderrPipe
+
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let deadline = DispatchTime.now() + .milliseconds(Int(timeoutSeconds * 1000))
+                let group = DispatchGroup()
+                group.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    process.waitUntilExit()
+                    group.leave()
+                }
+                if group.wait(timeout: deadline) == .timedOut {
+                    process.terminate()
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                continuation.resume(returning: SubprocessOutput(
+                    stdout: stdout,
+                    stderr: stderr,
+                    exitCode: process.terminationStatus
+                ))
+            }
+        }
+    }
 }
+
+// MARK: - Coord peer model
+
+struct HolyCoordPeer: Identifiable, Equatable {
+    let id: String
+    let label: String
+    let detail: String?
+
+    var displayLabel: String {
+        if let detail, !detail.isEmpty {
+            return "\(label) · \(detail)"
+        }
+        return label
+    }
+
+    /// Parses `agent-do coord peers` text output. Format is not formally documented
+    /// across versions, so this is a tolerant line-wise parser: the first non-empty
+    /// token becomes the ID/label, the rest of the line becomes detail. Header or
+    /// empty-state lines that don't look like peer rows are skipped.
+    static func parse(_ text: String) -> [HolyCoordPeer] {
+        text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line -> HolyCoordPeer? in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty else { return nil }
+                let lower = trimmed.lowercased()
+                if lower.hasPrefix("no peers")
+                    || lower.hasPrefix("peers:")
+                    || lower.hasPrefix("#")
+                    || lower.hasPrefix("active peers")
+                    || lower.hasPrefix("---") {
+                    return nil
+                }
+                let parts = trimmed.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+                let head = String(parts[0])
+                let tail = parts.count > 1
+                    ? String(parts[1]).trimmingCharacters(in: .whitespaces)
+                    : nil
+                return HolyCoordPeer(id: head, label: head, detail: tail)
+            }
+    }
+}
+

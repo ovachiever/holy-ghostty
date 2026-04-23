@@ -227,7 +227,8 @@ struct HolyWorkspaceRootView: View {
 
                 HolyContextPanelView(
                     session: store.selectedSession,
-                    coordination: store.selectedSession.map(store.coordination(for:)) ?? .empty
+                    coordination: store.selectedSession.map(store.coordination(for:)) ?? .empty,
+                    store: store
                 )
                 .frame(minWidth: 220, idealWidth: 280, maxWidth: 360, maxHeight: .infinity)
                 .background(HolyGhosttyTheme.bgElevated)
