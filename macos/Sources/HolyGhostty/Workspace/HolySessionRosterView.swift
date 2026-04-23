@@ -85,15 +85,16 @@ private struct HolyRosterRow: View {
             } else {
                 VStack(alignment: .leading, spacing: 2) {
                     displayLine
-                        .lineLimit(1)
 
                     if needsAttentionLine {
                         Text(statusLine)
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(attentionColor)
                             .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             Spacer(minLength: 0)
@@ -127,23 +128,25 @@ private struct HolyRosterRow: View {
         .onTapGesture(perform: onSelect)
     }
 
-    // Single-line display: "Claude — Custom_Coding"
+    // Stacked display: runtime name on top, project name as dim subtitle.
+    // Middle-truncate the project so long paths keep both ends visible.
     private var displayLine: some View {
-        HStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 1) {
             Text(session.displayRuntime.displayName)
                 .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
                 .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
 
             if let project = session.displayProjectName {
-                Text("  —  ")
-                    .font(.system(size: 12, weight: .regular))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-
                 Text(project)
-                    .font(.system(size: 12, weight: isSelected ? .medium : .regular))
-                    .foregroundStyle(isSelected ? HolyGhosttyTheme.textPrimary : HolyGhosttyTheme.textSecondary)
+                    .font(.system(size: 10, weight: isSelected ? .medium : .regular))
+                    .foregroundStyle(isSelected ? HolyGhosttyTheme.textSecondary : HolyGhosttyTheme.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var needsAttentionLine: Bool {

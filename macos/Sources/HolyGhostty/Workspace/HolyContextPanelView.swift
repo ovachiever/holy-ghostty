@@ -592,10 +592,7 @@ struct HolyContextPanelView: View {
         VStack(alignment: .leading, spacing: 6) {
             sectionLabel("Actions")
 
-            LazyVGrid(
-                columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)],
-                spacing: 6
-            ) {
+            VStack(spacing: 4) {
                 actionButton("Copy handoff", systemImage: "doc.on.clipboard") {
                     copyHandoff(for: session)
                 }
@@ -619,11 +616,17 @@ struct HolyContextPanelView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(role: role, action: action) {
-            Label(title, systemImage: systemImage)
-                .font(.system(size: 10, weight: .medium))
-                .labelStyle(.titleAndIcon)
-                .frame(maxWidth: .infinity)
-                .lineLimit(1)
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(width: 14, alignment: .center)
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
