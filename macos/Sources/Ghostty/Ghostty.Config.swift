@@ -68,6 +68,12 @@ extension Ghostty {
             // We only do this on macOS because other Apple platforms do not have the
             // same filesystem concept.
 #if os(macOS)
+            // Holy defaults load BEFORE user config so the user's own config wins
+            // on any conflict. Silent on failure — never block startup for chrome.
+            if let holyDefaultsPath = materializeHolyDefaults() {
+                ghostty_config_load_file(cfg, holyDefaultsPath)
+            }
+
             if let path {
                 ghostty_config_load_file(cfg, path)
             } else {
@@ -109,6 +115,58 @@ extension Ghostty {
         }
 
 #if os(macOS)
+        // MARK: - Holy defaults
+
+        /// Writes the Holy-opinionated config (background watermark, etc.) into
+        /// Application Support and returns a path Ghostty can load. Silent on
+        /// failure — chrome never blocks startup.
+        private static func materializeHolyDefaults() -> String? {
+            let fm = FileManager.default
+            guard let supportRoot = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+                return nil
+            }
+            let holyDir = supportRoot.appendingPathComponent("Holy Ghostty", isDirectory: true)
+
+            do {
+                try fm.createDirectory(at: holyDir, withIntermediateDirectories: true)
+            } catch {
+                return nil
+            }
+
+            let imageURL = holyDir.appendingPathComponent("background.png")
+            if !fm.fileExists(atPath: imageURL.path) {
+                guard let asset = NSDataAsset(name: "HolyGhosttyLogoASCII") else {
+                    return nil
+                }
+                do {
+                    try asset.data.write(to: imageURL, options: .atomic)
+                } catch {
+                    return nil
+                }
+            }
+
+            let configURL = holyDir.appendingPathComponent("holy-defaults.config")
+            let body = """
+            # Holy Ghostty opinionated defaults. Loaded before your user config,
+            # so anything you set in ~/.config/ghostty/config overrides these.
+            background-image = \(imageURL.path)
+            background-image-opacity = 0.10
+            background-image-fit = contain
+            background-image-position = center
+            background-image-repeat = false
+            """
+
+            // Rewrite every launch so the image path always tracks the current
+            // Application Support location and version-bumped defaults propagate.
+            do {
+                try body.write(to: configURL, atomically: true, encoding: .utf8)
+            } catch {
+                return nil
+            }
+
+            return configURL.path
+        }
+
         // MARK: - Keybindings
 
         /// Return the key equivalent for the given action. The action is the name of the action
