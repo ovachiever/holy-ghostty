@@ -130,11 +130,11 @@ private struct HolyRosterRow: View {
     // Single-line display: "Claude — Custom_Coding"
     private var displayLine: some View {
         HStack(spacing: 0) {
-            Text(session.runtime.displayName)
+            Text(session.displayRuntime.displayName)
                 .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
                 .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
 
-            if let project = projectName {
+            if let project = session.displayProjectName {
                 Text("  —  ")
                     .font(.system(size: 12, weight: .regular))
                     .foregroundStyle(HolyGhosttyTheme.textTertiary)
@@ -144,16 +144,6 @@ private struct HolyRosterRow: View {
                     .foregroundStyle(isSelected ? HolyGhosttyTheme.textPrimary : HolyGhosttyTheme.textSecondary)
             }
         }
-    }
-
-    private var projectName: String? {
-        if let repo = session.gitSnapshot?.repositoryName {
-            return repo
-        }
-        if let dir = session.workingDirectory {
-            return URL(fileURLWithPath: dir).lastPathComponent
-        }
-        return nil
     }
 
     private var needsAttentionLine: Bool {

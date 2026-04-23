@@ -729,7 +729,7 @@ private struct HolySessionGridTile: View {
             HolyGhosttyStatusDot(color: tileTint)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.title)
+                Text(session.displayLineTitle)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(HolyGhosttyTheme.textPrimary)
                     .lineLimit(1)

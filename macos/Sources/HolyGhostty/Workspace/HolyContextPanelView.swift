@@ -301,7 +301,7 @@ struct HolyContextPanelView: View {
         VStack(alignment: .leading, spacing: 6) {
             sectionLabel("Launch")
 
-            contextRow("Runtime", session.runtime.displayName)
+            contextRow("Runtime", session.displayRuntime.displayName)
             contextRow("Owner", session.ownership.label)
             contextRow("Transport", session.record.launchSpec.transport.summaryText)
             contextRow("Directory", session.workingDirectory ?? "Unassigned")

@@ -24,7 +24,7 @@ if [ ! -d "$APP_PATH" ]; then
   )
 fi
 
-/usr/bin/pkill -f '/Applications/Holy Ghostty.app/Contents/MacOS/ghostty' >/dev/null 2>&1 || true
+/usr/bin/pkill -f '/Applications/Holy Ghostty.app/Contents/MacOS/holy-ghostty' >/dev/null 2>&1 || true
 
 if [ -d "$DESTINATION" ]; then
   "$LSREGISTER" -u "$DESTINATION" >/dev/null 2>&1 || true

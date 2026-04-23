@@ -746,7 +746,7 @@
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
-				EXECUTABLE_NAME = ghostty;
+				EXECUTABLE_NAME = "holy-ghostty";
 				GCC_OPTIMIZATION_LEVEL = fast;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Ghostty-Info.plist";
@@ -1145,7 +1145,7 @@
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
-				EXECUTABLE_NAME = ghostty;
+				EXECUTABLE_NAME = "holy-ghostty";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Ghostty-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Holy Ghostty [Debug]";
@@ -1199,7 +1199,7 @@
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
-				EXECUTABLE_NAME = ghostty;
+				EXECUTABLE_NAME = "holy-ghostty";
 				GCC_OPTIMIZATION_LEVEL = fast;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Ghostty-Info.plist";

@@ -65,7 +65,14 @@ enum HolyAutomationURLParser {
     }
 
     private static func queryValue(named name: String, in components: URLComponents) -> String? {
-        components.queryItems?.first(where: { $0.name == name })?.value
+        guard let encodedValue = components.percentEncodedQueryItems?.first(where: { $0.name == name })?.value else {
+            return nil
+        }
+
+        // Shell tools commonly produce application/x-www-form-urlencoded query strings.
+        // URLComponents preserves "+" literally, so normalize it before percent-decoding.
+        let formEncodedValue = encodedValue.replacingOccurrences(of: "+", with: " ")
+        return formEncodedValue.removingPercentEncoding ?? formEncodedValue
     }
 
     private static func runtimeValue(from input: String?) -> HolySessionRuntime? {

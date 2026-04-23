@@ -16,6 +16,7 @@ final class HolySession: ObservableObject, Identifiable {
     @Published private(set) var runtimeTelemetry: HolySessionRuntimeTelemetry = .empty
     @Published private(set) var gitSnapshot: HolyGitSnapshot?
     @Published private(set) var activityAt: Date
+    @Published private(set) var inferredRuntime: HolySessionRuntime?
 
     private var cancellables: Set<AnyCancellable> = []
     private var gitRefreshTask: Task<Void, Never>?
@@ -45,6 +46,51 @@ final class HolySession: ObservableObject, Identifiable {
 
     var runtime: HolySessionRuntime {
         record.launchSpec.runtime
+    }
+
+    var displayRuntime: HolySessionRuntime {
+        inferredRuntime ?? runtime
+    }
+
+    var displayTitle: String {
+        let configured = record.launchSpec.resolvedTitle
+        guard Self.isDefaultTitle(configured, for: runtime) else {
+            return configured
+        }
+
+        if let terminalTitle = Self.normalizedTerminalTitle(surfaceView.title),
+           Self.inferredRuntime(
+               launchRuntime: runtime,
+               surfaceTitle: terminalTitle,
+               preview: "",
+               command: nil,
+               initialInput: nil
+           ) == displayRuntime {
+            return terminalTitle
+        }
+
+        return displayRuntime.displayName
+    }
+
+    var displayLineTitle: String {
+        guard let project = displayProjectName,
+              !displayTitle.localizedCaseInsensitiveContains(project) else {
+            return displayTitle
+        }
+
+        return "\(displayTitle) — \(project)"
+    }
+
+    var displayProjectName: String? {
+        if let repositoryName = gitSnapshot?.repositoryName {
+            return repositoryName
+        }
+
+        if let directory = workingDirectory {
+            return URL(fileURLWithPath: directory).lastPathComponent
+        }
+
+        return nil
     }
 
     var budget: HolySessionBudget {
@@ -223,7 +269,7 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     var primarySignalHeadline: String {
-        primarySignal?.headline ?? HolySessionAdapterRegistry.adapter(for: runtime).idleHeadline
+        primarySignal?.headline ?? HolySessionAdapterRegistry.adapter(for: displayRuntime).idleHeadline
     }
 
     var primarySignalDetail: String {
@@ -232,7 +278,7 @@ final class HolySession: ObservableObject, Identifiable {
         }
 
         if preview == "Interactive shell ready." {
-            return HolySessionAdapterRegistry.adapter(for: runtime).idleDetail
+            return HolySessionAdapterRegistry.adapter(for: displayRuntime).idleDetail
         }
 
         return preview
@@ -264,8 +310,20 @@ final class HolySession: ObservableObject, Identifiable {
     func refreshDerivedState(forceGitRefresh: Bool = false) {
         let previousPreview = preview
         let previousPhase = phase
+        let previousInferredRuntime = inferredRuntime
         let nextPreview = Self.previewText(from: surfaceView.cachedVisibleContents.get())
-        var nextSignals = Self.detectSignals(runtime: runtime, surfaceView: surfaceView, preview: nextPreview)
+        if let nextInferredRuntime = Self.inferredRuntime(
+            launchRuntime: runtime,
+            surfaceTitle: surfaceView.title,
+            preview: nextPreview,
+            command: record.launchSpec.command,
+            initialInput: record.launchSpec.initialInput
+        ) {
+            inferredRuntime = nextInferredRuntime
+        }
+
+        let effectiveRuntime = inferredRuntime ?? runtime
+        var nextSignals = Self.detectSignals(runtime: effectiveRuntime, surfaceView: surfaceView, preview: nextPreview)
         let previewStability = updatePreviewStability(for: nextPreview)
         let nextBudgetTelemetry = HolySessionBudgetParser.updatedTelemetry(
             from: nextPreview,
@@ -278,7 +336,7 @@ final class HolySession: ObservableObject, Identifiable {
         let nextPhase = Self.classifyPhase(surfaceView: surfaceView, signals: nextSignals)
         let nextRuntimeTelemetry = HolySessionRuntimeTelemetryParser.telemetry(
             from: .init(
-                runtime: runtime,
+                runtime: effectiveRuntime,
                 surfaceView: surfaceView,
                 preview: nextPreview,
                 signals: nextSignals,
@@ -300,6 +358,7 @@ final class HolySession: ObservableObject, Identifiable {
 
         if previousPreview != nextPreview
             || previousPhase != nextPhase
+            || previousInferredRuntime != inferredRuntime
             || nextBudgetTelemetry != nil
             || nextRuntimeTelemetry != nil
             || surfaceView.progressReport != nil {
@@ -537,6 +596,14 @@ final class HolySession: ObservableObject, Identifiable {
             ("fatal:", "Fatal error reported"),
             ("error:", "Command reported an error"),
             ("failed with exit code", "Command exited with failure"),
+            ("ssh: could not resolve hostname", "SSH host resolution failed"),
+            ("host key verification failed", "SSH host verification failed"),
+            ("permission denied (publickey", "SSH authentication failed"),
+            ("connection timed out", "SSH connection timed out"),
+            ("connection refused", "SSH connection refused"),
+            ("no server running", "Tmux server not running"),
+            ("can't find session", "Tmux session not found"),
+            ("no sessions", "Tmux has no sessions"),
         ] + adapter.failureHeadlines
         if let failure = failureHeadlines.first(where: { lowerPreview.contains($0.0) }) {
             append(.init(kind: .failure, headline: failure.1, detail: evidence))
@@ -661,6 +728,78 @@ final class HolySession: ObservableObject, Identifiable {
         }
 
         return normalized
+    }
+
+    private static func isDefaultTitle(_ title: String, for runtime: HolySessionRuntime) -> Bool {
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty
+            || normalized == "Shell"
+            || normalized == runtime.displayName
+    }
+
+    private static func normalizedTerminalTitle(_ title: String) -> String? {
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              normalized != "Shell" else {
+            return nil
+        }
+
+        return normalized
+    }
+
+    private static func inferredRuntime(
+        launchRuntime: HolySessionRuntime,
+        surfaceTitle: String,
+        preview: String,
+        command: String?,
+        initialInput: String?
+    ) -> HolySessionRuntime? {
+        guard launchRuntime == .shell else { return nil }
+
+        let title = surfaceTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let commandText = [command, initialInput]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .joined(separator: "\n")
+        let evidence = [title, preview, commandText]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+            .lowercased()
+
+        guard !evidence.isEmpty else { return nil }
+
+        if containsOpenCodeMarker(evidence) {
+            return .opencode
+        }
+
+        if containsCodexMarker(evidence) {
+            return .codex
+        }
+
+        if containsClaudeMarker(evidence) {
+            return .claude
+        }
+
+        return nil
+    }
+
+    private static func containsClaudeMarker(_ evidence: String) -> Bool {
+        evidence.contains("claude code")
+            || evidence.contains("claude max")
+            || evidence.contains(" claude ")
+            || evidence.hasPrefix("claude ")
+            || evidence.hasPrefix("claude-")
+    }
+
+    private static func containsCodexMarker(_ evidence: String) -> Bool {
+        evidence.contains("openai codex")
+            || evidence.contains(" codex ")
+            || evidence.hasPrefix("codex ")
+            || evidence.hasPrefix("codex-")
+    }
+
+    private static func containsOpenCodeMarker(_ evidence: String) -> Bool {
+        evidence.contains("opencode")
+            || evidence.contains("open code")
     }
 
     private static func budgetStatus(

@@ -118,6 +118,10 @@ final class HolyWorkspaceStore: ObservableObject {
         sourceTemplateID: UUID? = nil,
         relaunchedFrom archivedSession: HolyArchivedSession? = nil
     ) -> HolySession? {
+        if let existingRemoteSession = prepareRemoteTmuxLaunch(for: launchSpec) {
+            return existingRemoteSession
+        }
+
         guard let result = sessionSupervisor.createSession(
             with: launchSpec,
             in: currentSessionStoreState,
@@ -700,6 +704,36 @@ final class HolyWorkspaceStore: ObservableObject {
         suppressAutomaticSelectionPersistence = false
         bindSessions()
         reconcileExternalTasks()
+    }
+
+    private func prepareRemoteTmuxLaunch(for launchSpec: HolySessionLaunchSpec) -> HolySession? {
+        guard let launchKey = HolyRemoteTmuxSessionKey(launchSpec: launchSpec) else { return nil }
+
+        let matchingSessions = sessions.filter {
+            HolyRemoteTmuxSessionKey(launchSpec: $0.record.launchSpec) == launchKey
+        }
+
+        if let reusableSession = matchingSessions.first(where: { session in
+            switch session.phase {
+            case .active, .working, .waitingInput:
+                return true
+            case .completed, .failed:
+                return false
+            }
+        }) {
+            selectedSessionID = reusableSession.id
+            composerBusy = false
+            composerErrorMessage = nil
+            composerPresented = false
+            remoteHostsPresented = false
+            return reusableSession
+        }
+
+        for staleSession in matchingSessions where staleSession.phase == .completed || staleSession.phase == .failed {
+            archive(staleSession)
+        }
+
+        return nil
     }
 
     private func selectionEvents(from previousSessionID: UUID?, to nextSessionID: UUID?) -> [HolySessionEventDraft] {
@@ -1343,6 +1377,25 @@ private struct HolyDraftLaunchIntent {
 private struct HolyDraftLaunchAssessment {
     let guardrail: HolyLaunchGuardrail
     let ownershipPreview: HolySessionOwnership?
+}
+
+private struct HolyRemoteTmuxSessionKey: Equatable {
+    let sshDestination: String
+    let tmuxSocketName: String?
+    let tmuxSessionName: String
+
+    init?(launchSpec: HolySessionLaunchSpec) {
+        let realizedLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
+        guard realizedLaunchSpec.transport.kind == .ssh,
+              let sshDestination = realizedLaunchSpec.transport.sshDestination?.nilIfBlank,
+              let tmuxSessionName = realizedLaunchSpec.tmux?.normalized.sessionName?.nilIfBlank else {
+            return nil
+        }
+
+        self.sshDestination = sshDestination
+        self.tmuxSocketName = realizedLaunchSpec.tmux?.normalized.socketName?.nilIfBlank
+        self.tmuxSessionName = tmuxSessionName
+    }
 }
 
 private struct HolyCoordinationSummaryContext {

@@ -20,14 +20,15 @@ enum HolyTmuxCommandBuilder {
     static func surfaceConfiguration(for launchSpec: HolySessionLaunchSpec) -> Ghostty.SurfaceConfiguration {
         let realizedLaunchSpec = realizedLaunchSpec(launchSpec)
         let hasTmuxSubstrate = realizedLaunchSpec.tmux?.normalized.sessionName?.holyTrimmed.nilIfEmpty != nil
-        let launchCommand = hasTmuxSubstrate
-            ? shellInput(for: realizedLaunchSpec)
-            : command(for: realizedLaunchSpec)
+        let launchesViaCommand = !hasTmuxSubstrate || realizedLaunchSpec.transport.isRemote
+        let launchCommand = launchesViaCommand
+            ? command(for: realizedLaunchSpec)
+            : shellInput(for: realizedLaunchSpec)
 
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = realizedLaunchSpec.transport.isRemote ? nil : realizedLaunchSpec.workingDirectory
-        config.command = hasTmuxSubstrate ? nil : launchCommand
-        config.initialInput = hasTmuxSubstrate
+        config.command = launchesViaCommand ? launchCommand : nil
+        config.initialInput = !launchesViaCommand
             ? combinedInitialInput(
                 primaryCommand: launchCommand,
                 trailingInput: realizedLaunchSpec.initialInput
@@ -76,6 +77,12 @@ enum HolyTmuxCommandBuilder {
         let tmuxPrefix = tmuxPrefixArguments(for: tmux)
         let bootstrapCommand = bootstrapCommand(for: launchSpec)
         let metadataCommands = metadataCommands(for: launchSpec, tmux: tmux, sessionName: sessionName)
+
+        if launchSpec.transport.isRemote,
+           !tmux.createIfMissing,
+           let destination = launchSpec.transport.sshDestination?.holyTrimmed.nilIfEmpty {
+            return shellCommand(["ssh", "-t", destination] + tmuxPrefix + ["attach", "-t", sessionName])
+        }
 
         var lines: [String] = []
         if tmux.createIfMissing {

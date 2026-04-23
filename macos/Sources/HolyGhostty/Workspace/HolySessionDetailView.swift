@@ -38,13 +38,12 @@ struct HolySessionDetailView: View {
         HStack(alignment: .center, spacing: 8) {
             HolyGhosttyStatusDot(color: attentionColor)
 
-            Text(session.runtime.displayName)
+            Text(session.displayRuntime.displayName)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(HolyGhosttyTheme.textPrimary)
                 .lineLimit(1)
 
-            if let project = session.gitSnapshot?.repositoryName
-                ?? session.workingDirectory.map({ URL(fileURLWithPath: $0).lastPathComponent }) {
+            if let project = session.displayProjectName {
                 Text("—")
                     .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(HolyGhosttyTheme.textTertiary)
