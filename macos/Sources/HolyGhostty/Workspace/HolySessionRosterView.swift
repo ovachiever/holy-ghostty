@@ -1,27 +1,13 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct HolySessionRosterView: View {
     @ObservedObject var store: HolyWorkspaceStore
     var compact: Bool = false
+    @State private var draggingSessionID: UUID?
 
     private var sessions: [HolySession] {
-        store.sessions.sorted { lhs, rhs in
-            if lhs.id == store.selectedSessionID { return true }
-            if rhs.id == store.selectedSessionID { return false }
-
-            let lhsAttentionRank = store.coordination(for: lhs).attention.rosterRank
-            let rhsAttentionRank = store.coordination(for: rhs).attention.rosterRank
-            if lhsAttentionRank != rhsAttentionRank {
-                return lhsAttentionRank < rhsAttentionRank
-            }
-
-            let lhsRank = lhs.phase.rosterRank
-            let rhsRank = rhs.phase.rosterRank
-            if lhsRank == rhsRank {
-                return lhs.activityAt > rhs.activityAt
-            }
-            return lhsRank < rhsRank
-        }
+        store.sessions
     }
 
     var body: some View {
@@ -43,18 +29,93 @@ struct HolySessionRosterView: View {
                                 isSelected: store.selectedSessionID == session.id,
                                 compact: compact,
                                 onSelect: { store.selectedSessionID = session.id },
-                                onDuplicate: { store.duplicate(session) },
+                                onDuplicate: { store.duplicate(session.id) },
                                 onArchive: { store.close(session) },
-                                onRename: { store.rename(session, to: $0) }
+                                onRename: { store.rename(session, to: $0) },
+                                dragProvider: {
+                                    draggingSessionID = session.id
+                                    return HolyRosterDrag.itemProvider(for: session.id)
+                                }
+                            )
+                            .onDrop(
+                                of: [HolyRosterDrag.type],
+                                delegate: HolyRosterRowDropDelegate(
+                                    targetSessionID: session.id,
+                                    store: store,
+                                    draggingSessionID: $draggingSessionID
+                                )
                             )
                         }
+
+                        Color.clear
+                            .frame(height: 24)
+                            .onDrop(
+                                of: [HolyRosterDrag.type],
+                                delegate: HolyRosterEndDropDelegate(
+                                    store: store,
+                                    draggingSessionID: $draggingSessionID
+                                )
+                            )
                     }
                     .padding(.vertical, 4)
                     .padding(.horizontal, 6)
+                    .animation(.easeInOut(duration: 0.12), value: sessions.map(\.id))
                 }
                 .scrollIndicators(.hidden)
             }
         }
+    }
+}
+
+// MARK: - Roster Reordering
+
+private enum HolyRosterDrag {
+    static let type = UTType.plainText
+
+    static func itemProvider(for sessionID: UUID) -> NSItemProvider {
+        NSItemProvider(object: "holy-session:\(sessionID.uuidString)" as NSString)
+    }
+}
+
+private struct HolyRosterRowDropDelegate: DropDelegate {
+    let targetSessionID: UUID
+    let store: HolyWorkspaceStore
+    @Binding var draggingSessionID: UUID?
+
+    func dropEntered(info: DropInfo) {
+        guard let draggingSessionID,
+              draggingSessionID != targetSessionID else {
+            return
+        }
+
+        store.moveSession(draggingSessionID, to: targetSessionID)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        store.persistSessionOrder()
+        draggingSessionID = nil
+        return true
+    }
+}
+
+private struct HolyRosterEndDropDelegate: DropDelegate {
+    let store: HolyWorkspaceStore
+    @Binding var draggingSessionID: UUID?
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let draggingSessionID else { return false }
+        store.moveSessionToEnd(draggingSessionID)
+        store.persistSessionOrder()
+        self.draggingSessionID = nil
+        return true
     }
 }
 
@@ -69,6 +130,7 @@ private struct HolyRosterRow: View {
     let onDuplicate: () -> Void
     let onArchive: () -> Void
     let onRename: (String) -> Void
+    let dragProvider: () -> NSItemProvider
 
     @State private var isRenaming = false
     @State private var renameText = ""
@@ -76,6 +138,10 @@ private struct HolyRosterRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             HolyGhosttyStatusDot(color: attentionColor)
+
+            if !compact && !isRenaming {
+                dragHandle
+            }
 
             if isRenaming {
                 TextField("Session name", text: $renameText, onCommit: commitRename)
@@ -102,8 +168,14 @@ private struct HolyRosterRow: View {
             if !compact && !isRenaming {
                 Menu {
                     Button("Rename") { startRename() }
-                    Button("Duplicate", action: onDuplicate)
-                    Button("Archive", action: onArchive)
+                    Button("Duplicate") {
+                        onSelect()
+                        onDuplicate()
+                    }
+                    Button("Archive") {
+                        onSelect()
+                        onArchive()
+                    }
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 9, weight: .medium))
@@ -130,25 +202,69 @@ private struct HolyRosterRow: View {
         .onTapGesture(perform: onSelect)
     }
 
-    // Stacked display: runtime name on top, project name as dim subtitle.
-    // Middle-truncate the project so long paths keep both ends visible.
+    private var dragHandle: some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(isSelected ? HolyGhosttyTheme.textSecondary : HolyGhosttyTheme.textTertiary)
+            .frame(width: 24, height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.white.opacity(isSelected ? 0.04 : 0.02))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .onDrag(dragProvider)
+            .help("Drag to reorder")
+    }
+
+    // Stacked display: agent + project on top, concrete machine/session identity below.
     private var displayLine: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(session.displayRuntime.displayName)
-                .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+            Text(rosterPrimaryTitle)
+                .font(.system(size: 10, weight: isSelected ? .semibold : .medium))
                 .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
 
-            if let project = session.displayProjectName {
-                Text(project)
-                    .font(.system(size: 10, weight: isSelected ? .medium : .regular))
-                    .foregroundStyle(isSelected ? HolyGhosttyTheme.textSecondary : HolyGhosttyTheme.textTertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
+            Text(rosterSecondaryIdentity)
+                .font(.system(size: 10, weight: isSelected ? .medium : .regular))
+                .foregroundStyle(isSelected ? HolyGhosttyTheme.textSecondary : HolyGhosttyTheme.textTertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var rosterPrimaryTitle: String {
+        let runtimeName = session.displayRuntime.displayName
+        guard let project = session.displayProjectName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !project.isEmpty,
+              !runtimeName.localizedCaseInsensitiveContains(project) else {
+            return runtimeName
+        }
+
+        return "\(runtimeName) - \(project)"
+    }
+
+    private var rosterSecondaryIdentity: String {
+        let launchSpec = session.record.launchSpec
+        var parts: [String] = [
+            launchSpec.transport.isRemote ? launchSpec.transport.destinationDisplayName : "Local"
+        ]
+
+        if let tmux = launchSpec.tmux {
+            if let sessionName = tmux.sessionName?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !sessionName.isEmpty {
+                parts.append(sessionName)
+            } else {
+                let serverName = tmux.socketName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                parts.append(serverName.isEmpty ? "tmux" : serverName)
+            }
+        }
+
+        return parts
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "/")
     }
 
     private var needsAttentionLine: Bool {
@@ -202,33 +318,6 @@ private struct HolyRosterRow: View {
         case .waitingInput: return HolyGhosttyTheme.warning
         case .completed: return HolyGhosttyTheme.success
         case .failed:    return HolyGhosttyTheme.danger
-        }
-    }
-}
-
-// MARK: - Rank extensions
-
-private extension HolySessionPhase {
-    var rosterRank: Int {
-        switch self {
-        case .failed: return 0
-        case .waitingInput: return 1
-        case .working: return 2
-        case .active: return 3
-        case .completed: return 4
-        }
-    }
-}
-
-private extension HolySessionAttention {
-    var rosterRank: Int {
-        switch self {
-        case .failure: return 0
-        case .conflict: return 1
-        case .needsInput: return 2
-        case .watch: return 3
-        case .none: return 4
-        case .done: return 5
         }
     }
 }

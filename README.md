@@ -1,169 +1,191 @@
 <p align="center">
-  <img src="./holy-ghostty-logo.jpeg" alt="Holy Ghostty logo" width="220">
+  <img src="./holy-ghostty-logo.jpeg" alt="Holy Ghostty logo" width="120">
 </p>
 
 <h1 align="center">Holy Ghostty</h1>
 
 <p align="center">
-  Mission control for agentic coding sessions, built on Ghostty.
+  macOS control surface for durable local and SSH/tmux coding sessions, built on Ghostty.
 </p>
 
 <p align="center">
-  Native macOS shell · Real Ghostty surfaces · Tmux-backed durable sessions · Remote host discovery · Budget intelligence · Task inbox · Focus/Grid/Diff modes · Durable SQLite persistence
-</p>
-
-<p align="center">
-  <a href="./docs/holy-ghostty/README.md">User Guide</a>
+  <a href="./docs/holy-ghostty/README.md">Guide</a>
   ·
   <a href="./docs/holy-ghostty/engineering-spec.md">Engineering Spec</a>
   ·
-  <a href="./docs/holy-ghostty/request-vs-current-state.md">Vision vs Current State</a>
-  ·
-  <a href="./docs/holy-ghostty/roadmap.md">Roadmap</a>
+  <a href="./docs/holy-ghostty/agent-sessions-interoperability.md">Interoperability</a>
   ·
   <a href="./CHANGELOG.md">Changelog</a>
 </p>
 
-Holy Ghostty is a macOS-first product fork of Ghostty. The terminal core remains Ghostty; the Holy layer adds a native control surface around live terminal sessions so AI coding work can be launched, supervised, coordinated, archived, and resumed without disappearing into a pile of tabs.
+<p align="center">
+  <img src="./docs/holy-ghostty/assets/holy-ghostty-app.png" alt="Holy Ghostty workspace" width="920">
+</p>
 
-## What This Fork Is
+## Current State
 
-Holy Ghostty is not a new terminal emulator core. It is a Ghostty-based operator shell for:
+Holy Ghostty is a product fork of Ghostty. The terminal core remains Ghostty. The Holy layer adds a native macOS workspace for launching, attaching, supervising, archiving, and restoring terminal-backed coding sessions.
 
-- live Shell, Claude, Codex, and OpenCode sessions
-- session launch templates with budget configuration
-- tmux-backed local and SSH session launches
-- managed or attached git worktrees
-- pre-launch ownership guardrails
-- git-aware coordination and overlap detection
-- structured runtime telemetry (activity kind, stall/loop detection, command/file extraction)
-- budget intelligence (token/cost tracking, burn rate, exhaustion projection, enforcement)
-- external task inbox (GitHub, Linear, Jira, manual)
-- automation entrypoints via URL scheme, shell helper, and AppleScript
-- remote host registry with SSH config and Tailscale import
-- remote tmux discovery and attach
-- archive, history, and relaunch workflows with recovery context
-- native notifications for needs-input, failure, collision, drift, stalls, loops, budget warnings, and completion
-- durable SQLite persistence with schema migrations and an append-only event ledger
+Current Holy Ghostty release: `0.25`.
 
-Current product shape:
+The app currently supports:
 
-- left rail for active sessions, each row showing runtime on top and project directory as a dim middle-truncated subtitle
-- center live Ghostty surface with the ASCII angel-ghost logo riding behind at 4% opacity as an opinionated watermark (overridable via `~/.config/ghostty/config`)
-- right rail governed by a Prime Rule — only show what the terminal itself cannot: **Coordination** (collision intelligence plus external peers via `agent-do coord`), **Risk** (git state summarized by consequence — project / deps / CI / scripts / config — file list collapsed behind a disclosure), **Verification** (last command outcome from OSC 133 shell integration: exit code, duration, elapsed), **Actions** (Copy handoff · Copy diff · Duplicate · Archive), and a collapsed **Details** drawer for launch metadata
-- new-session composer with task linking and budget controls
-- searchable session history with recovery context and telemetry
-- task inbox for external work items
-- remote hosts sheet for tmux discovery and attach
-- focus mode, grid mode, and diff mode for multi-session operation
+- Embedded live Ghostty surfaces.
+- Shell, Claude, Codex, and OpenCode session runtimes.
+- Local shell sessions.
+- Local and remote SSH sessions attached through tmux.
+- Remote host records with SSH config and Tailscale import.
+- Remote tmux discovery and attach.
+- Durable SQLite workspace persistence with migrations, WAL, and event history.
+- Session archive, search, relaunch, and recovery context.
+- Launch templates and external task records.
+- Runtime telemetry inferred from terminal state, shell integration, and runtime output.
+- Budget telemetry and budget enforcement policy fields.
+- Git snapshot tracking for local and remote sessions.
+- Worktree and branch coordination checks for non-shell agent sessions.
+- Manual session ordering in the left roster.
+- Focus, grid, and compare display modes.
+- URL scheme, shell helper, and AppleScript session spawn entrypoints.
 
-## Prerequisites
+## User Interface
 
-- macOS 15+ (Sequoia or later)
-- Xcode 26+ with the Metal Toolchain component (`xcodebuild -downloadComponent MetalToolchain`)
-- Zig **0.15.2** (not 0.16; Zig minor versions are breaking). Install from https://ziglang.org/download/
+Standard mode has three regions:
 
-Zig is pre-1.0. Do not substitute a newer minor version. The build will fail.
+- Left roster: active sessions in persisted manual order. Each row shows `Runtime - Project` on the first line and `Host/tmux-session` or `Local` on the second line.
+- Center surface: selected live Ghostty terminal surface.
+- Right inspector: git risk, coordination, verification, actions, and launch details for the selected session.
 
-## Quick Start
+Toolbar controls:
+
+- `+`: create a new local shell session immediately.
+- checklist: open task inbox.
+- server: open remote hosts.
+- grid: toggle grid mode.
+- split: toggle compare mode.
+- diagonal arrows: toggle focus mode.
+- menu: templates, task inbox, remote hosts, history, duplicate, archive.
+
+Window behavior:
+
+- Empty top-bar space drags the window.
+- App content does not drag the window.
+- The left roster width is persisted and can be resized below its default.
+
+## Runtime Status
+
+Runtime status is inferred. Holy Ghostty does not receive structured internal state from Claude, Codex, or OpenCode.
+
+Current inputs:
+
+- Ghostty surface state.
+- Ghostty progress reports.
+- OSC 133 shell integration command-finished events.
+- Visible terminal output near the bottom of the screen.
+- tmux session metadata.
+- SSH-based git probes for remote sessions.
+
+The parser filters terminal chrome, tmux status bars, separators, and prompt/footer lines before reporting activity. Stale telemetry is cleared when there is no current structured signal.
+
+Displayed phase labels:
+
+- `Ready`
+- `Working`
+- `Needs Input`
+- `Complete`
+- `Issue`
+
+## Requirements
+
+- macOS 15 or newer.
+- Xcode 26 or newer.
+- Xcode Metal Toolchain component:
 
 ```bash
-# 1. Build the Zig core (produces GhosttyKit.xcframework)
+xcodebuild -downloadComponent MetalToolchain
+```
+
+- Zig 0.15.2.
+
+Zig minor versions are not interchangeable for this project.
+
+## Build
+
+Build the Zig core and generated framework:
+
+```bash
 zig build -Demit-xcframework
+```
 
-# 2. Build the macOS app
+Build the macOS app:
+
+```bash
 xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug SYMROOT=build build
+```
 
-# 3. Install and launch
+Install and launch:
+
+```bash
 scripts/install-holy-ghostty.sh Debug
 open -a "Holy Ghostty"
 ```
 
-Installed bundle path:
+Installed app path:
 
 ```text
 /Applications/Holy Ghostty.app
 ```
 
-If you only need the shared Ghostty core and not the macOS app bundle:
+Build only the shared Ghostty core:
 
 ```bash
 zig build -Demit-macos-app=false
 ```
 
-## Documentation
+## Data Locations
 
-Primary Holy Ghostty docs live under [`docs/holy-ghostty`](./docs/holy-ghostty).
+Debug bundle identifier:
 
-- [User guide and tutorial](./docs/holy-ghostty/README.md)
-- [Engineering spec](./docs/holy-ghostty/engineering-spec.md)
-- [Requested vision vs current state](./docs/holy-ghostty/request-vs-current-state.md)
-- [Roadmap](./docs/holy-ghostty/roadmap.md)
-- [v0.2 implementation plan](./docs/holy-ghostty/v0.2-implementation-plan.md)
-- [Interoperability notes](./docs/holy-ghostty/agent-sessions-interoperability.md)
-- [Changelog](./CHANGELOG.md)
-
-## Current Strengths
-
-- Real embedded Ghostty surfaces inside a native macOS shell
-- Session-oriented workflow instead of tab-oriented workflow
-- Durable SQLite persistence with schema migrations and event ledger
-- Separated session supervisor architecture
-- Tmux-backed session substrate for local and SSH launches
-- Worktree-aware launch strategies with recovery validation and orphan cleanup
-- Blocking shared-worktree guardrails
-- Warning-level shared-branch guardrails with explicit override
-- Structured runtime telemetry (activity kind, stall/loop detection, command/file extraction)
-- Budget intelligence with token/cost tracking, burn rate, projection, and enforcement
-- External task inbox (GitHub, Linear, Jira, manual) with task-to-session launching
-- Automation entrypoints via `holy-ghostty://spawn`, `scripts/holy-spawn-session.sh`, and AppleScript `spawn`
-- Remote host registry with manual, SSH-config, and Tailscale import
-- Remote tmux discovery with Holy metadata readback and remote git enrichment over SSH
-- Focus, grid, and diff display modes
-- Archive and relaunch history with recovery context and event timeline
-- Native notifications for failures, needs-input, collisions, drift, stalls, loops, budget warnings, and completion
-- `agent-sessions` compatibility views for future cross-tool interoperability
-
-## Current Limitations
-
-Holy Ghostty is usable and substantially complete, but some areas remain for future work:
-
-- deeper structured runtime telemetry via an embedded VT/PTY bridge (current system is inference-based)
-- richer remote orchestration beyond manual host registry and tmux discovery
-- dependency chains and automated session orchestration
-- broadcast input across sessions
-- status updates pushed back to external task sources
-- settings and preferences surface for budgets, notifications, and templates
-- signing, notarization, and distribution path
-
-## Repo Layout
-
-- `src/`: upstream Ghostty shared Zig core
-- `macos/`: macOS host app and Holy Ghostty shell
-- `macos/Sources/HolyGhostty/`: Holy-specific app logic
-- `docs/holy-ghostty/`: Holy Ghostty documentation
-
-## Relationship To Upstream Ghostty
-
-This project depends on Ghostty's terminal core and macOS host infrastructure. Holy Ghostty is best understood as a product shell layered on top of Ghostty rather than a rewrite of Ghostty itself.
-
-For upstream Ghostty:
-
-- Repository: <https://github.com/ghostty-org/ghostty>
-- Documentation: <https://ghostty.org/docs>
-
-## Development Notes
-
-Useful commands:
-
-```bash
-zig build
-zig build -Demit-macos-app=false
-zig build test -Dtest-filter=<filter>
-xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug SYMROOT=build build
-scripts/install-holy-ghostty.sh Debug
+```text
+org.holyghostty.app.debug
 ```
 
-For engineering context beyond this README, start with:
+Workspace database:
 
-- [`docs/holy-ghostty/engineering-spec.md`](./docs/holy-ghostty/engineering-spec.md)
+```text
+~/Library/Application Support/org.holyghostty.app.debug/HolyGhostty/holy-ghostty.sqlite3
+```
+
+User Claude state is outside the repo and is not managed by Holy Ghostty:
+
+```text
+~/.claude
+```
+
+## Repository Layout
+
+- `src/`: Ghostty Zig terminal core.
+- `macos/`: macOS application target.
+- `macos/Sources/HolyGhostty/`: Holy Ghostty Swift app layer.
+- `docs/holy-ghostty/`: Holy Ghostty documentation.
+- `scripts/`: local build, install, and spawn helpers.
+- `pkg/`: vendored build dependencies used by Ghostty.
+
+## Public Scope
+
+This repository is source-ready. It is not a signed, notarized, or packaged release channel.
+
+Known gaps:
+
+- Runtime status is heuristic rather than provider-native.
+- Remote orchestration is tmux/SSH based.
+- Broadcast input and dependency-chain automation are not implemented.
+- External task status writeback is not implemented.
+- User-facing preferences are limited.
+- Signing, notarization, and release packaging are not configured.
+
+## Upstream
+
+Holy Ghostty depends on Ghostty.
+
+- Upstream repository: <https://github.com/ghostty-org/ghostty>
+- Upstream documentation: <https://ghostty.org/docs>

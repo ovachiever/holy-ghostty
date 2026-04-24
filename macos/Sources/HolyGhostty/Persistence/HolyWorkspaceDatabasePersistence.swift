@@ -165,7 +165,7 @@ enum HolyWorkspaceDatabasePersistence {
         SELECT id, launch_spec_json, created_at, updated_at
         FROM sessions
         WHERE archived_at IS NULL
-        ORDER BY updated_at DESC;
+        ORDER BY created_at ASC;
         """
 
         var rows: [HolySessionRecord] = []

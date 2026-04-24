@@ -38,17 +38,17 @@ struct HolySessionDetailView: View {
         HStack(alignment: .center, spacing: 8) {
             HolyGhosttyStatusDot(color: attentionColor)
 
-            Text(session.displayRuntime.displayName)
+            Text(session.displayLineTitle)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(HolyGhosttyTheme.textPrimary)
                 .lineLimit(1)
 
-            if let project = session.displayProjectName {
+            if let subtitle = headerSubtitle(for: session) {
                 Text("—")
                     .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(HolyGhosttyTheme.textTertiary)
 
-                Text(project)
+                Text(subtitle)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(HolyGhosttyTheme.textPrimary)
                     .lineLimit(1)
@@ -63,6 +63,27 @@ struct HolySessionDetailView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+    }
+
+    private func headerSubtitle(for session: HolySession) -> String? {
+        var parts: [String] = [session.displayRuntime.displayName]
+        let launchSpec = session.record.launchSpec
+
+        if launchSpec.transport.isRemote {
+            parts.append(launchSpec.transport.summaryText)
+        }
+
+        if let tmux = launchSpec.tmux,
+           let sessionName = tmux.sessionName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !sessionName.isEmpty,
+           !session.displayLineTitle.localizedCaseInsensitiveContains(sessionName) {
+            parts.append("tmux \(sessionName)")
+        }
+
+        return parts
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
     }
 
     // MARK: - Status Bar (thin footer with key metrics)
@@ -113,6 +134,7 @@ struct HolySessionDetailView: View {
             Ghostty.SurfaceWrapper(surfaceView: session.surfaceView, isSplit: splitSurface)
                 .environmentObject(ghosttyApp)
                 .ghosttyLastFocusedSurface(Weak(session.surfaceView))
+                .id(session.id)
         } else {
             HolyGhosttyEmptyStateView(
                 title: "Surface unavailable",

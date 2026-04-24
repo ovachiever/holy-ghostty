@@ -84,6 +84,11 @@ actor HolyRemoteHostImportService {
             let payload = try JSONDecoder().decode(HolyTailscaleStatusPayload.self, from: jsonData)
             return payload.peer.values
                 .compactMap { peer -> HolyRemoteHostRecord? in
+                    guard peer.isUsefulSSHMachine,
+                          !peer.matches(payload.selfNode) else {
+                        return nil
+                    }
+
                     let destination = peer.normalizedDestination
                     guard let destination else { return nil }
 
@@ -141,9 +146,11 @@ actor HolyRemoteHostImportService {
 }
 
 private struct HolyTailscaleStatusPayload: Decodable {
+    let selfNode: HolyTailscalePeer?
     let peer: [String: HolyTailscalePeer]
 
     enum CodingKeys: String, CodingKey {
+        case selfNode = "Self"
         case peer = "Peer"
     }
 }
@@ -152,11 +159,15 @@ private struct HolyTailscalePeer: Decodable {
     let hostName: String?
     let dnsName: String?
     let tailscaleIPs: [String]?
+    let os: String?
+    let online: Bool?
 
     enum CodingKeys: String, CodingKey {
         case hostName = "HostName"
         case dnsName = "DNSName"
         case tailscaleIPs = "TailscaleIPs"
+        case os = "OS"
+        case online = "Online"
     }
 
     var displayLabel: String {
@@ -178,6 +189,34 @@ private struct HolyTailscalePeer: Decodable {
 
         return tailscaleIPs?.first?.holyTrimmed.nilIfEmpty
     }
+
+    var isUsefulSSHMachine: Bool {
+        guard online != false else { return false }
+
+        let normalizedOS = os?.holyTrimmed.lowercased()
+        return normalizedOS == "macos" || normalizedOS == "linux"
+    }
+
+    func matches(_ other: HolyTailscalePeer?) -> Bool {
+        guard let other else { return false }
+
+        let selfTokens = identityTokens
+        guard !selfTokens.isEmpty else { return false }
+
+        return !selfTokens.isDisjoint(with: other.identityTokens)
+    }
+
+    private var identityTokens: Set<String> {
+        [
+            hostName,
+            dnsName?.trimmingCharacters(in: CharacterSet(charactersIn: ".")),
+            normalizedDestination,
+        ]
+        .compactMap { $0?.holyMachineIdentityKey.nilIfEmpty }
+        .reduce(into: Set<String>()) { tokens, token in
+            tokens.insert(token)
+        }
+    }
 }
 
 private extension String {
@@ -187,5 +226,14 @@ private extension String {
 
     var nilIfEmpty: String? {
         isEmpty ? nil : self
+    }
+
+    var holyMachineIdentityKey: String {
+        folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: ".tail", with: "-tail")
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty && !$0.allSatisfy(\.isNumber) }
+            .joined()
     }
 }

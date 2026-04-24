@@ -28,7 +28,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate,
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovable = true
-        window.isMovableByWindowBackground = true
+        window.isMovableByWindowBackground = false
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.fullScreenPrimary, .managed]
         window.setFrameAutosaveName("HolyGhosttyWorkspaceWindow")

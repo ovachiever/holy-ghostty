@@ -1,12 +1,12 @@
 # Changelog
 
-All notable Holy Ghostty changes should be recorded in this file.
-
-The format is intentionally simple and release-oriented.
+All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
-Post-`0.2.0` mainline work currently includes:
+- No unreleased changes.
+
+## 0.25 (2026-04-24)
 
 ### Added
 
@@ -16,19 +16,34 @@ Post-`0.2.0` mainline work currently includes:
 - host import from `~/.ssh/config` and Tailscale
 - remote tmux discovery and attach inside the `Remote Hosts` sheet
 - right-rail **Verification** section backed by OSC 133 command telemetry (last outcome, duration, elapsed since)
-- right-rail **Actions** row — Copy handoff, Copy diff, Duplicate, Archive
-- right-rail **Risk** summary — git changes bucketed by consequence (project / deps / CI / scripts / config / tests / docs / source), full file list behind a disclosure
+- right-rail **Actions** row: Copy handoff, Copy diff, Duplicate, Archive
+- right-rail **Risk** summary: git changes bucketed by consequence (project / deps / CI / scripts / config / tests / docs / source), full file list behind a disclosure
 - external-peer intelligence in **Coordination** via `agent-do coord peers` subprocess probe
 - opinionated ASCII angel-ghost background watermark at 4% opacity, rendered by Ghostty's `background-image` config; extracted from an asset catalog data set into `~/Library/Application Support/Holy Ghostty/` on launch
+- README app screenshot and release version callout
 
 ### Changed
 
 - remote Holy sessions now enrich inspector/git state over SSH instead of staying local-only
 - public README and Holy docs now describe the current tmux/remote product shape instead of the older v0.2-only surface
-- right rail redesigned against a Prime Rule — only show what the terminal itself cannot. **Output** section removed (terminal is output); **Launch** collapsed into a `Details` disclosure; **Mission** gated behind a linked task; **Budget** gated behind configured budget or observed usage.
-- left-rail session rows split runtime and project into a two-line label with middle-truncation, replacing the old `Shell — Custom_Codi…` compound truncation
+- right rail redesigned against a Prime Rule: only show what the terminal itself cannot. **Output** section removed (terminal is output); **Launch** collapsed into a `Details` disclosure; **Mission** gated behind a linked task; **Budget** gated behind configured budget or observed usage.
+- left-rail session rows use a compact two-line label with manual persisted ordering
+- left-rail width defaults wider while remaining resizable below the default
 - session action menu hides the `.borderlessButton` disclosure chevron for a clean ellipsis affordance
+- `+` creates a new local shell immediately instead of opening the full launch menu
+- app content no longer acts as a window-drag region; only empty top-bar space drags the window
+- focus, grid, and compare display modes clamp to available window geometry
+- duplicate and archive actions target the selected session consistently
 - Holy defaults config (`background-image`, fit, position, opacity) loads before user config so `~/.config/ghostty/config` always wins on overrides
+- Holy Ghostty app marketing version is `0.25`
+
+### Fixed
+
+- remote tmux sessions no longer collapse into a single ambiguous Studio surface when selecting local, remote, or attach sessions
+- session labels preserve remote project directory when it can be discovered from tmux panes or runtime metadata
+- runtime status clears stale `Running command` state when no current structured activity signal exists
+- telemetry parser filters tmux chrome, status bars, separators, and prompt/footer output before inferring activity
+- fresh installs no longer import stale local database state into new workspaces
 
 ## 0.2.0 (2026-04-18)
 

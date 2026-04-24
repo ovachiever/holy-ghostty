@@ -1,12 +1,14 @@
 # Holy Ghostty Engineering Spec
 
-Last updated: 2026-04-19
+Last updated: 2026-04-24
 
-This document describes Holy Ghostty as it exists today in the repository. It is an as-is engineering spec, not a forward-looking design document.
+This document describes the current repository implementation. It is an as-is engineering spec.
+
+Current release: `0.25`.
 
 ## 1. Purpose
 
-Holy Ghostty is a macOS-native shell built around Ghostty terminal surfaces for running and supervising agentic coding sessions. The Holy layer adds session orchestration, tmux-backed local and SSH launch policy, worktree management, git-aware coordination, runtime heuristics, structured telemetry, budget intelligence, an external task inbox, an append-only event ledger, archive/history, templates, remote host discovery, and native alerts without replacing Ghostty's terminal core.
+Holy Ghostty is a macOS-native shell built around Ghostty terminal surfaces for running and supervising coding sessions. The Holy layer adds session orchestration, tmux-backed local and SSH launch policy, worktree management, git-aware coordination, runtime heuristics, structured telemetry, budget intelligence, an external task inbox, an append-only event ledger, archive/history, templates, remote host discovery, and native alerts without replacing Ghostty's terminal core.
 
 ## 2. Scope And Current Boundary
 
@@ -29,7 +31,7 @@ Architecture layers:
 2. Existing macOS host integration
    - The macOS app embeds Ghostty surfaces and manages app lifecycle.
 3. Holy Ghostty shell
-   - Adds the mission-control UI, session model, persistence, tmux-backed launch substrate, git/worktree logic, launch guardrails, heuristics, structured telemetry, budget intelligence, task inbox, remote host discovery, event ledger, archive, templates, and alerts.
+   - Adds the workspace UI, session model, persistence, tmux-backed launch substrate, git/worktree logic, launch guardrails, heuristics, structured telemetry, budget intelligence, task inbox, remote host discovery, event ledger, archive, templates, and alerts.
 
 Primary Holy code root:
 
@@ -56,7 +58,7 @@ Current window characteristics:
 - titled, closable, miniaturizable, resizable, full-size content view
 - transparent titlebar
 - hidden title
-- movable by background
+- movable through empty top-bar drag region only
 - unified toolbar style with an attached empty toolbar
 - full-screen primary and managed collection behavior
 - autosaved frame
@@ -75,8 +77,8 @@ Responsibilities:
 Display modes (selectable via toolbar or keyboard shortcuts):
 
 - Standard: left roster, center session surface, right inspector
-- Focus: full-screen single session with floating status overlay
-- Grid: 2x2 or 2x3 tiled session previews with selection and promotion
+- Focus: single selected session with floating status overlay
+- Grid: up to four tiled session previews with selection and promotion
 - Diff: side-by-side comparison of two sessions with branch, file overlap, and phase analysis
 
 ### Design system
@@ -204,7 +206,9 @@ The telemetry parser infers structured activity from terminal preview text, sign
 - Stall detection (same evidence signature persisting beyond a threshold)
 - Loop detection (same evidence signature repeating)
 
-This is not yet a structured embedded telemetry bridge. It is a useful runtime-classification layer that combines adapter markers with inference from terminal output.
+Current filters remove terminal chrome, tmux status bars, separator lines, and readiness footer/prompt lines before classifying activity. If there is no current structured signal, stale telemetry is cleared instead of displayed.
+
+This is not a provider-native telemetry bridge. It is a runtime-classification layer that combines adapter markers with inference from terminal output.
 
 ## 7. Budget Intelligence
 
@@ -568,11 +572,9 @@ Supported launch ownership patterns:
 - attach existing worktree
 - create managed worktree
 
-New in v0.2:
-
 - `recoveryEvaluation(for:)`: validates whether a worktree-backed session can be restored (checks directory existence, git validity, repository match, branch match)
 - `cleanupOrphanedManagedWorktrees(referencedPaths:)`: removes orphaned managed worktrees not referenced by any session
-- Improved worktree creation with cleanup on failure
+- worktree creation with cleanup on failure
 
 ## 19. Launch Guardrails
 
@@ -626,9 +628,9 @@ Current alert triggers:
 - phase becomes failed
 - phase becomes waiting for input
 - branch ownership drift
-- session stalled (new in v0.2)
-- session looping (new in v0.2)
-- budget warning or exceeded (new in v0.2)
+- session stalled
+- session looping
+- budget warning or exceeded
 - phase becomes completed
 
 ## 22. Views And User-Facing Surfaces
@@ -637,7 +639,7 @@ Current alert triggers:
 
 - `macos/Sources/HolyGhostty/Workspace/HolySessionRosterView.swift`
 
-Displays live active sessions sorted by attention and recent activity.
+Displays active sessions in persisted manual order. Selection and activity changes do not reorder the list. Each row shows runtime/project on the first line and local or remote tmux identity on the second line.
 
 ### Session detail
 
@@ -651,18 +653,15 @@ Displays the currently selected session with the live `Ghostty.SurfaceView` and 
 
 Displays:
 
-- mission (with task source if linked)
-- runtime and signal
-- runtime telemetry (activity kind, headline, progress, command, file, next step hint, artifact, stagnant/repeat counters)
-- command telemetry
-- budget status, usage, remaining, burn rate, evidence
-- budget intelligence (ledger, projection, runtime spend rollup)
-- ownership state
-- coordination summary
-- git state and changed files
-- session event timeline
-- output preview
-- environment
+- mission when linked to a task
+- runtime telemetry only when meaningful
+- budget state only when configured or usage exists
+- session timeline
+- coordination summary and external peers
+- git risk and changed-file summary
+- verification from command telemetry
+- actions
+- collapsed launch metadata
 
 ### New session sheet
 

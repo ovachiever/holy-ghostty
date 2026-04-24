@@ -39,7 +39,7 @@ struct HolyRemoteHostRecord: Codable, Equatable, Identifiable {
 
     var tmuxSummary: String {
         let socketName = tmuxSocketName?.holyTrimmed.nilIfEmpty
-        return socketName.map { "tmux -L \($0)" } ?? "Automatic: default tmux, then holy"
+        return socketName.map { "tmux -L \($0)" } ?? "Automatic: default tmux + holy"
     }
 
     func normalized() -> HolyRemoteHostRecord {

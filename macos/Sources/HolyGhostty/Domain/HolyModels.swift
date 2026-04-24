@@ -28,11 +28,11 @@ enum HolySessionPhase: String, Codable, CaseIterable {
 
     var displayName: String {
         switch self {
-        case .active: "Active"
+        case .active: "Ready"
         case .working: "Working"
         case .waitingInput: "Needs Input"
-        case .completed: "Completed"
-        case .failed: "Failed"
+        case .completed: "Complete"
+        case .failed: "Issue"
         }
     }
 }

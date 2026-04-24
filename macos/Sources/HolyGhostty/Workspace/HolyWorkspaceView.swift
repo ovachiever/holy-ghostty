@@ -1,5 +1,8 @@
 import SwiftUI
 import GhosttyKit
+#if os(macOS)
+import AppKit
+#endif
 
 private enum HolyWorkspaceDisplayMode: String {
     case standard
@@ -8,11 +11,56 @@ private enum HolyWorkspaceDisplayMode: String {
     case diff
 }
 
+private enum HolyWorkspaceLayout {
+    static let rosterMinWidth: CGFloat = 160
+    static let rosterDefaultWidth: CGFloat = 250
+    static let rosterMaxWidth: CGFloat = 560
+    static let detailMinimumVisibleWidth: CGFloat = 420
+    static let splitHandleWidth: CGFloat = 8
+}
+
+private struct HolyWorkspaceSplitHandle: View {
+    @State private var isHovering = false
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(HolyGhosttyTheme.border.opacity(isHovering ? 0.9 : 0.65))
+
+            Capsule(style: .continuous)
+                .fill(HolyGhosttyTheme.textTertiary.opacity(isHovering ? 0.45 : 0))
+                .frame(width: 3, height: 40)
+        }
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+    }
+}
+
+#if os(macOS)
+private struct HolyWindowDragRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        HolyWindowDragRegionView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private final class HolyWindowDragRegionView: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
+}
+#endif
+
 struct HolyWorkspaceRootView: View {
     @EnvironmentObject private var ghostty: Ghostty.App
     @ObservedObject var store: HolyWorkspaceStore
-    @SceneStorage("holy.workspace.displayMode") private var displayModeRaw = HolyWorkspaceDisplayMode.standard.rawValue
-    @SceneStorage("holy.workspace.diffCompareSessionID") private var diffCompareSessionIDRaw: String?
+    @State private var displayMode = HolyWorkspaceDisplayMode.standard
+    @State private var diffCompareSessionIDRaw: String?
+    @SceneStorage("holy.workspace.rosterWidth.v2") private var rosterWidthRaw = Double(HolyWorkspaceLayout.rosterDefaultWidth)
+    @State private var rosterDragStartWidth: CGFloat?
 
     var body: some View {
         ZStack {
@@ -28,6 +76,8 @@ struct HolyWorkspaceRootView: View {
                 workspaceContent
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
         .sheet(isPresented: $store.composerPresented) {
             HolyNewSessionSheet(
                 draft: $store.draft,
@@ -90,11 +140,12 @@ struct HolyWorkspaceRootView: View {
                 }
             }
 
-            Button { store.presentComposer() } label: {
+            Button { _ = store.createSession(from: nil) } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 11, weight: .medium))
             }
             .buttonStyle(HolyGhosttyActionButtonStyle())
+            .help("New Shell")
             .keyboardShortcut("n", modifiers: [.command])
 
             Button { store.presentTasks() } label: {
@@ -144,7 +195,13 @@ struct HolyWorkspaceRootView: View {
             .buttonStyle(HolyGhosttyActionButtonStyle())
             .keyboardShortcut("f", modifiers: [.command, .shift])
 
+#if os(macOS)
+            Color.clear
+                .frame(maxWidth: .infinity, minHeight: 28, maxHeight: 28)
+                .background(HolyWindowDragRegion())
+#else
             Spacer()
+#endif
 
             Menu {
                 Section("Templates") {
@@ -191,6 +248,20 @@ struct HolyWorkspaceRootView: View {
 
     @ViewBuilder
     private var workspaceContent: some View {
+        GeometryReader { geometry in
+            workspaceModeContent
+                .frame(
+                    width: max(0, geometry.size.width),
+                    height: max(0, geometry.size.height)
+                )
+                .clipped()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+    }
+
+    @ViewBuilder
+    private var workspaceModeContent: some View {
         switch displayMode {
         case .focus:
             HolySessionDetailView(
@@ -211,29 +282,74 @@ struct HolyWorkspaceRootView: View {
         case .diff:
             diffContent
         case .standard:
-            HSplitView {
+            standardContent
+        }
+    }
+
+    private var standardContent: some View {
+        GeometryReader { geometry in
+            let rosterWidth = clampedRosterWidth(for: geometry.size.width)
+
+            HStack(spacing: 0) {
                 HolySessionRosterView(store: store)
-                    .frame(minWidth: 220, idealWidth: 320, maxWidth: 440, maxHeight: .infinity)
+                    .frame(width: rosterWidth)
+                    .frame(maxHeight: .infinity)
                     .background(HolyGhosttyTheme.bgElevated)
 
-                HolySessionDetailView(
-                    session: store.selectedSession,
-                    coordination: store.selectedSession.map(store.coordination(for:)) ?? .empty,
-                    ghosttyApp: ghostty
-                )
-                .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
-                .background(HolyGhosttyTheme.bg)
-                .layoutPriority(1)
+                HolyWorkspaceSplitHandle()
+                    .frame(width: HolyWorkspaceLayout.splitHandleWidth)
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                let startWidth = rosterDragStartWidth ?? rosterWidth
+                                rosterDragStartWidth = startWidth
+                                setRosterWidth(startWidth + value.translation.width, availableWidth: geometry.size.width)
+                            }
+                            .onEnded { _ in
+                                rosterDragStartWidth = nil
+                            }
+                    )
 
-                HolyContextPanelView(
-                    session: store.selectedSession,
-                    coordination: store.selectedSession.map(store.coordination(for:)) ?? .empty,
-                    store: store
-                )
-                .frame(minWidth: 220, idealWidth: 280, maxWidth: 360, maxHeight: .infinity)
-                .background(HolyGhosttyTheme.bgElevated)
+                HSplitView {
+                    HolySessionDetailView(
+                        session: store.selectedSession,
+                        coordination: store.selectedSession.map(store.coordination(for:)) ?? .empty,
+                        ghosttyApp: ghostty
+                    )
+                    .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
+                    .background(HolyGhosttyTheme.bg)
+                    .layoutPriority(1)
+
+                    HolyContextPanelView(
+                        session: store.selectedSession,
+                        coordination: store.selectedSession.map(store.coordination(for:)) ?? .empty,
+                        store: store
+                    )
+                    .frame(minWidth: 220, idealWidth: 280, maxWidth: 360, maxHeight: .infinity)
+                    .background(HolyGhosttyTheme.bgElevated)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(width: max(0, geometry.size.width), height: max(0, geometry.size.height))
+            .clipped()
         }
+    }
+
+    private func clampedRosterWidth(for availableWidth: CGFloat) -> CGFloat {
+        clampedRosterWidth(CGFloat(rosterWidthRaw), availableWidth: availableWidth)
+    }
+
+    private func clampedRosterWidth(_ proposedWidth: CGFloat, availableWidth: CGFloat) -> CGFloat {
+        let windowConstrainedMax = max(
+            HolyWorkspaceLayout.rosterMinWidth,
+            availableWidth - HolyWorkspaceLayout.detailMinimumVisibleWidth
+        )
+        let maxWidth = min(HolyWorkspaceLayout.rosterMaxWidth, windowConstrainedMax)
+        return min(max(proposedWidth, HolyWorkspaceLayout.rosterMinWidth), maxWidth)
+    }
+
+    private func setRosterWidth(_ proposedWidth: CGFloat, availableWidth: CGFloat) {
+        rosterWidthRaw = Double(clampedRosterWidth(proposedWidth, availableWidth: availableWidth))
     }
 
     private var gridContent: some View {
@@ -579,43 +695,13 @@ struct HolyWorkspaceRootView: View {
     }
 
     private var orderedSessions: [HolySession] {
-        store.sessions.sorted { lhs, rhs in
-            if lhs.id == store.selectedSessionID { return true }
-            if rhs.id == store.selectedSessionID { return false }
-
-            let lhsAttentionRank = attentionRank(store.coordination(for: lhs).attention)
-            let rhsAttentionRank = attentionRank(store.coordination(for: rhs).attention)
-            if lhsAttentionRank != rhsAttentionRank {
-                return lhsAttentionRank < rhsAttentionRank
-            }
-
-            let lhsPhaseRank = phaseRank(lhs.phase)
-            let rhsPhaseRank = phaseRank(rhs.phase)
-            if lhsPhaseRank != rhsPhaseRank {
-                return lhsPhaseRank < rhsPhaseRank
-            }
-
-            return lhs.activityAt > rhs.activityAt
-        }
+        store.sessions
     }
 
     private var visibleGridSessions: [HolySession] {
         let limit = 4
         let sorted = orderedSessions
-        guard sorted.count > limit,
-              let selectedSession = store.selectedSession,
-              !sorted.prefix(limit).contains(where: { $0.id == selectedSession.id }) else {
-            return Array(sorted.prefix(limit))
-        }
-
-        var visible = Array(sorted.prefix(limit - 1))
-        visible.append(selectedSession)
-        return visible
-    }
-
-    private var displayMode: HolyWorkspaceDisplayMode {
-        get { HolyWorkspaceDisplayMode(rawValue: displayModeRaw) ?? .standard }
-        nonmutating set { displayModeRaw = newValue.rawValue }
+        return Array(sorted.prefix(limit))
     }
 
     private var diffCompareSessionID: UUID? {
@@ -643,38 +729,6 @@ struct HolyWorkspaceRootView: View {
         let spacing: CGFloat = CGFloat(max(0, rows - 1)) * 12
         let available = max(260, totalHeight - verticalChrome - spacing)
         return max(260, available / CGFloat(rows))
-    }
-
-    private func attentionRank(_ attention: HolySessionAttention) -> Int {
-        switch attention {
-        case .failure:
-            return 0
-        case .conflict:
-            return 1
-        case .needsInput:
-            return 2
-        case .watch:
-            return 3
-        case .none:
-            return 4
-        case .done:
-            return 5
-        }
-    }
-
-    private func phaseRank(_ phase: HolySessionPhase) -> Int {
-        switch phase {
-        case .failed:
-            return 0
-        case .waitingInput:
-            return 1
-        case .working:
-            return 2
-        case .active:
-            return 3
-        case .completed:
-            return 4
-        }
     }
 
     @ViewBuilder

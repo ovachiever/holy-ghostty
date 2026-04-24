@@ -35,6 +35,7 @@ final class HolySessionSupervisor {
     private let ghostty: Ghostty.App
     private let seedDefaultSession: Bool
     private let alertCoordinator = HolySessionAlertCoordinator()
+    private let tmuxRecoveryValidator = HolyTmuxRecoveryValidator()
     private var scheduledPersistTask: Task<Void, Never>?
     private var bufferedMutationEvents: [HolySessionEventDraft] = []
     private var observedRuntimeStatesBySessionID: [UUID: HolyObservedRuntimeState] = [:]
@@ -323,7 +324,18 @@ final class HolySessionSupervisor {
     }
 
     private func recoveryEvaluation(for record: HolySessionRecord) -> HolyWorktreeRecoveryEvaluation {
-        HolyWorktreeManager.recoveryEvaluation(for: record.launchSpec)
+        if !record.launchSpec.transport.isRemote {
+            let worktreeEvaluation = HolyWorktreeManager.recoveryEvaluation(for: record.launchSpec)
+            if worktreeEvaluation.issue != nil {
+                return worktreeEvaluation
+            }
+        }
+
+        if let tmuxIssue = tmuxRecoveryValidator.recoveryIssue(for: record.launchSpec) {
+            return .init(issue: tmuxIssue, cleanupSummary: nil)
+        }
+
+        return .empty
     }
 
     private func recoveredArchivedSession(
@@ -447,6 +459,222 @@ private struct HolyObservedRuntimeState: Equatable {
         return [summary, path]
             .compactMap { $0?.isEmpty == true ? nil : $0 }
             .joined(separator: "::")
+    }
+}
+
+private final class HolyTmuxRecoveryValidator {
+    private enum SessionListResult {
+        case available(Set<String>)
+        case unavailable(String)
+    }
+
+    private struct LocalServerKey: Hashable {
+        let socketName: String?
+    }
+
+    private struct RemoteServerKey: Hashable {
+        let sshDestination: String
+        let socketName: String?
+    }
+
+    private struct CommandResult {
+        let stdout: String
+        let stderr: String
+        let exitCode: Int32
+    }
+
+    private var localSessionListCache: [LocalServerKey: SessionListResult] = [:]
+    private var remoteSessionListCache: [RemoteServerKey: SessionListResult] = [:]
+
+    func recoveryIssue(for launchSpec: HolySessionLaunchSpec) -> String? {
+        let realizedLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
+        guard let tmux = realizedLaunchSpec.tmux?.normalized,
+              !tmux.createIfMissing,
+              let sessionName = tmux.sessionName?.holyTrimmed.nilIfEmpty else {
+            return nil
+        }
+
+        let sessionTarget = targetDescription(
+            transport: realizedLaunchSpec.transport,
+            socketName: tmux.socketName,
+            sessionName: sessionName
+        )
+
+        switch sessionListResult(for: realizedLaunchSpec.transport, tmux: tmux) {
+        case let .available(sessionNames):
+            guard sessionNames.contains(sessionName) else {
+                return "Recovery archived this session because its tmux session is no longer available: \(sessionTarget). Rediscover or relaunch it when the tmux session exists again."
+            }
+
+            return nil
+
+        case let .unavailable(reason):
+            return "Recovery archived this session because Holy could not inspect its tmux server for \(sessionTarget): \(reason)"
+        }
+    }
+
+    private func sessionListResult(
+        for transport: HolySessionTransportSpec,
+        tmux: HolySessionTmuxSpec
+    ) -> SessionListResult {
+        let socketName = tmux.socketName?.holyTrimmed.nilIfEmpty
+
+        if transport.isRemote {
+            guard let sshDestination = transport.sshDestination?.holyTrimmed.nilIfEmpty else {
+                return .unavailable("Missing SSH destination.")
+            }
+
+            let key = RemoteServerKey(sshDestination: sshDestination, socketName: socketName)
+            if let cached = remoteSessionListCache[key] {
+                return cached
+            }
+
+            let result = remoteSessionListResult(sshDestination: sshDestination, socketName: socketName)
+            remoteSessionListCache[key] = result
+            return result
+        }
+
+        let key = LocalServerKey(socketName: socketName)
+        if let cached = localSessionListCache[key] {
+            return cached
+        }
+
+        let result = localSessionListResult(socketName: socketName)
+        localSessionListCache[key] = result
+        return result
+    }
+
+    private func localSessionListResult(socketName: String?) -> SessionListResult {
+        guard let result = runCommand(
+            executablePath: "/bin/zsh",
+            arguments: ["-lc", tmuxListScript(socketName: socketName)]
+        ) else {
+            return .unavailable("Failed to launch local tmux probe.")
+        }
+
+        return sessionListResult(from: result)
+    }
+
+    private func remoteSessionListResult(sshDestination: String, socketName: String?) -> SessionListResult {
+        let remoteCommand = "zsh -lc \(posixQuote(tmuxListScript(socketName: socketName)))"
+        guard let result = runCommand(
+            executablePath: "/usr/bin/ssh",
+            arguments: [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=3",
+                "-o",
+                "ServerAliveInterval=3",
+                "-o",
+                "ServerAliveCountMax=1",
+                sshDestination,
+                remoteCommand,
+            ]
+        ) else {
+            return .unavailable("Failed to launch SSH tmux probe.")
+        }
+
+        return sessionListResult(from: result)
+    }
+
+    private func sessionListResult(from result: CommandResult) -> SessionListResult {
+        guard result.exitCode == 0 else {
+            let stderr = result.stderr.holyTrimmed.nilIfEmpty
+            let stdout = result.stdout.holyTrimmed.nilIfEmpty
+            let detail = stderr ?? stdout ?? "Probe exited with status \(result.exitCode)."
+            return .unavailable(detail)
+        }
+
+        let sessionNames = Set(
+            result.stdout
+                .split(whereSeparator: \.isNewline)
+                .map(String.init)
+                .map { $0.holyTrimmed }
+                .filter { !$0.isEmpty }
+        )
+        return .available(sessionNames)
+    }
+
+    private func runCommand(executablePath: String, arguments: [String]) -> CommandResult? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+
+        let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+
+        return .init(
+            stdout: String(bytes: stdoutData, encoding: .utf8) ?? "",
+            stderr: String(bytes: stderrData, encoding: .utf8) ?? "",
+            exitCode: process.terminationStatus
+        )
+    }
+
+    private func tmuxListScript(socketName: String?) -> String {
+        let socketBinding = socketName?.holyTrimmed.nilIfEmpty.map(posixQuote) ?? "''"
+
+        return """
+        socket_name=\(socketBinding)
+        if ! command -v tmux >/dev/null 2>&1; then
+          printf 'tmux not found\\n' >&2
+          exit 127
+        fi
+
+        tmux_cmd=(tmux)
+        if [[ -n "$socket_name" ]]; then
+          tmux_cmd+=(-L "$socket_name")
+        fi
+
+        output=$("${tmux_cmd[@]}" list-sessions -F '#{session_name}' 2>/dev/null)
+        tmux_status=$?
+        if [[ $tmux_status -eq 1 ]]; then
+          exit 0
+        fi
+        if [[ $tmux_status -ne 0 ]]; then
+          printf 'tmux list-sessions failed with exit code %s\\n' "$tmux_status" >&2
+          exit $tmux_status
+        fi
+
+        printf '%s\\n' "$output"
+        """
+    }
+
+    private func targetDescription(
+        transport: HolySessionTransportSpec,
+        socketName: String?,
+        sessionName: String
+    ) -> String {
+        let serverDescription: String
+        if transport.isRemote {
+            serverDescription = "SSH \(transport.destinationDisplayName)"
+        } else {
+            serverDescription = "local tmux"
+        }
+
+        let socketDescription = socketName?.holyTrimmed.nilIfEmpty.map { "socket `\($0)`" } ?? "default socket"
+        return "\(serverDescription) \(socketDescription) session `\(sessionName)`"
+    }
+
+    private func posixQuote(_ value: String) -> String {
+        if value.isEmpty {
+            return "''"
+        }
+
+        let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
+        return "'\(escaped)'"
     }
 }
 
@@ -646,6 +874,14 @@ private struct HolySessionAlertState: Equatable {
 }
 
 private extension String {
+    var holyTrimmed: String {
+        trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
+
     var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed

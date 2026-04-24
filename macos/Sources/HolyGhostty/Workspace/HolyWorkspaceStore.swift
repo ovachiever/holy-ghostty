@@ -8,8 +8,11 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var archivedSessions: [HolyArchivedSession] = []
     @Published private(set) var externalTasks: [HolyExternalTaskRecord] = []
     @Published private(set) var remoteHosts: [HolyRemoteHostRecord] = []
+    @Published private(set) var discoveredLocalTmuxSessions: [HolyDiscoveredTmuxSession] = []
     @Published private(set) var discoveredRemoteSessionsByHostID: [UUID: [HolyDiscoveredTmuxSession]] = [:]
+    @Published private(set) var localTmuxDiscoveryError: String?
     @Published private(set) var remoteDiscoveryErrorsByHostID: [UUID: String] = [:]
+    @Published private(set) var localTmuxDiscoveryBusy: Bool = false
     @Published private(set) var remoteDiscoveryBusyHostIDs: Set<UUID> = []
     @Published private(set) var remoteHostImportMessage: String?
     @Published private(set) var coordinationBySessionID: [UUID: HolySessionCoordination] = [:]
@@ -67,6 +70,10 @@ final class HolyWorkspaceStore: ObservableObject {
         return remoteHosts.first(where: { $0.id == selectedRemoteHostID }) ?? remoteHosts.first
     }
 
+    var localMachineDisplayName: String {
+        HolyLocalMachineIdentity.current.displayName
+    }
+
     var builtInTemplates: [HolySessionTemplate] {
         HolySessionTemplateCatalog.builtIns
     }
@@ -108,6 +115,7 @@ final class HolyWorkspaceStore: ObservableObject {
         applySessionStoreState(restoration.state)
         loadTasks()
         loadRemoteHosts()
+        refreshActiveRemoteTmuxSessionMetadata()
         persist(pendingEvents: restoration.pendingEvents)
     }
 
@@ -165,6 +173,31 @@ final class HolyWorkspaceStore: ObservableObject {
         archive(session)
     }
 
+    func moveSession(_ sessionID: UUID, to targetSessionID: UUID) {
+        guard sessionID != targetSessionID,
+              let sourceIndex = sessions.firstIndex(where: { $0.id == sessionID }),
+              let targetIndex = sessions.firstIndex(where: { $0.id == targetSessionID }) else {
+            return
+        }
+
+        let session = sessions.remove(at: sourceIndex)
+        sessions.insert(session, at: min(targetIndex, sessions.count))
+    }
+
+    func moveSessionToEnd(_ sessionID: UUID) {
+        guard let sourceIndex = sessions.firstIndex(where: { $0.id == sessionID }),
+              sourceIndex != sessions.index(before: sessions.endIndex) else {
+            return
+        }
+
+        let session = sessions.remove(at: sourceIndex)
+        sessions.append(session)
+    }
+
+    func persistSessionOrder() {
+        persist()
+    }
+
     func archive(_ session: HolySession) {
         let previousSelectedSessionID = selectedSessionID
         let result = sessionSupervisor.archive(session, in: currentSessionStoreState)
@@ -198,6 +231,11 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         _ = createSession(with: launchSpec, origin: .duplicate)
+    }
+
+    func duplicate(_ sessionID: UUID) {
+        guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
+        duplicate(session)
     }
 
     func presentComposer() {
@@ -258,12 +296,7 @@ final class HolyWorkspaceStore: ObservableObject {
     func presentRemoteHosts() {
         selectedRemoteHostID = selectedRemoteHost?.id ?? remoteHosts.first?.id
         remoteHostsPresented = true
-
-        if let host = selectedRemoteHost,
-           remoteSessions(for: host).isEmpty,
-           !isRemoteDiscoveryBusy(for: host) {
-            refreshRemoteSessions(for: host)
-        }
+        refreshConnectionOverview()
     }
 
     func createTask() {
@@ -379,6 +412,14 @@ final class HolyWorkspaceStore: ObservableObject {
         persistRemoteHosts()
     }
 
+    func refreshConnectionOverview() {
+        refreshLocalTmuxSessions()
+
+        for host in remoteHosts where !host.sshDestination.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            refreshRemoteSessions(for: host)
+        }
+    }
+
     func launchTask(_ task: HolyExternalTaskRecord) {
         attemptLaunch(using: makeDraft(from: task), origin: .directLaunch)
     }
@@ -395,7 +436,38 @@ final class HolyWorkspaceStore: ObservableObject {
         remoteDiscoveryBusyHostIDs.contains(host.id)
     }
 
+    func refreshLocalTmuxSessions() {
+        guard !localTmuxDiscoveryBusy else { return }
+
+        localTmuxDiscoveryBusy = true
+        localTmuxDiscoveryError = nil
+
+        Task { [weak self] in
+            do {
+                let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverLocalSessionsThrowing(
+                    hostID: HolyLocalMachineIdentity.localHostID,
+                    hostLabel: HolyLocalMachineIdentity.current.displayName
+                )
+                await MainActor.run {
+                    guard let self else { return }
+                    self.discoveredLocalTmuxSessions = sessions
+                    self.localTmuxDiscoveryBusy = false
+                    self.localTmuxDiscoveryError = nil
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.discoveredLocalTmuxSessions = []
+                    self.localTmuxDiscoveryBusy = false
+                    self.localTmuxDiscoveryError = error.localizedDescription
+                }
+            }
+        }
+    }
+
     func refreshRemoteSessions(for host: HolyRemoteHostRecord) {
+        guard !remoteDiscoveryBusyHostIDs.contains(host.id) else { return }
+
         remoteDiscoveryBusyHostIDs.insert(host.id)
         remoteDiscoveryErrorsByHostID.removeValue(forKey: host.id)
 
@@ -405,6 +477,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 await MainActor.run {
                     guard let self else { return }
                     self.discoveredRemoteSessionsByHostID[host.id] = sessions
+                    self.applyDiscoveredRemoteSessionMetadata(sessions, on: host)
                     self.remoteDiscoveryBusyHostIDs.remove(host.id)
                     self.remoteDiscoveryErrorsByHostID.removeValue(forKey: host.id)
                     self.markRemoteHostDiscovered(host.id)
@@ -420,17 +493,13 @@ final class HolyWorkspaceStore: ObservableObject {
         }
     }
 
-    func launchRemoteTmuxSession(_ session: HolyDiscoveredTmuxSession, on host: HolyRemoteHostRecord) {
+    func launchLocalTmuxSession(_ session: HolyDiscoveredTmuxSession) {
         let launchSpec = HolySessionLaunchSpec(
             runtime: session.runtime ?? .shell,
             title: session.displayTitle,
             objective: session.objective,
             budget: nil,
-            transport: .init(
-                kind: .ssh,
-                hostLabel: host.displayTitle,
-                sshDestination: host.sshDestination
-            ),
+            transport: .local,
             tmux: .init(
                 socketName: session.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
                 sessionName: session.sessionName,
@@ -448,7 +517,7 @@ final class HolyWorkspaceStore: ObservableObject {
         remoteHostsPresented = false
     }
 
-    func launchRemoteTmuxSessions(_ sessions: [HolyDiscoveredTmuxSession], on host: HolyRemoteHostRecord) {
+    func launchLocalTmuxSessions(_ sessions: [HolyDiscoveredTmuxSession]) {
         guard !sessions.isEmpty else { return }
 
         for session in sessions {
@@ -457,11 +526,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 title: session.displayTitle,
                 objective: session.objective,
                 budget: nil,
-                transport: .init(
-                    kind: .ssh,
-                    hostLabel: host.displayTitle,
-                    sshDestination: host.sshDestination
-                ),
+                transport: .local,
                 tmux: .init(
                     socketName: session.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
                     sessionName: session.sessionName,
@@ -474,6 +539,25 @@ final class HolyWorkspaceStore: ObservableObject {
                 environment: [:],
                 workspace: nil
             )
+
+            _ = createSession(with: launchSpec, origin: .directLaunch)
+        }
+
+        remoteHostsPresented = false
+    }
+
+    func launchRemoteTmuxSession(_ session: HolyDiscoveredTmuxSession, on host: HolyRemoteHostRecord) {
+        let launchSpec = remoteTmuxLaunchSpec(for: session, on: host)
+
+        _ = createSession(with: launchSpec, origin: .directLaunch)
+        remoteHostsPresented = false
+    }
+
+    func launchRemoteTmuxSessions(_ sessions: [HolyDiscoveredTmuxSession], on host: HolyRemoteHostRecord) {
+        guard !sessions.isEmpty else { return }
+
+        for session in sessions {
+            let launchSpec = remoteTmuxLaunchSpec(for: session, on: host)
 
             _ = createSession(with: launchSpec, origin: .directLaunch)
         }
@@ -721,6 +805,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 return false
             }
         }) {
+            reusableSession.applyDiscoveredLaunchMetadata(from: launchSpec)
             selectedSessionID = reusableSession.id
             composerBusy = false
             composerErrorMessage = nil
@@ -734,6 +819,98 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         return nil
+    }
+
+    private func refreshActiveRemoteTmuxSessionMetadata() {
+        for host in activeRemoteTmuxDiscoveryHosts() {
+            refreshRemoteSessions(for: host)
+        }
+    }
+
+    private func activeRemoteTmuxDiscoveryHosts() -> [HolyRemoteHostRecord] {
+        var hosts: [HolyRemoteHostRecord] = []
+        var seenKeys: Set<String> = []
+
+        for session in sessions {
+            let launchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(session.record.launchSpec)
+            guard launchSpec.transport.kind == .ssh,
+                  let destination = launchSpec.transport.sshDestination?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
+                  let tmux = launchSpec.tmux?.normalized,
+                  tmux.sessionName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank != nil else {
+                continue
+            }
+
+            let socketName = tmux.socketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+            let matchingHost = remoteHosts.first { host in
+                let normalizedHost = host.normalized()
+                guard normalizedHost.sshDestination.caseInsensitiveCompare(destination) == .orderedSame else {
+                    return false
+                }
+
+                let hostSocketName = normalizedHost.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+                return hostSocketName == socketName || hostSocketName == nil
+            }
+
+            let host = matchingHost ?? HolyRemoteHostRecord(
+                label: launchSpec.transport.hostLabel ?? destination,
+                sshDestination: destination,
+                tmuxSocketName: socketName
+            )
+            let normalizedHost = host.normalized()
+            let key = [
+                normalizedHost.sshDestination.lowercased(),
+                normalizedHost.tmuxSocketName?.lowercased() ?? "auto",
+            ].joined(separator: "|")
+
+            guard seenKeys.insert(key).inserted else { continue }
+            hosts.append(host)
+        }
+
+        return hosts
+    }
+
+    private func remoteTmuxLaunchSpec(
+        for session: HolyDiscoveredTmuxSession,
+        on host: HolyRemoteHostRecord
+    ) -> HolySessionLaunchSpec {
+        HolySessionLaunchSpec(
+            runtime: session.runtime ?? .shell,
+            title: session.displayTitle,
+            objective: session.objective,
+            budget: nil,
+            transport: .init(
+                kind: .ssh,
+                hostLabel: host.displayTitle,
+                sshDestination: host.sshDestination
+            ),
+            tmux: .init(
+                socketName: session.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
+                sessionName: session.sessionName,
+                createIfMissing: false
+            ),
+            workingDirectory: session.workingDirectory,
+            command: session.bootstrapCommand,
+            initialInput: nil,
+            waitAfterCommand: false,
+            environment: [:],
+            workspace: nil
+        )
+    }
+
+    private func applyDiscoveredRemoteSessionMetadata(
+        _ discoveredSessions: [HolyDiscoveredTmuxSession],
+        on host: HolyRemoteHostRecord
+    ) {
+        for discoveredSession in discoveredSessions {
+            let launchSpec = remoteTmuxLaunchSpec(for: discoveredSession, on: host)
+            guard let discoveredKey = HolyRemoteTmuxSessionKey(launchSpec: launchSpec) else {
+                continue
+            }
+
+            for session in sessions where HolyRemoteTmuxSessionKey(launchSpec: session.record.launchSpec) == discoveredKey {
+                session.applyDiscoveredLaunchMetadata(from: launchSpec)
+            }
+        }
     }
 
     private func selectionEvents(from previousSessionID: UUID?, to nextSessionID: UUID?) -> [HolySessionEventDraft] {
@@ -817,10 +994,16 @@ final class HolyWorkspaceStore: ObservableObject {
     private func loadRemoteHosts() {
         let loadedHosts = HolyRemoteHostRepository.load()
         let migratedHosts = loadedHosts.map(migrateRemoteHostIfNeeded(_:))
-        remoteHosts = migratedHosts
-        selectedRemoteHostID = selectedRemoteHost?.id ?? remoteHosts.first?.id
+        let reconciledHosts = reconcileRemoteHosts(migratedHosts)
+        remoteHosts = reconciledHosts
+        if let selectedRemoteHostID,
+           remoteHosts.contains(where: { $0.id == selectedRemoteHostID }) {
+            self.selectedRemoteHostID = selectedRemoteHostID
+        } else {
+            self.selectedRemoteHostID = remoteHosts.first?.id
+        }
 
-        if migratedHosts != loadedHosts {
+        if reconciledHosts != loadedHosts {
             persistRemoteHosts()
         }
     }
@@ -839,12 +1022,12 @@ final class HolyWorkspaceStore: ObservableObject {
             return
         }
 
+        let previousHostCount = remoteHosts.count
         var existingHostsByDestination: [String: HolyRemoteHostRecord] = [:]
         for host in remoteHosts {
             existingHostsByDestination[host.sshDestination.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] = host
         }
 
-        var addedHosts = 0
         for importedHost in importedHosts {
             let normalizedHost = importedHost.normalized()
             let key = normalizedHost.sshDestination.lowercased()
@@ -852,19 +1035,23 @@ final class HolyWorkspaceStore: ObservableObject {
             guard existingHostsByDestination[key] == nil else { continue }
             remoteHosts.append(normalizedHost)
             existingHostsByDestination[key] = normalizedHost
-            addedHosts += 1
         }
 
+        remoteHosts = reconcileRemoteHosts(remoteHosts)
         remoteHosts.sort { lhs, rhs in
             lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
         }
 
-        if selectedRemoteHostID == nil {
-            selectedRemoteHostID = remoteHosts.first?.id
+        if let selectedRemoteHostID,
+           remoteHosts.contains(where: { $0.id == selectedRemoteHostID }) {
+            self.selectedRemoteHostID = selectedRemoteHostID
+        } else {
+            self.selectedRemoteHostID = remoteHosts.first?.id
         }
 
         persistRemoteHosts()
 
+        let addedHosts = max(0, remoteHosts.count - previousHostCount)
         if addedHosts == 0 {
             remoteHostImportMessage = "No new machines found in \(sourceLabel.lowercased())."
         } else if addedHosts == 1 {
@@ -899,6 +1086,135 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         return normalizedHost
+    }
+
+    private func reconcileRemoteHosts(_ hosts: [HolyRemoteHostRecord]) -> [HolyRemoteHostRecord] {
+        var hostsByConnectionKey: [String: HolyRemoteHostRecord] = [:]
+
+        for host in hosts.map(migrateRemoteHostIfNeeded(_:)) {
+            let normalizedHost = host.normalized()
+            guard !HolyLocalMachineIdentity.current.shouldHideAsRemote(normalizedHost) else { continue }
+
+            let connectionKey = remoteHostConnectionKey(for: normalizedHost)
+            if let existingHost = hostsByConnectionKey[connectionKey] {
+                hostsByConnectionKey[connectionKey] = mergedRemoteHost(existingHost, normalizedHost, connectionKey: connectionKey)
+            } else {
+                hostsByConnectionKey[connectionKey] = canonicalRemoteHost(normalizedHost, connectionKey: connectionKey)
+            }
+        }
+
+        return hostsByConnectionKey.values.sorted { lhs, rhs in
+            lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
+        }
+    }
+
+    private func remoteHostConnectionKey(for host: HolyRemoteHostRecord) -> String {
+        let destination = host.sshDestination.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !destination.isEmpty else { return "manual:\(host.id.uuidString)" }
+
+        let candidates = [
+            host.label,
+            destination,
+            destination.components(separatedBy: ".").first ?? destination,
+        ]
+
+        if candidates.contains(where: { $0.holyConnectionTokenSet.contains("studio") }) {
+            return "studio"
+        }
+
+        if let firstUsefulToken = candidates
+            .flatMap(\.holyConnectionTokenSet)
+            .first(where: { !Self.remoteHostIgnoredConnectionTokens.contains($0) }) {
+            return firstUsefulToken
+        }
+
+        return destination.holyMachineIdentityKey.nilIfBlank ?? destination.lowercased()
+    }
+
+    private func mergedRemoteHost(
+        _ lhs: HolyRemoteHostRecord,
+        _ rhs: HolyRemoteHostRecord,
+        connectionKey: String
+    ) -> HolyRemoteHostRecord {
+        let preferred = preferredRemoteHost(lhs, rhs)
+        let fallback = preferred.id == lhs.id ? rhs : lhs
+
+        return canonicalRemoteHost(
+            HolyRemoteHostRecord(
+                id: preferred.id,
+                label: preferred.label,
+                sshDestination: preferred.sshDestination,
+                tmuxSocketName: preferred.tmuxSocketName ?? fallback.tmuxSocketName,
+                createdAt: min(lhs.createdAt, rhs.createdAt),
+                updatedAt: max(lhs.updatedAt, rhs.updatedAt),
+                lastDiscoveredAt: latestDate(lhs.lastDiscoveredAt, rhs.lastDiscoveredAt)
+            ),
+            connectionKey: connectionKey
+        )
+    }
+
+    private func canonicalRemoteHost(
+        _ host: HolyRemoteHostRecord,
+        connectionKey: String
+    ) -> HolyRemoteHostRecord {
+        guard connectionKey == "studio" else { return host.normalized() }
+
+        return HolyRemoteHostRecord(
+            id: host.id,
+            label: "Studio",
+            sshDestination: preferredStudioDestination(from: host),
+            tmuxSocketName: host.tmuxSocketName,
+            createdAt: host.createdAt,
+            updatedAt: host.updatedAt,
+            lastDiscoveredAt: host.lastDiscoveredAt
+        )
+    }
+
+    private func preferredRemoteHost(
+        _ lhs: HolyRemoteHostRecord,
+        _ rhs: HolyRemoteHostRecord
+    ) -> HolyRemoteHostRecord {
+        remoteHostPreferenceScore(lhs) >= remoteHostPreferenceScore(rhs) ? lhs : rhs
+    }
+
+    private func remoteHostPreferenceScore(_ host: HolyRemoteHostRecord) -> Int {
+        let destination = host.sshDestination.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let label = host.label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var score = 0
+
+        if !destination.contains(".tail") { score += 40 }
+        if destination == label { score += 30 }
+        if !destination.contains("-lan") && !label.contains("-lan") { score += 20 }
+        if host.lastDiscoveredAt != nil { score += 10 }
+        if destination == "studio" { score += 50 }
+
+        return score
+    }
+
+    private func preferredStudioDestination(from host: HolyRemoteHostRecord) -> String {
+        let destination = host.sshDestination.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !destination.isEmpty else { return "studio" }
+
+        if destination.lowercased() == "studio" {
+            return destination
+        }
+
+        return destination.contains(".tail") || destination.lowercased().contains("-lan")
+            ? "studio"
+            : destination
+    }
+
+    private func latestDate(_ lhs: Date?, _ rhs: Date?) -> Date? {
+        switch (lhs, rhs) {
+        case let (lhs?, rhs?):
+            return max(lhs, rhs)
+        case let (lhs?, nil):
+            return lhs
+        case let (nil, rhs?):
+            return rhs
+        case (nil, nil):
+            return nil
+        }
     }
 
     private func reconcileExternalTasks(persistIfChanged: Bool = true) {
@@ -1118,6 +1434,26 @@ final class HolyWorkspaceStore: ObservableObject {
         return URL(fileURLWithPath: trimmed).standardizedFileURL.path
     }
 
+    private func filesystemNamespaceKey(for session: HolySession) -> String? {
+        filesystemNamespaceKey(for: session.record.launchSpec)
+    }
+
+    private func filesystemNamespaceKey(for launchSpec: HolySessionLaunchSpec) -> String? {
+        let transport = launchSpec.transport.normalized
+        switch transport.kind {
+        case .local:
+            return "local"
+        case .ssh:
+            guard let destination = transport.sshDestination?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfBlank else {
+                return nil
+            }
+
+            return "ssh:\(destination.lowercased())"
+        }
+    }
+
     private func bindSessions() {
         sessionObservationCancellables.removeAll()
 
@@ -1162,36 +1498,20 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     private func makeCoordination(for session: HolySession) -> HolySessionCoordination {
+        if session.displayRuntime == .shell {
+            return coordinationWithoutOwnershipConflict(for: session)
+        }
+
         let ownership = session.ownership
         let sessionRepositoryRoot = normalizedPath(ownership.repositoryRoot)
         let sessionWorktreePath = normalizedPath(ownership.worktreePath)
         let sessionBranchName = ownership.branchName
+        let sessionNamespaceKey = filesystemNamespaceKey(for: session)
 
         if sessionRepositoryRoot == nil,
            sessionWorktreePath == nil,
            session.gitSnapshot == nil {
-            return .init(
-                attention: attention(
-                    for: session.phase,
-                    hasBlockingConflict: false,
-                    hasSharedBranch: false,
-                    hasOwnershipDrift: session.hasBranchOwnershipDrift,
-                    runtimeActivityKind: session.runtimeTelemetry.activityKind
-                ),
-                summary: summary(
-                    for: session.phase,
-                    hasOwnershipDrift: session.hasBranchOwnershipDrift,
-                    ownershipStatusText: session.ownershipStatusText,
-                    runtimeActivityKind: session.runtimeTelemetry.activityKind
-                ),
-                sharedWorktreeSessionIDs: [],
-                sharedWorktreeSessionTitles: [],
-                sharedBranchSessionIDs: [],
-                sharedBranchSessionTitles: [],
-                overlappingSessionIDs: [],
-                overlappingSessionTitles: [],
-                overlappingFiles: []
-            )
+            return coordinationWithoutOwnershipConflict(for: session)
         }
 
         var sharedWorktreeSessionIDs: Set<UUID> = []
@@ -1202,6 +1522,11 @@ final class HolyWorkspaceStore: ObservableObject {
         let sessionFiles = Set(session.gitSnapshot?.changedFiles.map(\.path) ?? [])
 
         for other in sessions where other.id != session.id {
+            guard let sessionNamespaceKey,
+                  filesystemNamespaceKey(for: other) == sessionNamespaceKey else {
+                continue
+            }
+
             let otherOwnership = other.ownership
             let otherRepositoryRoot = normalizedPath(otherOwnership.repositoryRoot)
             let otherWorktreePath = normalizedPath(otherOwnership.worktreePath)
@@ -1273,6 +1598,31 @@ final class HolyWorkspaceStore: ObservableObject {
             overlappingSessionIDs: orderedOverlapIDs,
             overlappingSessionTitles: orderedOverlapIDs.map(title(forSessionID:)),
             overlappingFiles: orderedOverlapFiles
+        )
+    }
+
+    private func coordinationWithoutOwnershipConflict(for session: HolySession) -> HolySessionCoordination {
+        .init(
+            attention: attention(
+                for: session.phase,
+                hasBlockingConflict: false,
+                hasSharedBranch: false,
+                hasOwnershipDrift: session.hasBranchOwnershipDrift,
+                runtimeActivityKind: session.runtimeTelemetry.activityKind
+            ),
+            summary: summary(
+                for: session.phase,
+                hasOwnershipDrift: session.hasBranchOwnershipDrift,
+                ownershipStatusText: session.ownershipStatusText,
+                runtimeActivityKind: session.runtimeTelemetry.activityKind
+            ),
+            sharedWorktreeSessionIDs: [],
+            sharedWorktreeSessionTitles: [],
+            sharedBranchSessionIDs: [],
+            sharedBranchSessionTitles: [],
+            overlappingSessionIDs: [],
+            overlappingSessionTitles: [],
+            overlappingFiles: []
         )
     }
 
@@ -1409,9 +1759,112 @@ private struct HolyCoordinationSummaryContext {
     let runtimeActivityKind: HolySessionActivityKind
 }
 
+private extension HolyWorkspaceStore {
+    static let remoteHostIgnoredConnectionTokens: Set<String> = [
+        "erik",
+        "eriks",
+        "lan",
+        "local",
+        "mac",
+        "pro",
+        "tail",
+        "tailscale",
+        "ts",
+    ]
+}
+
+private struct HolyLocalMachineIdentity {
+    static let localHostID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    static let current = HolyLocalMachineIdentity()
+
+    let displayName: String
+    private let localKeys: Set<String>
+
+    private init() {
+        let processInfo = ProcessInfo.processInfo
+        let candidateNames = [
+            Self.scutilValue("ComputerName"),
+            Self.scutilValue("LocalHostName"),
+            Host.current().localizedName,
+            processInfo.hostName,
+            processInfo.environment["HOSTNAME"],
+        ]
+        .compactMap { $0?.nilIfBlank }
+
+        displayName = candidateNames.first ?? "This Mac"
+        localKeys = Set(candidateNames.compactMap { $0.holyMachineIdentityKey.nilIfBlank })
+    }
+
+    func shouldHideAsRemote(_ host: HolyRemoteHostRecord) -> Bool {
+        let label = host.label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let destination = host.sshDestination.trimmingCharacters(in: .whitespacesAndNewlines)
+        let loweredLabel = label.lowercased()
+        let loweredDestination = destination.lowercased()
+
+        if loweredLabel == "localhost" || loweredDestination == "localhost" {
+            return true
+        }
+
+        if ["127.0.0.1", "::1"].contains(loweredDestination) {
+            return true
+        }
+
+        if loweredDestination.contains(".tail"),
+           (loweredDestination.contains("iphone") || loweredDestination.contains("ipad")) {
+            return true
+        }
+
+        let hostKeys = [
+            label,
+            destination,
+            destination.components(separatedBy: ".").first ?? destination,
+        ]
+        .compactMap { $0.holyMachineIdentityKey.nilIfBlank }
+
+        if hostKeys.contains(where: { localKeys.contains($0) }) {
+            return true
+        }
+
+        return false
+    }
+
+    private static func scutilValue(_ key: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/scutil")
+        process.arguments = ["--get", key]
+
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+
+        guard process.terminationStatus == 0 else { return nil }
+
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?.nilIfBlank
+    }
+}
+
 private extension String {
     var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var holyConnectionTokenSet: [String] {
+        folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty && !$0.allSatisfy(\.isNumber) }
+    }
+
+    var holyMachineIdentityKey: String {
+        holyConnectionTokenSet.joined()
     }
 }

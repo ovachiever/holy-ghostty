@@ -21,8 +21,33 @@ actor HolyRemoteTmuxDiscoveryService {
         let normalizedHost = host.normalized()
         guard !normalizedHost.sshDestination.isEmpty else { return [] }
 
+        return try discoverSessionsThrowing(for: normalizedHost) { host, socketName in
+            runRemoteDiscovery(for: host, socketName: socketName)
+        }
+    }
+
+    func discoverLocalSessionsThrowing(hostID: UUID, hostLabel: String) throws -> [HolyDiscoveredTmuxSession] {
+        let localHost = HolyRemoteHostRecord(
+            id: hostID,
+            label: hostLabel,
+            sshDestination: "localhost",
+            tmuxSocketName: nil
+        )
+
+        return try discoverSessionsThrowing(for: localHost) { _, socketName in
+            runLocalDiscovery(socketName: socketName)
+        }
+    }
+
+    private func discoverSessionsThrowing(
+        for normalizedHost: HolyRemoteHostRecord,
+        using runDiscovery: (HolyRemoteHostRecord, String?) -> HolyRemoteCommandResult?
+    ) throws -> [HolyDiscoveredTmuxSession] {
+        var discoveredSessions: [HolyDiscoveredTmuxSession] = []
+        var discoveredSessionIDs: Set<String> = []
+
         for probeTarget in probeTargets(for: normalizedHost) {
-            guard let result = runDiscovery(for: normalizedHost, socketName: probeTarget.socketName) else {
+            guard let result = runDiscovery(normalizedHost, probeTarget.socketName) else {
                 throw CocoaError(.executableNotLoadable)
             }
 
@@ -43,18 +68,24 @@ actor HolyRemoteTmuxDiscoveryService {
                 discoveredAt: .now
             )
 
-            if !sessions.isEmpty || probeTarget.isExplicit {
+            if probeTarget.isExplicit {
                 return sessions
+            }
+
+            for session in sessions where !discoveredSessionIDs.contains(session.id) {
+                discoveredSessions.append(session)
+                discoveredSessionIDs.insert(session.id)
             }
         }
 
-        return []
+        return sortedSessions(discoveredSessions)
     }
 
-    private func runDiscovery(
+    private func runRemoteDiscovery(
         for host: HolyRemoteHostRecord,
         socketName: String?
     ) -> HolyRemoteCommandResult? {
+        let script = remoteDiscoveryScript(socketName: socketName)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         process.arguments = [
@@ -67,11 +98,21 @@ actor HolyRemoteTmuxDiscoveryService {
             "-o",
             "ServerAliveCountMax=1",
             host.sshDestination,
-            "zsh",
-            "-lc",
-            remoteDiscoveryScript(socketName: socketName)
+            "zsh -lc \(posixQuote(script))"
         ]
 
+        return run(process: process, context: host.sshDestination)
+    }
+
+    private func runLocalDiscovery(socketName: String?) -> HolyRemoteCommandResult? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", remoteDiscoveryScript(socketName: socketName)]
+
+        return run(process: process, context: "local tmux")
+    }
+
+    private func run(process: Process, context: String) -> HolyRemoteCommandResult? {
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
@@ -81,7 +122,7 @@ actor HolyRemoteTmuxDiscoveryService {
             try process.run()
             process.waitUntilExit()
         } catch {
-            logger.error("Failed to run remote tmux discovery for \(host.sshDestination, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            logger.error("Failed to run tmux discovery for \(context, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return nil
         }
 
@@ -129,17 +170,27 @@ actor HolyRemoteTmuxDiscoveryService {
                     discoveredAt: discoveredAt
                 )
             }
-            .sorted { lhs, rhs in
-                if lhs.isHolyManaged != rhs.isHolyManaged {
-                    return lhs.isHolyManaged && !rhs.isHolyManaged
-                }
+            .sorted(by: sessionSortOrder)
+    }
 
-                if lhs.attachedClientCount != rhs.attachedClientCount {
-                    return lhs.attachedClientCount > rhs.attachedClientCount
-                }
+    private func sortedSessions(_ sessions: [HolyDiscoveredTmuxSession]) -> [HolyDiscoveredTmuxSession] {
+        sessions.sorted(by: sessionSortOrder)
+    }
 
-                return lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
-            }
+    private func sessionSortOrder(_ lhs: HolyDiscoveredTmuxSession, _ rhs: HolyDiscoveredTmuxSession) -> Bool {
+        if lhs.isHolyManaged != rhs.isHolyManaged {
+            return lhs.isHolyManaged && !rhs.isHolyManaged
+        }
+
+        if lhs.attachedClientCount != rhs.attachedClientCount {
+            return lhs.attachedClientCount > rhs.attachedClientCount
+        }
+
+        if lhs.tmuxSocketName != rhs.tmuxSocketName {
+            return (lhs.tmuxSocketName ?? "").localizedCaseInsensitiveCompare(rhs.tmuxSocketName ?? "") == .orderedAscending
+        }
+
+        return lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
     }
 
     private func remoteDiscoveryScript(socketName: String?) -> String {
@@ -165,6 +216,11 @@ actor HolyRemoteTmuxDiscoveryService {
           local session_name="$1"
           local option_name="$2"
           "${tmux_cmd[@]}" show-options -qv -t "$session_name" "$option_name" 2>/dev/null || true
+        }
+
+        pane_working_directory() {
+          local session_name="$1"
+          "${tmux_cmd[@]}" display-message -p -t "$session_name" '#{pane_current_path}' 2>/dev/null || true
         }
 
         git_metadata() {
@@ -260,6 +316,9 @@ actor HolyRemoteTmuxDiscoveryService {
           runtime=$(option_value "$session_name" @holy_runtime)
           objective=$(option_value "$session_name" @holy_objective)
           working_directory=$(option_value "$session_name" @holy_working_directory)
+          if [[ -z "$working_directory" ]]; then
+            working_directory=$(pane_working_directory "$session_name")
+          fi
           command=$(option_value "$session_name" @holy_command)
           task_title=$(option_value "$session_name" @holy_task_title)
           task_source=$(option_value "$session_name" @holy_task_source)

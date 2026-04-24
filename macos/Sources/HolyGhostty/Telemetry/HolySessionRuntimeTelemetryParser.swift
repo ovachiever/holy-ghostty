@@ -47,12 +47,13 @@ enum HolySessionRuntimeTelemetryParser {
         let hasStructuredSignal = source.surfaceView.progressReport != nil
             || primarySignal != nil
             || command != nil
-            || filePath != nil
             || nextStepHint != nil
             || artifact != nil
             || stallKind != nil
 
-        guard hasStructuredSignal else { return nil }
+        guard hasStructuredSignal else {
+            return current.isMeaningful ? .empty : nil
+        }
 
         let activityKind = inferredActivityKind(
             primarySignal: primarySignal,
@@ -335,7 +336,26 @@ enum HolySessionRuntimeTelemetryParser {
         preview
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .last(where: { !$0.isEmpty })
+            .last(where: { !$0.isEmpty && !isTerminalChromeLine($0) })
+    }
+
+    private static func isTerminalChromeLine(_ line: String) -> Bool {
+        isTmuxStatusLine(line) || isSeparatorLine(line)
+    }
+
+    private static func isTmuxStatusLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("[") else { return false }
+        return trimmed.range(
+            of: #"\b\d{1,2}:\d{2}\s+\d{2}-[A-Za-z]{3}-\d{2}\b"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func isSeparatorLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 8 else { return false }
+        return trimmed.allSatisfy { "─━═- ".contains($0) }
     }
 
     private static func firstMatch(in text: String, pattern: String) -> String? {

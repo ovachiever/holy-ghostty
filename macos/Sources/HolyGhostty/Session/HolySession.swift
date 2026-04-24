@@ -290,6 +290,43 @@ final class HolySession: ObservableObject, Identifiable {
         objectWillChange.send()
     }
 
+    @discardableResult
+    func applyDiscoveredLaunchMetadata(from launchSpec: HolySessionLaunchSpec) -> Bool {
+        let discoveredLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
+        var changed = false
+
+        if record.launchSpec.runtime == .shell,
+           discoveredLaunchSpec.runtime != .shell {
+            record.launchSpec.runtime = discoveredLaunchSpec.runtime
+            changed = true
+        }
+
+        if let workingDirectory = Self.normalizedMetadataString(discoveredLaunchSpec.workingDirectory),
+           Self.normalizedMetadataString(record.launchSpec.workingDirectory) != workingDirectory {
+            record.launchSpec.workingDirectory = workingDirectory
+            changed = true
+        }
+
+        if let objective = Self.normalizedMetadataString(discoveredLaunchSpec.objective),
+           Self.normalizedMetadataString(record.launchSpec.objective) == nil {
+            record.launchSpec.objective = objective
+            changed = true
+        }
+
+        if let command = Self.normalizedMetadataString(discoveredLaunchSpec.command),
+           Self.normalizedMetadataString(record.launchSpec.command) == nil {
+            record.launchSpec.command = command
+            changed = true
+        }
+
+        guard changed else { return false }
+
+        markUpdated()
+        refreshGitSnapshotIfNeeded(force: true)
+        objectWillChange.send()
+        return true
+    }
+
     func archiveSnapshot(at archivedAt: Date = .init()) -> HolyArchivedSession {
         HolyArchivedSession(
             sourceSessionID: id,
@@ -546,8 +583,10 @@ final class HolySession: ObservableObject, Identifiable {
         preview: String
     ) -> [HolySessionSignal] {
         let adapter = HolySessionAdapterRegistry.adapter(for: runtime)
-        let lowerPreview = preview.lowercased()
         let evidence = lastMeaningfulLine(from: preview) ?? preview
+        let activePreview = recentMeaningfulLines(from: preview, maxCount: 3).joined(separator: "\n")
+        let lowerActivePreview = activePreview.lowercased()
+        let evidenceLooksReady = isReadyLine(evidence)
         var results: [HolySessionSignal] = []
 
         func append(_ signal: HolySessionSignal) {
@@ -578,7 +617,7 @@ final class HolySession: ObservableObject, Identifiable {
             "[y/n]",
             "(y/n)",
         ] + adapter.approvalMarkers
-        if approvalMarkers.contains(where: lowerPreview.contains) {
+        if approvalMarkers.contains(where: lowerActivePreview.contains) {
             append(.init(
                 kind: .approval,
                 headline: "\(adapter.runtime.displayName) needs approval or confirmation",
@@ -605,7 +644,7 @@ final class HolySession: ObservableObject, Identifiable {
             ("can't find session", "Tmux session not found"),
             ("no sessions", "Tmux has no sessions"),
         ] + adapter.failureHeadlines
-        if let failure = failureHeadlines.first(where: { lowerPreview.contains($0.0) }) {
+        if let failure = failureHeadlines.first(where: { lowerActivePreview.contains($0.0) }) {
             append(.init(kind: .failure, headline: failure.1, detail: evidence))
         }
 
@@ -617,7 +656,7 @@ final class HolySession: ObservableObject, Identifiable {
             "scanning ",
             "searching ",
         ] + adapter.readingMarkers
-        if readingMarkers.contains(where: lowerPreview.contains) {
+        if !evidenceLooksReady, readingMarkers.contains(where: lowerActivePreview.contains) {
             append(.init(kind: .reading, headline: "\(adapter.runtime.displayName) is reading code and context", detail: evidence))
         }
 
@@ -629,7 +668,7 @@ final class HolySession: ObservableObject, Identifiable {
             "updated ",
             "modifying ",
         ] + adapter.editingMarkers
-        if editingMarkers.contains(where: lowerPreview.contains) {
+        if !evidenceLooksReady, editingMarkers.contains(where: lowerActivePreview.contains) {
             append(.init(kind: .editing, headline: "\(adapter.runtime.displayName) is editing project files", detail: evidence))
         }
 
@@ -644,7 +683,7 @@ final class HolySession: ObservableObject, Identifiable {
             "yarn ",
             "git ",
         ] + adapter.commandMarkers
-        if commandMarkers.contains(where: lowerPreview.contains) {
+        if !evidenceLooksReady, commandMarkers.contains(where: lowerActivePreview.contains) {
             append(.init(kind: .command, headline: "\(adapter.runtime.displayName) is running commands", detail: evidence))
         }
 
@@ -655,7 +694,7 @@ final class HolySession: ObservableObject, Identifiable {
             "finished successfully",
             "done",
         ] + adapter.completionMarkers
-        if completionMarkers.contains(where: lowerPreview.contains) || surfaceView.processExited {
+        if (!evidenceLooksReady && completionMarkers.contains(where: lowerActivePreview.contains)) || surfaceView.processExited {
             append(.init(kind: .completion, headline: "\(adapter.runtime.displayName) session completed", detail: evidence))
         }
 
@@ -711,10 +750,48 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     private static func lastMeaningfulLine(from preview: String) -> String? {
+        recentMeaningfulLines(from: preview, maxCount: .max).last
+    }
+
+    private static func recentMeaningfulLines(from preview: String, maxCount: Int) -> [String] {
         preview
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .last(where: { !$0.isEmpty })
+            .filter { !$0.isEmpty && !isTerminalChromeLine($0) }
+            .suffix(maxCount)
+            .map { $0 }
+    }
+
+    private static func isTerminalChromeLine(_ line: String) -> Bool {
+        isTmuxStatusLine(line) || isSeparatorLine(line)
+    }
+
+    private static func isTmuxStatusLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("[") else { return false }
+        return trimmed.range(
+            of: #"\b\d{1,2}:\d{2}\s+\d{2}-[A-Za-z]{3}-\d{2}\b"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func isSeparatorLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 8 else { return false }
+        return trimmed.allSatisfy { "─━═- ".contains($0) }
+    }
+
+    private static func isReadyLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("? for shortcuts") || lower.contains("new task?") {
+            return true
+        }
+
+        return trimmed.range(
+            of: #"(^|\s)[^\n]*[%$#]\s*$"#,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func normalizedEvidenceSignature(from evidence: String) -> String? {
@@ -728,6 +805,15 @@ final class HolySession: ObservableObject, Identifiable {
         }
 
         return normalized
+    }
+
+    private static func normalizedMetadataString(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+
+        return trimmed
     }
 
     private static func isDefaultTitle(_ title: String, for runtime: HolySessionRuntime) -> Bool {
