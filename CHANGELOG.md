@@ -4,9 +4,29 @@ All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
+### Changed
+
+- Session creation, clear-roster, and SSH controls now live in the left tmux roster.
+- The roster `New` action now opens `tmux` directly in `~/Documents/AI/Custom_Coding` instead of injecting a generated Holy tmux bootstrap script.
+- `New` and empty-workspace seeding pre-start the default tmux server out-of-band when needed so Holy Ghostty only owns the tmux client process.
+- The old `Grid` / `Diff` / `Focus` controls are removed from the live workspace chrome; Diff code is preserved dormant for a later explicit comparison mode.
+- Standard workspace layout controls now live at the bottom of the left rail: single, split right, split down, and quad.
+- Holy-owned pane layouts persist across launches and show pane position labels in the session roster.
+- The selected session header is removed from the terminal pane so the live terminal gets the top edge.
+- The standard workspace now removes the empty native toolbar band; the left rail reserves traffic-light clearance while the terminal surface starts at the top edge.
+- Holy defaults now add top terminal padding so the first prompt row clears macOS window controls without adding a separate app bar.
+- The bundled Holy background image now stretches to the live terminal surface size.
+- Per-session menus now separate `Detach From Roster` from `Stop tmux session`; stopping a tmux-backed session kills the backing tmux session before removing it from the roster.
+- Public docs now describe the Level 1 pane layout model instead of the old toolbar display-mode model.
+
 ### Fixed
 
 - Local tmux startup discovery no longer probes git metadata or checks inferred project directories on disk, preventing automatic restore from triggering repeated macOS Documents permission prompts.
+- Local terminal launches now strip inherited direnv active-session state so shells opened above the launch repo do not print a stale `direnv: unloading` message.
+
+### Removed
+
+- The stale public roadmap document was moved out of the release docs surface; Diff remains preserved as dormant code for a future explicit comparison mode.
 
 ## 0.30 (2026-05-12)
 

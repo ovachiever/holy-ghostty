@@ -4,19 +4,13 @@ import GhosttyKit
 import AppKit
 #endif
 
-private enum HolyWorkspaceDisplayMode: String {
-    case standard
-    case focus
-    case grid
-    case diff
-}
-
 private enum HolyWorkspaceLayout {
-    static let rosterMinWidth: CGFloat = 160
+    static let rosterMinWidth: CGFloat = 180
     static let rosterDefaultWidth: CGFloat = 250
     static let rosterMaxWidth: CGFloat = 560
     static let detailMinimumVisibleWidth: CGFloat = 420
     static let splitHandleWidth: CGFloat = 8
+    static let titlebarControlInset: CGFloat = 42
 }
 
 private struct HolyWorkspaceSplitHandle: View {
@@ -57,7 +51,6 @@ private final class HolyWindowDragRegionView: NSView {
 struct HolyWorkspaceRootView: View {
     @EnvironmentObject private var ghostty: Ghostty.App
     @ObservedObject var store: HolyWorkspaceStore
-    @State private var displayMode = HolyWorkspaceDisplayMode.standard
     @State private var diffCompareSessionIDRaw: String?
     @SceneStorage("holy.workspace.rosterWidth.v2") private var rosterWidthRaw = Double(HolyWorkspaceLayout.rosterDefaultWidth)
     @SceneStorage("holy.workspace.contextRailExpanded.v1") private var contextRailExpanded = false
@@ -66,18 +59,10 @@ struct HolyWorkspaceRootView: View {
     var body: some View {
         ZStack {
             HolyGhosttyBackdrop()
-
-            VStack(spacing: 0) {
-                header
-
-                Rectangle()
-                    .fill(HolyGhosttyTheme.border)
-                    .frame(height: 0.5)
-
-                workspaceContent
-            }
+            workspaceContent
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea(.container, edges: .top)
         .clipped()
         .sheet(isPresented: $store.composerPresented) {
             HolyNewSessionSheet(
@@ -109,183 +94,12 @@ struct HolyWorkspaceRootView: View {
         .onChange(of: store.selectedSessionID) { _ in focusSelectedSession() }
     }
 
-    // MARK: - Header (thin bar: brand left, controls right)
-
-    private var header: some View {
-        HStack(spacing: 8) {
-            Image("HolyGhosttyLogo")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(height: 24)
-                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-
-            Text("Holy Ghostty")
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
-                .foregroundStyle(HolyGhosttyTheme.halo)
-
-            if !store.sessions.isEmpty {
-                Text("\(store.sessions.count)")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(HolyGhosttyTheme.bgSurface))
-
-                Button {
-                    store.detachAllSessions()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "rectangle.stack.badge.minus")
-                            .font(.system(size: 10, weight: .medium))
-                        Text("Clear")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                }
-                .buttonStyle(HolyGhosttyActionButtonStyle())
-                .help("Detach all sessions")
-            }
-
-            if failedSessionCount > 0 {
-                HStack(spacing: 3) {
-                    HolyGhosttyStatusDot(color: HolyGhosttyTheme.danger)
-                    Text("\(failedSessionCount)")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(HolyGhosttyTheme.danger)
-                }
-                .help("Failed sessions")
-            }
-
-            Button { _ = store.createSession(from: nil) } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(HolyGhosttyActionButtonStyle())
-            .help("New Shell")
-            .keyboardShortcut("n", modifiers: [.command])
-
-            Button { store.presentTasks() } label: {
-                Image(systemName: "checklist")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(HolyGhosttyActionButtonStyle())
-            .keyboardShortcut("t", modifiers: [.command, .shift])
-
-            Button { store.presentRemoteHosts() } label: {
-                Image(systemName: "server.rack")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(HolyGhosttyActionButtonStyle())
-            .keyboardShortcut("r", modifiers: [.command, .shift])
-
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    toggleDisplayMode(.grid)
-                }
-            } label: {
-                Image(systemName: displayMode == .grid ? "square.grid.2x2.fill" : "square.grid.2x2")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(HolyGhosttyActionButtonStyle())
-            .keyboardShortcut("g", modifiers: [.command, .shift])
-
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    toggleDisplayMode(.diff)
-                }
-            } label: {
-                Image(systemName: displayMode == .diff ? "rectangle.split.2x1.fill" : "rectangle.split.2x1")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(HolyGhosttyActionButtonStyle())
-            .keyboardShortcut("d", modifiers: [.command, .shift])
-
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    contextRailExpanded.toggle()
-                }
-            } label: {
-                Image(systemName: "sidebar.right")
-                    .font(.system(size: 11, weight: .medium))
-                    .symbolVariant(contextRailExpanded ? .fill : .none)
-            }
-            .buttonStyle(HolyGhosttyActionButtonStyle())
-            .help(contextRailExpanded ? "Hide Inspector" : "Show Inspector")
-            .keyboardShortcut("i", modifiers: [.command, .shift])
-
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    toggleDisplayMode(.focus)
-                }
-            } label: {
-                Image(systemName: displayMode == .focus ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(HolyGhosttyActionButtonStyle())
-            .keyboardShortcut("f", modifiers: [.command, .shift])
-
-#if os(macOS)
-            Color.clear
-                .frame(maxWidth: .infinity, minHeight: 28, maxHeight: 28)
-                .background(HolyWindowDragRegion())
-#else
-            Spacer()
-#endif
-
-            Menu {
-                Section("Templates") {
-                    templateSection(title: "Built-In", templates: store.builtInTemplates)
-
-                    if !store.savedTemplates.isEmpty {
-                        Divider()
-                        templateSection(title: "Saved", templates: store.savedTemplates)
-                    }
-                }
-
-                Divider()
-
-                Button { store.presentTasks() } label: {
-                    Label("Task Inbox", systemImage: "checklist")
-                }
-
-                Button { store.presentRemoteHosts() } label: {
-                    Label("Remote Hosts", systemImage: "server.rack")
-                }
-
-                Button { store.presentHistory() } label: {
-                    Label("Session History", systemImage: "clock")
-                }
-
-                if let selected = store.selectedSession {
-                    Divider()
-                    Button("Duplicate Session") { store.duplicate(selected) }
-                    Button("Detach Session") { store.close(selected) }
-                    if store.canKillTmuxSession(selected) {
-                        Button("Kill Tmux Session") { store.killTmuxSession(selected) }
-                    }
-                }
-
-                if !store.sessions.isEmpty {
-                    Divider()
-                    Button("Detach All Sessions") { store.detachAllSessions() }
-                }
-            } label: {
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(HolyGhosttyActionButtonStyle())
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
-        .padding(.bottom, 6)
-        .background(HolyGhosttyTheme.bgElevated)
-    }
-
     // MARK: - Helpers
 
     @ViewBuilder
     private var workspaceContent: some View {
         GeometryReader { geometry in
-            workspaceModeContent
+            standardContent
                 .frame(
                     width: max(0, geometry.size.width),
                     height: max(0, geometry.size.height)
@@ -296,41 +110,26 @@ struct HolyWorkspaceRootView: View {
         .clipped()
     }
 
-    @ViewBuilder
-    private var workspaceModeContent: some View {
-        switch displayMode {
-        case .focus:
-            HolySessionDetailView(
-                session: store.selectedSession,
-                coordination: store.selectedSession.map(store.coordination(for:)) ?? .empty,
-                ghosttyApp: ghostty,
-                focusMode: true
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(HolyGhosttyTheme.bg)
-            .overlay(alignment: .topTrailing) {
-                focusOverlay
-                    .padding(.top, 12)
-                    .padding(.trailing, 12)
-            }
-        case .grid:
-            gridContent
-        case .diff:
-            diffContent
-        case .standard:
-            standardContent
-        }
-    }
-
     private var standardContent: some View {
         GeometryReader { geometry in
             let rosterWidth = clampedRosterWidth(for: geometry.size.width)
 
             HStack(spacing: 0) {
-                HolySessionRosterView(store: store)
-                    .frame(width: rosterWidth)
+                VStack(spacing: 0) {
+                    HolySessionRosterView(
+                        store: store,
+                        titlebarInset: HolyWorkspaceLayout.titlebarControlInset,
+                        paneLabelsBySessionID: store.paneLabelsBySessionID,
+                        onPresentRemoteHosts: { store.presentRemoteHosts() },
+                        onPresentHistory: { store.presentHistory() }
+                    )
                     .frame(maxHeight: .infinity)
-                    .background(HolyGhosttyTheme.bgElevated)
+
+                    leftRailViewControls
+                }
+                .frame(width: rosterWidth)
+                .frame(maxHeight: .infinity)
+                .background(HolyGhosttyTheme.bgElevated)
 
                 HolyWorkspaceSplitHandle()
                     .frame(width: HolyWorkspaceLayout.splitHandleWidth)
@@ -346,24 +145,176 @@ struct HolyWorkspaceRootView: View {
                             }
                     )
 
-                HSplitView {
-                    standardSessionDetail
-                    if contextRailExpanded {
-                        standardContextPanel
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                primaryWorkspaceContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(width: max(0, geometry.size.width), height: max(0, geometry.size.height))
             .clipped()
         }
     }
 
+    @ViewBuilder
+    private var primaryWorkspaceContent: some View {
+        switch store.normalizedPaneLayout.kind {
+        case .single:
+            singlePaneContent
+        case .splitRight:
+            HSplitView {
+                paneView(at: 0)
+                paneView(at: 1)
+            }
+        case .splitDown:
+            VSplitView {
+                paneView(at: 0)
+                paneView(at: 1)
+            }
+        case .quad:
+            VSplitView {
+                HSplitView {
+                    paneView(at: 0)
+                    paneView(at: 1)
+                }
+
+                HSplitView {
+                    paneView(at: 2)
+                    paneView(at: 3)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var singlePaneContent: some View {
+        if let session = store.visiblePaneSessions.first ?? store.selectedSession {
+            paneSurface(for: session)
+        } else {
+            HolyGhosttyEmptyStateView(
+                title: "No session selected",
+                subtitle: "Start or attach a tmux session from the left rail.",
+                symbol: "terminal"
+            )
+        }
+    }
+
+    private var leftRailViewControls: some View {
+        HStack(spacing: 6) {
+            if let selected = store.selectedSession {
+                Text(selected.statusText)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(statusColor(for: selected.phase))
+                    .lineLimit(1)
+                    .frame(maxWidth: 72)
+                    .padding(.trailing, 2)
+            }
+
+            layoutControlButton(
+                title: "Single",
+                systemName: "rectangle",
+                isActive: store.normalizedPaneLayout.kind == .single
+            ) {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    store.showSinglePane()
+                }
+            }
+
+            layoutControlButton(
+                title: "Split Right",
+                systemName: "rectangle.split.2x1",
+                isActive: store.normalizedPaneLayout.kind == .splitRight
+            ) {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    store.splitPaneRight()
+                }
+            }
+
+            layoutControlButton(
+                title: "Split Down",
+                systemName: "rectangle.split.2x1",
+                rotation: .degrees(90),
+                isActive: store.normalizedPaneLayout.kind == .splitDown
+            ) {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    store.splitPaneDown()
+                }
+            }
+
+            layoutControlButton(
+                title: "Quad",
+                systemName: "square.grid.2x2",
+                isActive: store.normalizedPaneLayout.kind == .quad
+            ) {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    store.showQuadPaneLayout()
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(HolyGhosttyTheme.bgElevated)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(HolyGhosttyTheme.border)
+                .frame(height: 0.5)
+        }
+    }
+
+    @ViewBuilder
+    private func paneView(at index: Int) -> some View {
+        let sessions = store.visiblePaneSessions
+        if index < sessions.count {
+            paneSurface(for: sessions[index])
+        } else {
+            HolyGhosttyEmptyStateView(
+                title: "Empty pane",
+                subtitle: "Select another session or start a new tmux session.",
+                symbol: "rectangle.dashed"
+            )
+        }
+    }
+
+    private func paneSurface(for session: HolySession) -> some View {
+        HolySessionDetailView(
+            session: session,
+            coordination: store.coordination(for: session),
+            ghosttyApp: ghostty,
+            showsSessionHeader: false,
+            splitSurface: store.normalizedPaneLayout.kind != .single
+        )
+        .frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity)
+        .background(HolyGhosttyTheme.bg)
+        .layoutPriority(1)
+    }
+
+    private func layoutControlButton(
+        title: String,
+        systemName: String,
+        rotation: Angle = .zero,
+        isActive: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 10, weight: .medium))
+                .symbolVariant(isActive ? .fill : .none)
+                .rotationEffect(rotation)
+                .frame(width: 24, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isActive ? HolyGhosttyTheme.halo.opacity(0.14) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isActive ? HolyGhosttyTheme.halo : HolyGhosttyTheme.textSecondary)
+        .help(title)
+    }
+
     private var standardSessionDetail: some View {
         HolySessionDetailView(
             session: store.selectedSession,
             coordination: store.selectedSession.map(store.coordination(for:)) ?? .empty,
-            ghosttyApp: ghostty
+            ghosttyApp: ghostty,
+            showsSessionHeader: false
         )
         .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
         .background(HolyGhosttyTheme.bg)
@@ -398,6 +349,8 @@ struct HolyWorkspaceRootView: View {
     }
 
     private var gridContent: some View {
+        // Dormant: preserved for a later explicit agent/worktree comparison pass.
+        // Level 1 uses direct terminal pane layouts instead of these old view modes.
         GeometryReader { geometry in
             let sessions = visibleGridSessions
             let columns = gridColumns(for: geometry.size.width, sessionCount: sessions.count)
@@ -677,14 +630,23 @@ struct HolyWorkspaceRootView: View {
 
     private func promote(_ session: HolySession) {
         store.selectedSessionID = session.id
-        withAnimation(.easeInOut(duration: 0.18)) {
-            displayMode = .standard
-        }
         Ghostty.moveFocus(to: session.surfaceView)
     }
 
-    private var failedSessionCount: Int {
-        store.sessions.filter { $0.phase == .failed }.count
+    private func statusColor(for phase: HolySessionPhase) -> Color {
+        switch phase {
+        case .active:
+            return HolyGhosttyTheme.textTertiary
+        case .working:
+            return HolyAgentPalette.workingBlue
+        case .waitingInput:
+            guard let selected = store.selectedSession else { return HolyGhosttyTheme.warning }
+            return HolyWaitingFreshness(age: Date.now.timeIntervalSince(selected.activityAt)).color
+        case .completed:
+            return HolyAgentPalette.done
+        case .failed:
+            return HolyGhosttyTheme.danger
+        }
     }
 
     private var focusSummaryText: String {
@@ -751,10 +713,6 @@ struct HolyWorkspaceRootView: View {
     private var diffCompareSessionID: UUID? {
         guard let diffCompareSessionIDRaw else { return nil }
         return UUID(uuidString: diffCompareSessionIDRaw)
-    }
-
-    private func toggleDisplayMode(_ mode: HolyWorkspaceDisplayMode) {
-        displayMode = displayMode == mode ? .standard : mode
     }
 
     private func gridColumns(for width: CGFloat, sessionCount: Int) -> [GridItem] {
@@ -952,6 +910,7 @@ private struct HolySessionDiffPane: View {
                 session: session,
                 coordination: coordination,
                 ghosttyApp: ghosttyApp,
+                showsSessionHeader: false,
                 splitSurface: true
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -23,7 +23,7 @@ private final class HolyWorkspaceWindow: NSWindow {
 }
 
 @MainActor
-final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
+final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate {
     let workspaceStore: HolyWorkspaceStore
 
     init(
@@ -54,11 +54,6 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate,
         window.collectionBehavior = [.fullScreenPrimary, .managed]
         window.setFrameAutosaveName("HolyGhosttyWorkspaceWindow")
 
-        let toolbar = NSToolbar(identifier: "HolyGhosttyToolbar")
-        toolbar.displayMode = .iconOnly
-        window.toolbar = toolbar
-        window.toolbarStyle = .unified
-
         let hostingController = NSHostingController(
             rootView: HolyWorkspaceRootView(store: workspaceStore)
                 .environmentObject(ghostty)
@@ -68,7 +63,6 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate,
         super.init(window: window)
         window.holyWorkspaceController = self
         window.delegate = self
-        toolbar.delegate = self
 
         if let initialConfig {
             _ = createSession(from: initialConfig)
@@ -185,19 +179,5 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate,
         all.first(where: { $0.window?.isMainWindow ?? false })
         ?? all.first(where: { $0.window?.isKeyWindow ?? false })
         ?? all.last
-    }
-
-    // MARK: - NSToolbarDelegate
-
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace]
-    }
-
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        []
-    }
-
-    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        nil
     }
 }

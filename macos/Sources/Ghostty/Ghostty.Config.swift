@@ -151,9 +151,10 @@ extension Ghostty {
             # so anything you set in ~/.config/ghostty/config overrides these.
             background-image = \(imageURL.path)
             background-image-opacity = 0.04
-            background-image-fit = contain
+            background-image-fit = stretch
             background-image-position = center
             background-image-repeat = false
+            window-padding-y = 34,2
             """
 
             // Rewrite every launch so the image path always tracks the current

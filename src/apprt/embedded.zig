@@ -953,6 +953,8 @@ pub const Surface = struct {
         var env = try internal_os.getEnvMap(alloc);
         errdefer env.deinit();
 
+        removeInheritedDirenvState(&env);
+
         if (comptime builtin.target.os.tag.isDarwin()) {
             if (env.get("__XCODE_BUILT_PRODUCTS_DIR_PATHS") != null) {
                 env.remove("__XCODE_BUILT_PRODUCTS_DIR_PATHS");
@@ -977,6 +979,20 @@ pub const Surface = struct {
         }
 
         return env;
+    }
+
+    fn removeInheritedDirenvState(env: *std.process.EnvMap) void {
+        const direnv_state_vars = [_][]const u8{
+            "DIRENV_DIR",
+            "DIRENV_DIFF",
+            "DIRENV_FILE",
+            "DIRENV_LAYOUT",
+            "DIRENV_WATCHES",
+        };
+
+        inline for (direnv_state_vars) |key| {
+            env.remove(key);
+        }
     }
 
     /// The cursor position from the host directly is in screen coordinates but

@@ -6,19 +6,23 @@ struct HolySessionDetailView: View {
     let coordination: HolySessionCoordination
     let ghosttyApp: Ghostty.App?
     var focusMode: Bool = false
+    var showsSessionHeader: Bool = true
     var splitSurface: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let session {
-                sessionHeader(session)
+                if showsSessionHeader {
+                    sessionHeader(session)
+                }
 
                 HolyGhosttySurfaceFrame(halo: true) {
                     activeSurface(session: session)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 8)
+                .padding(.horizontal, focusMode ? 0 : 6)
+                .padding(.top, showsSessionHeader || focusMode ? 0 : 6)
+                .padding(.bottom, focusMode ? 0 : 6)
             } else {
                 HolyGhosttyEmptyStateView(
                     title: "No session selected",

@@ -68,14 +68,16 @@ final class HolySessionSupervisor {
                         savedTemplates: snapshot.templates,
                         archivedSessions: archivedSessions,
                         selectedSessionID: nil,
-                        selectedArchivedSessionID: archivedSessions.first?.id
+                        selectedArchivedSessionID: archivedSessions.first?.id,
+                        paneLayout: .single
                     ),
                     pendingEvents: recovery.pendingEvents
                 )
             }
 
+            HolyLocalTmuxDefaults.ensureDefaultServerStartedIfNeeded()
             let session = HolySession(
-                record: .init(launchSpec: .interactiveShell()),
+                record: .init(launchSpec: HolyLocalTmuxDefaults.launchSpec()),
                 app: app
             )
 
@@ -85,7 +87,8 @@ final class HolySessionSupervisor {
                     savedTemplates: snapshot.templates,
                     archivedSessions: archivedSessions,
                     selectedSessionID: session.id,
-                    selectedArchivedSessionID: archivedSessions.first?.id
+                    selectedArchivedSessionID: archivedSessions.first?.id,
+                    paneLayout: .init(kind: .single, sessionIDs: [session.id])
                 ),
                 pendingEvents: recovery.pendingEvents + [
                     .created(session: session, origin: .defaultSeed, attention: nil),
@@ -105,7 +108,11 @@ final class HolySessionSupervisor {
                 savedTemplates: snapshot.templates,
                 archivedSessions: archivedSessions,
                 selectedSessionID: selectedSessionID,
-                selectedArchivedSessionID: archivedSessions.first?.id
+                selectedArchivedSessionID: archivedSessions.first?.id,
+                paneLayout: snapshot.paneLayout.normalized(
+                    availableSessionIDs: restoredSessions.map(\.id),
+                    selectedSessionID: selectedSessionID
+                )
             ),
             pendingEvents: recovery.pendingEvents + restoredSessions.map {
                 .restored(session: $0, attention: nil)

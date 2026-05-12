@@ -10,6 +10,7 @@ enum HolyWorkspaceDatabasePersistence {
 
     private static let workspaceInitializedKey = "workspace_initialized"
     private static let selectedSessionIDKey = "selected_session_id"
+    private static let paneLayoutKey = "pane_layout"
     private static let activeSessionOrderKey = "active_session_order"
     private static let archivedSessionOrderKey = "archived_session_order"
     private static let templateOrderKey = "template_order"
@@ -96,6 +97,7 @@ enum HolyWorkspaceDatabasePersistence {
         let archivedSessions = try loadArchivedSessions(from: database)
         let templates = try loadTemplates(from: database)
         let selectedSessionID: UUID? = try appStateValue(forKey: selectedSessionIDKey, in: database)
+        let paneLayout: HolyPaneLayout = try appStateValue(forKey: paneLayoutKey, in: database) ?? .single
         let activeSessionOrder: [UUID] = try appStateValue(forKey: activeSessionOrderKey, in: database) ?? []
         let archivedSessionOrder: [UUID] = try appStateValue(forKey: archivedSessionOrderKey, in: database) ?? []
         let templateOrder: [UUID] = try appStateValue(forKey: templateOrderKey, in: database) ?? []
@@ -104,7 +106,11 @@ enum HolyWorkspaceDatabasePersistence {
             sessions: reorder(records, by: activeSessionOrder, id: \.id),
             selectedSessionID: selectedSessionID,
             templates: reorder(templates, by: templateOrder, id: \.id),
-            archivedSessions: reorder(archivedSessions, by: archivedSessionOrder, id: \.id)
+            archivedSessions: reorder(archivedSessions, by: archivedSessionOrder, id: \.id),
+            paneLayout: paneLayout.normalized(
+                availableSessionIDs: records.map(\.id),
+                selectedSessionID: selectedSessionID
+            )
         )
     }
 
@@ -143,6 +149,7 @@ enum HolyWorkspaceDatabasePersistence {
 
             try upsertAppStateValue(true, forKey: workspaceInitializedKey, in: database)
             try upsertOptionalAppStateValue(snapshot.selectedSessionID, forKey: selectedSessionIDKey, in: database)
+            try upsertAppStateValue(snapshot.paneLayout, forKey: paneLayoutKey, in: database)
             try upsertAppStateValue(snapshot.sessions.map(\.id), forKey: activeSessionOrderKey, in: database)
             try upsertAppStateValue(snapshot.archivedSessions.map(\.id), forKey: archivedSessionOrderKey, in: database)
             try upsertAppStateValue(snapshot.templates.map(\.id), forKey: templateOrderKey, in: database)

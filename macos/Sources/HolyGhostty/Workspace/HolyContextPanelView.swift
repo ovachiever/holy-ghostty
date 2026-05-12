@@ -602,11 +602,11 @@ struct HolyContextPanelView: View {
                 actionButton("Duplicate", systemImage: "plus.square.on.square") {
                     store.duplicate(session)
                 }
-                actionButton("Detach", systemImage: "rectangle.stack.badge.minus", role: .destructive) {
+                actionButton("Detach from roster", systemImage: "rectangle.stack.badge.minus", role: .destructive) {
                     store.archive(session)
                 }
                 if store.canKillTmuxSession(session) {
-                    actionButton("Kill Tmux Session", systemImage: "xmark.octagon", role: .destructive) {
+                    actionButton("Stop tmux session", systemImage: "xmark.octagon", role: .destructive) {
                         store.killTmuxSession(session)
                     }
                 }

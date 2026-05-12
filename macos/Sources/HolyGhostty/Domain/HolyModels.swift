@@ -1,6 +1,41 @@
 import Foundation
 import GhosttyKit
 
+enum HolyLocalTmuxDefaults {
+    static var workingDirectory: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/AI/Custom_Coding", isDirectory: true)
+            .path
+    }
+
+    static func launchSpec(fallbackTitle: String = "Shell") -> HolySessionLaunchSpec {
+        let title = URL(fileURLWithPath: workingDirectory).lastPathComponent.nilIfBlank ?? fallbackTitle
+        return .localTmuxClientShell(title: title, workingDirectory: workingDirectory)
+    }
+
+    static func ensureDefaultServerStartedIfNeeded() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = [
+            "-lc",
+            """
+            if command -v tmux >/dev/null 2>&1; then
+              tmux list-sessions >/dev/null 2>&1 || tmux start-server >/dev/null 2>&1 || true
+            fi
+            """,
+        ]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return
+        }
+    }
+}
+
 enum HolySessionRuntime: String, Codable, CaseIterable, Identifiable {
     case shell
     case claude
@@ -871,6 +906,30 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         )
     }
 
+    static func interactiveTmuxShell(title: String = "Shell") -> Self {
+        var spec = interactiveShell(title: title)
+        spec.tmux = .holyManagedDefault
+        return spec
+    }
+
+    static func localTmuxClientShell(title: String = "Shell", workingDirectory: String) -> Self {
+        .init(
+            runtime: .shell,
+            title: title,
+            objective: nil,
+            task: nil,
+            budget: nil,
+            transport: .local,
+            tmux: nil,
+            workingDirectory: workingDirectory,
+            command: "tmux",
+            initialInput: nil,
+            waitAfterCommand: false,
+            environment: [:],
+            workspace: nil
+        )
+    }
+
     init(
         runtime: HolySessionRuntime = .shell,
         title: String,
@@ -964,6 +1023,82 @@ struct HolySessionRecord: Codable, Identifiable, Equatable {
     }
 }
 
+enum HolyPaneLayoutKind: String, Codable, Equatable {
+    case single
+    case splitRight
+    case splitDown
+    case quad
+
+    var maxPaneCount: Int {
+        switch self {
+        case .single:
+            return 1
+        case .splitRight, .splitDown:
+            return 2
+        case .quad:
+            return 4
+        }
+    }
+}
+
+struct HolyPaneLayout: Codable, Equatable {
+    var kind: HolyPaneLayoutKind
+    var sessionIDs: [UUID]
+
+    static let single = Self(kind: .single, sessionIDs: [])
+
+    func normalized(
+        availableSessionIDs: [UUID],
+        selectedSessionID: UUID?
+    ) -> Self {
+        let available = Set(availableSessionIDs)
+        var uniqueIDs: [UUID] = []
+
+        for id in sessionIDs where available.contains(id) && !uniqueIDs.contains(id) {
+            uniqueIDs.append(id)
+        }
+
+        if uniqueIDs.isEmpty,
+           let selectedSessionID,
+           available.contains(selectedSessionID) {
+            uniqueIDs.append(selectedSessionID)
+        }
+
+        if uniqueIDs.isEmpty,
+           let fallback = availableSessionIDs.first {
+            uniqueIDs.append(fallback)
+        }
+
+        let resolvedKind: HolyPaneLayoutKind
+        if uniqueIDs.count <= 1 {
+            resolvedKind = .single
+        } else {
+            resolvedKind = kind
+        }
+
+        return .init(
+            kind: resolvedKind,
+            sessionIDs: Array(uniqueIDs.prefix(resolvedKind.maxPaneCount))
+        )
+    }
+
+    func label(for sessionID: UUID) -> String? {
+        guard let index = sessionIDs.firstIndex(of: sessionID) else { return nil }
+
+        switch kind {
+        case .single:
+            return nil
+        case .splitRight:
+            return index == 0 ? "Left" : "Right"
+        case .splitDown:
+            return index == 0 ? "Top" : "Bottom"
+        case .quad:
+            let labels = ["Top Left", "Top Right", "Bottom Left", "Bottom Right"]
+            return index < labels.count ? labels[index] : nil
+        }
+    }
+}
+
 struct HolySessionTemplate: Codable, Identifiable, Equatable {
     let id: UUID
     var name: String
@@ -998,19 +1133,28 @@ struct HolyWorkspaceSnapshot: Codable {
     var selectedSessionID: UUID?
     var templates: [HolySessionTemplate]
     var archivedSessions: [HolyArchivedSession]
+    var paneLayout: HolyPaneLayout
 
-    static let empty = Self(sessions: [], selectedSessionID: nil, templates: [], archivedSessions: [])
+    static let empty = Self(
+        sessions: [],
+        selectedSessionID: nil,
+        templates: [],
+        archivedSessions: [],
+        paneLayout: .single
+    )
 
     init(
         sessions: [HolySessionRecord],
         selectedSessionID: UUID?,
         templates: [HolySessionTemplate] = [],
-        archivedSessions: [HolyArchivedSession] = []
+        archivedSessions: [HolyArchivedSession] = [],
+        paneLayout: HolyPaneLayout = .single
     ) {
         self.sessions = sessions
         self.selectedSessionID = selectedSessionID
         self.templates = templates
         self.archivedSessions = archivedSessions
+        self.paneLayout = paneLayout
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1018,6 +1162,7 @@ struct HolyWorkspaceSnapshot: Codable {
         case selectedSessionID
         case templates
         case archivedSessions
+        case paneLayout
     }
 
     init(from decoder: Decoder) throws {
@@ -1026,6 +1171,7 @@ struct HolyWorkspaceSnapshot: Codable {
         selectedSessionID = try container.decodeIfPresent(UUID.self, forKey: .selectedSessionID)
         templates = try container.decodeIfPresent([HolySessionTemplate].self, forKey: .templates) ?? []
         archivedSessions = try container.decodeIfPresent([HolyArchivedSession].self, forKey: .archivedSessions) ?? []
+        paneLayout = try container.decodeIfPresent(HolyPaneLayout.self, forKey: .paneLayout) ?? .single
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1034,6 +1180,7 @@ struct HolyWorkspaceSnapshot: Codable {
         try container.encode(selectedSessionID, forKey: .selectedSessionID)
         try container.encode(templates, forKey: .templates)
         try container.encode(archivedSessions, forKey: .archivedSessions)
+        try container.encode(paneLayout, forKey: .paneLayout)
     }
 }
 

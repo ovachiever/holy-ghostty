@@ -19,10 +19,18 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var draftLaunchGuardrail: HolyLaunchGuardrail = .clear
     @Published private(set) var draftOwnershipPreview: HolySessionOwnership?
     @Published private(set) var draftLaunchGuardrailRefreshing: Bool = false
+    @Published var paneLayout: HolyPaneLayout = .single {
+        didSet {
+            guard !suppressAutomaticSelectionPersistence,
+                  oldValue != paneLayout else { return }
+            persist()
+        }
+    }
     @Published var selectedSessionID: UUID? {
         didSet {
             guard !suppressAutomaticSelectionPersistence,
                   oldValue != selectedSessionID else { return }
+            reconcilePaneLayoutForSelection()
             persist(pendingEvents: selectionEvents(from: oldValue, to: selectedSessionID))
         }
     }
@@ -53,6 +61,25 @@ final class HolyWorkspaceStore: ObservableObject {
     var selectedSession: HolySession? {
         guard let selectedSessionID else { return sessions.first }
         return sessions.first(where: { $0.id == selectedSessionID }) ?? sessions.first
+    }
+
+    var visiblePaneSessions: [HolySession] {
+        normalizedPaneLayout.sessionIDs.compactMap(session(withID:))
+    }
+
+    var normalizedPaneLayout: HolyPaneLayout {
+        paneLayout.normalized(
+            availableSessionIDs: sessions.map(\.id),
+            selectedSessionID: selectedSessionID
+        )
+    }
+
+    var paneLabelsBySessionID: [UUID: String] {
+        Dictionary(
+            uniqueKeysWithValues: normalizedPaneLayout.sessionIDs.compactMap { id in
+                normalizedPaneLayout.label(for: id).map { (id, $0) }
+            }
+        )
     }
 
     var selectedArchivedSession: HolyArchivedSession? {
@@ -110,6 +137,27 @@ final class HolyWorkspaceStore: ObservableObject {
         coordinationBySessionID[session.id] ?? .empty
     }
 
+    func session(withID id: UUID) -> HolySession? {
+        sessions.first(where: { $0.id == id })
+    }
+
+    func showSinglePane() {
+        let selectedID = selectedSession?.id ?? sessions.first?.id
+        paneLayout = .init(kind: .single, sessionIDs: selectedID.map { [$0] } ?? [])
+    }
+
+    func splitPaneRight() {
+        applyPaneLayout(kind: .splitRight, preferredPaneCount: 2)
+    }
+
+    func splitPaneDown() {
+        applyPaneLayout(kind: .splitDown, preferredPaneCount: 2)
+    }
+
+    func showQuadPaneLayout() {
+        applyPaneLayout(kind: .quad, preferredPaneCount: 4)
+    }
+
     func restore() {
         let restoration = sessionSupervisor.restoreWorkspace()
         applySessionStoreState(restoration.state)
@@ -127,6 +175,10 @@ final class HolyWorkspaceStore: ObservableObject {
         sourceTemplateID: UUID? = nil,
         relaunchedFrom archivedSession: HolyArchivedSession? = nil
     ) -> HolySession? {
+        if shouldBootstrapDefaultTmuxServer(for: launchSpec) {
+            HolyLocalTmuxDefaults.ensureDefaultServerStartedIfNeeded()
+        }
+
         if let existingRemoteSession = prepareRemoteTmuxLaunch(for: launchSpec) {
             return existingRemoteSession
         }
@@ -161,7 +213,7 @@ final class HolyWorkspaceStore: ObservableObject {
         let launchSpec = if let baseConfig {
             HolySessionLaunchSpec(config: baseConfig)
         } else {
-            HolySessionLaunchSpec.interactiveShell(title: nextShellTitle())
+            newLocalTmuxLaunchSpec()
         }
 
         return createSession(
@@ -203,11 +255,20 @@ final class HolyWorkspaceStore: ObservableObject {
             return
         }
 
-        Task.detached(priority: .utility) {
-            command.run()
-        }
+        let sessionID = session.id
 
-        archive(session)
+        Task {
+            let didStop = await Task.detached(priority: .utility) {
+                command.run()
+            }.value
+
+            guard didStop,
+                  let currentSession = sessions.first(where: { $0.id == sessionID }) else {
+                return
+            }
+
+            archive(currentSession)
+        }
     }
 
     func moveSession(_ sessionID: UUID, to targetSessionID: UUID) {
@@ -776,7 +837,8 @@ final class HolyWorkspaceStore: ObservableObject {
             savedTemplates: savedTemplates,
             archivedSessions: archivedSessions,
             selectedSessionID: selectedSessionID,
-            selectedArchivedSessionID: selectedArchivedSessionID
+            selectedArchivedSessionID: selectedArchivedSessionID,
+            paneLayout: normalizedPaneLayout
         )
     }
 
@@ -787,9 +849,89 @@ final class HolyWorkspaceStore: ObservableObject {
         archivedSessions = state.archivedSessions
         selectedArchivedSessionID = state.selectedArchivedSessionID
         selectedSessionID = state.selectedSessionID
+        paneLayout = state.paneLayout.normalized(
+            availableSessionIDs: state.sessions.map(\.id),
+            selectedSessionID: state.selectedSessionID
+        )
         suppressAutomaticSelectionPersistence = false
         bindSessions()
         reconcileExternalTasks()
+    }
+
+    private func applyPaneLayout(kind: HolyPaneLayoutKind, preferredPaneCount: Int) {
+        var paneSessionIDs = paneSeedSessionIDs()
+        let minimumPaneCount = kind == .quad ? min(2, preferredPaneCount) : preferredPaneCount
+
+        while paneSessionIDs.count < minimumPaneCount {
+            guard let session = createSession(from: nil) else { break }
+            if !paneSessionIDs.contains(session.id) {
+                paneSessionIDs.append(session.id)
+            }
+        }
+
+        for session in sessions where paneSessionIDs.count < preferredPaneCount {
+            guard !paneSessionIDs.contains(session.id) else { continue }
+            paneSessionIDs.append(session.id)
+        }
+
+        let finalIDs = Array(paneSessionIDs.prefix(kind.maxPaneCount))
+        guard !finalIDs.isEmpty else {
+            paneLayout = .single
+            return
+        }
+
+        paneLayout = HolyPaneLayout(kind: kind, sessionIDs: finalIDs).normalized(
+            availableSessionIDs: sessions.map(\.id),
+            selectedSessionID: selectedSessionID
+        )
+        selectedSessionID = finalIDs.last
+    }
+
+    private func paneSeedSessionIDs() -> [UUID] {
+        var ids: [UUID] = []
+
+        if let selectedID = selectedSession?.id {
+            ids.append(selectedID)
+        }
+
+        for id in normalizedPaneLayout.sessionIDs where !ids.contains(id) {
+            ids.append(id)
+        }
+
+        for session in sessions where !ids.contains(session.id) {
+            ids.append(session.id)
+        }
+
+        return ids
+    }
+
+    private func reconcilePaneLayoutForSelection() {
+        guard let selectedSessionID,
+              sessions.contains(where: { $0.id == selectedSessionID }) else {
+            return
+        }
+
+        var layout = normalizedPaneLayout
+        switch layout.kind {
+        case .single:
+            layout.sessionIDs = [selectedSessionID]
+        case .splitRight, .splitDown, .quad:
+            if !layout.sessionIDs.contains(selectedSessionID) {
+                if layout.sessionIDs.isEmpty {
+                    layout.sessionIDs = [selectedSessionID]
+                } else {
+                    layout.sessionIDs[layout.sessionIDs.count - 1] = selectedSessionID
+                }
+            }
+        }
+
+        let previousSuppression = suppressAutomaticSelectionPersistence
+        suppressAutomaticSelectionPersistence = true
+        paneLayout = layout.normalized(
+            availableSessionIDs: sessions.map(\.id),
+            selectedSessionID: selectedSessionID
+        )
+        suppressAutomaticSelectionPersistence = previousSuppression
     }
 
     private func prepareRemoteTmuxLaunch(for launchSpec: HolySessionLaunchSpec) -> HolySession? {
@@ -975,10 +1117,24 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private func draftForNewSession() -> HolySessionDraft {
         HolySessionDraft(
-            launchSpec: .interactiveShell(title: nextShellTitle()),
+            launchSpec: newLocalTmuxLaunchSpec(),
             contextualWorkingDirectory: contextualWorkingDirectory,
             contextualRepositoryRoot: contextualRepositoryRoot
         )
+    }
+
+    private func newLocalTmuxLaunchSpec() -> HolySessionLaunchSpec {
+        HolyLocalTmuxDefaults.launchSpec(fallbackTitle: nextShellTitle())
+    }
+
+    private func shouldBootstrapDefaultTmuxServer(for launchSpec: HolySessionLaunchSpec) -> Bool {
+        guard launchSpec.transport.kind == .local,
+              launchSpec.tmux == nil,
+              launchSpec.command?.trimmingCharacters(in: .whitespacesAndNewlines) == "tmux" else {
+            return false
+        }
+
+        return true
     }
 
     private func makeDraft(from launchSpec: HolySessionLaunchSpec) -> HolySessionDraft {
@@ -1849,7 +2005,7 @@ private struct HolyTmuxSessionTerminationCommand: Sendable {
         )
     }
 
-    func run() {
+    func run() -> Bool {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
@@ -1859,8 +2015,9 @@ private struct HolyTmuxSessionTerminationCommand: Sendable {
         do {
             try process.run()
             process.waitUntilExit()
+            return process.terminationStatus == 0
         } catch {
-            return
+            return false
         }
     }
 
@@ -1938,8 +2095,9 @@ private struct HolyLocalMachineIdentity {
             return true
         }
 
+        let isMobileTailnetHost = loweredDestination.contains("iphone") || loweredDestination.contains("ipad")
         if loweredDestination.contains(".tail"),
-           (loweredDestination.contains("iphone") || loweredDestination.contains("ipad")) {
+           isMobileTailnetHost {
             return true
         }
 

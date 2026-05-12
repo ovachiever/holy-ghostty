@@ -58,8 +58,8 @@ Current window characteristics:
 - titled, closable, miniaturizable, resizable, full-size content view
 - transparent titlebar
 - hidden title
-- movable through empty top-bar drag region only
-- unified toolbar style with an attached empty toolbar
+- no attached app toolbar in the standard workspace
+- content ignores the top safe area so terminal panes can use the top edge
 - full-screen primary and managed collection behavior
 - autosaved frame
 
@@ -70,16 +70,18 @@ Current window characteristics:
 Responsibilities:
 
 - render the overall Holy shell
-- present the header
-- compose the layout for the active display mode
-- manage sheet presentation for session creation, history, and task inbox
+- render the left tmux roster, selected terminal surfaces, and optional inspector
+- compose Holy-owned pane layouts over durable tmux-backed sessions
+- manage sheet presentation for session creation, history, remote hosts, and task inbox
 
-Display modes (selectable via toolbar or keyboard shortcuts):
+Current exposed workspace layouts:
 
-- Standard: grouped left roster and selected session surface, with the inspector collapsed by default
-- Focus: single selected session with floating status overlay
-- Grid: up to four tiled session previews with selection and promotion
-- Diff: side-by-side comparison of two sessions with branch, file overlap, and phase analysis
+- Single: grouped left roster and one selected session surface
+- Split Right: selected session plus one additional session side by side
+- Split Down: selected session plus one additional session stacked vertically
+- Quad: up to four live session surfaces
+
+The older Focus, Grid, and Diff implementations remain dormant in this file for a later explicit comparison/review pass. They are not exposed in the primary Level 1 chrome.
 
 ### Design system
 
@@ -645,7 +647,7 @@ Displays active sessions grouped by runtime and sorted by project/folder context
 
 - `macos/Sources/HolyGhostty/Workspace/HolySessionDetailView.swift`
 
-Displays the currently selected session with the live `Ghostty.SurfaceView` and session header/status.
+Displays the currently selected session with the live `Ghostty.SurfaceView`. The session header can be shown by callers, but the standard Level 1 workspace hides it so terminal panes start at the top edge.
 
 ### Context inspector
 
@@ -716,25 +718,29 @@ Shows budget analytics in the context panel: sample count, exhaustion projection
 
 Renders a session's event timeline with colored badges, timestamps, titles, and details.
 
-## 23. Display Modes
+## 23. Pane Layouts
 
-The workspace view supports four display modes, selectable via toolbar or keyboard shortcuts:
+The standard workspace exposes Holy-owned visual pane layouts from the bottom of the left rail. These layouts arrange whole Holy sessions, not tmux panes.
 
-### Standard mode
+### Single
 
-The default two-region layout: grouped left roster and selected session surface. The right inspector is available behind the toolbar toggle.
+The selected session fills the main terminal surface.
 
-### Focus mode (Cmd+Shift+F)
+### Split Right
 
-Full-screen single session with a floating status overlay showing session title, phase, and action buttons.
+The selected session stays on the left and another durable Holy session is shown to the right.
 
-### Grid mode (Cmd+Shift+G)
+### Split Down
 
-Tiled session previews (2x2 or 2x3) with selection, phase badges, and promote-to-focus action.
+The selected session stays on top and another durable Holy session is shown below.
 
-### Diff mode (Cmd+Shift+D)
+### Quad
 
-Side-by-side comparison of two sessions showing terminal surfaces, signals, git summaries, and a comparison summary (branch conflict, file overlap, phase mismatch).
+Up to four durable Holy sessions are shown at once.
+
+Pane layout state is persisted with the workspace. When a session is visible in a multi-pane layout, the roster shows a small pane-position label such as `Left`, `Right`, `Top`, `Bottom`, or a quadrant label.
+
+The old Diff implementation is intentionally preserved dormant for a future agent/worktree comparison mode. It is not part of the current Level 1 navigation.
 
 ## 24. Integration Into Ghostty Host
 
@@ -798,6 +804,6 @@ macos/Sources/HolyGhostty/
 ├── Tasks/                  # External task models and repository
 ├── Templates/              # Built-in and custom template catalog
 ├── Telemetry/              # Runtime telemetry parser
-├── Workspace/              # All SwiftUI views (roster, detail, inspector, composer, history, task inbox, timeline, budget, display modes)
+├── Workspace/              # SwiftUI views: roster, pane layouts, detail, inspector, composer, history, task inbox, timeline, budget
 └── Worktree/               # Worktree creation, validation, recovery, cleanup
 ```

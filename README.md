@@ -44,7 +44,7 @@ The app currently supports:
 - Git snapshot tracking for local and remote sessions.
 - Worktree and branch coordination checks for non-shell agent sessions.
 - Runtime-grouped left roster sorted by project/folder context.
-- Focus, grid, and compare display modes.
+- Holy-owned pane layouts: single session, side-by-side split, stacked split, and quad.
 - Detach-all, per-session detach, and tmux kill controls for session cleanup.
 - URL scheme, shell helper, and AppleScript session spawn entrypoints.
 
@@ -58,17 +58,29 @@ Standard mode defaults to two working regions:
 
 Roster rows are intentionally dense. Each row leads with the project or parent folder name, uses a single activity orb on the left, and only shows compact risk icons when there is something to notice.
 
-Toolbar controls:
+Left rail controls are scoped to the tmux roster.
 
-- `Clear`: detach all visible sessions from the workspace.
-- `+`: create a new local shell session immediately.
-- checklist: open task inbox.
-- server: open remote hosts.
-- grid: toggle grid mode.
-- split: toggle compare mode.
-- right sidebar: show or hide the inspector.
-- diagonal arrows: toggle focus mode.
-- menu: templates, task inbox, remote hosts, history, duplicate, detach, kill tmux session.
+Session roster controls:
+
+- `New`: open a local tmux client in `~/Documents/AI/Custom_Coding`.
+- `Clear`: detach all visible sessions from the workspace roster without stopping tmux.
+- `SSH`: open SSH/tmux hosts.
+- `More`: templates, SSH hosts, history, duplicate, detach, and stop tmux session.
+
+Before `New` launches the terminal, Holy Ghostty starts the default tmux server out-of-band if no tmux server/session is running. The terminal then runs `tmux` directly, so closing Holy Ghostty only closes the client and does not make Holy own the tmux server.
+
+Layout controls:
+
+- `Single`, `Split Right`, `Split Down`, and `Quad` live at the bottom of the left rail.
+- Layout changes are Holy visual layouts over durable tmux sessions, not tmux panes.
+- Sessions shown in a split layout get `Left` / `Right`, `Top` / `Bottom`, or quadrant labels in the roster.
+- The old Diff implementation is preserved in code for a later explicit agent/worktree comparison mode, but it is not exposed in the primary Level 1 chrome.
+- `Tasks` and `Inspect` are hidden from the standard workspace for now.
+
+The selected session's `...` menu separates cleanup actions:
+
+- `Detach From Roster`: remove Holy's attachment while leaving the tmux session alive.
+- `Stop tmux session`: kill the backing tmux session and then remove it from the roster.
 
 Session cleanup shortcuts:
 
@@ -77,7 +89,10 @@ Session cleanup shortcuts:
 
 Window behavior:
 
-- Empty top-bar space drags the window.
+- The standard workspace removes empty native toolbar chrome; only the left rail reserves traffic-light clearance.
+- The terminal surface starts at the top edge to maximize live terminal space.
+- Holy defaults add top terminal padding so the first prompt row clears macOS window controls without adding a separate app bar.
+- The bundled Holy background image stretches to the live terminal surface size.
 - App content does not drag the window.
 - The left roster width is persisted and can be resized below its default.
 - The inspector is collapsed by default to reserve space for the terminal.

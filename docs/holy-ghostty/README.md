@@ -25,23 +25,37 @@ Sessions are persisted in SQLite and restored on launch.
 
 ## Main Window
 
-### Top Bar
+### Left Rail
 
-- `Clear`: detach all active sessions.
-- `+`: create a local shell immediately.
-- checklist: task inbox.
-- server: remote hosts.
-- grid: grid mode.
-- split: compare mode.
-- right sidebar: show or hide the inspector.
-- diagonal arrows: focus mode.
-- menu: templates, task inbox, remote hosts, history, duplicate, detach, kill tmux session.
+The standard workspace keeps the left rail scoped to tmux sessions so the terminal can own the main surface. `Tasks` and `Inspect` are hidden from the standard workspace for now.
 
-Only the empty space in the top bar drags the window.
+Layout controls live at the bottom of the left rail:
+
+- `Single`: show the selected session.
+- `Split Right`: show two sessions side by side.
+- `Split Down`: show two sessions stacked.
+- `Quad`: show up to four sessions.
+
+Layouts are Holy visual layouts over durable tmux sessions, not tmux panes. When a session is visible in a split layout, the roster adds a pane label such as `Left`, `Right`, `Top`, `Bottom`, or a quadrant label.
+
+The old Diff implementation is preserved in code for a later explicit agent/worktree comparison mode, but it is not exposed in the primary Level 1 chrome.
+
+The window removes the empty native toolbar band in standard mode. The left rail keeps traffic-light clearance, while the terminal surface starts at the top edge. Holy defaults add top terminal padding so the first prompt row clears macOS window controls without adding a separate app bar. The bundled Holy background image stretches to the live terminal surface size.
 
 ### Left Roster
 
 The roster lists active sessions grouped by runtime.
+
+TMUX session controls:
+
+- `New`: open a local tmux client in `~/Documents/AI/Custom_Coding`.
+- `Clear`: detach all active sessions from the roster without stopping tmux.
+- `SSH`: open SSH/tmux hosts.
+- `More`: templates, SSH hosts, history, duplicate, detach, and stop tmux session.
+
+`New` starts the default tmux server out-of-band when no tmux server/session exists, then launches the terminal with `tmux` as the command. Holy Ghostty stays a tmux client and does not own the server process.
+
+Each session row's `...` menu keeps `Detach From Roster` beside `Stop tmux session`. Detach leaves tmux alive; stop kills the backing tmux session before removing it from the roster.
 
 Section order:
 
@@ -58,11 +72,11 @@ The roster width defaults to a narrow working size and can be resized by the div
 
 ### Center Surface
 
-The center region embeds the selected live Ghostty surface.
+The center region embeds one or more live Ghostty surfaces according to the current Holy pane layout.
 
 ### Inspector
 
-The inspector is collapsed by default to reserve space for the terminal. The right-sidebar toolbar button toggles it.
+The inspector remains available in code, but the standard workspace hides its visible toggle for now to reserve space for the terminal.
 
 When visible, the inspector shows selected-session state that is not already visible in the terminal.
 
@@ -71,29 +85,24 @@ Sections include:
 - Risk: branch, sync, and git state.
 - Coordination: worktree, branch, and file overlap risk.
 - Verification: last command outcome when shell integration is available.
-- Actions: copy handoff, copy diff, duplicate, detach, kill tmux session when available.
+- Actions: copy handoff, copy diff, duplicate, detach from roster, and stop tmux session when available.
 - Details: launch metadata.
 
-## Display Modes
+## Pane Layouts
 
-Display mode state is in SwiftUI view state. It is not persisted.
+Pane layout state is persisted with the workspace.
 
-Modes:
+Layouts:
 
-- Standard: roster and selected surface, with optional inspector.
-- Focus: selected surface only, with a small status overlay.
-- Grid: up to four session tiles.
-- Compare: selected session next to another session, with repository/worktree/branch comparison.
+- Single: one selected surface.
+- Split Right: selected surface plus another session to the right.
+- Split Down: selected surface plus another session below.
+- Quad: up to four live surfaces.
 
 Shortcuts:
 
-- `Command-N`: new shell.
-- `Command-Shift-T`: task inbox.
+- `Command-N`: new local tmux session.
 - `Command-Shift-R`: remote hosts.
-- `Command-Shift-G`: grid.
-- `Command-Shift-D`: compare.
-- `Command-Shift-I`: toggle inspector.
-- `Command-Shift-F`: focus.
 - `Command-W`: detach selected session.
 - `Option-Q`: kill selected tmux session when available.
 
@@ -137,9 +146,9 @@ Roster cues:
 
 ## Creating Sessions
 
-The `+` button creates a local shell immediately.
+The `New` button creates a local tmux client immediately in `~/Documents/AI/Custom_Coding`.
 
-Session templates and advanced launch settings are available from the top-right menu and task/remote flows.
+Session templates and advanced launch settings are available from the left-rail `More` menu and task/remote flows.
 
 Launch settings support:
 

@@ -3,6 +3,10 @@ import SwiftUI
 struct HolySessionRosterView: View {
     @ObservedObject var store: HolyWorkspaceStore
     var compact: Bool = false
+    var titlebarInset: CGFloat = 0
+    var paneLabelsBySessionID: [UUID: String] = [:]
+    var onPresentRemoteHosts: () -> Void = {}
+    var onPresentHistory: () -> Void = {}
 
     private var sections: [HolyRosterSection] {
         let grouped = Dictionary(grouping: store.sessions, by: { $0.displayRuntime })
@@ -21,11 +25,23 @@ struct HolySessionRosterView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            workspaceToolbar
+
+            Rectangle()
+                .fill(HolyGhosttyTheme.border)
+                .frame(height: 0.5)
+
+            sessionToolbar
+
+            Rectangle()
+                .fill(HolyGhosttyTheme.border)
+                .frame(height: 0.5)
+
             if store.sessions.isEmpty {
                 HolyGhosttyEmptyStateView(
                     title: "No sessions",
-                    subtitle: "Press + to create one.",
-                    symbol: "terminal"
+                    subtitle: "Start tmux from the session controls.",
+                    symbol: "rectangle.stack.badge.plus"
                 )
                 .frame(maxHeight: .infinity)
             } else {
@@ -42,6 +58,7 @@ struct HolySessionRosterView: View {
                                     HolyRosterRow(
                                         session: session,
                                         primaryTitle: Self.primaryTitle(for: session),
+                                        paneLabel: paneLabelsBySessionID[session.id],
                                         coordination: store.coordination(for: session),
                                         isSelected: store.selectedSessionID == session.id,
                                         compact: compact,
@@ -65,6 +82,170 @@ struct HolySessionRosterView: View {
                 .scrollIndicators(.hidden)
             }
         }
+    }
+
+    private var workspaceToolbar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image("HolyGhosttyLogo")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(height: 22)
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+
+                Text("Holy Ghostty")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(HolyGhosttyTheme.halo)
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                moreMenu
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 8 + titlebarInset)
+        .padding(.bottom, 8)
+        .background(HolyGhosttyTheme.bgElevated)
+    }
+
+    private var moreMenu: some View {
+        Menu {
+            if !store.builtInTemplates.isEmpty {
+                Section("Built-In Templates") {
+                    ForEach(store.builtInTemplates, id: \.id) { template in
+                        Button(template.name) {
+                            store.launchTemplate(template)
+                        }
+                    }
+                }
+            }
+
+            if !store.savedTemplates.isEmpty {
+                Section("Saved Templates") {
+                    ForEach(store.savedTemplates, id: \.id) { template in
+                        Button(template.name) {
+                            store.launchTemplate(template)
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            Button {
+                onPresentRemoteHosts()
+            } label: {
+                Label("SSH Hosts", systemImage: "network")
+            }
+
+            Button {
+                onPresentHistory()
+            } label: {
+                Label("Session History", systemImage: "clock")
+            }
+
+            if let selected = store.selectedSession {
+                Divider()
+
+                Button("Duplicate Session") {
+                    store.duplicate(selected)
+                }
+
+                Button("Detach From Roster") {
+                    store.close(selected)
+                }
+
+                if store.canKillTmuxSession(selected) {
+                    Button("Stop tmux session", role: .destructive) {
+                        store.killTmuxSession(selected)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .help("More")
+    }
+
+    private var sessionToolbar: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Label {
+                    Text("TMUX Sessions")
+                        .font(.system(size: 10, weight: .semibold))
+                        .textCase(.uppercase)
+                        .tracking(0.6)
+                } icon: {
+                    Image(systemName: "rectangle.stack")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .foregroundStyle(HolyGhosttyTheme.textTertiary)
+
+                Spacer(minLength: 4)
+
+                Text("\(store.sessions.count)")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 6) {
+                rosterActionButton(
+                    title: "New",
+                    symbol: "rectangle.stack.badge.plus",
+                    help: "Start a new local tmux-backed shell",
+                    action: { _ = store.createSession(from: nil) }
+                )
+                .keyboardShortcut("n", modifiers: [.command])
+
+                rosterActionButton(
+                    title: "Clear",
+                    symbol: "rectangle.stack.badge.minus",
+                    help: "Detach every session from this roster without stopping tmux",
+                    action: { store.detachAllSessions() }
+                )
+                .disabled(store.sessions.isEmpty)
+
+                rosterActionButton(
+                    title: "SSH",
+                    symbol: "network",
+                    help: "Open SSH and tmux hosts",
+                    action: onPresentRemoteHosts
+                )
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+        .background(HolyGhosttyTheme.bgElevated)
+    }
+
+    private func rosterActionButton(
+        title: String,
+        symbol: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: symbol)
+                    .font(.system(size: 10, weight: .medium))
+                Text(title)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(HolyRosterActionButtonStyle())
+        .help(help)
     }
 
     private static func sortedSessions(_ sessions: [HolySession]) -> [HolySession] {
@@ -162,6 +343,23 @@ private struct HolyRosterSortKey {
     let identity: String
 }
 
+private struct HolyRosterActionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(configuration.isPressed ? HolyGhosttyTheme.textPrimary : HolyGhosttyTheme.textSecondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(configuration.isPressed ? HolyGhosttyTheme.bgSurface : HolyGhosttyTheme.bg)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(HolyGhosttyTheme.borderActive, lineWidth: 0.5)
+            )
+    }
+}
+
 private struct HolyRosterSectionHeader: View {
     let runtime: HolySessionRuntime
     let count: Int
@@ -191,6 +389,7 @@ private struct HolyRosterSectionHeader: View {
 private struct HolyRosterRow: View {
     @ObservedObject var session: HolySession
     let primaryTitle: String
+    let paneLabel: String?
     let coordination: HolySessionCoordination
     let isSelected: Bool
     var compact: Bool = false
@@ -233,13 +432,15 @@ private struct HolyRosterRow: View {
                         onSelect()
                         onDuplicate()
                     }
-                    Button("Detach") {
+
+                    Divider()
+
+                    Button("Detach From Roster") {
                         onSelect()
                         onArchive()
                     }
                     if canKillTmux {
-                        Divider()
-                        Button("Kill Tmux Session") {
+                        Button("Stop tmux session", role: .destructive) {
                             onSelect()
                             onKillTmux()
                         }
@@ -319,11 +520,21 @@ private struct HolyRosterRow: View {
 
     // Runtime grouping owns the agent label; dense rows lead with project context only.
     private var displayLine: some View {
-        Text(primaryTitle)
-            .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
-            .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
-            .lineLimit(1)
-            .truncationMode(.tail)
+        VStack(alignment: .leading, spacing: 1) {
+            Text(primaryTitle)
+                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            if let paneLabel {
+                Text(paneLabel)
+                    .font(.system(size: 8, weight: .semibold, design: .rounded))
+                    .textCase(.uppercase)
+                    .foregroundStyle(HolyGhosttyTheme.halo.opacity(isSelected ? 0.95 : 0.72))
+                    .lineLimit(1)
+            }
+        }
     }
 
     private func startRename() {
