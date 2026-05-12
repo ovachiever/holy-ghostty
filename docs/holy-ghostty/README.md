@@ -1,6 +1,6 @@
 # Holy Ghostty Guide
 
-Updated: 2026-04-24
+Updated: 2026-05-12
 
 Holy Ghostty is a macOS workspace for live Ghostty terminal sessions. The app treats a session as the primary unit instead of a terminal tab.
 
@@ -27,26 +27,32 @@ Sessions are persisted in SQLite and restored on launch.
 
 ### Top Bar
 
+- `Clear`: detach all active sessions.
 - `+`: create a local shell immediately.
 - checklist: task inbox.
 - server: remote hosts.
 - grid: grid mode.
 - split: compare mode.
+- right sidebar: show or hide the inspector.
 - diagonal arrows: focus mode.
-- menu: templates, task inbox, remote hosts, history, duplicate, archive.
+- menu: templates, task inbox, remote hosts, history, duplicate, detach, kill tmux session.
 
 Only the empty space in the top bar drags the window.
 
 ### Left Roster
 
-The roster lists active sessions in the user's manual order.
+The roster lists active sessions grouped by runtime.
 
-Rows show:
+Section order:
 
-- First line: `Runtime - Project`.
-- Second line: `Local`, `Host/session`, or `Host/tmux-socket`.
+- Claude
+- Codex
+- OpenCode
+- Shell
 
-The handle on the left of a row reorders sessions. The order is persisted. Selecting a session does not move it.
+Rows are sorted by project/folder context, then parent folder, then launch identity.
+
+Rows show one compact project/folder label, a single activity orb, and quiet risk icons when needed. Selecting a session does not move it.
 
 The roster width defaults to a narrow working size and can be resized by the divider.
 
@@ -54,16 +60,18 @@ The roster width defaults to a narrow working size and can be resized by the div
 
 The center region embeds the selected live Ghostty surface.
 
-### Right Inspector
+### Inspector
 
-The inspector shows selected-session state that is not already visible in the terminal.
+The inspector is collapsed by default to reserve space for the terminal. The right-sidebar toolbar button toggles it.
+
+When visible, the inspector shows selected-session state that is not already visible in the terminal.
 
 Sections include:
 
 - Risk: branch, sync, and git state.
 - Coordination: worktree, branch, and file overlap risk.
 - Verification: last command outcome when shell integration is available.
-- Actions: copy handoff, copy diff, duplicate, archive.
+- Actions: copy handoff, copy diff, duplicate, detach, kill tmux session when available.
 - Details: launch metadata.
 
 ## Display Modes
@@ -72,7 +80,7 @@ Display mode state is in SwiftUI view state. It is not persisted.
 
 Modes:
 
-- Standard: roster, selected surface, inspector.
+- Standard: roster and selected surface, with optional inspector.
 - Focus: selected surface only, with a small status overlay.
 - Grid: up to four session tiles.
 - Compare: selected session next to another session, with repository/worktree/branch comparison.
@@ -84,7 +92,10 @@ Shortcuts:
 - `Command-Shift-R`: remote hosts.
 - `Command-Shift-G`: grid.
 - `Command-Shift-D`: compare.
+- `Command-Shift-I`: toggle inspector.
 - `Command-Shift-F`: focus.
+- `Command-W`: detach selected session.
+- `Option-Q`: kill selected tmux session when available.
 
 ## Runtime Status
 
@@ -114,6 +125,15 @@ Displayed phases:
 - `Needs Input`
 - `Complete`
 - `Issue`
+
+Roster cues:
+
+- Working: multicolor spinner.
+- Waiting on user: waiting orb colored by freshness.
+- Complete: subdued gray orb.
+- Stalled: orange orb.
+- Failed: red orb.
+- Shared worktree, shared branch, branch drift, and overlapping files: quiet inline risk icons.
 
 ## Creating Sessions
 

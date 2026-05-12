@@ -60,6 +60,7 @@ struct HolyWorkspaceRootView: View {
     @State private var displayMode = HolyWorkspaceDisplayMode.standard
     @State private var diffCompareSessionIDRaw: String?
     @SceneStorage("holy.workspace.rosterWidth.v2") private var rosterWidthRaw = Double(HolyWorkspaceLayout.rosterDefaultWidth)
+    @SceneStorage("holy.workspace.contextRailExpanded.v1") private var contextRailExpanded = false
     @State private var rosterDragStartWidth: CGFloat?
 
     var body: some View {
@@ -129,15 +130,29 @@ struct HolyWorkspaceRootView: View {
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
                     .background(Capsule().fill(HolyGhosttyTheme.bgSurface))
+
+                Button {
+                    store.detachAllSessions()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "rectangle.stack.badge.minus")
+                            .font(.system(size: 10, weight: .medium))
+                        Text("Clear")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                }
+                .buttonStyle(HolyGhosttyActionButtonStyle())
+                .help("Detach all sessions")
             }
 
-            if conflictCount > 0 {
+            if failedSessionCount > 0 {
                 HStack(spacing: 3) {
                     HolyGhosttyStatusDot(color: HolyGhosttyTheme.danger)
-                    Text("\(conflictCount)")
+                    Text("\(failedSessionCount)")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(HolyGhosttyTheme.danger)
                 }
+                .help("Failed sessions")
             }
 
             Button { _ = store.createSession(from: nil) } label: {
@@ -186,6 +201,19 @@ struct HolyWorkspaceRootView: View {
 
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) {
+                    contextRailExpanded.toggle()
+                }
+            } label: {
+                Image(systemName: "sidebar.right")
+                    .font(.system(size: 11, weight: .medium))
+                    .symbolVariant(contextRailExpanded ? .fill : .none)
+            }
+            .buttonStyle(HolyGhosttyActionButtonStyle())
+            .help(contextRailExpanded ? "Hide Inspector" : "Show Inspector")
+            .keyboardShortcut("i", modifiers: [.command, .shift])
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
                     toggleDisplayMode(.focus)
                 }
             } label: {
@@ -230,7 +258,15 @@ struct HolyWorkspaceRootView: View {
                 if let selected = store.selectedSession {
                     Divider()
                     Button("Duplicate Session") { store.duplicate(selected) }
-                    Button("Archive Session") { store.close(selected) }
+                    Button("Detach Session") { store.close(selected) }
+                    if store.canKillTmuxSession(selected) {
+                        Button("Kill Tmux Session") { store.killTmuxSession(selected) }
+                    }
+                }
+
+                if !store.sessions.isEmpty {
+                    Divider()
+                    Button("Detach All Sessions") { store.detachAllSessions() }
                 }
             } label: {
                 Image(systemName: "line.3.horizontal")
@@ -311,28 +347,37 @@ struct HolyWorkspaceRootView: View {
                     )
 
                 HSplitView {
-                    HolySessionDetailView(
-                        session: store.selectedSession,
-                        coordination: store.selectedSession.map(store.coordination(for:)) ?? .empty,
-                        ghosttyApp: ghostty
-                    )
-                    .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
-                    .background(HolyGhosttyTheme.bg)
-                    .layoutPriority(1)
-
-                    HolyContextPanelView(
-                        session: store.selectedSession,
-                        coordination: store.selectedSession.map(store.coordination(for:)) ?? .empty,
-                        store: store
-                    )
-                    .frame(minWidth: 220, idealWidth: 280, maxWidth: 360, maxHeight: .infinity)
-                    .background(HolyGhosttyTheme.bgElevated)
+                    standardSessionDetail
+                    if contextRailExpanded {
+                        standardContextPanel
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(width: max(0, geometry.size.width), height: max(0, geometry.size.height))
             .clipped()
         }
+    }
+
+    private var standardSessionDetail: some View {
+        HolySessionDetailView(
+            session: store.selectedSession,
+            coordination: store.selectedSession.map(store.coordination(for:)) ?? .empty,
+            ghosttyApp: ghostty
+        )
+        .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
+        .background(HolyGhosttyTheme.bg)
+        .layoutPriority(1)
+    }
+
+    private var standardContextPanel: some View {
+        HolyContextPanelView(
+            session: store.selectedSession,
+            coordination: store.selectedSession.map(store.coordination(for:)) ?? .empty,
+            store: store
+        )
+        .frame(minWidth: 220, idealWidth: 280, maxWidth: 360, maxHeight: .infinity)
+        .background(HolyGhosttyTheme.bgElevated)
     }
 
     private func clampedRosterWidth(for availableWidth: CGFloat) -> CGFloat {
@@ -638,8 +683,8 @@ struct HolyWorkspaceRootView: View {
         Ghostty.moveFocus(to: session.surfaceView)
     }
 
-    private var conflictCount: Int {
-        store.coordinationBySessionID.values.filter(\.hasBlockingConflict).count
+    private var failedSessionCount: Int {
+        store.sessions.filter { $0.phase == .failed }.count
     }
 
     private var focusSummaryText: String {
@@ -671,8 +716,7 @@ struct HolyWorkspaceRootView: View {
 
     private var gridSummaryText: String {
         if let selected = store.selectedSession {
-            let attention = store.coordination(for: selected).attention.displayName
-            return "\(store.sessions.count) sessions · selected: \(selected.title) · \(attention)"
+            return "\(store.sessions.count) sessions · selected: \(selected.title)"
         }
 
         return "\(store.sessions.count) sessions"

@@ -43,33 +43,44 @@ The app currently supports:
 - Budget telemetry and budget enforcement policy fields.
 - Git snapshot tracking for local and remote sessions.
 - Worktree and branch coordination checks for non-shell agent sessions.
-- Manual session ordering in the left roster.
+- Runtime-grouped left roster sorted by project/folder context.
 - Focus, grid, and compare display modes.
+- Detach-all, per-session detach, and tmux kill controls for session cleanup.
 - URL scheme, shell helper, and AppleScript session spawn entrypoints.
 
 ## User Interface
 
-Standard mode has three regions:
+Standard mode defaults to two working regions:
 
-- Left roster: active sessions in persisted manual order. Each row shows `Runtime - Project` on the first line and `Host/tmux-session` or `Local` on the second line.
+- Left roster: active sessions grouped by runtime (`Claude`, `Codex`, `OpenCode`, `Shell`) and sorted by project/folder context.
 - Center surface: selected live Ghostty terminal surface.
-- Right inspector: git risk, coordination, verification, actions, and launch details for the selected session.
+- Optional inspector: git risk, coordination, verification, actions, and launch details for the selected session.
+
+Roster rows are intentionally dense. Each row leads with the project or parent folder name, uses a single activity orb on the left, and only shows compact risk icons when there is something to notice.
 
 Toolbar controls:
 
+- `Clear`: detach all visible sessions from the workspace.
 - `+`: create a new local shell session immediately.
 - checklist: open task inbox.
 - server: open remote hosts.
 - grid: toggle grid mode.
 - split: toggle compare mode.
+- right sidebar: show or hide the inspector.
 - diagonal arrows: toggle focus mode.
-- menu: templates, task inbox, remote hosts, history, duplicate, archive.
+- menu: templates, task inbox, remote hosts, history, duplicate, detach, kill tmux session.
+
+Session cleanup shortcuts:
+
+- `Command-W`: detach the selected session from the Holy workspace.
+- `Option-Q`: kill the selected tmux session when the selected session has a tmux target.
 
 Window behavior:
 
 - Empty top-bar space drags the window.
 - App content does not drag the window.
 - The left roster width is persisted and can be resized below its default.
+- The inspector is collapsed by default to reserve space for the terminal.
 
 ## Runtime Status
 
@@ -93,6 +104,15 @@ Displayed phase labels:
 - `Needs Input`
 - `Complete`
 - `Issue`
+
+Visual cues:
+
+- working sessions use a multicolor spinner.
+- newly waiting sessions use a bright waiting orb that ages through warmer colors.
+- completed sessions use a subdued gray orb.
+- stalled sessions use orange.
+- failed sessions use red.
+- shared worktree, shared branch, branch drift, and overlapping-file risks use quiet inline icons instead of warning text.
 
 ## Requirements
 
@@ -172,7 +192,7 @@ User Claude state is outside the repo and is not managed by Holy Ghostty:
 
 ## Public Scope
 
-This repository is source-ready. It is not a signed, notarized, or packaged release channel.
+This repository is source-release ready. It is not a signed, notarized, or packaged app distribution channel.
 
 Known gaps:
 

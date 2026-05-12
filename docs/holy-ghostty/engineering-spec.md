@@ -76,7 +76,7 @@ Responsibilities:
 
 Display modes (selectable via toolbar or keyboard shortcuts):
 
-- Standard: left roster, center session surface, right inspector
+- Standard: grouped left roster and selected session surface, with the inspector collapsed by default
 - Focus: single selected session with floating status overlay
 - Grid: up to four tiled session previews with selection and promotion
 - Diff: side-by-side comparison of two sessions with branch, file overlap, and phase analysis
@@ -639,7 +639,7 @@ Current alert triggers:
 
 - `macos/Sources/HolyGhostty/Workspace/HolySessionRosterView.swift`
 
-Displays active sessions in persisted manual order. Selection and activity changes do not reorder the list. Each row shows runtime/project on the first line and local or remote tmux identity on the second line.
+Displays active sessions grouped by runtime and sorted by project/folder context. Each row shows one compact project/folder label, one activity orb, and quiet risk icons when needed.
 
 ### Session detail
 
@@ -722,7 +722,7 @@ The workspace view supports four display modes, selectable via toolbar or keyboa
 
 ### Standard mode
 
-The default three-zone layout: left roster, center session surface, right inspector.
+The default two-region layout: grouped left roster and selected session surface. The right inspector is available behind the toolbar toggle.
 
 ### Focus mode (Cmd+Shift+F)
 

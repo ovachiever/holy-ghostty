@@ -94,6 +94,11 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
             return
         }
 
+        if AppDelegate.isHolyGhosttyBundle {
+            completionHandler(nil, nil)
+            return
+        }
+
         // If our configuration is "never" then we never restore the state
         // no matter what. Note its safe to use "ghostty.config" directly here
         // because window restoration is only ever invoked on app start so we
@@ -189,4 +194,3 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
         }
     }
 }
-

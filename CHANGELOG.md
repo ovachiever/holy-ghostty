@@ -4,7 +4,27 @@ All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
-- No unreleased changes.
+### Added
+
+- `Command-W` detaches the selected Holy session without closing the Holy Ghostty window.
+- `Option-Q` kills the selected tmux session when the selected session has a tmux target.
+- `Clear` toolbar action detaches all active sessions from the workspace.
+- Optional inspector toggle so the terminal gets the full default workspace width.
+
+### Changed
+
+- Left roster now groups sessions by runtime and sorts each group by project/folder context.
+- Roster rows now use one compact project/folder label, one activity orb, and quiet risk icons.
+- Working sessions use a multicolor spinner; waiting sessions age through freshness colors.
+- Public docs now describe the current two-region default workspace and session cleanup shortcuts.
+
+### Fixed
+
+- Holy-embedded terminal scroll views clamp horizontal scroll origin during vertical scrollback.
+
+### Removed
+
+- Internal terminal-scroll handoff note and stale planning docs from the public docs surface.
 
 ## 0.25 (2026-04-24)
 

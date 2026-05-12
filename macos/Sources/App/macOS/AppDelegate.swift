@@ -11,6 +11,10 @@ class AppDelegate: NSObject,
                     NSApplicationDelegate,
                     UNUserNotificationCenterDelegate,
                     GhosttyAppDelegate {
+    static var isHolyGhosttyBundle: Bool {
+        Bundle.main.bundleIdentifier?.contains("holyghostty") == true
+    }
+
     // The application logger. We should probably move this at some point to a dedicated
     // class/struct but for now it lives here! 🤷‍♂️
     static let logger = Logger(
@@ -201,6 +205,10 @@ class AppDelegate: NSObject,
             // Manual autofill via the `Edit => AutoFill` menu item still work as expected.
             "NSAutoFillHeuristicControllerEnabled": false,
         ])
+
+        if Self.isHolyGhosttyBundle {
+            UserDefaults.ghostty.setValue(false, forKey: "NSQuitAlwaysKeepsWindows")
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -381,6 +389,18 @@ class AppDelegate: NSObject,
         // First launch stuff
         if !applicationHasBecomeActive {
             applicationHasBecomeActive = true
+
+            if Self.isHolyGhosttyBundle {
+                undoManager.disableUndoRegistration()
+                discardStandaloneTerminalWindowsForHolyWorkspaceLaunch()
+                if HolyWorkspaceWindowController.all.isEmpty {
+                    openWorkspaceWindow()
+                } else {
+                    HolyWorkspaceWindowController.preferred?.showAndActivate()
+                }
+                undoManager.enableUndoRegistration()
+                return
+            }
 
             // Let's launch our first window. We only do this if we have no other windows. It
             // is possible to have other windows in a few scenarios:
@@ -809,11 +829,15 @@ class AppDelegate: NSObject,
         // Depending on the "window-save-state" setting we have to set the NSQuitAlwaysKeepsWindows
         // configuration. This is the only way to carefully control whether macOS invokes the
         // state restoration system.
-        switch config.windowSaveState {
-        case "never": UserDefaults.ghostty.setValue(false, forKey: "NSQuitAlwaysKeepsWindows")
-        case "always": UserDefaults.ghostty.setValue(true, forKey: "NSQuitAlwaysKeepsWindows")
-        case "default": fallthrough
-        default: UserDefaults.ghostty.removeObject(forKey: "NSQuitAlwaysKeepsWindows")
+        if Self.isHolyGhosttyBundle {
+            UserDefaults.ghostty.setValue(false, forKey: "NSQuitAlwaysKeepsWindows")
+        } else {
+            switch config.windowSaveState {
+            case "never": UserDefaults.ghostty.setValue(false, forKey: "NSQuitAlwaysKeepsWindows")
+            case "always": UserDefaults.ghostty.setValue(true, forKey: "NSQuitAlwaysKeepsWindows")
+            case "default": fallthrough
+            default: UserDefaults.ghostty.removeObject(forKey: "NSQuitAlwaysKeepsWindows")
+            }
         }
 
         // Sync our auto-update settings. If SUEnableAutomaticChecks (in our Info.plist) is
@@ -912,12 +936,13 @@ class AppDelegate: NSObject,
 
     /// We support NSSecureCoding for restorable state. Required as of macOS Sonoma (14) but a good idea anyways.
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
-        return true
+        return !Self.isHolyGhosttyBundle
     }
 
     func application(_ app: NSApplication, willEncodeRestorableState coder: NSCoder) {
         Self.logger.debug("application will save window state")
 
+        guard !Self.isHolyGhosttyBundle else { return }
         guard ghostty.config.windowSaveState != "never" else { return }
 
         // Encode our quick terminal state if we have it.
@@ -938,7 +963,8 @@ class AppDelegate: NSObject,
         Self.logger.debug("application will restore window state")
 
         // Decode our quick terminal state.
-        if ghostty.config.windowSaveState != "never",
+        if !Self.isHolyGhosttyBundle,
+            ghostty.config.windowSaveState != "never",
             let state = QuickTerminalRestorableState(coder: coder) {
             quickTerminalControllerState = .pendingRestore(state)
         }
@@ -1036,6 +1062,16 @@ class AppDelegate: NSObject,
     }
 
     @MainActor
+    @IBAction func close(_ sender: Any?) {
+        guard let keyWindow = NSApp.keyWindow,
+              let workspace = keyWindow.windowController as? HolyWorkspaceWindowController else {
+            return
+        }
+
+        workspace.closeSelectedSessionIfAvailable()
+    }
+
+    @MainActor
     @IBAction func closeAllWindows(_ sender: Any?) {
         HolyWorkspaceWindowController.all.forEach { $0.close() }
         TerminalController.closeAllWindows()
@@ -1075,6 +1111,13 @@ class AppDelegate: NSObject,
         )
         controller.showAndActivate()
         return controller
+    }
+
+    @MainActor
+    private func discardStandaloneTerminalWindowsForHolyWorkspaceLaunch() {
+        TerminalController.all.forEach { controller in
+            controller.closeWindowImmediately()
+        }
     }
 
     @MainActor

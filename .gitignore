@@ -5,6 +5,7 @@
 *.profraw
 /.private/
 /.agents/
+/.dev/
 .DS_Store
 .vscode/
 .direnv/
@@ -14,6 +15,8 @@ zig-cache/
 .zig-cache/
 zig-pkg/
 zig-out/
+macos/macos/
+src/build/
 build-cmake/
 CMakeCache.txt
 CMakeFiles/

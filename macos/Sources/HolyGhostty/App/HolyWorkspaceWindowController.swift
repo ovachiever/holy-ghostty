@@ -2,6 +2,27 @@ import AppKit
 import SwiftUI
 
 @MainActor
+private final class HolyWorkspaceWindow: NSWindow {
+    weak var holyWorkspaceController: HolyWorkspaceWindowController?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if holyWorkspaceController?.handleWorkspaceKeyEquivalent(event) == true {
+            return true
+        }
+
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func performClose(_ sender: Any?) {
+        if holyWorkspaceController?.closeSelectedSessionIfAvailable() == true {
+            return
+        }
+
+        super.performClose(sender)
+    }
+}
+
+@MainActor
 final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
     let workspaceStore: HolyWorkspaceStore
 
@@ -16,7 +37,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate,
             seedDefaultSession: resolvedSeedDefaultSession
         )
 
-        let window = NSWindow(
+        let window = HolyWorkspaceWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1580, height: 980),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
@@ -45,6 +66,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate,
         window.contentViewController = hostingController
 
         super.init(window: window)
+        window.holyWorkspaceController = self
         window.delegate = self
         toolbar.delegate = self
 
@@ -97,8 +119,44 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func closeSelectedSession() {
-        guard let selected = workspaceStore.selectedSession else { return }
+        closeSelectedSessionIfAvailable()
+    }
+
+    @discardableResult
+    func closeSelectedSessionIfAvailable() -> Bool {
+        guard let selected = workspaceStore.selectedSession else { return false }
         workspaceStore.close(selected)
+        return true
+    }
+
+    @discardableResult
+    func killSelectedTmuxSessionIfAvailable() -> Bool {
+        guard let selected = workspaceStore.selectedSession,
+              workspaceStore.canKillTmuxSession(selected) else {
+            return false
+        }
+
+        workspaceStore.killTmuxSession(selected)
+        return true
+    }
+
+    func handleWorkspaceKeyEquivalent(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown,
+              let key = event.charactersIgnoringModifiers?.lowercased() else {
+            return false
+        }
+
+        let relevantFlags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+
+        if key == "w", relevantFlags == .command {
+            return closeSelectedSessionIfAvailable()
+        }
+
+        if key == "q", relevantFlags == .option {
+            return killSelectedTmuxSessionIfAvailable()
+        }
+
+        return false
     }
 
     func focus(surfaceView: Ghostty.SurfaceView) {

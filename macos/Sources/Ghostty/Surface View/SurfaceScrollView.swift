@@ -16,6 +16,7 @@ class SurfaceScrollView: NSView {
     private let scrollView: NSScrollView
     private let documentView: NSView
     private let surfaceView: Ghostty.SurfaceView
+    private let clipsTerminalViewport: Bool
     private var observers: [NSObjectProtocol] = []
     private var cancellables: Set<AnyCancellable> = []
     private var isLiveScrolling = false
@@ -27,11 +28,13 @@ class SurfaceScrollView: NSView {
 
     init(contentSize: CGSize, surfaceView: Ghostty.SurfaceView) {
         self.surfaceView = surfaceView
+        self.clipsTerminalViewport = AppDelegate.isHolyGhosttyBundle
         // The scroll view is our outermost view that controls all our scrollbar
         // rendering and behavior.
         scrollView = NSScrollView()
         scrollView.hasVerticalScroller = false
         scrollView.hasHorizontalScroller = false
+        scrollView.horizontalScrollElasticity = clipsTerminalViewport ? .none : .automatic
         scrollView.autohidesScrollers = false
         scrollView.usesPredominantAxisScrolling = true
         // Always use the overlay style. See mouseMoved for how we make
@@ -39,24 +42,28 @@ class SurfaceScrollView: NSView {
         scrollView.scrollerStyle = .overlay
         // hide default background to show blur effect properly
         scrollView.drawsBackground = false
-        // don't let the content view clip its subviews, to enable the
-        // surface to draw the background behind non-overlay scrollers
-        // (we currently only use overlay scrollers, but might as well
-        // configure the views correctly in case we change our mind)
-        scrollView.contentView.clipsToBounds = false
+        // Standalone Ghostty windows allow the surface to draw behind non-overlay
+        // scrollers. Holy embeds the terminal inside a framed workspace pane, so
+        // it must clip aggressively to keep scrollback from painting outside the
+        // visible terminal viewport.
+        scrollView.clipsToBounds = clipsTerminalViewport
+        scrollView.contentView.clipsToBounds = clipsTerminalViewport
 
         // The document view is what the scrollview is actually going
         // to be directly scrolling. We set it up to a "blank" NSView
         // with the desired content size.
         documentView = NSView(frame: NSRect(origin: .zero, size: contentSize))
+        documentView.clipsToBounds = clipsTerminalViewport
         scrollView.documentView = documentView
 
         // The document view contains our actual surface as a child.
         // We synchronize the scrolling of the document with this surface
         // so that our primary Ghostty renderer only needs to render the viewport.
+        surfaceView.clipsToBounds = clipsTerminalViewport
         documentView.addSubview(surfaceView)
 
         super.init(frame: .zero)
+        clipsToBounds = clipsTerminalViewport
 
         // Our scroll view is our only view
         addSubview(scrollView)
@@ -199,7 +206,8 @@ class SurfaceScrollView: NSView {
     /// so the renderer only needs to render what's currently on screen.
     private func synchronizeSurfaceView() {
         let visibleRect = scrollView.contentView.documentVisibleRect
-        surfaceView.frame.origin = visibleRect.origin
+        clampHorizontalScrollOffset()
+        surfaceView.frame.origin = CGPoint(x: 0, y: visibleRect.origin.y)
     }
 
     /// Inform the actual pty of our size change. This doesn't change the actual view
@@ -238,6 +246,16 @@ class SurfaceScrollView: NSView {
         }
 
         // Always update our scrolled view with the latest dimensions
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    private func clampHorizontalScrollOffset() {
+        guard clipsTerminalViewport else { return }
+
+        let origin = scrollView.contentView.bounds.origin
+        guard origin.x != 0 else { return }
+
+        scrollView.contentView.scroll(to: CGPoint(x: 0, y: origin.y))
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 

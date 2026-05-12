@@ -18,9 +18,7 @@ struct HolySessionDetailView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.horizontal, 12)
-                .padding(.bottom, 12)
-
-                statusBar(session)
+                .padding(.bottom, 8)
             } else {
                 HolyGhosttyEmptyStateView(
                     title: "No session selected",
@@ -36,7 +34,7 @@ struct HolySessionDetailView: View {
 
     private func sessionHeader(_ session: HolySession) -> some View {
         HStack(alignment: .center, spacing: 8) {
-            HolyGhosttyStatusDot(color: attentionColor)
+            HolyGhosttyStatusDot(color: phaseColor(for: session))
 
             Text(session.displayLineTitle)
                 .font(.system(size: 13, weight: .semibold))
@@ -56,10 +54,13 @@ struct HolySessionDetailView: View {
 
             Spacer()
 
-            Text(coordination.attention.displayName)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(attentionColor)
-                .textCase(.uppercase)
+            if let headerStatus = headerStatus(for: session) {
+                Text(headerStatus.text)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(headerStatus.color)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
@@ -86,45 +87,7 @@ struct HolySessionDetailView: View {
             .joined(separator: " · ")
     }
 
-    // MARK: - Status Bar (thin footer with key metrics)
-
-    private func statusBar(_ session: HolySession) -> some View {
-        HStack(spacing: 14) {
-            statusItem(session.statusText, color: phaseColor(for: session))
-
-            if let branch = session.gitSnapshot?.branchDisplayName {
-                statusItem(branch, color: branchColor(for: session))
-            }
-
-            if let git = session.gitSnapshot, !git.isClean {
-                statusItem(session.changeSummaryText, color: changeColor(for: session))
-            }
-
-            if session.budget.isConfigured || session.budgetTelemetry.hasUsage {
-                statusItem(session.budgetSummaryText, color: budgetColor(for: session))
-            }
-
-            if let runtimeSummary = session.runtimeTelemetrySummaryText {
-                statusItem(runtimeSummary, color: runtimeColor(for: session.runtimeTelemetry.activityKind))
-            }
-
-            Spacer()
-
-            Text(session.activityAt.formatted(date: .omitted, time: .shortened))
-                .font(.system(size: 10, weight: .regular, design: .monospaced))
-                .foregroundStyle(HolyGhosttyTheme.textTertiary)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 5)
-        .background(HolyGhosttyTheme.bgElevated)
-    }
-
-    private func statusItem(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(color)
-            .lineLimit(1)
-    }
+    // MARK: - Header Status
 
     // MARK: - Surface
 
@@ -146,23 +109,68 @@ struct HolySessionDetailView: View {
 
     // MARK: - Colors
 
-    private var attentionColor: Color {
-        switch coordination.attention {
-        case .none:       return phaseColor(for: session)
-        case .watch:      return HolyGhosttyTheme.accent
-        case .needsInput: return HolyGhosttyTheme.warning
-        case .failure, .conflict: return HolyGhosttyTheme.danger
-        case .done:       return HolyGhosttyTheme.success
+    private func headerStatus(for session: HolySession) -> (text: String, color: Color)? {
+        if let runtimeSummary = session.runtimeTelemetrySummaryText {
+            return (runtimeSummary, runtimeColor(for: session.runtimeTelemetry.activityKind))
         }
+
+        if let coordinationSummary = coordinationStatusText(for: session) {
+            return (coordinationSummary, coordinationStatusColor(for: session))
+        }
+
+        if let git = session.gitSnapshot, !git.isClean {
+            return (session.changeSummaryText, changeColor(for: session))
+        }
+
+        if session.budget.isConfigured || session.budgetTelemetry.hasUsage {
+            return (session.budgetSummaryText, budgetColor(for: session))
+        }
+
+        return (session.statusText, phaseColor(for: session))
+    }
+
+    private func coordinationStatusText(for session: HolySession) -> String? {
+        if !coordination.overlappingFiles.isEmpty {
+            let count = coordination.overlappingFiles.count
+            return count == 1 ? "1 overlapping file" : "\(count) overlapping files"
+        }
+
+        if !coordination.sharedWorktreeSessionIDs.isEmpty {
+            let count = coordination.sharedWorktreeSessionIDs.count
+            return count == 1 ? "same worktree as 1 session" : "same worktree as \(count) sessions"
+        }
+
+        if coordination.hasSharedBranch {
+            let count = coordination.sharedBranchSessionIDs.count
+            return count == 1 ? "same branch as 1 session" : "same branch as \(count) sessions"
+        }
+
+        if session.hasBranchOwnershipDrift {
+            return "branch drift"
+        }
+
+        return nil
+    }
+
+    private func coordinationStatusColor(for session: HolySession) -> Color {
+        if !coordination.overlappingFiles.isEmpty || session.hasBranchOwnershipDrift {
+            return HolyGhosttyTheme.warning
+        }
+
+        return HolyGhosttyTheme.textTertiary
     }
 
     private func phaseColor(for session: HolySession?) -> Color {
         guard let session else { return HolyGhosttyTheme.textTertiary }
         switch session.phase {
-        case .active:       return HolyGhosttyTheme.success
-        case .working:      return HolyGhosttyTheme.accent
-        case .waitingInput: return HolyGhosttyTheme.warning
-        case .completed:    return HolyGhosttyTheme.success
+        case .active:
+            return HolyGhosttyTheme.textTertiary
+        case .working:
+            return HolyAgentPalette.workingBlue
+        case .waitingInput:
+            return HolyWaitingFreshness(age: Date.now.timeIntervalSince(session.activityAt)).color
+        case .completed:
+            return HolyAgentPalette.done
         case .failed:       return HolyGhosttyTheme.danger
         }
     }
@@ -195,15 +203,16 @@ struct HolySessionDetailView: View {
     private func runtimeColor(for kind: HolySessionActivityKind) -> Color {
         switch kind {
         case .approval:
-            return HolyGhosttyTheme.warning
+            guard let session else { return HolyAgentPalette.agingWait }
+            return HolyWaitingFreshness(age: Date.now.timeIntervalSince(session.activityAt)).color
         case .stalled, .looping:
-            return HolyGhosttyTheme.warning
+            return HolyAgentPalette.stalled
         case .failure:
             return HolyGhosttyTheme.danger
         case .completion:
-            return HolyGhosttyTheme.success
+            return HolyAgentPalette.done
         case .progress, .reading, .editing, .command:
-            return HolyGhosttyTheme.accent
+            return HolyAgentPalette.workingBlue
         case .idle:
             return HolyGhosttyTheme.textTertiary
         }

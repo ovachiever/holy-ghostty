@@ -173,6 +173,42 @@ final class HolyWorkspaceStore: ObservableObject {
         archive(session)
     }
 
+    func detachAllSessions() {
+        guard !sessions.isEmpty else { return }
+
+        let previousSelectedSessionID = selectedSessionID
+        var nextState = currentSessionStoreState
+        var pendingEvents: [HolySessionEventDraft] = []
+
+        for session in sessions.reversed() {
+            let result = sessionSupervisor.archive(session, in: nextState)
+            nextState = result.state
+            pendingEvents.append(contentsOf: result.pendingEvents)
+        }
+
+        nextState.selectedSessionID = nil
+        applySessionStoreState(nextState)
+        pendingEvents.append(contentsOf: selectionEvents(from: previousSelectedSessionID, to: selectedSessionID))
+        persist(pendingEvents: pendingEvents)
+        refreshDraftLaunchGuardrail()
+    }
+
+    func canKillTmuxSession(_ session: HolySession) -> Bool {
+        HolyTmuxSessionTerminationCommand.command(for: session.record.launchSpec) != nil
+    }
+
+    func killTmuxSession(_ session: HolySession) {
+        guard let command = HolyTmuxSessionTerminationCommand.command(for: session.record.launchSpec) else {
+            return
+        }
+
+        Task.detached(priority: .utility) {
+            command.run()
+        }
+
+        archive(session)
+    }
+
     func moveSession(_ sessionID: UUID, to targetSessionID: UUID) {
         guard sessionID != targetSessionID,
               let sourceIndex = sessions.firstIndex(where: { $0.id == sessionID }),
@@ -1757,6 +1793,79 @@ private struct HolyCoordinationSummaryContext {
     let hasOwnershipDrift: Bool
     let ownershipStatusText: String
     let runtimeActivityKind: HolySessionActivityKind
+}
+
+private struct HolyTmuxSessionTerminationCommand: Sendable {
+    let executableURL: URL
+    let arguments: [String]
+
+    static func command(for launchSpec: HolySessionLaunchSpec) -> Self? {
+        let realizedLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
+        guard let tmux = realizedLaunchSpec.tmux?.normalized,
+              let sessionName = tmux.sessionName?.holyTerminatorTrimmed.nilIfEmpty else {
+            return nil
+        }
+
+        var tmuxArguments = ["tmux"]
+        if let socketName = tmux.socketName?.holyTerminatorTrimmed.nilIfEmpty {
+            tmuxArguments += ["-L", socketName]
+        }
+        tmuxArguments += ["kill-session", "-t", sessionName]
+
+        if realizedLaunchSpec.transport.isRemote {
+            guard let destination = realizedLaunchSpec.transport.sshDestination?.holyTerminatorTrimmed.nilIfEmpty else {
+                return nil
+            }
+
+            return Self(
+                executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+                arguments: ["ssh", destination, "zsh", "-lc", shellCommand(tmuxArguments)]
+            )
+        }
+
+        return Self(
+            executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+            arguments: tmuxArguments
+        )
+    }
+
+    func run() {
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return
+        }
+    }
+
+    private static func shellCommand(_ arguments: [String]) -> String {
+        arguments.map(posixQuote).joined(separator: " ")
+    }
+
+    private static func posixQuote(_ value: String) -> String {
+        if value.isEmpty {
+            return "''"
+        }
+
+        let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
+        return "'\(escaped)'"
+    }
+}
+
+private extension String {
+    var holyTerminatorTrimmed: String {
+        trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
 }
 
 private extension HolyWorkspaceStore {

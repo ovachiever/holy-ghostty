@@ -64,7 +64,11 @@ final class HolySession: ObservableObject, Identifiable {
                surfaceTitle: terminalTitle,
                preview: "",
                command: nil,
-               initialInput: nil
+               initialInput: nil,
+               launchTitle: record.launchSpec.resolvedTitle,
+               tmuxSessionName: record.launchSpec.tmux?.sessionName,
+               tmuxSocketName: record.launchSpec.tmux?.socketName,
+               objective: record.launchSpec.objective
            ) == displayRuntime {
             return terminalTitle
         }
@@ -354,7 +358,11 @@ final class HolySession: ObservableObject, Identifiable {
             surfaceTitle: surfaceView.title,
             preview: nextPreview,
             command: record.launchSpec.command,
-            initialInput: record.launchSpec.initialInput
+            initialInput: record.launchSpec.initialInput,
+            launchTitle: record.launchSpec.resolvedTitle,
+            tmuxSessionName: record.launchSpec.tmux?.sessionName,
+            tmuxSocketName: record.launchSpec.tmux?.socketName,
+            objective: record.launchSpec.objective
         ) {
             inferredRuntime = nextInferredRuntime
         }
@@ -838,15 +846,22 @@ final class HolySession: ObservableObject, Identifiable {
         surfaceTitle: String,
         preview: String,
         command: String?,
-        initialInput: String?
+        initialInput: String?,
+        launchTitle: String?,
+        tmuxSessionName: String?,
+        tmuxSocketName: String?,
+        objective: String?
     ) -> HolySessionRuntime? {
         guard launchRuntime == .shell else { return nil }
 
         let title = surfaceTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let launchMetadata = [launchTitle, tmuxSessionName, tmuxSocketName, objective]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .joined(separator: "\n")
         let commandText = [command, initialInput]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .joined(separator: "\n")
-        let evidence = [title, preview, commandText]
+        let evidence = [title, launchMetadata, preview, commandText]
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
             .lowercased()
@@ -881,6 +896,14 @@ final class HolySession: ObservableObject, Identifiable {
             || evidence.contains(" codex ")
             || evidence.hasPrefix("codex ")
             || evidence.hasPrefix("codex-")
+            || evidence.range(
+                of: #"(^|[^a-z])codex([0-9_-]|[^a-z]|$)"#,
+                options: .regularExpression
+            ) != nil
+            || evidence.range(
+                of: #"\bgpt-[0-9a-z][0-9a-z.\-]*\s+(fast\s+)?(low|medium|high|xhigh)\b"#,
+                options: .regularExpression
+            ) != nil
     }
 
     private static func containsOpenCodeMarker(_ evidence: String) -> Bool {

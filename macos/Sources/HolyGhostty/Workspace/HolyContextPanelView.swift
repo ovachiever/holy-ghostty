@@ -602,8 +602,13 @@ struct HolyContextPanelView: View {
                 actionButton("Duplicate", systemImage: "plus.square.on.square") {
                     store.duplicate(session)
                 }
-                actionButton("Archive", systemImage: "archivebox", role: .destructive) {
+                actionButton("Detach", systemImage: "rectangle.stack.badge.minus", role: .destructive) {
                     store.archive(session)
+                }
+                if store.canKillTmuxSession(session) {
+                    actionButton("Kill Tmux Session", systemImage: "xmark.octagon", role: .destructive) {
+                        store.killTmuxSession(session)
+                    }
                 }
             }
         }
@@ -779,4 +784,3 @@ struct HolyCoordPeer: Identifiable, Equatable {
             }
     }
 }
-
