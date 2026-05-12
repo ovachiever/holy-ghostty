@@ -212,15 +212,112 @@ actor HolyRemoteTmuxDiscoveryService {
           printf '%s' "$value"
         }
 
+        trimmed_value() {
+          local value="$1"
+          value="${value#"${value%%[![:space:]]*}"}"
+          value="${value%"${value##*[![:space:]]}"}"
+          printf '%s' "$value"
+        }
+
         option_value() {
           local session_name="$1"
           local option_name="$2"
           "${tmux_cmd[@]}" show-options -qv -t "$session_name" "$option_name" 2>/dev/null || true
         }
 
-        pane_working_directory() {
+        pane_value() {
           local session_name="$1"
-          "${tmux_cmd[@]}" display-message -p -t "$session_name" '#{pane_current_path}' 2>/dev/null || true
+          local format="$2"
+          "${tmux_cmd[@]}" display-message -p -t "$session_name" "$format" 2>/dev/null || true
+        }
+
+        project_candidate() {
+          local value lowered
+          value=$(trimmed_value "$1")
+          [[ -z "$value" ]] && return 1
+          [[ "$value" == */* ]] && return 1
+
+          lowered="${value:l}"
+          [[ "$lowered" =~ '^[0-9]+$' ]] && return 1
+          [[ "$lowered" == *"claude code"* ]] && return 1
+          [[ "$lowered" == *"codex cli"* ]] && return 1
+
+          case "$lowered" in
+            zsh|bash|sh|fish|tmux|"[tmux]"|node|python|python[0-9]*|*.exe|*.local|localhost|ai|coding|custom-coding|custom_coding|projects|repos|repositories|workspace|workspaces)
+              return 1
+              ;;
+          esac
+
+          printf '%s' "$value"
+        }
+
+        inferred_working_directory() {
+          local working_directory candidate raw_candidate
+          working_directory=$(trimmed_value "$1")
+          shift
+
+          if [[ -d "$working_directory" ]]; then
+            for raw_candidate in "$@"; do
+              if candidate=$(project_candidate "$raw_candidate"); then
+                if [[ "$candidate" == "${working_directory:t}" ]]; then
+                  printf '%s' "$working_directory"
+                  return
+                fi
+                if [[ -d "$working_directory/$candidate" ]]; then
+                  printf '%s' "$working_directory/$candidate"
+                  return
+                fi
+              fi
+            done
+          fi
+
+          printf '%s' "$working_directory"
+        }
+
+        repository_name_for_directory() {
+          local working_directory repository_root
+          working_directory=$(trimmed_value "$1")
+          [[ -z "$working_directory" ]] && return 1
+
+          repository_root=$(git -C "$working_directory" rev-parse --show-toplevel 2>/dev/null) || return 1
+          repository_root=$(trimmed_value "$repository_root")
+          [[ -z "$repository_root" ]] && return 1
+
+          printf '%s' "${repository_root:t}"
+        }
+
+        fallback_session_title() {
+          local working_directory candidate raw_candidate directory_name repository_name
+          local session_name="$2"
+          local pane_title="$3"
+          local window_name="$4"
+
+          working_directory=$(trimmed_value "$1")
+
+          if repository_name=$(repository_name_for_directory "$working_directory"); then
+            printf '%s' "$repository_name"
+            return
+          fi
+
+          directory_name="${working_directory:t}"
+          if candidate=$(project_candidate "$directory_name"); then
+            printf '%s' "$candidate"
+            return
+          fi
+
+          if candidate=$(project_candidate "$session_name"); then
+            printf '%s' "$candidate"
+            return
+          fi
+
+          for raw_candidate in "$pane_title" "$window_name"; do
+            if candidate=$(project_candidate "$raw_candidate"); then
+              printf '%s' "$candidate"
+              return
+            fi
+          done
+
+          return 1
         }
 
         git_metadata() {
@@ -316,8 +413,14 @@ actor HolyRemoteTmuxDiscoveryService {
           runtime=$(option_value "$session_name" @holy_runtime)
           objective=$(option_value "$session_name" @holy_objective)
           working_directory=$(option_value "$session_name" @holy_working_directory)
+          pane_title=$(pane_value "$session_name" '#{pane_title}')
+          window_name=$(pane_value "$session_name" '#{window_name}')
           if [[ -z "$working_directory" ]]; then
-            working_directory=$(pane_working_directory "$session_name")
+            working_directory=$(pane_value "$session_name" '#{pane_current_path}')
+            working_directory=$(inferred_working_directory "$working_directory" "$pane_title" "$window_name" "$session_name")
+          fi
+          if [[ -z "$title" ]]; then
+            title=$(fallback_session_title "$working_directory" "$session_name" "$pane_title" "$window_name")
           fi
           command=$(option_value "$session_name" @holy_command)
           task_title=$(option_value "$session_name" @holy_task_title)

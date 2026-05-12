@@ -1,10 +1,10 @@
 # Holy Ghostty Engineering Spec
 
-Last updated: 2026-04-24
+Last updated: 2026-05-12
 
 This document describes the current repository implementation. It is an as-is engineering spec.
 
-Current release: `0.25`.
+Current release: `0.30`.
 
 ## 1. Purpose
 

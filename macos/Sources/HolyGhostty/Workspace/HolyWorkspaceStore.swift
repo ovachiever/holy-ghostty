@@ -115,6 +115,7 @@ final class HolyWorkspaceStore: ObservableObject {
         applySessionStoreState(restoration.state)
         loadTasks()
         loadRemoteHosts()
+        refreshLocalTmuxSessions()
         refreshActiveRemoteTmuxSessionMetadata()
         persist(pendingEvents: restoration.pendingEvents)
     }
@@ -487,6 +488,9 @@ final class HolyWorkspaceStore: ObservableObject {
                 await MainActor.run {
                     guard let self else { return }
                     self.discoveredLocalTmuxSessions = sessions
+                    if self.applyDiscoveredLocalSessionMetadata(sessions) {
+                        self.persist()
+                    }
                     self.localTmuxDiscoveryBusy = false
                     self.localTmuxDiscoveryError = nil
                 }
@@ -530,26 +534,7 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func launchLocalTmuxSession(_ session: HolyDiscoveredTmuxSession) {
-        let launchSpec = HolySessionLaunchSpec(
-            runtime: session.runtime ?? .shell,
-            title: session.displayTitle,
-            objective: session.objective,
-            budget: nil,
-            transport: .local,
-            tmux: .init(
-                socketName: session.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
-                sessionName: session.sessionName,
-                createIfMissing: false
-            ),
-            workingDirectory: session.workingDirectory,
-            command: session.bootstrapCommand,
-            initialInput: nil,
-            waitAfterCommand: false,
-            environment: [:],
-            workspace: nil
-        )
-
-        _ = createSession(with: launchSpec, origin: .directLaunch)
+        _ = createSession(with: localTmuxLaunchSpec(for: session), origin: .directLaunch)
         remoteHostsPresented = false
     }
 
@@ -557,26 +542,7 @@ final class HolyWorkspaceStore: ObservableObject {
         guard !sessions.isEmpty else { return }
 
         for session in sessions {
-            let launchSpec = HolySessionLaunchSpec(
-                runtime: session.runtime ?? .shell,
-                title: session.displayTitle,
-                objective: session.objective,
-                budget: nil,
-                transport: .local,
-                tmux: .init(
-                    socketName: session.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
-                    sessionName: session.sessionName,
-                    createIfMissing: false
-                ),
-                workingDirectory: session.workingDirectory,
-                command: session.bootstrapCommand,
-                initialInput: nil,
-                waitAfterCommand: false,
-                environment: [:],
-                workspace: nil
-            )
-
-            _ = createSession(with: launchSpec, origin: .directLaunch)
+            _ = createSession(with: localTmuxLaunchSpec(for: session), origin: .directLaunch)
         }
 
         remoteHostsPresented = false
@@ -905,6 +871,27 @@ final class HolyWorkspaceStore: ObservableObject {
         return hosts
     }
 
+    private func localTmuxLaunchSpec(for session: HolyDiscoveredTmuxSession) -> HolySessionLaunchSpec {
+        HolySessionLaunchSpec(
+            runtime: session.runtime ?? .shell,
+            title: session.displayTitle,
+            objective: session.objective,
+            budget: nil,
+            transport: .local,
+            tmux: .init(
+                socketName: session.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
+                sessionName: session.sessionName,
+                createIfMissing: false
+            ),
+            workingDirectory: session.workingDirectory,
+            command: session.bootstrapCommand,
+            initialInput: nil,
+            waitAfterCommand: false,
+            environment: [:],
+            workspace: nil
+        )
+    }
+
     private func remoteTmuxLaunchSpec(
         for session: HolyDiscoveredTmuxSession,
         on host: HolyRemoteHostRecord
@@ -931,6 +918,23 @@ final class HolyWorkspaceStore: ObservableObject {
             environment: [:],
             workspace: nil
         )
+    }
+
+    private func applyDiscoveredLocalSessionMetadata(_ discoveredSessions: [HolyDiscoveredTmuxSession]) -> Bool {
+        var changed = false
+
+        for discoveredSession in discoveredSessions {
+            let launchSpec = localTmuxLaunchSpec(for: discoveredSession)
+            guard let discoveredKey = HolyLocalTmuxSessionKey(launchSpec: launchSpec) else {
+                continue
+            }
+
+            for session in sessions where HolyLocalTmuxSessionKey(launchSpec: session.record.launchSpec) == discoveredKey {
+                changed = session.applyDiscoveredLaunchMetadata(from: launchSpec) || changed
+            }
+        }
+
+        return changed
     }
 
     private func applyDiscoveredRemoteSessionMetadata(
@@ -1763,6 +1767,22 @@ private struct HolyDraftLaunchIntent {
 private struct HolyDraftLaunchAssessment {
     let guardrail: HolyLaunchGuardrail
     let ownershipPreview: HolySessionOwnership?
+}
+
+private struct HolyLocalTmuxSessionKey: Equatable {
+    let tmuxSocketName: String?
+    let tmuxSessionName: String
+
+    init?(launchSpec: HolySessionLaunchSpec) {
+        let realizedLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
+        guard realizedLaunchSpec.transport.kind == .local,
+              let tmuxSessionName = realizedLaunchSpec.tmux?.normalized.sessionName?.nilIfBlank else {
+            return nil
+        }
+
+        self.tmuxSocketName = realizedLaunchSpec.tmux?.normalized.socketName?.nilIfBlank
+        self.tmuxSessionName = tmuxSessionName
+    }
 }
 
 private struct HolyRemoteTmuxSessionKey: Equatable {

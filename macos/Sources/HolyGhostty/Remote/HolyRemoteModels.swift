@@ -105,7 +105,19 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
     }
 
     var displayTitle: String {
-        title?.holyTrimmed.nilIfEmpty ?? "\(hostLabel)/\(sessionName)"
+        if let title = title?.holyTrimmed.nilIfEmpty {
+            return title
+        }
+
+        if let gitSummary {
+            return gitSummary.repositoryName
+        }
+
+        if isLocalHost {
+            return sessionName
+        }
+
+        return "\(hostLabel)/\(sessionName)"
     }
 
     var subtitle: String {
@@ -146,6 +158,13 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
         }
 
         return "Default tmux server"
+    }
+
+    private var isLocalHost: Bool {
+        let normalizedDestination = hostDestination.holyTrimmed.lowercased()
+        return normalizedDestination == "localhost"
+            || normalizedDestination == "127.0.0.1"
+            || normalizedDestination == "::1"
     }
 }
 

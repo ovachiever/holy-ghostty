@@ -26,7 +26,7 @@
 
 Holy Ghostty is a product fork of Ghostty. The terminal core remains Ghostty. The Holy layer adds a native macOS workspace for launching, attaching, supervising, archiving, and restoring terminal-backed coding sessions.
 
-Current Holy Ghostty release: `0.25`.
+Current Holy Ghostty release: `0.30`.
 
 The app currently supports:
 
@@ -192,7 +192,7 @@ User Claude state is outside the repo and is not managed by Holy Ghostty:
 
 ## Public Scope
 
-This repository is source-release ready. It is not a signed, notarized, or packaged app distribution channel.
+This repository is source-release ready. GitHub releases may include an ad-hoc signed macOS app bundle zip. It is not notarized or distributed through a packaged installer channel.
 
 Known gaps:
 
@@ -201,7 +201,7 @@ Known gaps:
 - Broadcast input and dependency-chain automation are not implemented.
 - External task status writeback is not implemented.
 - User-facing preferences are limited.
-- Signing, notarization, and release packaging are not configured.
+- Developer ID signing, notarization, packaged installer, and automated release workflow are not configured.
 
 ## Upstream
 

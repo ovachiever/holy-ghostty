@@ -4,7 +4,7 @@ Updated: 2026-05-12
 
 Holy Ghostty is a macOS workspace for live Ghostty terminal sessions. The app treats a session as the primary unit instead of a terminal tab.
 
-Current release: `0.25`.
+Current release: `0.30`.
 
 ## Session Model
 
@@ -250,11 +250,11 @@ Source-ready:
 
 Release-ready:
 
-- no
+- source and ad-hoc app zip only
 
 Missing release infrastructure:
 
-- code signing configuration.
+- Developer ID signing configuration.
 - notarization.
 - packaged installer.
 - automated release workflow.

@@ -4,6 +4,10 @@ All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
+No changes yet.
+
+## 0.30 (2026-05-12)
+
 ### Added
 
 - `Command-W` detaches the selected Holy session without closing the Holy Ghostty window.
@@ -17,9 +21,11 @@ All notable Holy Ghostty changes are recorded in this file.
 - Roster rows now use one compact project/folder label, one activity orb, and quiet risk icons.
 - Working sessions use a multicolor spinner; waiting sessions age through freshness colors.
 - Public docs now describe the current two-region default workspace and session cleanup shortcuts.
+- Holy Ghostty app marketing version is `0.30`.
 
 ### Fixed
 
+- Local tmux discovery now infers project folders from pane, window, and session metadata when tmux reports a shared parent directory, so attached sessions keep project/folder roster titles after restore.
 - Holy-embedded terminal scroll views clamp horizontal scroll origin during vertical scrollback.
 
 ### Removed

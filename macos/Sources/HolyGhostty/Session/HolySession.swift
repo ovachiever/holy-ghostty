@@ -102,7 +102,13 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     var workingDirectory: String? {
-        surfaceView.pwd ?? record.launchSpec.workingDirectory
+        let recordedWorkingDirectory = Self.normalizedMetadataString(record.launchSpec.workingDirectory)
+        if prefersTmuxWorkingDirectory,
+           let recordedWorkingDirectory {
+            return recordedWorkingDirectory
+        }
+
+        return surfaceView.pwd ?? recordedWorkingDirectory
     }
 
     var repositoryName: String? {
@@ -136,6 +142,14 @@ final class HolySession: ObservableObject, Identifiable {
             observedBranchName: observedBranchName,
             isDetachedHead: gitSnapshot?.isDetachedHead == true
         )
+    }
+
+    private var prefersTmuxWorkingDirectory: Bool {
+        guard let tmux = record.launchSpec.tmux?.normalized else {
+            return false
+        }
+
+        return tmux.createIfMissing == false
     }
 
     var ownershipStatusText: String {
@@ -311,6 +325,12 @@ final class HolySession: ObservableObject, Identifiable {
             changed = true
         }
 
+        if let title = Self.normalizedMetadataString(discoveredLaunchSpec.title),
+           shouldApplyDiscoveredTitle(title) {
+            record.launchSpec.title = title
+            changed = true
+        }
+
         if let objective = Self.normalizedMetadataString(discoveredLaunchSpec.objective),
            Self.normalizedMetadataString(record.launchSpec.objective) == nil {
             record.launchSpec.objective = objective
@@ -329,6 +349,28 @@ final class HolySession: ObservableObject, Identifiable {
         refreshGitSnapshotIfNeeded(force: true)
         objectWillChange.send()
         return true
+    }
+
+    private func shouldApplyDiscoveredTitle(_ discoveredTitle: String) -> Bool {
+        guard Self.normalizedMetadataString(record.launchSpec.title) != discoveredTitle else {
+            return false
+        }
+
+        if Self.isDefaultTitle(record.launchSpec.title, for: runtime) {
+            return true
+        }
+
+        guard let tmux = record.launchSpec.tmux?.normalized,
+              tmux.createIfMissing == false else {
+            return false
+        }
+
+        let currentTitle = record.launchSpec.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if currentTitle == tmux.sessionName {
+            return true
+        }
+
+        return currentTitle.contains("/")
     }
 
     func archiveSnapshot(at archivedAt: Date = .init()) -> HolyArchivedSession {
