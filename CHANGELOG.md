@@ -4,7 +4,9 @@ All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
-No changes yet.
+### Fixed
+
+- Local tmux startup discovery no longer probes git metadata or checks inferred project directories on disk, preventing automatic restore from triggering repeated macOS Documents permission prompts.
 
 ## 0.30 (2026-05-12)
 

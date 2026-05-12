@@ -309,7 +309,10 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     @discardableResult
-    func applyDiscoveredLaunchMetadata(from launchSpec: HolySessionLaunchSpec) -> Bool {
+    func applyDiscoveredLaunchMetadata(
+        from launchSpec: HolySessionLaunchSpec,
+        refreshGitSnapshot: Bool = true
+    ) -> Bool {
         let discoveredLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
         var changed = false
 
@@ -346,7 +349,9 @@ final class HolySession: ObservableObject, Identifiable {
         guard changed else { return false }
 
         markUpdated()
-        refreshGitSnapshotIfNeeded(force: true)
+        if refreshGitSnapshot {
+            refreshGitSnapshotIfNeeded(force: true)
+        }
         objectWillChange.send()
         return true
     }

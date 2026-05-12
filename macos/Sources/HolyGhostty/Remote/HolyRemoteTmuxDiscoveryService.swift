@@ -85,7 +85,7 @@ actor HolyRemoteTmuxDiscoveryService {
         for host: HolyRemoteHostRecord,
         socketName: String?
     ) -> HolyRemoteCommandResult? {
-        let script = remoteDiscoveryScript(socketName: socketName)
+        let script = remoteDiscoveryScript(socketName: socketName, includeGitMetadata: true)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         process.arguments = [
@@ -107,7 +107,7 @@ actor HolyRemoteTmuxDiscoveryService {
     private func runLocalDiscovery(socketName: String?) -> HolyRemoteCommandResult? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", remoteDiscoveryScript(socketName: socketName)]
+        process.arguments = ["-lc", remoteDiscoveryScript(socketName: socketName, includeGitMetadata: false)]
 
         return run(process: process, context: "local tmux")
     }
@@ -193,12 +193,14 @@ actor HolyRemoteTmuxDiscoveryService {
         return lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
     }
 
-    private func remoteDiscoveryScript(socketName: String?) -> String {
+    private func remoteDiscoveryScript(socketName: String?, includeGitMetadata: Bool) -> String {
         let socketBinding = socketName?.holyTrimmed.nilIfEmpty.map(posixQuote) ?? "''"
+        let includeGitMetadataFlag = includeGitMetadata ? "1" : "0"
 
         return """
         setopt pipefail
         socket_name=\(socketBinding)
+        include_git_metadata=\(includeGitMetadataFlag)
         sep=$'\\x1f'
         tmux_cmd=(tmux)
         if [[ -n "$socket_name" ]]; then
@@ -251,25 +253,38 @@ actor HolyRemoteTmuxDiscoveryService {
           printf '%s' "$value"
         }
 
+        generic_directory_name() {
+          local value lowered
+          value=$(trimmed_value "$1")
+          lowered="${value:l}"
+          case "$lowered" in
+            custom-coding|custom_coding|projects|repos|repositories|workspace|workspaces)
+              return 0
+              ;;
+          esac
+          return 1
+        }
+
         inferred_working_directory() {
-          local working_directory candidate raw_candidate
+          local working_directory directory_name candidate raw_candidate base_directory
           working_directory=$(trimmed_value "$1")
           shift
 
-          if [[ -d "$working_directory" ]]; then
-            for raw_candidate in "$@"; do
-              if candidate=$(project_candidate "$raw_candidate"); then
-                if [[ "$candidate" == "${working_directory:t}" ]]; then
-                  printf '%s' "$working_directory"
-                  return
-                fi
-                if [[ -d "$working_directory/$candidate" ]]; then
-                  printf '%s' "$working_directory/$candidate"
-                  return
-                fi
+          directory_name="${working_directory:t}"
+          for raw_candidate in "$@"; do
+            if candidate=$(project_candidate "$raw_candidate"); then
+              if [[ "$candidate" == "$directory_name" ]]; then
+                printf '%s' "$working_directory"
+                return
               fi
-            done
-          fi
+              if generic_directory_name "$directory_name"; then
+                base_directory="${working_directory%/}"
+                [[ -z "$base_directory" ]] && base_directory="$working_directory"
+                printf '%s/%s' "$base_directory" "$candidate"
+                return
+              fi
+            fi
+          done
 
           printf '%s' "$working_directory"
         }
@@ -322,7 +337,7 @@ actor HolyRemoteTmuxDiscoveryService {
 
         git_metadata() {
           local working_directory="$1"
-          if [[ -z "$working_directory" ]]; then
+          if [[ "$include_git_metadata" != "1" || -z "$working_directory" ]]; then
             printf '%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s' \
               "" "$sep" \
               "" "$sep" \

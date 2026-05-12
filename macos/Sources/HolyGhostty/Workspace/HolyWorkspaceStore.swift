@@ -930,7 +930,7 @@ final class HolyWorkspaceStore: ObservableObject {
             }
 
             for session in sessions where HolyLocalTmuxSessionKey(launchSpec: session.record.launchSpec) == discoveredKey {
-                changed = session.applyDiscoveredLaunchMetadata(from: launchSpec) || changed
+                changed = session.applyDiscoveredLaunchMetadata(from: launchSpec, refreshGitSnapshot: false) || changed
             }
         }
 
