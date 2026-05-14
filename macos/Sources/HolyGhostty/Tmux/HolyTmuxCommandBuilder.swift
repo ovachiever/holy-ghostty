@@ -72,6 +72,7 @@ enum HolyTmuxCommandBuilder {
         if tmux.createIfMissing {
             if usesManagedServer {
                 lines.append("\(shellCommand(tmuxPrefix + ["set-option", "-gq", "destroy-unattached", "off"])) 2>/dev/null || true")
+                lines.append("\(shellCommand(tmuxPrefix + ["set-option", "-gq", "mouse", "on"])) 2>/dev/null || true")
             }
 
             var createArguments = tmuxPrefix + ["new-session", "-d", "-s", sessionName]
