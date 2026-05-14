@@ -4,21 +4,37 @@ All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
+No unreleased changes.
+
+## 0.40 (2026-05-14)
+
+0.40 turns Holy Ghostty into a cleaner tmux workspace for local and SSH agent sessions, with more terminal space, clearer controls, smarter session status, and more stable local installs.
+
+### Added
+
+- Launch profiles now drive `New`, with generated `Local Mac` and SSH-host profiles plus a saved default target.
+- Holy-owned pane layouts now persist across launches: single, split right, split down, and quad.
+- Session rows now show pane labels when a session is visible in a split layout.
+- Agent status now has separate states for active work, new replies, planning questions, approval prompts, stale replies, and agent swarms.
+- Agent swarms now get their own animated roster indicator and bottom status state.
+- New-reply indicators now behave like unread mail: opening a session and keeping it visible for about three seconds marks the current reply as seen.
+- The local installer now re-signs `/Applications/Holy Ghostty.app` with a stable available signing identity when possible, so macOS privacy permissions are less likely to duplicate after rebuilds.
+
 ### Changed
 
 - Session creation, clear-roster, and SSH controls now live in the left tmux roster.
-- The roster `New` action now uses launch profiles, with generated `Local Mac` and SSH-host profiles plus a persisted default target.
 - First-time profile setup defaults `New` to the only configured SSH host when exactly one exists; otherwise it defaults to `Local Mac`.
 - SSH tmux sessions can now be reattached from the roster, either per session or all at once, without killing the remote tmux session.
 - The old `Grid` / `Diff` / `Focus` controls are removed from the live workspace chrome; Diff code is preserved dormant for a later explicit comparison mode.
 - Standard workspace layout controls now live at the bottom of the left rail: single, split right, split down, and quad.
-- Holy-owned pane layouts persist across launches and show pane position labels in the session roster.
 - The selected session header is removed from the terminal pane so the live terminal gets the top edge.
 - The standard workspace now removes the empty native toolbar band; the left rail reserves traffic-light clearance while the terminal surface starts at the top edge.
 - Holy defaults now add top terminal padding so the first prompt row clears macOS window controls without adding a separate app bar.
 - The bundled Holy background image now stretches to the live terminal surface size.
+- Roster rows now keep risk and worktree details out of the left list unless they need attention in the selected-session status area.
 - Per-session menus now separate `Detach From Roster` from `Kill from Roster`; killing a tmux-backed session attempts to stop tmux and always removes the roster attachment.
 - Public docs now describe the Level 1 pane layout model instead of the old toolbar display-mode model.
+- Holy Ghostty app marketing version is `0.40`.
 
 ### Fixed
 
@@ -27,6 +43,8 @@ All notable Holy Ghostty changes are recorded in this file.
 - Active tmux session discovery now prefers live pane paths and pane commands over stale launch metadata, so sessions move from `Custom_Coding`/`Shell` to the actual project and agent group after Claude/Codex starts.
 - The roster working spinner now requires fresh working evidence instead of stale visible words like `running` or `thinking`.
 - Live agent-working signals now take precedence over stale error text in the roster activity indicator.
+- Planning-question status clears once the agent moves back into real work instead of staying stuck on the question icon.
+- The roster no longer briefly shows a work spinner just because the user clicked into a session.
 - Reattaching SSH tmux sessions now detaches existing tmux clients first, preventing stale tiny clients from shrinking the visible session viewport.
 - Restored Holy sessions now seed their hidden terminal surfaces with a wide fallback size so offscreen tmux clients do not start at the default 49-column viewport.
 

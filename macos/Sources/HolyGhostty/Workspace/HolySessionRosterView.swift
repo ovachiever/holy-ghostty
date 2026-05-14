@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct HolySessionRosterView: View {
@@ -60,6 +61,7 @@ struct HolySessionRosterView: View {
                                         primaryTitle: Self.primaryTitle(for: session),
                                         paneLabel: paneLabelsBySessionID[session.id],
                                         coordination: store.coordination(for: session),
+                                        attention: store.attentionPresentation(for: session),
                                         isSelected: store.selectedSessionID == session.id,
                                         compact: compact,
                                         onSelect: { store.selectedSessionID = session.id },
@@ -436,6 +438,7 @@ private struct HolyRosterRow: View {
     let primaryTitle: String
     let paneLabel: String?
     let coordination: HolySessionCoordination
+    let attention: HolySessionAttentionPresentation
     let isSelected: Bool
     var compact: Bool = false
     let onSelect: () -> Void
@@ -453,11 +456,10 @@ private struct HolyRosterRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             HolyAgentStatusOrb(
-                state: activityIndicatorState,
-                activityAt: session.activityAt
+                state: activityIndicatorState
             )
             .frame(width: 18, height: 18)
-            .help(session.activityHelpText)
+            .help(attention.helpText)
 
             if isRenaming {
                 TextField("Session name", text: $renameText, onCommit: commitRename)
@@ -472,8 +474,6 @@ private struct HolyRosterRow: View {
             Spacer(minLength: 0)
 
             if !compact && !isRenaming {
-                statusIconRail
-
                 Menu {
                     Button("Rename") { startRename() }
                     Button("Duplicate") {
@@ -595,13 +595,16 @@ private struct HolyRosterRow: View {
         }
     }
 
+    @ViewBuilder
     private var connectionIndicator: some View {
-        Image(systemName: session.record.launchSpec.transport.isRemote ? "network" : "laptopcomputer")
-            .font(.system(size: 8.5, weight: .semibold))
-            .foregroundStyle(connectionColor)
-            .frame(width: 10, height: 10)
-            .opacity(isSelected ? 0.9 : 0.62)
-            .help(connectionHelpText)
+        if session.record.launchSpec.transport.isRemote {
+            Image(systemName: "network")
+                .font(.system(size: 8.5, weight: .semibold))
+                .foregroundStyle(connectionColor)
+                .frame(width: 10, height: 10)
+                .opacity(isSelected ? 0.9 : 0.62)
+                .help(connectionHelpText)
+        }
     }
 
     private var connectionColor: Color {
@@ -632,22 +635,7 @@ private struct HolyRosterRow: View {
     }
 
     private var activityColor: Color {
-        activityColor(at: .now)
-    }
-
-    private func activityColor(at date: Date) -> Color {
-        switch activityIndicatorState {
-        case .idle:      return phaseColor
-        case .working:   return HolyAgentPalette.workingBlue
-        case .needsUser: return waitingFreshness(at: date).color
-        case .done:      return HolyAgentPalette.done
-        case .stalled:   return HolyAgentPalette.stalled
-        case .failed:    return HolyGhosttyTheme.danger
-        }
-    }
-
-    private func waitingFreshness(at date: Date) -> HolyWaitingFreshness {
-        HolyWaitingFreshness(age: date.timeIntervalSince(session.activityAt))
+        attention.kind.holyColor
     }
 
     private var rowOutlineColor: Color {
@@ -655,39 +643,36 @@ private struct HolyRosterRow: View {
             return HolyGhosttyTheme.danger
         }
 
-        if riskState != .none {
-            return HolyGhosttyTheme.warning
-        }
-
         return activityColor
     }
 
     private var activityIndicatorState: HolyRosterActivityState {
-        switch session.phase {
+        switch attention.kind {
         case .working:
             return .working
-        case .waitingInput:
-            return .needsUser
-        case .completed:
-            return .done
+        case .swarming:
+            return .swarming
+        case .planningQuestion:
+            return .planningQuestion
+        case .approvalNeeded:
+            return .approvalNeeded
+        case .newReply:
+            return .newReply
+        case .waitingQuiet:
+            return .waitingQuiet
+        case .overdueReply:
+            return .overdueReply
+        case .staleReply:
+            return .staleReply
+        case .stalled:
+            return .stalled
         case .failed:
             return .failed
-        case .active:
-            break
-        }
-
-        switch session.runtimeTelemetry.activityKind {
-        case .approval:
-            return .needsUser
-        case .progress, .reading, .editing, .command:
-            return .working
-        case .stalled, .looping:
-            return .stalled
-        case .failure:
-            return .failed
-        case .completion:
+        case .done:
             return .done
-        case .idle:
+        case .conflict:
+            return .conflict
+        case .quiet:
             return .idle
         }
     }
@@ -720,7 +705,7 @@ private struct HolyRosterRow: View {
         switch session.phase {
         case .active:    return HolyGhosttyTheme.textTertiary
         case .working:   return HolyAgentPalette.workingBlue
-        case .waitingInput: return waitingFreshness(at: .now).color
+        case .waitingInput: return attention.kind.holyColor
         case .completed: return HolyAgentPalette.done
         case .failed:    return HolyGhosttyTheme.danger
         }
@@ -730,10 +715,17 @@ private struct HolyRosterRow: View {
 private enum HolyRosterActivityState {
     case idle
     case working
-    case needsUser
+    case swarming
+    case planningQuestion
+    case approvalNeeded
+    case newReply
+    case waitingQuiet
+    case overdueReply
+    case staleReply
     case done
     case stalled
     case failed
+    case conflict
 }
 
 private enum HolyRosterRiskState {
@@ -749,13 +741,48 @@ enum HolyAgentPalette {
     static let workingViolet = Color(red: 0.68, green: 0.44, blue: 1.0)
     static let workingMint = Color(red: 0.25, green: 0.92, blue: 0.70)
     static let workingGold = Color(red: 1.0, green: 0.78, blue: 0.30)
+    static let swarmCyan = Color(red: 0.18, green: 0.88, blue: 1.0)
+    static let swarmPink = Color(red: 1.0, green: 0.35, blue: 0.78)
+    static let swarmGold = Color(red: 1.0, green: 0.84, blue: 0.28)
     static let done = Color(red: 0.42, green: 0.47, blue: 0.52)
     static let stalled = Color(red: 1.0, green: 0.47, blue: 0.22)
+    static let waitingReply = Color(red: 0.30, green: 0.76, blue: 1.0)
+    static let approvalNeeded = Color(red: 1.0, green: 0.58, blue: 0.22)
     static let freshWait = Color(red: 0.12, green: 0.86, blue: 1.0)
+    static let planningQuestion = Color(red: 1.0, green: 0.78, blue: 0.30)
     static let warmWait = Color(red: 0.43, green: 0.82, blue: 0.52)
     static let agingWait = Color(red: 0.98, green: 0.70, blue: 0.24)
     static let oldWait = Color(red: 0.98, green: 0.43, blue: 0.22)
     static let staleWait = Color(red: 1.0, green: 0.24, blue: 0.56)
+}
+
+extension HolySessionAttentionKind {
+    var holyColor: Color {
+        switch self {
+        case .quiet, .waitingQuiet:
+            return HolyGhosttyTheme.textTertiary
+        case .working:
+            return HolyAgentPalette.workingBlue
+        case .swarming:
+            return HolyAgentPalette.swarmGold
+        case .newReply:
+            return HolyAgentPalette.waitingReply
+        case .overdueReply:
+            return HolyAgentPalette.agingWait
+        case .staleReply:
+            return HolyAgentPalette.oldWait
+        case .planningQuestion:
+            return HolyAgentPalette.planningQuestion
+        case .approvalNeeded:
+            return HolyAgentPalette.approvalNeeded
+        case .stalled:
+            return HolyAgentPalette.stalled
+        case .failed, .conflict:
+            return HolyGhosttyTheme.danger
+        case .done:
+            return HolyAgentPalette.done
+        }
+    }
 }
 
 enum HolyWaitingFreshness {
@@ -803,28 +830,92 @@ enum HolyWaitingFreshness {
 
 private struct HolyAgentStatusOrb: View {
     let state: HolyRosterActivityState
-    let activityAt: Date
 
     var body: some View {
         switch state {
         case .working:
             HolyAgentWorkingSpinner(size: 13, lineWidth: 2)
                 .frame(width: 13, height: 13)
-        case .needsUser:
-            TimelineView(.periodic(from: .now, by: 60)) { context in
-                HolyAgentWaitingOrb(
-                    freshness: HolyWaitingFreshness(age: context.date.timeIntervalSince(activityAt))
-                )
-            }
-            .frame(width: 13, height: 13)
+        case .swarming:
+            HolyAgentSwarmSpinner(size: 16)
+                .frame(width: 16, height: 16)
+        case .planningQuestion:
+            HolyAgentPlanningQuestionOrb()
+                .frame(width: 15, height: 15)
+        case .approvalNeeded:
+            HolyAgentSymbolOrb(systemName: "hand.raised.fill", color: HolyAgentPalette.approvalNeeded)
+        case .newReply:
+            HolyAgentWaitingOrb()
+                .frame(width: 15, height: 15)
+        case .waitingQuiet:
+            HolyAgentStaticOrb(color: HolyGhosttyTheme.textTertiary, symbol: nil, opacity: 0.40)
+        case .overdueReply:
+            HolyAgentSymbolOrb(systemName: "clock", color: HolyAgentPalette.agingWait)
+        case .staleReply:
+            HolyAgentSymbolOrb(systemName: "clock.fill", color: HolyAgentPalette.oldWait)
         case .stalled:
-            HolyAgentStaticOrb(color: HolyAgentPalette.stalled, symbol: "!")
+            HolyAgentSymbolOrb(systemName: "hourglass", color: HolyAgentPalette.stalled)
         case .failed:
-            HolyAgentStaticOrb(color: HolyGhosttyTheme.danger, symbol: "x")
+            HolyAgentSymbolOrb(systemName: "xmark.octagon.fill", color: HolyGhosttyTheme.danger)
+        case .conflict:
+            HolyAgentSymbolOrb(systemName: "exclamationmark.triangle.fill", color: HolyGhosttyTheme.danger)
         case .done:
-            HolyAgentStaticOrb(color: HolyAgentPalette.done, symbol: nil)
+            HolyAgentSymbolOrb(systemName: "checkmark.circle.fill", color: HolyAgentPalette.done)
         case .idle:
             HolyAgentStaticOrb(color: HolyGhosttyTheme.textTertiary, symbol: nil, opacity: 0.55)
+        }
+    }
+}
+
+private struct HolyAgentPlanningQuestionOrb: View {
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(HolyAgentPalette.planningQuestion.opacity(0.18))
+                .frame(width: 14, height: 14)
+
+            Image(systemName: "questionmark.bubble.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(HolyAgentPalette.planningQuestion)
+        }
+    }
+}
+
+private struct HolyAgentSwarmSpinner: View {
+    let size: CGFloat
+
+    var body: some View {
+        TimelineView(.animation) { context in
+            let cycle = context.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: 1.35) / 1.35
+            let colors = [
+                HolyAgentPalette.swarmCyan,
+                HolyAgentPalette.swarmPink,
+                HolyAgentPalette.swarmGold,
+            ]
+
+            ZStack {
+                Circle()
+                    .stroke(HolyAgentPalette.swarmGold.opacity(0.18), lineWidth: 1.2)
+                    .frame(width: size - 2, height: size - 2)
+
+                ForEach(0..<3, id: \.self) { index in
+                    let radians = (cycle * 2 * Double.pi) + (Double(index) * 2 * Double.pi / 3)
+                    Circle()
+                        .fill(colors[index])
+                        .frame(width: 3.5, height: 3.5)
+                        .shadow(color: colors[index].opacity(0.65), radius: 2.5)
+                        .offset(
+                            x: CGFloat(cos(radians)) * (size * 0.36),
+                            y: CGFloat(sin(radians)) * (size * 0.36)
+                        )
+                }
+
+                Image(systemName: "sparkles")
+                    .font(.system(size: 7.5, weight: .bold))
+                    .foregroundStyle(HolyAgentPalette.swarmGold)
+            }
+            .frame(width: size, height: size)
         }
     }
 }
@@ -869,21 +960,25 @@ private struct HolyAgentWorkingSpinner: View {
 }
 
 private struct HolyAgentWaitingOrb: View {
-    let freshness: HolyWaitingFreshness
+    var body: some View {
+        HolyAgentSymbolOrb(systemName: "arrowshape.turn.up.left.fill", color: HolyAgentPalette.waitingReply)
+    }
+}
+
+private struct HolyAgentSymbolOrb: View {
+    let systemName: String
+    let color: Color
 
     var body: some View {
         ZStack {
             Circle()
-                .fill(freshness.color.opacity(0.20))
-                .frame(width: 13, height: 13)
+                .fill(color.opacity(0.18))
+                .frame(width: 14, height: 14)
 
-            Circle()
-                .stroke(freshness.color.opacity(freshness == .justFinished ? 0.95 : 0.70), lineWidth: 2)
-                .frame(width: 12, height: 12)
-
-            Circle()
-                .fill(freshness.color)
-                .frame(width: 5.5, height: 5.5)
+            Image(systemName: systemName)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(color)
+                .frame(width: 14, height: 14)
         }
     }
 }

@@ -209,12 +209,16 @@ struct HolySessionDetailView: View {
         case .approval:
             guard let session else { return HolyAgentPalette.agingWait }
             return HolyWaitingFreshness(age: Date.now.timeIntervalSince(session.activityAt)).color
+        case .planningQuestion:
+            return HolyAgentPalette.planningQuestion
         case .stalled, .looping:
             return HolyAgentPalette.stalled
         case .failure:
             return HolyGhosttyTheme.danger
         case .completion:
             return HolyAgentPalette.done
+        case .swarming:
+            return HolyAgentPalette.swarmGold
         case .progress, .reading, .editing, .command:
             return HolyAgentPalette.workingBlue
         case .idle:

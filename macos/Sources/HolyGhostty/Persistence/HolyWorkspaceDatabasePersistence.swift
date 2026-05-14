@@ -14,6 +14,7 @@ enum HolyWorkspaceDatabasePersistence {
     private static let activeSessionOrderKey = "active_session_order"
     private static let archivedSessionOrderKey = "archived_session_order"
     private static let templateOrderKey = "template_order"
+    private static let attentionMetadataKey = "attention_metadata"
     private static let legacyImportCompletedAtKey = "legacy_json_imported_at"
 
     private struct HolySessionRowProjection {
@@ -101,6 +102,7 @@ enum HolyWorkspaceDatabasePersistence {
         let activeSessionOrder: [UUID] = try appStateValue(forKey: activeSessionOrderKey, in: database) ?? []
         let archivedSessionOrder: [UUID] = try appStateValue(forKey: archivedSessionOrderKey, in: database) ?? []
         let templateOrder: [UUID] = try appStateValue(forKey: templateOrderKey, in: database) ?? []
+        let attentionMetadata: [HolySessionAttentionMetadata] = try appStateValue(forKey: attentionMetadataKey, in: database) ?? []
 
         return HolyWorkspaceSnapshot(
             sessions: reorder(records, by: activeSessionOrder, id: \.id),
@@ -110,7 +112,10 @@ enum HolyWorkspaceDatabasePersistence {
             paneLayout: paneLayout.normalized(
                 availableSessionIDs: records.map(\.id),
                 selectedSessionID: selectedSessionID
-            )
+            ),
+            attentionMetadata: attentionMetadata.filter { metadata in
+                records.contains(where: { $0.id == metadata.sessionID })
+            }
         )
     }
 
@@ -153,6 +158,7 @@ enum HolyWorkspaceDatabasePersistence {
             try upsertAppStateValue(snapshot.sessions.map(\.id), forKey: activeSessionOrderKey, in: database)
             try upsertAppStateValue(snapshot.archivedSessions.map(\.id), forKey: archivedSessionOrderKey, in: database)
             try upsertAppStateValue(snapshot.templates.map(\.id), forKey: templateOrderKey, in: database)
+            try upsertAppStateValue(snapshot.attentionMetadata, forKey: attentionMetadataKey, in: database)
             try HolyBudgetIntelligenceRepository.appendSamples(
                 activeSessions: activeSessions,
                 archivedSessions: snapshot.archivedSessions,

@@ -8,6 +8,7 @@ struct HolySessionStoreState {
     var selectedSessionID: UUID?
     var selectedArchivedSessionID: UUID?
     var paneLayout: HolyPaneLayout = .single
+    var attentionMetadata: [HolySessionAttentionMetadata] = []
 
     static let empty = Self(
         sessions: [],
@@ -15,7 +16,8 @@ struct HolySessionStoreState {
         archivedSessions: [],
         selectedSessionID: nil,
         selectedArchivedSessionID: nil,
-        paneLayout: .single
+        paneLayout: .single,
+        attentionMetadata: []
     )
 
     var snapshot: HolyWorkspaceSnapshot {
@@ -24,7 +26,8 @@ struct HolySessionStoreState {
             selectedSessionID: selectedSessionID,
             templates: savedTemplates,
             archivedSessions: archivedSessions,
-            paneLayout: paneLayout
+            paneLayout: paneLayout,
+            attentionMetadata: attentionMetadata
         )
     }
 }

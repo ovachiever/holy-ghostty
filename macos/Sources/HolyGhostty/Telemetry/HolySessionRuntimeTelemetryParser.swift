@@ -42,7 +42,8 @@ enum HolySessionRuntimeTelemetryParser {
         let stallKind = inferredStallKind(
             phase: source.phase,
             stability: source.stability,
-            hasProgressReport: source.surfaceView.progressReport != nil
+            hasProgressReport: source.surfaceView.progressReport != nil,
+            primarySignal: primarySignal
         )
         let hasStructuredSignal = source.surfaceView.progressReport != nil
             || primarySignal != nil
@@ -101,8 +102,14 @@ enum HolySessionRuntimeTelemetryParser {
     private static func activityKind(for signal: HolySessionSignal) -> HolySessionActivityKind {
         switch signal.kind {
         case .approval:
+            if isPlanningQuestionSignal(signal) {
+                return .planningQuestion
+            }
             return .approval
         case .progress:
+            if isSwarmingSignal(signal) {
+                return .swarming
+            }
             return .progress
         case .reading:
             return .reading
@@ -164,11 +171,15 @@ enum HolySessionRuntimeTelemetryParser {
         switch activityKind {
         case .approval:
             return "\(runtime.displayName) needs approval"
+        case .planningQuestion:
+            return "\(runtime.displayName) has planning questions"
         case .progress:
             if let progressPercent {
                 return "\(runtime.displayName) progress \(progressPercent)%"
             }
             return "\(runtime.displayName) is working"
+        case .swarming:
+            return "\(runtime.displayName) is coordinating a swarm"
         case .reading:
             return "\(runtime.displayName) is reading context"
         case .editing:
@@ -186,6 +197,26 @@ enum HolySessionRuntimeTelemetryParser {
         case .idle:
             return nil
         }
+    }
+
+    private static func isPlanningQuestionSignal(_ signal: HolySessionSignal) -> Bool {
+        let evidence = "\(signal.headline)\n\(signal.detail)".lowercased()
+        return evidence.contains("planning question")
+            || evidence.contains("planning:")
+            || evidence.contains("plan mode")
+            || evidence.contains("how should ")
+            || evidence.contains("enter to select")
+    }
+
+    private static func isSwarmingSignal(_ signal: HolySessionSignal) -> Bool {
+        let evidence = "\(signal.headline)\n\(signal.detail)".lowercased()
+        return evidence.contains("coordinating a swarm")
+            || evidence.contains("background agents launched")
+            || evidence.contains("teammates running")
+            || evidence.contains("show teammates")
+            || evidence.contains("agents working in parallel")
+            || evidence.contains("build swarm")
+            || evidence.contains("agent swarm")
     }
 
     private static func matches(
@@ -209,9 +240,11 @@ enum HolySessionRuntimeTelemetryParser {
     private static func inferredStallKind(
         phase: HolySessionPhase,
         stability: HolySessionPreviewStability,
-        hasProgressReport: Bool
+        hasProgressReport: Bool,
+        primarySignal: HolySessionSignal?
     ) -> HolySessionActivityKind? {
         guard phase == .working, !hasProgressReport else { return nil }
+        if let primarySignal, isLiveWorkSignal(primarySignal) { return nil }
 
         if stability.isLoopingCandidate {
             return .looping
@@ -222,6 +255,15 @@ enum HolySessionRuntimeTelemetryParser {
         }
 
         return nil
+    }
+
+    private static func isLiveWorkSignal(_ signal: HolySessionSignal) -> Bool {
+        switch signal.kind {
+        case .progress, .reading, .editing, .command:
+            return true
+        case .coordination, .approval, .failure, .completion:
+            return false
+        }
     }
 
     private static let readingMarkers = [

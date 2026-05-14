@@ -204,6 +204,10 @@ final class HolySession: ObservableObject, Identifiable {
             return phase.displayName
         case .working:
             switch runtimeTelemetry.activityKind {
+            case .planningQuestion:
+                return "Planning"
+            case .swarming:
+                return "Swarming"
             case .reading:
                 return "Reading"
             case .editing:
@@ -218,6 +222,9 @@ final class HolySession: ObservableObject, Identifiable {
                 return "Working"
             }
         case .waitingInput:
+            if runtimeTelemetry.activityKind == .planningQuestion {
+                return "Planning"
+            }
             return "Needs Input"
         case .completed:
             return "Done"
@@ -749,14 +756,15 @@ final class HolySession: ObservableObject, Identifiable {
         let lowerActivePreview = activePreview.lowercased()
         let evidenceLooksReady = isReadyLine(evidence)
         let meaningfulLines = recentMeaningfulLines(from: preview, maxCount: 14)
+        let swarmEvidence = agentSwarmEvidence(runtime: runtime, lines: meaningfulLines)
         let liveAgentWorkingEvidence = agentWorkingEvidence(
             runtime: runtime,
             surfaceTitle: surfaceView.title,
             lines: meaningfulLines,
             previewChangedRecently: previewChangedRecently
         )
-        let hasFreshTerminalActivity = previewChangedRecently
-            || liveAgentWorkingEvidence != nil
+        let hasFreshTerminalActivity = liveAgentWorkingEvidence != nil
+            || swarmEvidence != nil
             || surfaceView.progressReport != nil
         var results: [HolySessionSignal] = []
 
@@ -774,11 +782,25 @@ final class HolySession: ObservableObject, Identifiable {
             ))
         }
 
+        if let swarmEvidence {
+            append(.init(
+                kind: .progress,
+                headline: "\(runtime.displayName) is coordinating a swarm",
+                detail: swarmEvidence
+            ))
+        }
+
         if let liveAgentWorkingEvidence {
             append(.init(
                 kind: .progress,
                 headline: "\(runtime.displayName) is working",
                 detail: liveAgentWorkingEvidence
+            ))
+        } else if let planningQuestionEvidence = agentPlanningQuestionEvidence(runtime: runtime, lines: meaningfulLines) {
+            append(.init(
+                kind: .approval,
+                headline: "\(runtime.displayName) has planning questions",
+                detail: planningQuestionEvidence
             ))
         } else if let waitingEvidence = agentWaitingEvidence(runtime: runtime, lines: meaningfulLines) {
             append(.init(
@@ -841,6 +863,7 @@ final class HolySession: ObservableObject, Identifiable {
             "reviewing ",
             "scanning ",
             "searching ",
+            "doodling",
         ] + adapter.readingMarkers
         if !evidenceLooksReady,
            hasFreshTerminalActivity,
@@ -872,6 +895,7 @@ final class HolySession: ObservableObject, Identifiable {
             "pnpm ",
             "yarn ",
             "git ",
+            "bash(",
         ] + adapter.commandMarkers
         if !evidenceLooksReady,
            hasFreshTerminalActivity,
@@ -965,7 +989,7 @@ final class HolySession: ObservableObject, Identifiable {
     ) -> String? {
         guard isAgentRuntime(runtime) else { return nil }
 
-        if isBusyAgentTitle(surfaceTitle), previewChangedRecently {
+        if isBusyAgentTitle(surfaceTitle) {
             return normalizedTerminalTitle(surfaceTitle) ?? surfaceTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
@@ -973,14 +997,78 @@ final class HolySession: ObservableObject, Identifiable {
             return line
         }
 
-        guard previewChangedRecently else { return nil }
-        return lines.reversed().first(where: isAgentRecentOutputLine)
+        return nil
+    }
+
+    private static func agentSwarmEvidence(runtime: HolySessionRuntime, lines: [String]) -> String? {
+        guard isAgentRuntime(runtime) else { return nil }
+
+        let recent = Array(lines.suffix(18))
+        if let liveLine = recent.reversed().first(where: isLiveAgentSwarmLine) {
+            return liveLine
+        }
+
+        return recent.reversed().first(where: isAgentSwarmLine)
+    }
+
+    private static func isLiveAgentSwarmLine(_ line: String) -> Bool {
+        let lower = line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lower.contains("teammates running")
+            || lower.contains("show teammates")
+            || lower.range(of: #"\b[2-9][0-9]*\s+teammates?\b"#, options: .regularExpression) != nil
+    }
+
+    private static func isAgentSwarmLine(_ line: String) -> Bool {
+        let lower = line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lower.contains("background agents launched")
+            || lower.contains("agents working in parallel")
+            || lower.contains("build swarm")
+            || lower.contains("agent swarm")
+            || lower.range(
+                of: #"\b[2-9][0-9]*\s+(background\s+)?agents?\s+(launched|running|working)\b"#,
+                options: .regularExpression
+            ) != nil
     }
 
     private static func agentWaitingEvidence(runtime: HolySessionRuntime, lines: [String]) -> String? {
         guard isAgentRuntime(runtime) else { return nil }
 
         return lines.suffix(8).reversed().first(where: isAgentPromptLine)
+    }
+
+    private static func agentPlanningQuestionEvidence(runtime: HolySessionRuntime, lines: [String]) -> String? {
+        guard isAgentRuntime(runtime) else { return nil }
+
+        let recent = Array(lines.suffix(16))
+        let joined = recent.joined(separator: "\n")
+        let lower = joined.lowercased()
+        guard lower.contains("planning:")
+            || lower.contains("plan mode")
+            || lower.contains("enter to select")
+            || lower.contains("how should ")
+            || lower.contains("questions i need from you") else {
+            return nil
+        }
+
+        if let questionLine = recent.reversed().first(where: isPlanningQuestionLine) {
+            return questionLine
+        }
+
+        return recent.reversed().first(where: isPlanningPromptLine)
+    }
+
+    private static func isPlanningQuestionLine(_ line: String) -> Bool {
+        let lower = line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lower.hasSuffix("?")
+            || lower.hasPrefix("how should ")
+            || lower.contains("questions i need from you")
+    }
+
+    private static func isPlanningPromptLine(_ line: String) -> Bool {
+        let lower = line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lower.contains("planning:")
+            || lower.contains("plan mode")
+            || lower.contains("enter to select")
     }
 
     private static func isBusyAgentTitle(_ title: String) -> Bool {
@@ -993,7 +1081,7 @@ final class HolySession: ObservableObject, Identifiable {
 
         let lower = trimmed.lowercased()
         return lower.range(
-            of: #"\b(working|thinking|reasoning|running|searching|editing|writing)\b"#,
+            of: #"\b(working|thinking|reasoning|running|searching|editing|writing|doodling|tooling)\b"#,
             options: .regularExpression
         ) != nil
     }
@@ -1012,14 +1100,14 @@ final class HolySession: ObservableObject, Identifiable {
         }
 
         if hasAgentStatusPrefix(trimmed), lower.range(
-            of: #"\b(working|thinking|reasoning|reading|searching|running|executing|editing|writing|applying|patching|using|calling)\b"#,
+            of: #"\b(working|thinking|reasoning|reading|searching|running|executing|editing|writing|applying|patching|using|calling|doodling|tooling)\b"#,
             options: .regularExpression
         ) != nil {
             return true
         }
 
         return trimmed.range(
-            of: #"^\s*(working|thinking|reasoning|reading|searching|running|executing|editing|writing|applying|patching)\b"#,
+            of: #"^\s*(working|thinking|reasoning|reading|searching|running|executing|editing|writing|applying|patching|doodling|tooling)\b"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
     }

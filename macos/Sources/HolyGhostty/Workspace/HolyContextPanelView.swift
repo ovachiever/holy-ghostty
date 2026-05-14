@@ -484,12 +484,16 @@ struct HolyContextPanelView: View {
         switch kind {
         case .approval:
             return HolyGhosttyTheme.warning
+        case .planningQuestion:
+            return HolyAgentPalette.planningQuestion
         case .stalled, .looping:
             return HolyGhosttyTheme.warning
         case .failure:
             return HolyGhosttyTheme.danger
         case .completion:
             return HolyGhosttyTheme.success
+        case .swarming:
+            return HolyAgentPalette.swarmGold
         case .progress, .reading, .editing, .command:
             return HolyGhosttyTheme.accent
         case .idle:

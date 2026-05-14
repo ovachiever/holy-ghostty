@@ -144,12 +144,24 @@ struct HolyWorkspaceRootView: View {
                             }
                     )
 
-                primaryWorkspaceContent
+                mainWorkspaceContent
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(width: max(0, geometry.size.width), height: max(0, geometry.size.height))
             .clipped()
         }
+    }
+
+    private var mainWorkspaceContent: some View {
+        VStack(spacing: 0) {
+            primaryWorkspaceContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
+
+            bottomSessionStatusRail
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(HolyGhosttyTheme.bg)
     }
 
     @ViewBuilder
@@ -179,6 +191,48 @@ struct HolyWorkspaceRootView: View {
                     paneView(at: 3)
                 }
             }
+        }
+    }
+
+    private var bottomSessionStatusRail: some View {
+        HStack(spacing: 7) {
+            if let session = store.selectedSession {
+                let state = statusRailState(for: session)
+                statusRailPill(
+                    symbol: state.symbolName,
+                    text: statusRailTitle(for: session, state: state),
+                    color: state.kind.holyColor
+                )
+
+                if let detail = statusRailDetail(for: session, stateTitle: state.title) {
+                    Text(detail)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+
+                Spacer(minLength: 8)
+
+                ForEach(Array(sessionRiskStatusItems(for: session).enumerated()), id: \.offset) { entry in
+                    statusRailPill(
+                        symbol: entry.element.symbol,
+                        text: entry.element.text,
+                        color: entry.element.color
+                    )
+                }
+            } else {
+                statusRailPill(symbol: "circle", text: "Ready", color: HolyGhosttyTheme.textTertiary)
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(height: 22)
+        .padding(.horizontal, 10)
+        .background(HolyGhosttyTheme.bgElevated.opacity(0.96))
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(HolyGhosttyTheme.border)
+                .frame(height: 0.5)
         }
     }
 
@@ -639,19 +693,173 @@ struct HolyWorkspaceRootView: View {
     }
 
     private func statusColor(for phase: HolySessionPhase) -> Color {
+        guard let selected = store.selectedSession else { return HolyGhosttyTheme.textTertiary }
+
         switch phase {
         case .active:
             return HolyGhosttyTheme.textTertiary
         case .working:
-            return HolyAgentPalette.workingBlue
+            return statusRailState(for: selected).kind.holyColor
         case .waitingInput:
-            guard let selected = store.selectedSession else { return HolyGhosttyTheme.warning }
-            return HolyWaitingFreshness(age: Date.now.timeIntervalSince(selected.activityAt)).color
+            return statusRailState(for: selected).kind.holyColor
         case .completed:
             return HolyAgentPalette.done
         case .failed:
             return HolyGhosttyTheme.danger
         }
+    }
+
+    private func statusRailState(for session: HolySession) -> HolySessionAttentionPresentation {
+        store.attentionPresentation(for: session)
+    }
+
+    private func statusRailTitle(
+        for session: HolySession,
+        state: HolySessionAttentionPresentation
+    ) -> String {
+        switch state.kind {
+        case .approvalNeeded, .planningQuestion, .newReply, .waitingQuiet, .overdueReply, .staleReply:
+            return "\(state.title) \(elapsedText(since: state.becameAvailableAt ?? session.activityAt))"
+        default:
+            return state.title
+        }
+    }
+
+    private func statusRailDetail(for session: HolySession, stateTitle: String) -> String? {
+        let telemetry = session.runtimeTelemetry
+        let values: [String?]
+
+        switch telemetry.activityKind {
+        case .planningQuestion, .approval:
+            values = [telemetry.detail, telemetry.nextStepHint, telemetry.headline]
+        case .stalled, .looping, .failure:
+            values = [telemetry.detail, telemetry.headline, telemetry.nextStepHint]
+        case .swarming, .reading, .editing, .command, .progress:
+            values = [telemetry.headline, telemetry.detail, telemetry.command, telemetry.filePath]
+        case .completion:
+            values = [telemetry.headline, telemetry.artifactSummary, telemetry.artifactPath]
+        case .idle:
+            values = [session.missionDisplay == "No mission defined" ? nil : session.missionDisplay]
+        }
+
+        return firstRailText(values, excluding: [stateTitle, session.compactStatusText])
+    }
+
+    private func sessionRiskStatusItems(
+        for session: HolySession
+    ) -> [(symbol: String, text: String, color: Color)] {
+        let coordination = store.coordination(for: session)
+        var items: [(symbol: String, text: String, color: Color)] = []
+
+        if !coordination.overlappingFiles.isEmpty {
+            items.append((
+                "exclamationmark.triangle.fill",
+                pluralized(count: coordination.overlappingFiles.count, singular: "overlapping file"),
+                HolyGhosttyTheme.danger
+            ))
+        }
+
+        if !coordination.sharedWorktreeSessionIDs.isEmpty {
+            items.append((
+                "link",
+                "Same worktree with \(pluralized(count: coordination.sharedWorktreeSessionIDs.count, singular: "session"))",
+                HolyGhosttyTheme.textSecondary
+            ))
+        }
+
+        if coordination.hasSharedBranch {
+            items.append((
+                "arrow.triangle.branch",
+                "Same branch with \(pluralized(count: coordination.sharedBranchSessionIDs.count, singular: "session"))",
+                HolyGhosttyTheme.textSecondary
+            ))
+        }
+
+        if session.hasBranchOwnershipDrift {
+            items.append((
+                "arrow.triangle.2.circlepath",
+                "Branch drift",
+                HolyGhosttyTheme.warning
+            ))
+        }
+
+        return items
+    }
+
+    private func statusRailPill(symbol: String, text: String, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(color)
+                .frame(width: 12, height: 12)
+
+            Text(text)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(HolyGhosttyTheme.textPrimary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(
+            Capsule(style: .continuous)
+                .fill(color.opacity(0.10))
+        )
+    }
+
+    private func approvalLooksExplicit(for session: HolySession) -> Bool {
+        guard session.runtimeTelemetry.activityKind == .approval else { return false }
+
+        let evidence = [
+            session.runtimeTelemetry.headline,
+            session.runtimeTelemetry.detail,
+            session.runtimeTelemetry.nextStepHint,
+        ]
+        .compactMap { $0?.lowercased() }
+        .joined(separator: "\n")
+
+        return [
+            "approval",
+            "approve",
+            "confirm",
+            "allow",
+            "permission",
+            "continue?",
+            "[y/n]",
+            "(y/n)",
+        ].contains { evidence.contains($0) }
+    }
+
+    private func firstRailText(_ values: [String?], excluding excluded: [String] = []) -> String? {
+        let excludedValues = Set(excluded.compactMap { normalizedRailText($0)?.lowercased() })
+
+        for value in values {
+            guard let text = normalizedRailText(value) else { continue }
+            guard !excludedValues.contains(text.lowercased()) else { continue }
+            return text
+        }
+
+        return nil
+    }
+
+    private func normalizedRailText(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private func elapsedText(since date: Date) -> String {
+        let seconds = max(0, Int(Date.now.timeIntervalSince(date)))
+        if seconds < 60 { return "now" }
+        if seconds < 3_600 { return "\(seconds / 60)m" }
+        if seconds < 86_400 { return "\(seconds / 3_600)h" }
+        return "\(seconds / 86_400)d"
+    }
+
+    private func pluralized(count: Int, singular: String) -> String {
+        count == 1 ? "1 \(singular)" : "\(count) \(singular)s"
     }
 
     private var focusSummaryText: String {
@@ -869,12 +1077,16 @@ private struct HolySessionGridTile: View {
         switch kind {
         case .approval:
             return HolyGhosttyTheme.warning
+        case .planningQuestion:
+            return HolyAgentPalette.planningQuestion
         case .stalled, .looping:
             return HolyGhosttyTheme.warning
         case .failure:
             return HolyGhosttyTheme.danger
         case .completion:
             return HolyGhosttyTheme.success
+        case .swarming:
+            return HolyAgentPalette.swarmGold
         case .progress, .reading, .editing, .command:
             return HolyGhosttyTheme.accent
         case .idle:

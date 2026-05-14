@@ -18,6 +18,7 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var remoteDiscoveryBusyHostIDs: Set<UUID> = []
     @Published private(set) var remoteHostImportMessage: String?
     @Published private(set) var coordinationBySessionID: [UUID: HolySessionCoordination] = [:]
+    @Published private(set) var attentionMetadataBySessionID: [UUID: HolySessionAttentionMetadata] = [:]
     @Published private(set) var draftLaunchGuardrail: HolyLaunchGuardrail = .clear
     @Published private(set) var draftOwnershipPreview: HolySessionOwnership?
     @Published private(set) var draftLaunchGuardrailRefreshing: Bool = false
@@ -33,6 +34,7 @@ final class HolyWorkspaceStore: ObservableObject {
             guard !suppressAutomaticSelectionPersistence,
                   oldValue != selectedSessionID else { return }
             reconcilePaneLayoutForSelection()
+            scheduleSelectedSessionSeenMark()
             persist(pendingEvents: selectionEvents(from: oldValue, to: selectedSessionID))
         }
     }
@@ -51,7 +53,12 @@ final class HolyWorkspaceStore: ObservableObject {
     private var sessionObservationCancellables: Set<AnyCancellable> = []
     private var activeTmuxMetadataRefreshCancellable: AnyCancellable?
     private var draftLaunchGuardrailTask: Task<Void, Never>?
+    private var selectedSessionReadTask: Task<Void, Never>?
+    private var selectedSessionReadTaskKey: String?
     private var suppressAutomaticSelectionPersistence = false
+    private static let selectedSessionReadDelay: TimeInterval = 3
+    private static let overdueReplyInterval: TimeInterval = 2 * 60 * 60
+    private static let staleReplyInterval: TimeInterval = 24 * 60 * 60
 
     init(ghostty: Ghostty.App, seedDefaultSession: Bool = true) {
         self.sessionSupervisor = HolySessionSupervisor(
@@ -151,6 +158,10 @@ final class HolyWorkspaceStore: ObservableObject {
 
     func coordination(for session: HolySession) -> HolySessionCoordination {
         coordinationBySessionID[session.id] ?? .empty
+    }
+
+    func attentionPresentation(for session: HolySession) -> HolySessionAttentionPresentation {
+        attentionPresentation(for: session, coordination: coordination(for: session))
     }
 
     func session(withID id: UUID) -> HolySession? {
@@ -957,8 +968,359 @@ final class HolyWorkspaceStore: ObservableObject {
             archivedSessions: archivedSessions,
             selectedSessionID: selectedSessionID,
             selectedArchivedSessionID: selectedArchivedSessionID,
-            paneLayout: normalizedPaneLayout
+            paneLayout: normalizedPaneLayout,
+            attentionMetadata: attentionMetadataForPersistence()
         )
+    }
+
+    private func attentionMetadataForPersistence() -> [HolySessionAttentionMetadata] {
+        let activeIDs = Set(sessions.map(\.id))
+        return attentionMetadataBySessionID.values
+            .filter { activeIDs.contains($0.sessionID) }
+            .sorted { $0.sessionID.uuidString < $1.sessionID.uuidString }
+    }
+
+    @discardableResult
+    private func markSelectedSessionSeenIfNeeded(at date: Date = .init()) -> Bool {
+        guard let selectedSessionID,
+              let session = session(withID: selectedSessionID) else {
+            return false
+        }
+
+        return updateAttentionMetadata(
+            for: session,
+            markSeen: true,
+            existing: &attentionMetadataBySessionID,
+            at: date
+        )
+    }
+
+    private func scheduleSelectedSessionSeenMark() {
+        guard let selectedSessionID,
+              let session = session(withID: selectedSessionID),
+              let signature = attentionEvidenceSignature(for: session) else {
+            cancelSelectedSessionSeenMark()
+            return
+        }
+
+        if attentionMetadataBySessionID[selectedSessionID]?.seenEvidenceSignature == signature {
+            cancelSelectedSessionSeenMark()
+            return
+        }
+
+        let taskKey = "\(selectedSessionID.uuidString)|\(signature)"
+        guard selectedSessionReadTaskKey != taskKey else { return }
+
+        selectedSessionReadTask?.cancel()
+        selectedSessionReadTaskKey = taskKey
+        selectedSessionReadTask = Task { [weak self, selectedSessionID, signature] in
+            let nanoseconds = UInt64(Self.selectedSessionReadDelay * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                guard let self,
+                      self.selectedSessionID == selectedSessionID,
+                      let session = self.session(withID: selectedSessionID),
+                      self.attentionEvidenceSignature(for: session) == signature else {
+                    return
+                }
+
+                if self.markSelectedSessionSeenIfNeeded() {
+                    self.persist()
+                }
+                self.selectedSessionReadTask = nil
+                self.selectedSessionReadTaskKey = nil
+            }
+        }
+    }
+
+    private func cancelSelectedSessionSeenMark() {
+        selectedSessionReadTask?.cancel()
+        selectedSessionReadTask = nil
+        selectedSessionReadTaskKey = nil
+    }
+
+    private func reconcileAttentionMetadata(
+        markSelectedSeen: Bool,
+        seedMissingAsSeen: Bool = false,
+        at date: Date = .init()
+    ) {
+        let activeIDs = Set(sessions.map(\.id))
+        var next = attentionMetadataBySessionID.filter { activeIDs.contains($0.key) }
+        var changed = next.count != attentionMetadataBySessionID.count
+
+        for session in sessions {
+            let shouldMarkSeen = (markSelectedSeen && session.id == selectedSessionID)
+                || (seedMissingAsSeen && next[session.id] == nil)
+            if updateAttentionMetadata(for: session, markSeen: shouldMarkSeen, existing: &next, at: date) {
+                changed = true
+            }
+        }
+
+        if changed {
+            attentionMetadataBySessionID = next
+        }
+    }
+
+    @discardableResult
+    private func updateAttentionMetadata(
+        for session: HolySession,
+        markSeen: Bool,
+        existing: inout [UUID: HolySessionAttentionMetadata],
+        at date: Date = .init()
+    ) -> Bool {
+        let signature = attentionEvidenceSignature(for: session)
+        var metadata = existing[session.id] ?? HolySessionAttentionMetadata(sessionID: session.id)
+        var changed = false
+
+        if metadata.lastAttentionEvidenceSignature != signature {
+            metadata.lastAttentionEvidenceSignature = signature
+            metadata.lastAttentionBecameAvailableAt = signature == nil ? nil : date
+            changed = true
+        }
+
+        if markSeen,
+           signature != nil,
+           metadata.seenEvidenceSignature != signature {
+            metadata.seenEvidenceSignature = signature
+            metadata.lastSeenAt = date
+            changed = true
+        }
+
+        if changed {
+            metadata.updatedAt = date
+            existing[session.id] = metadata
+        } else if existing[session.id] == nil {
+            existing[session.id] = metadata
+            changed = true
+        }
+
+        return changed
+    }
+
+    private func attentionEvidenceSignature(for session: HolySession) -> String? {
+        guard session.phase != .active
+            || session.runtimeTelemetry.activityKind != .idle
+            || coordination(for: session).attention != .none else {
+            return nil
+        }
+
+        let telemetry = session.runtimeTelemetry
+        let signal = session.primarySignal
+        let components = [
+            session.phase.rawValue,
+            telemetry.activityKind.rawValue,
+            normalizedAttentionText(telemetry.headline),
+            normalizedAttentionText(telemetry.detail),
+            normalizedAttentionText(telemetry.nextStepHint),
+            normalizedAttentionText(telemetry.command),
+            normalizedAttentionText(signal?.headline),
+            normalizedAttentionText(signal?.detail),
+            previewAttentionTail(for: session.preview),
+        ].compactMap { $0 }
+
+        return components.joined(separator: "|").nilIfAttentionBlank
+    }
+
+    private func previewAttentionTail(for preview: String) -> String? {
+        let lines = preview
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .map(normalizedAttentionText)
+            .compactMap { $0 }
+            .suffix(12)
+            .joined(separator: " ")
+
+        guard !lines.isEmpty else { return nil }
+        return String(lines.suffix(512))
+    }
+
+    private func normalizedAttentionText(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let collapsed = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        return collapsed.isEmpty ? nil : collapsed
+    }
+
+    private func attentionPresentation(
+        for session: HolySession,
+        coordination: HolySessionCoordination
+    ) -> HolySessionAttentionPresentation {
+        let metadata = attentionMetadataBySessionID[session.id]
+        let signature = attentionEvidenceSignature(for: session)
+        let becameAvailableAt = metadata?.lastAttentionBecameAvailableAt ?? session.activityAt
+        let hasSeenCurrentEvidence = signature != nil && metadata?.seenEvidenceSignature == signature
+        let detail = attentionDetail(for: session)
+
+        if session.phase == .failed || session.runtimeTelemetry.activityKind == .failure {
+            return .init(
+                kind: .failed,
+                symbolName: "xmark.octagon.fill",
+                title: "Issue",
+                detail: detail,
+                isProminent: true,
+                becameAvailableAt: becameAvailableAt
+            )
+        }
+
+        if session.runtimeTelemetry.activityKind == .planningQuestion {
+            return .init(
+                kind: .planningQuestion,
+                symbolName: "questionmark.bubble.fill",
+                title: "Planning questions",
+                detail: detail,
+                isProminent: true,
+                becameAvailableAt: becameAvailableAt
+            )
+        }
+
+        if approvalLooksExplicit(for: session) {
+            return .init(
+                kind: .approvalNeeded,
+                symbolName: "hand.raised.fill",
+                title: "Approval needed",
+                detail: detail,
+                isProminent: true,
+                becameAvailableAt: becameAvailableAt
+            )
+        }
+
+        if session.runtimeTelemetry.activityKind == .swarming {
+            return .init(
+                kind: .swarming,
+                symbolName: "sparkles",
+                title: "Swarming",
+                detail: detail,
+                isProminent: true,
+                becameAvailableAt: becameAvailableAt
+            )
+        }
+
+        if session.runtimeTelemetry.activityKind == .stalled || session.runtimeTelemetry.activityKind == .looping {
+            let isLooping = session.runtimeTelemetry.activityKind == .looping
+            return .init(
+                kind: .stalled,
+                symbolName: isLooping ? "arrow.triangle.2.circlepath" : "hourglass",
+                title: isLooping ? "Looping" : "Stalled",
+                detail: detail,
+                isProminent: true,
+                becameAvailableAt: becameAvailableAt
+            )
+        }
+
+        if session.phase == .working || session.runtimeTelemetry.activityKind.isActiveWork {
+            return .init(
+                kind: .working,
+                symbolName: "circle.dotted",
+                title: session.compactStatusText,
+                detail: detail,
+                isProminent: true,
+                becameAvailableAt: becameAvailableAt
+            )
+        }
+
+        if session.phase == .waitingInput || session.runtimeTelemetry.activityKind == .approval {
+            let age = Date().timeIntervalSince(becameAvailableAt)
+            if age >= Self.staleReplyInterval {
+                return .init(
+                    kind: .staleReply,
+                    symbolName: "clock.fill",
+                    title: "Reply overdue",
+                    detail: detail,
+                    isProminent: true,
+                    becameAvailableAt: becameAvailableAt
+                )
+            }
+
+            if age >= Self.overdueReplyInterval {
+                return .init(
+                    kind: .overdueReply,
+                    symbolName: "clock",
+                    title: "Reply aging",
+                    detail: detail,
+                    isProminent: true,
+                    becameAvailableAt: becameAvailableAt
+                )
+            }
+
+            if !hasSeenCurrentEvidence {
+                return .init(
+                    kind: .newReply,
+                    symbolName: "arrowshape.turn.up.left.fill",
+                    title: "New reply",
+                    detail: detail,
+                    isProminent: true,
+                    becameAvailableAt: becameAvailableAt
+                )
+            }
+
+            return .init(
+                kind: .waitingQuiet,
+                symbolName: "circle",
+                title: "Waiting quietly",
+                detail: detail,
+                isProminent: false,
+                becameAvailableAt: becameAvailableAt
+            )
+        }
+
+        if session.phase == .completed || session.runtimeTelemetry.activityKind == .completion {
+            return .init(
+                kind: .done,
+                symbolName: "checkmark.circle.fill",
+                title: "Complete",
+                detail: detail,
+                isProminent: false,
+                becameAvailableAt: becameAvailableAt
+            )
+        }
+
+        return .init(
+            kind: .quiet,
+            symbolName: "circle",
+            title: "Ready",
+            detail: detail,
+            isProminent: false,
+            becameAvailableAt: becameAvailableAt
+        )
+    }
+
+    private func approvalLooksExplicit(for session: HolySession) -> Bool {
+        guard session.runtimeTelemetry.activityKind == .approval else { return false }
+
+        let evidence = [
+            session.runtimeTelemetry.headline,
+            session.runtimeTelemetry.detail,
+            session.runtimeTelemetry.nextStepHint,
+        ]
+        .compactMap { $0?.lowercased() }
+        .joined(separator: "\n")
+
+        return [
+            "approval",
+            "approve",
+            "confirm",
+            "allow",
+            "permission",
+            "continue?",
+            "[y/n]",
+            "(y/n)",
+        ].contains { evidence.contains($0) }
+    }
+
+    private func attentionDetail(for session: HolySession) -> String? {
+        [
+            session.runtimeTelemetry.detail,
+            session.runtimeTelemetry.nextStepHint,
+            session.runtimeTelemetry.headline,
+            session.primarySignal?.detail,
+            session.primarySignal?.headline,
+        ]
+        .compactMap(normalizedAttentionText)
+        .first
     }
 
     private func applySessionStoreState(_ state: HolySessionStoreState) {
@@ -966,6 +1328,7 @@ final class HolyWorkspaceStore: ObservableObject {
         sessions = state.sessions
         savedTemplates = state.savedTemplates
         archivedSessions = state.archivedSessions
+        attentionMetadataBySessionID = Dictionary(uniqueKeysWithValues: state.attentionMetadata.map { ($0.sessionID, $0) })
         selectedArchivedSessionID = state.selectedArchivedSessionID
         selectedSessionID = state.selectedSessionID
         paneLayout = state.paneLayout.normalized(
@@ -974,8 +1337,9 @@ final class HolyWorkspaceStore: ObservableObject {
         )
         suppressAutomaticSelectionPersistence = false
         reconcilePaneLayoutForSelection()
-        bindSessions()
+        bindSessions(seedMissingAsSeen: true)
         reconcileExternalTasks()
+        scheduleSelectedSessionSeenMark()
     }
 
     private func applyPaneLayout(kind: HolyPaneLayoutKind, preferredPaneCount: Int) {
@@ -1809,7 +2173,7 @@ final class HolyWorkspaceStore: ObservableObject {
         }
     }
 
-    private func bindSessions() {
+    private func bindSessions(seedMissingAsSeen: Bool = false) {
         sessionObservationCancellables.removeAll()
 
         for session in sessions {
@@ -1824,11 +2188,16 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         recomputeCoordination()
+        reconcileAttentionMetadata(markSelectedSeen: false, seedMissingAsSeen: seedMissingAsSeen)
         sessionSupervisor.sessionBindingsDidChange(for: currentSessionStoreState)
     }
 
     private func handleSessionMutation(for session: HolySession) {
         recomputeCoordination()
+        reconcileAttentionMetadata(markSelectedSeen: false)
+        if session.id == selectedSessionID {
+            scheduleSelectedSessionSeenMark()
+        }
         sessionSupervisor.sessionDidMutate(
             session,
             in: currentSessionStoreState,
@@ -2046,6 +2415,10 @@ final class HolyWorkspaceStore: ObservableObject {
 
         if context.runtimeActivityKind == .stalled {
             return "Session has not made visible progress recently."
+        }
+
+        if context.runtimeActivityKind == .swarming {
+            return "Agent swarm is running."
         }
 
         switch context.phase {
@@ -2421,6 +2794,11 @@ private extension String {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    var nilIfAttentionBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     var holyConnectionTokenSet: [String] {
         folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
             .lowercased()
@@ -2430,5 +2808,16 @@ private extension String {
 
     var holyMachineIdentityKey: String {
         holyConnectionTokenSet.joined()
+    }
+}
+
+private extension HolySessionActivityKind {
+    var isActiveWork: Bool {
+        switch self {
+        case .progress, .swarming, .reading, .editing, .command:
+            return true
+        case .idle, .approval, .planningQuestion, .stalled, .looping, .failure, .completion:
+            return false
+        }
     }
 }

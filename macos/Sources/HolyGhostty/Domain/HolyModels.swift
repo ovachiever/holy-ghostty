@@ -92,6 +92,63 @@ enum HolySessionAttention: String, CaseIterable {
     }
 }
 
+enum HolySessionAttentionKind: String, Codable, Equatable {
+    case quiet
+    case working
+    case swarming
+    case newReply
+    case waitingQuiet
+    case overdueReply
+    case staleReply
+    case planningQuestion
+    case approvalNeeded
+    case stalled
+    case failed
+    case done
+    case conflict
+}
+
+struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
+    let sessionID: UUID
+    var lastSeenAt: Date?
+    var seenEvidenceSignature: String?
+    var lastAttentionEvidenceSignature: String?
+    var lastAttentionBecameAvailableAt: Date?
+    var updatedAt: Date
+
+    var id: UUID { sessionID }
+
+    init(
+        sessionID: UUID,
+        lastSeenAt: Date? = nil,
+        seenEvidenceSignature: String? = nil,
+        lastAttentionEvidenceSignature: String? = nil,
+        lastAttentionBecameAvailableAt: Date? = nil,
+        updatedAt: Date = .init()
+    ) {
+        self.sessionID = sessionID
+        self.lastSeenAt = lastSeenAt
+        self.seenEvidenceSignature = seenEvidenceSignature
+        self.lastAttentionEvidenceSignature = lastAttentionEvidenceSignature
+        self.lastAttentionBecameAvailableAt = lastAttentionBecameAvailableAt
+        self.updatedAt = updatedAt
+    }
+}
+
+struct HolySessionAttentionPresentation: Equatable {
+    let kind: HolySessionAttentionKind
+    let symbolName: String
+    let title: String
+    let detail: String?
+    let isProminent: Bool
+    let becameAvailableAt: Date?
+
+    var helpText: String {
+        guard let detail, !detail.isEmpty else { return title }
+        return "\(title): \(detail)"
+    }
+}
+
 enum HolyLaunchConflictSeverity: String, Equatable {
     case warning
     case blocking
@@ -387,7 +444,9 @@ struct HolySessionBudgetTelemetry: Codable, Equatable {
 enum HolySessionActivityKind: String, Codable {
     case idle
     case approval
+    case planningQuestion
     case progress
+    case swarming
     case reading
     case editing
     case command
@@ -400,7 +459,9 @@ enum HolySessionActivityKind: String, Codable {
         switch self {
         case .idle: "Idle"
         case .approval: "Needs Approval"
+        case .planningQuestion: "Planning Questions"
         case .progress: "Progress"
+        case .swarming: "Swarming"
         case .reading: "Reading"
         case .editing: "Editing"
         case .command: "Command"
@@ -1134,13 +1195,15 @@ struct HolyWorkspaceSnapshot: Codable {
     var templates: [HolySessionTemplate]
     var archivedSessions: [HolyArchivedSession]
     var paneLayout: HolyPaneLayout
+    var attentionMetadata: [HolySessionAttentionMetadata]
 
     static let empty = Self(
         sessions: [],
         selectedSessionID: nil,
         templates: [],
         archivedSessions: [],
-        paneLayout: .single
+        paneLayout: .single,
+        attentionMetadata: []
     )
 
     init(
@@ -1148,13 +1211,15 @@ struct HolyWorkspaceSnapshot: Codable {
         selectedSessionID: UUID?,
         templates: [HolySessionTemplate] = [],
         archivedSessions: [HolyArchivedSession] = [],
-        paneLayout: HolyPaneLayout = .single
+        paneLayout: HolyPaneLayout = .single,
+        attentionMetadata: [HolySessionAttentionMetadata] = []
     ) {
         self.sessions = sessions
         self.selectedSessionID = selectedSessionID
         self.templates = templates
         self.archivedSessions = archivedSessions
         self.paneLayout = paneLayout
+        self.attentionMetadata = attentionMetadata
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1163,6 +1228,7 @@ struct HolyWorkspaceSnapshot: Codable {
         case templates
         case archivedSessions
         case paneLayout
+        case attentionMetadata
     }
 
     init(from decoder: Decoder) throws {
@@ -1172,6 +1238,7 @@ struct HolyWorkspaceSnapshot: Codable {
         templates = try container.decodeIfPresent([HolySessionTemplate].self, forKey: .templates) ?? []
         archivedSessions = try container.decodeIfPresent([HolyArchivedSession].self, forKey: .archivedSessions) ?? []
         paneLayout = try container.decodeIfPresent(HolyPaneLayout.self, forKey: .paneLayout) ?? .single
+        attentionMetadata = try container.decodeIfPresent([HolySessionAttentionMetadata].self, forKey: .attentionMetadata) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1181,6 +1248,7 @@ struct HolyWorkspaceSnapshot: Codable {
         try container.encode(templates, forKey: .templates)
         try container.encode(archivedSessions, forKey: .archivedSessions)
         try container.encode(paneLayout, forKey: .paneLayout)
+        try container.encode(attentionMetadata, forKey: .attentionMetadata)
     }
 }
 
