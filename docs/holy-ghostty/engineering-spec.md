@@ -306,6 +306,20 @@ Current remote-host model:
 - Holy metadata readback from discovered tmux sessions
 - remote git enrichment for Holy-managed SSH sessions
 
+## 8C. Launch Profiles
+
+- `macos/Sources/HolyGhostty/Profiles/HolyLaunchProfile.swift`
+- `macos/Sources/HolyGhostty/Profiles/HolyLaunchProfileRepository.swift`
+
+Launch profiles drive the left-roster `New` action without hardcoding personal machine choices into the repo.
+
+Generated profile types:
+
+- `Local Mac`
+- one profile per configured SSH host
+
+The selected default profile is stored in `app_state` under `default_launch_profile_id`. On first profile creation, Holy Ghostty defaults `New` to the only configured SSH host when exactly one exists; otherwise it defaults to `Local Mac`.
+
 ## 9. Session Supervisor
 
 - `macos/Sources/HolyGhostty/Supervisor/HolySessionSupervisor.swift`
@@ -356,6 +370,7 @@ The store delegates lifecycle operations to the `HolySessionSupervisor` and mana
 - archives
 - external tasks
 - remote hosts and discovered remote tmux sessions
+- launch profiles and default launch target
 - composer state
 - history state
 - task inbox state
@@ -384,7 +399,7 @@ Core SQLite connection wrapper using the system `SQLite3` framework directly. Co
 - `macos/Sources/HolyGhostty/Database/HolyDatabaseMigrator.swift`
 - `macos/Sources/HolyGhostty/Database/HolyDatabaseModels.swift`
 
-Sequential schema migration runner with 6 migrations:
+Sequential schema migration runner with 7 migrations:
 
 1. Full initial schema (sessions, events, git_snapshots, templates, alerts, annotations, indexes, and `agent-sessions` compatibility views)
 2. `latest_budget_json` column on sessions
@@ -392,8 +407,9 @@ Sequential schema migration runner with 6 migrations:
 4. `budget_samples` table
 5. `tasks` table
 6. `remote_hosts` table
+7. `launch_profiles` table
 
-Current schema version: 6.
+Current schema version: 7.
 
 ### Database paths
 
@@ -423,6 +439,7 @@ Additional persisted tables now include:
 - `budget_samples`
 - `tasks`
 - `remote_hosts`
+- `launch_profiles`
 
 ## 12. Event Ledger
 
@@ -643,6 +660,8 @@ Current alert triggers:
 
 Displays active sessions grouped by runtime and sorted by project/folder context. Each row shows one compact project/folder label, one activity orb, and quiet risk icons when needed.
 
+The roster `New` button launches the current default launch profile. The `More` menu exposes all profiles for direct launch and default selection.
+
 ### Session detail
 
 - `macos/Sources/HolyGhostty/Workspace/HolySessionDetailView.swift`
@@ -798,6 +817,7 @@ macos/Sources/HolyGhostty/
 ├── Events/                 # Event model and event repository
 ├── Git/                    # Git snapshot model and client
 ├── Persistence/            # JSON persistence, DB persistence, coders
+├── Profiles/               # Launch profiles and default New target persistence
 ├── Session/                # Live session model
 ├── Store/                  # In-memory state struct
 ├── Supervisor/             # Lifecycle orchestration, migration, workspace repository

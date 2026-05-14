@@ -8,6 +8,8 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var archivedSessions: [HolyArchivedSession] = []
     @Published private(set) var externalTasks: [HolyExternalTaskRecord] = []
     @Published private(set) var remoteHosts: [HolyRemoteHostRecord] = []
+    @Published private(set) var launchProfiles: [HolyLaunchProfile] = []
+    @Published private(set) var defaultLaunchProfileID: UUID?
     @Published private(set) var discoveredLocalTmuxSessions: [HolyDiscoveredTmuxSession] = []
     @Published private(set) var discoveredRemoteSessionsByHostID: [UUID: [HolyDiscoveredTmuxSession]] = [:]
     @Published private(set) var localTmuxDiscoveryError: String?
@@ -47,6 +49,7 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private let sessionSupervisor: HolySessionSupervisor
     private var sessionObservationCancellables: Set<AnyCancellable> = []
+    private var activeTmuxMetadataRefreshCancellable: AnyCancellable?
     private var draftLaunchGuardrailTask: Task<Void, Never>?
     private var suppressAutomaticSelectionPersistence = false
 
@@ -97,6 +100,15 @@ final class HolyWorkspaceStore: ObservableObject {
         return remoteHosts.first(where: { $0.id == selectedRemoteHostID }) ?? remoteHosts.first
     }
 
+    var defaultLaunchProfile: HolyLaunchProfile? {
+        guard let defaultLaunchProfileID else { return launchProfiles.first }
+        return launchProfiles.first(where: { $0.id == defaultLaunchProfileID }) ?? launchProfiles.first
+    }
+
+    var defaultLaunchProfileName: String {
+        defaultLaunchProfile?.name ?? "Local Mac"
+    }
+
     var localMachineDisplayName: String {
         HolyLocalMachineIdentity.current.displayName
     }
@@ -111,6 +123,10 @@ final class HolyWorkspaceStore: ObservableObject {
 
     var sessionCountText: String {
         "\(sessions.count) session" + (sessions.count == 1 ? "" : "s")
+    }
+
+    var hasReattachableSessions: Bool {
+        sessions.contains { canReattachSession($0) }
     }
 
     var conflictCountText: String {
@@ -163,8 +179,10 @@ final class HolyWorkspaceStore: ObservableObject {
         applySessionStoreState(restoration.state)
         loadTasks()
         loadRemoteHosts()
+        loadLaunchProfiles()
         refreshLocalTmuxSessions()
         refreshActiveRemoteTmuxSessionMetadata()
+        startActiveTmuxMetadataRefresh()
         persist(pendingEvents: restoration.pendingEvents)
     }
 
@@ -213,7 +231,7 @@ final class HolyWorkspaceStore: ObservableObject {
         let launchSpec = if let baseConfig {
             HolySessionLaunchSpec(config: baseConfig)
         } else {
-            newLocalTmuxLaunchSpec()
+            newDefaultLaunchProfileSpec()
         }
 
         return createSession(
@@ -246,6 +264,71 @@ final class HolyWorkspaceStore: ObservableObject {
         refreshDraftLaunchGuardrail()
     }
 
+    func canReattachSession(_ session: HolySession) -> Bool {
+        HolyRemoteTmuxSessionKey(launchSpec: session.record.launchSpec) != nil
+    }
+
+    func reattach(_ session: HolySession) {
+        guard canReattachSession(session) else {
+            return
+        }
+
+        let sessionID = session.id
+        let detachCommand = HolyTmuxClientDetachCommand.command(for: session.record.launchSpec)
+
+        Task {
+            if let detachCommand {
+                _ = await Task.detached(priority: .utility) {
+                    detachCommand.run()
+                }.value
+            }
+
+            guard let currentSession = sessions.first(where: { $0.id == sessionID }),
+                  let result = sessionSupervisor.reattach(currentSession, in: currentSessionStoreState) else {
+                return
+            }
+
+            applySessionStoreState(result.state)
+            persist(pendingEvents: result.pendingEvents)
+            refreshActiveRemoteTmuxSessionMetadata()
+        }
+    }
+
+    func reattachAllSessions() {
+        let reattachableSessions = sessions.filter { canReattachSession($0) }
+        guard !reattachableSessions.isEmpty else { return }
+
+        let sessionIDs = reattachableSessions.map(\.id)
+        let detachCommands = reattachableSessions.compactMap {
+            HolyTmuxClientDetachCommand.command(for: $0.record.launchSpec)
+        }
+
+        Task {
+            _ = await Task.detached(priority: .utility) {
+                for command in detachCommands {
+                    _ = command.run()
+                }
+            }.value
+
+            var nextState = currentSessionStoreState
+            var pendingEvents: [HolySessionEventDraft] = []
+
+            for sessionID in sessionIDs {
+                guard let currentSession = nextState.sessions.first(where: { $0.id == sessionID }),
+                      let result = sessionSupervisor.reattach(currentSession, in: nextState) else {
+                    continue
+                }
+
+                nextState = result.state
+                pendingEvents.append(contentsOf: result.pendingEvents)
+            }
+
+            applySessionStoreState(nextState)
+            persist(pendingEvents: pendingEvents)
+            refreshActiveRemoteTmuxSessionMetadata()
+        }
+    }
+
     func canKillTmuxSession(_ session: HolySession) -> Bool {
         HolyTmuxSessionTerminationCommand.command(for: session.record.launchSpec) != nil
     }
@@ -258,12 +341,11 @@ final class HolyWorkspaceStore: ObservableObject {
         let sessionID = session.id
 
         Task {
-            let didStop = await Task.detached(priority: .utility) {
+            _ = await Task.detached(priority: .utility) {
                 command.run()
             }.value
 
-            guard didStop,
-                  let currentSession = sessions.first(where: { $0.id == sessionID }) else {
+            guard let currentSession = sessions.first(where: { $0.id == sessionID }) else {
                 return
             }
 
@@ -309,6 +391,17 @@ final class HolyWorkspaceStore: ObservableObject {
     func rename(_ session: HolySession, to newTitle: String) {
         session.rename(to: newTitle)
         persist()
+
+        guard let command = HolyTmuxSessionTitleUpdateCommand.command(
+            for: session.record.launchSpec,
+            title: newTitle
+        ) else {
+            return
+        }
+
+        Task.detached(priority: .utility) {
+            _ = command.run()
+        }
     }
 
     func duplicate(_ session: HolySession) {
@@ -338,6 +431,27 @@ final class HolyWorkspaceStore: ObservableObject {
 
     func presentComposer() {
         presentComposer(with: draftForNewSession())
+    }
+
+    @discardableResult
+    func createSessionFromDefaultLaunchProfile() -> HolySession? {
+        createSession(with: newDefaultLaunchProfileSpec(), origin: .directLaunch)
+    }
+
+    @discardableResult
+    func createSession(using profile: HolyLaunchProfile) -> HolySession? {
+        createSession(with: launchSpec(for: profile), origin: .directLaunch)
+    }
+
+    @discardableResult
+    func createLocalSession() -> HolySession? {
+        createSession(with: launchSpec(for: HolyLaunchProfile.localDefault()), origin: .directLaunch)
+    }
+
+    func setDefaultLaunchProfile(_ profile: HolyLaunchProfile) {
+        guard launchProfiles.contains(where: { $0.id == profile.id }) else { return }
+        defaultLaunchProfileID = profile.id
+        persistLaunchProfiles()
     }
 
     func presentComposer(using template: HolySessionTemplate) {
@@ -495,6 +609,7 @@ final class HolyWorkspaceStore: ObservableObject {
 
         selectedRemoteHostID = normalizedHost.id
         persistRemoteHosts()
+        reconcileLaunchProfiles()
     }
 
     func deleteRemoteHost(_ host: HolyRemoteHostRecord) {
@@ -508,6 +623,7 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         persistRemoteHosts()
+        reconcileLaunchProfiles()
     }
 
     func refreshConnectionOverview() {
@@ -578,10 +694,13 @@ final class HolyWorkspaceStore: ObservableObject {
                 await MainActor.run {
                     guard let self else { return }
                     self.discoveredRemoteSessionsByHostID[host.id] = sessions
-                    self.applyDiscoveredRemoteSessionMetadata(sessions, on: host)
+                    let changed = self.applyDiscoveredRemoteSessionMetadata(sessions, on: host)
                     self.remoteDiscoveryBusyHostIDs.remove(host.id)
                     self.remoteDiscoveryErrorsByHostID.removeValue(forKey: host.id)
                     self.markRemoteHostDiscovered(host.id)
+                    if changed {
+                        self.persist()
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -854,6 +973,7 @@ final class HolyWorkspaceStore: ObservableObject {
             selectedSessionID: state.selectedSessionID
         )
         suppressAutomaticSelectionPersistence = false
+        reconcilePaneLayoutForSelection()
         bindSessions()
         reconcileExternalTasks()
     }
@@ -963,6 +1083,30 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         return nil
+    }
+
+    private func startActiveTmuxMetadataRefresh() {
+        guard activeTmuxMetadataRefreshCancellable == nil else { return }
+
+        activeTmuxMetadataRefreshCancellable = Timer.publish(every: 10, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.refreshActiveTmuxSessionMetadata()
+            }
+    }
+
+    private func refreshActiveTmuxSessionMetadata() {
+        if hasActiveLocalTmuxSessions {
+            refreshLocalTmuxSessions()
+        }
+
+        refreshActiveRemoteTmuxSessionMetadata()
+    }
+
+    private var hasActiveLocalTmuxSessions: Bool {
+        sessions.contains { session in
+            HolyLocalTmuxSessionKey(launchSpec: session.record.launchSpec) != nil
+        }
     }
 
     private func refreshActiveRemoteTmuxSessionMetadata() {
@@ -1082,7 +1226,9 @@ final class HolyWorkspaceStore: ObservableObject {
     private func applyDiscoveredRemoteSessionMetadata(
         _ discoveredSessions: [HolyDiscoveredTmuxSession],
         on host: HolyRemoteHostRecord
-    ) {
+    ) -> Bool {
+        var changed = false
+
         for discoveredSession in discoveredSessions {
             let launchSpec = remoteTmuxLaunchSpec(for: discoveredSession, on: host)
             guard let discoveredKey = HolyRemoteTmuxSessionKey(launchSpec: launchSpec) else {
@@ -1090,9 +1236,11 @@ final class HolyWorkspaceStore: ObservableObject {
             }
 
             for session in sessions where HolyRemoteTmuxSessionKey(launchSpec: session.record.launchSpec) == discoveredKey {
-                session.applyDiscoveredLaunchMetadata(from: launchSpec)
+                changed = session.applyDiscoveredLaunchMetadata(from: launchSpec) || changed
             }
         }
+
+        return changed
     }
 
     private func selectionEvents(from previousSessionID: UUID?, to nextSessionID: UUID?) -> [HolySessionEventDraft] {
@@ -1117,14 +1265,19 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private func draftForNewSession() -> HolySessionDraft {
         HolySessionDraft(
-            launchSpec: newLocalTmuxLaunchSpec(),
+            launchSpec: newDefaultLaunchProfileSpec(),
             contextualWorkingDirectory: contextualWorkingDirectory,
             contextualRepositoryRoot: contextualRepositoryRoot
         )
     }
 
-    private func newLocalTmuxLaunchSpec() -> HolySessionLaunchSpec {
-        HolyLocalTmuxDefaults.launchSpec(fallbackTitle: nextShellTitle())
+    private func newDefaultLaunchProfileSpec() -> HolySessionLaunchSpec {
+        let profile = defaultLaunchProfile ?? HolyLaunchProfile.localDefault()
+        return launchSpec(for: profile)
+    }
+
+    private func launchSpec(for profile: HolyLaunchProfile) -> HolySessionLaunchSpec {
+        contextualizedLaunchSpec(from: profile.launchSpecForNewSession(fallbackTitle: nextShellTitle()))
     }
 
     private func shouldBootstrapDefaultTmuxServer(for launchSpec: HolySessionLaunchSpec) -> Bool {
@@ -1204,12 +1357,45 @@ final class HolyWorkspaceStore: ObservableObject {
         }
     }
 
+    private func loadLaunchProfiles() {
+        let state = HolyLaunchProfileRepository.loadState(remoteHosts: remoteHosts)
+        launchProfiles = state.profiles
+        defaultLaunchProfileID = state.defaultProfileID
+    }
+
     private func persistTasks() {
         HolyTaskRepository.save(externalTasks)
     }
 
     private func persistRemoteHosts() {
         HolyRemoteHostRepository.save(remoteHosts)
+    }
+
+    private func persistLaunchProfiles() {
+        HolyLaunchProfileRepository.save(
+            .init(
+                profiles: launchProfiles,
+                defaultProfileID: defaultLaunchProfileID
+            )
+        )
+    }
+
+    private func reconcileLaunchProfiles(persistIfChanged: Bool = true) {
+        let nextState = HolyLaunchProfileRepository.reconciledState(
+            loadedProfiles: launchProfiles,
+            loadedDefaultID: defaultLaunchProfileID,
+            remoteHosts: remoteHosts
+        )
+
+        guard nextState.profiles != launchProfiles || nextState.defaultProfileID != defaultLaunchProfileID else {
+            return
+        }
+
+        launchProfiles = nextState.profiles
+        defaultLaunchProfileID = nextState.defaultProfileID
+        if persistIfChanged {
+            persistLaunchProfiles()
+        }
     }
 
     private func mergeImportedRemoteHosts(_ importedHosts: [HolyRemoteHostRecord], sourceLabel: String) {
@@ -1246,6 +1432,7 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         persistRemoteHosts()
+        reconcileLaunchProfiles()
 
         let addedHosts = max(0, remoteHosts.count - previousHostCount)
         if addedHosts == 0 {
@@ -1271,6 +1458,7 @@ final class HolyWorkspaceStore: ObservableObject {
         )
 
         persistRemoteHosts()
+        reconcileLaunchProfiles()
     }
 
     private func migrateRemoteHostIfNeeded(_ host: HolyRemoteHostRecord) -> HolyRemoteHostRecord {
@@ -1314,10 +1502,6 @@ final class HolyWorkspaceStore: ObservableObject {
             destination.components(separatedBy: ".").first ?? destination,
         ]
 
-        if candidates.contains(where: { $0.holyConnectionTokenSet.contains("studio") }) {
-            return "studio"
-        }
-
         if let firstUsefulToken = candidates
             .flatMap(\.holyConnectionTokenSet)
             .first(where: { !Self.remoteHostIgnoredConnectionTokens.contains($0) }) {
@@ -1353,17 +1537,7 @@ final class HolyWorkspaceStore: ObservableObject {
         _ host: HolyRemoteHostRecord,
         connectionKey: String
     ) -> HolyRemoteHostRecord {
-        guard connectionKey == "studio" else { return host.normalized() }
-
-        return HolyRemoteHostRecord(
-            id: host.id,
-            label: "Studio",
-            sshDestination: preferredStudioDestination(from: host),
-            tmuxSocketName: host.tmuxSocketName,
-            createdAt: host.createdAt,
-            updatedAt: host.updatedAt,
-            lastDiscoveredAt: host.lastDiscoveredAt
-        )
+        host.normalized()
     }
 
     private func preferredRemoteHost(
@@ -1382,22 +1556,7 @@ final class HolyWorkspaceStore: ObservableObject {
         if destination == label { score += 30 }
         if !destination.contains("-lan") && !label.contains("-lan") { score += 20 }
         if host.lastDiscoveredAt != nil { score += 10 }
-        if destination == "studio" { score += 50 }
-
         return score
-    }
-
-    private func preferredStudioDestination(from host: HolyRemoteHostRecord) -> String {
-        let destination = host.sshDestination.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !destination.isEmpty else { return "studio" }
-
-        if destination.lowercased() == "studio" {
-            return destination
-        }
-
-        return destination.contains(".tail") || destination.lowercased().contains("-lan")
-            ? "studio"
-            : destination
     }
 
     private func latestDate(_ lhs: Date?, _ rhs: Date?) -> Date? {
@@ -1971,6 +2130,126 @@ private struct HolyCoordinationSummaryContext {
     let runtimeActivityKind: HolySessionActivityKind
 }
 
+private struct HolyTmuxClientDetachCommand: Sendable {
+    let executableURL: URL
+    let arguments: [String]
+
+    static func command(for launchSpec: HolySessionLaunchSpec) -> Self? {
+        let realizedLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
+        guard realizedLaunchSpec.transport.isRemote,
+              let destination = realizedLaunchSpec.transport.sshDestination?.holyTerminatorTrimmed.nilIfEmpty,
+              let tmux = realizedLaunchSpec.tmux?.normalized,
+              let sessionName = tmux.sessionName?.holyTerminatorTrimmed.nilIfEmpty else {
+            return nil
+        }
+
+        var tmuxArguments = ["tmux"]
+        if let socketName = tmux.socketName?.holyTerminatorTrimmed.nilIfEmpty {
+            tmuxArguments += ["-L", socketName]
+        }
+        tmuxArguments += ["detach-client", "-s", sessionName]
+
+        return Self(
+            executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+            arguments: ["ssh", destination, "zsh", "-lc", shellCommand(tmuxArguments)]
+        )
+    }
+
+    func run() -> Bool {
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    private static func shellCommand(_ arguments: [String]) -> String {
+        arguments.map(posixQuote).joined(separator: " ")
+    }
+
+    private static func posixQuote(_ value: String) -> String {
+        if value.isEmpty {
+            return "''"
+        }
+
+        let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
+        return "'\(escaped)'"
+    }
+}
+
+private struct HolyTmuxSessionTitleUpdateCommand: Sendable {
+    let executableURL: URL
+    let arguments: [String]
+
+    static func command(for launchSpec: HolySessionLaunchSpec, title: String) -> Self? {
+        let realizedLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
+        guard let tmux = realizedLaunchSpec.tmux?.normalized,
+              let sessionName = tmux.sessionName?.holyTerminatorTrimmed.nilIfEmpty,
+              let title = title.holyTerminatorTrimmed.nilIfEmpty else {
+            return nil
+        }
+
+        var tmuxArguments = ["tmux"]
+        if let socketName = tmux.socketName?.holyTerminatorTrimmed.nilIfEmpty {
+            tmuxArguments += ["-L", socketName]
+        }
+        tmuxArguments += ["set-option", "-q", "-t", sessionName, "@holy_title", title]
+
+        if realizedLaunchSpec.transport.isRemote {
+            guard let destination = realizedLaunchSpec.transport.sshDestination?.holyTerminatorTrimmed.nilIfEmpty else {
+                return nil
+            }
+
+            return Self(
+                executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+                arguments: ["ssh", destination, "zsh", "-lc", shellCommand(tmuxArguments)]
+            )
+        }
+
+        return Self(
+            executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+            arguments: tmuxArguments
+        )
+    }
+
+    func run() -> Bool {
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    private static func shellCommand(_ arguments: [String]) -> String {
+        arguments.map(posixQuote).joined(separator: " ")
+    }
+
+    private static func posixQuote(_ value: String) -> String {
+        if value.isEmpty {
+            return "''"
+        }
+
+        let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
+        return "'\(escaped)'"
+    }
+}
+
 private struct HolyTmuxSessionTerminationCommand: Sendable {
     let executableURL: URL
     let arguments: [String]
@@ -2047,8 +2326,6 @@ private extension String {
 
 private extension HolyWorkspaceStore {
     static let remoteHostIgnoredConnectionTokens: Set<String> = [
-        "erik",
-        "eriks",
         "lan",
         "local",
         "mac",

@@ -64,6 +64,8 @@ struct HolySessionRosterView: View {
                                         compact: compact,
                                         onSelect: { store.selectedSessionID = session.id },
                                         onDuplicate: { store.duplicate(session.id) },
+                                        canReattach: store.canReattachSession(session),
+                                        onReattach: { store.reattach(session) },
                                         onArchive: { store.close(session) },
                                         canKillTmux: store.canKillTmuxSession(session),
                                         onKillTmux: { store.killTmuxSession(session) },
@@ -131,6 +133,31 @@ struct HolySessionRosterView: View {
                 }
             }
 
+            if !store.launchProfiles.isEmpty {
+                Section("New From Profile") {
+                    ForEach(store.launchProfiles) { profile in
+                        Button {
+                            store.createSession(using: profile)
+                        } label: {
+                            Label(profile.name, systemImage: profile.isRemote ? "network" : "laptopcomputer")
+                        }
+                    }
+                }
+
+                Section("Default New Profile") {
+                    ForEach(store.launchProfiles) { profile in
+                        Button {
+                            store.setDefaultLaunchProfile(profile)
+                        } label: {
+                            Label(
+                                profile.name,
+                                systemImage: store.defaultLaunchProfileID == profile.id ? "checkmark.circle.fill" : "circle"
+                            )
+                        }
+                    }
+                }
+            }
+
             Divider()
 
             Button {
@@ -152,12 +179,18 @@ struct HolySessionRosterView: View {
                     store.duplicate(selected)
                 }
 
+                if store.canReattachSession(selected) {
+                    Button("Reattach") {
+                        store.reattach(selected)
+                    }
+                }
+
                 Button("Detach From Roster") {
                     store.close(selected)
                 }
 
                 if store.canKillTmuxSession(selected) {
-                    Button("Stop tmux session", role: .destructive) {
+                    Button("Kill from Roster", role: .destructive) {
                         store.killTmuxSession(selected)
                     }
                 }
@@ -200,8 +233,8 @@ struct HolySessionRosterView: View {
                 rosterActionButton(
                     title: "New",
                     symbol: "rectangle.stack.badge.plus",
-                    help: "Start a new local tmux-backed shell",
-                    action: { _ = store.createSession(from: nil) }
+                    help: "Start a new tmux-backed shell using \(store.defaultLaunchProfileName)",
+                    action: { _ = store.createSessionFromDefaultLaunchProfile() }
                 )
                 .keyboardShortcut("n", modifiers: [.command])
 
@@ -212,6 +245,14 @@ struct HolySessionRosterView: View {
                     action: { store.detachAllSessions() }
                 )
                 .disabled(store.sessions.isEmpty)
+
+                rosterActionButton(
+                    title: "Join",
+                    symbol: "arrow.triangle.2.circlepath",
+                    help: "Reattach every SSH tmux session in this roster",
+                    action: { store.reattachAllSessions() }
+                )
+                .disabled(!store.hasReattachableSessions)
 
                 rosterActionButton(
                     title: "SSH",
@@ -270,6 +311,10 @@ struct HolySessionRosterView: View {
     }
 
     private static func primaryTitle(for session: HolySession) -> String {
+        if let title = session.rosterTitleOverride?.holyRosterTrimmed.nilIfEmpty {
+            return title
+        }
+
         if let project = session.displayProjectName?.holyRosterTrimmed.nilIfEmpty {
             return project
         }
@@ -395,6 +440,8 @@ private struct HolyRosterRow: View {
     var compact: Bool = false
     let onSelect: () -> Void
     let onDuplicate: () -> Void
+    let canReattach: Bool
+    let onReattach: () -> Void
     let onArchive: () -> Void
     let canKillTmux: Bool
     let onKillTmux: () -> Void
@@ -410,6 +457,7 @@ private struct HolyRosterRow: View {
                 activityAt: session.activityAt
             )
             .frame(width: 18, height: 18)
+            .help(session.activityHelpText)
 
             if isRenaming {
                 TextField("Session name", text: $renameText, onCommit: commitRename)
@@ -432,6 +480,12 @@ private struct HolyRosterRow: View {
                         onSelect()
                         onDuplicate()
                     }
+                    if canReattach {
+                        Button("Reattach") {
+                            onSelect()
+                            onReattach()
+                        }
+                    }
 
                     Divider()
 
@@ -440,7 +494,7 @@ private struct HolyRosterRow: View {
                         onArchive()
                     }
                     if canKillTmux {
-                        Button("Stop tmux session", role: .destructive) {
+                        Button("Kill from Roster", role: .destructive) {
                             onSelect()
                             onKillTmux()
                         }
@@ -521,11 +575,15 @@ private struct HolyRosterRow: View {
     // Runtime grouping owns the agent label; dense rows lead with project context only.
     private var displayLine: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(primaryTitle)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
-                .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            HStack(spacing: 4) {
+                connectionIndicator
+
+                Text(primaryTitle)
+                    .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
 
             if let paneLabel {
                 Text(paneLabel)
@@ -535,6 +593,29 @@ private struct HolyRosterRow: View {
                     .lineLimit(1)
             }
         }
+    }
+
+    private var connectionIndicator: some View {
+        Image(systemName: session.record.launchSpec.transport.isRemote ? "network" : "laptopcomputer")
+            .font(.system(size: 8.5, weight: .semibold))
+            .foregroundStyle(connectionColor)
+            .frame(width: 10, height: 10)
+            .opacity(isSelected ? 0.9 : 0.62)
+            .help(connectionHelpText)
+    }
+
+    private var connectionColor: Color {
+        session.record.launchSpec.transport.isRemote
+            ? HolyGhosttyTheme.halo
+            : HolyGhosttyTheme.textTertiary
+    }
+
+    private var connectionHelpText: String {
+        if session.record.launchSpec.transport.isRemote {
+            return "SSH: \(session.record.launchSpec.transport.destinationDisplayName)"
+        }
+
+        return "Local: This Mac"
     }
 
     private func startRename() {
@@ -582,6 +663,19 @@ private struct HolyRosterRow: View {
     }
 
     private var activityIndicatorState: HolyRosterActivityState {
+        switch session.phase {
+        case .working:
+            return .working
+        case .waitingInput:
+            return .needsUser
+        case .completed:
+            return .done
+        case .failed:
+            return .failed
+        case .active:
+            break
+        }
+
         switch session.runtimeTelemetry.activityKind {
         case .approval:
             return .needsUser
@@ -594,20 +688,7 @@ private struct HolyRosterRow: View {
         case .completion:
             return .done
         case .idle:
-            break
-        }
-
-        switch session.phase {
-        case .active:
             return .idle
-        case .working:
-            return .working
-        case .waitingInput:
-            return .needsUser
-        case .completed:
-            return .done
-        case .failed:
-            return .failed
         }
     }
 

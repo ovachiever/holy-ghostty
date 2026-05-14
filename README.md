@@ -36,6 +36,7 @@ The app currently supports:
 - Local and remote SSH sessions attached through tmux.
 - Remote host records with SSH config and Tailscale import.
 - Remote tmux discovery and attach.
+- Launch profiles for local and SSH/tmux session starts, including a persisted default target for `New`.
 - Durable SQLite workspace persistence with migrations, WAL, and event history.
 - Session archive, search, relaunch, and recovery context.
 - Launch templates and external task records.
@@ -62,12 +63,12 @@ Left rail controls are scoped to the tmux roster.
 
 Session roster controls:
 
-- `New`: open a local tmux client in `~/Documents/AI/Custom_Coding`.
+- `New`: start a tmux-backed session from the selected default launch profile.
 - `Clear`: detach all visible sessions from the workspace roster without stopping tmux.
 - `SSH`: open SSH/tmux hosts.
-- `More`: templates, SSH hosts, history, duplicate, detach, and stop tmux session.
+- `More`: launch profiles, templates, SSH hosts, history, duplicate, detach, and kill from roster.
 
-Before `New` launches the terminal, Holy Ghostty starts the default tmux server out-of-band if no tmux server/session is running. The terminal then runs `tmux` directly, so closing Holy Ghostty only closes the client and does not make Holy own the tmux server.
+Holy Ghostty creates generated launch profiles for `Local Mac` and configured SSH hosts. The default `New` profile is stored in local SQLite state, so personal choices such as defaulting `New` to a remote workstation never need to be committed to the public repo.
 
 Layout controls:
 
@@ -80,7 +81,7 @@ Layout controls:
 The selected session's `...` menu separates cleanup actions:
 
 - `Detach From Roster`: remove Holy's attachment while leaving the tmux session alive.
-- `Stop tmux session`: kill the backing tmux session and then remove it from the roster.
+- `Kill from Roster`: attempt to kill the backing tmux session and always remove Holy's roster attachment.
 
 Session cleanup shortcuts:
 

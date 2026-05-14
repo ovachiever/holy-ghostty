@@ -1107,7 +1107,8 @@ class AppDelegate: NSObject,
 
         let controller = HolyWorkspaceWindowController(
             ghostty: ghostty,
-            initialConfig: initialConfig
+            initialConfig: initialConfig,
+            seedDefaultSession: Self.isHolyGhosttyBundle ? false : nil
         )
         controller.showAndActivate()
         return controller

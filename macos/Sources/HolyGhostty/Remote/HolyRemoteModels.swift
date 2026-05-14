@@ -105,7 +105,11 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
     }
 
     var displayTitle: String {
-        if let title = title?.holyTrimmed.nilIfEmpty {
+        if let projectTitle = projectTitleForDefaultSession {
+            return projectTitle
+        }
+
+        if let title = normalizedTitle {
             return title
         }
 
@@ -118,6 +122,60 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
         }
 
         return "\(hostLabel)/\(sessionName)"
+    }
+
+    private var normalizedTitle: String? {
+        title?.holyTrimmed.nilIfEmpty
+    }
+
+    private var projectTitleForDefaultSession: String? {
+        guard normalizedTitle.map(Self.isGeneratedDefaultTitle) ?? true else {
+            return nil
+        }
+
+        if let gitSummary {
+            return gitSummary.repositoryName
+        }
+
+        guard let workingDirectory = workingDirectory?.holyTrimmed.nilIfEmpty else {
+            return nil
+        }
+
+        let directoryName = URL(fileURLWithPath: workingDirectory)
+            .standardizedFileURL
+            .lastPathComponent
+            .holyTrimmed
+        guard let directoryName = directoryName.nilIfEmpty,
+              !Self.isGenericWorkspaceName(directoryName) else {
+            return nil
+        }
+
+        return directoryName
+    }
+
+    private static func isGeneratedDefaultTitle(_ title: String) -> Bool {
+        let normalized = title.holyTrimmed
+        guard !normalized.isEmpty else { return true }
+
+        if normalized.range(
+            of: #"^Shell\s+\d+$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            return true
+        }
+
+        return ["Shell", "Claude", "Codex", "OpenCode"].contains { defaultTitle in
+            normalized.caseInsensitiveCompare(defaultTitle) == .orderedSame
+        }
+    }
+
+    private static func isGenericWorkspaceName(_ name: String) -> Bool {
+        switch name.holyTrimmed.lowercased() {
+        case "custom-coding", "custom_coding", "projects", "repos", "repositories", "workspace", "workspaces":
+            return true
+        default:
+            return false
+        }
     }
 
     var subtitle: String {

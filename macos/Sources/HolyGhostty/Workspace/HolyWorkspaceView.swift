@@ -52,8 +52,7 @@ struct HolyWorkspaceRootView: View {
     @EnvironmentObject private var ghostty: Ghostty.App
     @ObservedObject var store: HolyWorkspaceStore
     @State private var diffCompareSessionIDRaw: String?
-    @SceneStorage("holy.workspace.rosterWidth.v2") private var rosterWidthRaw = Double(HolyWorkspaceLayout.rosterDefaultWidth)
-    @SceneStorage("holy.workspace.contextRailExpanded.v1") private var contextRailExpanded = false
+    @AppStorage("holy.workspace.rosterWidth.v2") private var rosterWidthRaw = Double(HolyWorkspaceLayout.rosterDefaultWidth)
     @State private var rosterDragStartWidth: CGFloat?
 
     var body: some View {
@@ -197,58 +196,64 @@ struct HolyWorkspaceRootView: View {
     }
 
     private var leftRailViewControls: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 0) {
             if let selected = store.selectedSession {
-                Text(selected.statusText)
+                Text(selected.compactStatusText)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(statusColor(for: selected.phase))
                     .lineLimit(1)
-                    .frame(maxWidth: 72)
-                    .padding(.trailing, 2)
+                    .frame(width: 70, alignment: .leading)
+                    .help(selected.activityHelpText)
+
+                Spacer(minLength: 16)
             }
 
-            layoutControlButton(
-                title: "Single",
-                systemName: "rectangle",
-                isActive: store.normalizedPaneLayout.kind == .single
-            ) {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    store.showSinglePane()
+            HStack(spacing: 3) {
+                layoutControlButton(
+                    title: "Single",
+                    systemName: "rectangle",
+                    isActive: store.normalizedPaneLayout.kind == .single
+                ) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        store.showSinglePane()
+                    }
+                }
+
+                layoutControlButton(
+                    title: "Split Right",
+                    systemName: "rectangle.split.2x1",
+                    isActive: store.normalizedPaneLayout.kind == .splitRight
+                ) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        store.splitPaneRight()
+                    }
+                }
+
+                layoutControlButton(
+                    title: "Split Down",
+                    systemName: "rectangle.split.2x1",
+                    rotation: .degrees(90),
+                    isActive: store.normalizedPaneLayout.kind == .splitDown
+                ) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        store.splitPaneDown()
+                    }
+                }
+
+                layoutControlButton(
+                    title: "Quad",
+                    systemName: "square.grid.2x2",
+                    isActive: store.normalizedPaneLayout.kind == .quad
+                ) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        store.showQuadPaneLayout()
+                    }
                 }
             }
 
-            layoutControlButton(
-                title: "Split Right",
-                systemName: "rectangle.split.2x1",
-                isActive: store.normalizedPaneLayout.kind == .splitRight
-            ) {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    store.splitPaneRight()
-                }
-            }
-
-            layoutControlButton(
-                title: "Split Down",
-                systemName: "rectangle.split.2x1",
-                rotation: .degrees(90),
-                isActive: store.normalizedPaneLayout.kind == .splitDown
-            ) {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    store.splitPaneDown()
-                }
-            }
-
-            layoutControlButton(
-                title: "Quad",
-                systemName: "square.grid.2x2",
-                isActive: store.normalizedPaneLayout.kind == .quad
-            ) {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    store.showQuadPaneLayout()
-                }
-            }
+            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, alignment: .center)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(HolyGhosttyTheme.bgElevated)

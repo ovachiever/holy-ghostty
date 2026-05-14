@@ -153,8 +153,8 @@ struct HolyNewSessionSheet: View {
 
             if draft.transportKind == .ssh {
                 HStack(spacing: 10) {
-                    labeledField("Host Label", text: $draft.remoteHostLabel, placeholder: "studio")
-                    labeledField("SSH Destination", text: $draft.remoteHostDestination, placeholder: "studio")
+                    labeledField("Host Label", text: $draft.remoteHostLabel, placeholder: "workstation")
+                    labeledField("SSH Destination", text: $draft.remoteHostDestination, placeholder: "workstation")
                 }
 
                 helperText("Remote sessions attach through SSH and currently treat workspace ownership as direct-directory only.")

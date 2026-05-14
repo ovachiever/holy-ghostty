@@ -53,6 +53,11 @@ enum HolyDatabaseMigrator {
             label: "Remote host registry",
             statements: schemaV6
         ),
+        .init(
+            version: 7,
+            label: "Launch profiles",
+            statements: schemaV7
+        ),
     ]
 
     private static let schemaV1: [String] = [
@@ -350,6 +355,29 @@ enum HolyDatabaseMigrator {
         """
         CREATE INDEX IF NOT EXISTS remote_hosts_updated_at_idx
         ON remote_hosts(updated_at, created_at);
+        """,
+    ]
+
+    private static let schemaV7: [String] = [
+        """
+        CREATE TABLE IF NOT EXISTS launch_profiles (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            summary TEXT,
+            source_kind TEXT NOT NULL,
+            source_remote_host_id TEXT,
+            launch_spec_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS launch_profiles_source_idx
+        ON launch_profiles(source_kind, source_remote_host_id);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS launch_profiles_updated_at_idx
+        ON launch_profiles(updated_at, created_at);
         """,
     ]
 }

@@ -110,7 +110,7 @@ struct HolyRemoteHostsSheet: View {
                     .padding(.top, 6)
 
                 if store.remoteHosts.isEmpty {
-                    Text("Add Studio or import SSH hosts. Local devices and phones are filtered out.")
+                    Text("Add or import SSH hosts. Local devices and phones are filtered out.")
                         .font(.system(size: 11))
                         .foregroundStyle(HolyGhosttyTheme.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -270,8 +270,8 @@ struct HolyRemoteHostsSheet: View {
         VStack(alignment: .leading, spacing: 10) {
             sectionLabel("Remote SSH")
 
-            labeledField("Name", text: editorBinding(\.label), placeholder: "Studio")
-            labeledField("SSH Destination", text: editorBinding(\.sshDestination), placeholder: "studio")
+            labeledField("Name", text: editorBinding(\.label), placeholder: "Workstation")
+            labeledField("SSH Destination", text: editorBinding(\.sshDestination), placeholder: "workstation")
 
             DisclosureGroup("Advanced") {
                 VStack(alignment: .leading, spacing: 8) {

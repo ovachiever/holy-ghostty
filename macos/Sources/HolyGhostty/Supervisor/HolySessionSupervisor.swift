@@ -158,6 +158,21 @@ final class HolySessionSupervisor {
         )
     }
 
+    func reattach(_ session: HolySession, in state: HolySessionStoreState) -> HolySessionStoreMutationResult? {
+        guard let app = ghostty.app,
+              let index = state.sessions.firstIndex(where: { $0.id == session.id }) else {
+            return nil
+        }
+
+        var record = session.record
+        record.updatedAt = .now
+
+        var nextState = state
+        nextState.sessions[index] = HolySession(record: record, app: app)
+
+        return .init(state: nextState, pendingEvents: [])
+    }
+
     func archive(_ session: HolySession, in state: HolySessionStoreState) -> HolySessionArchiveResult {
         let archivedSession = session.archiveSnapshot()
         var nextState = state

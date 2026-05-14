@@ -48,14 +48,16 @@ The roster lists active sessions grouped by runtime.
 
 TMUX session controls:
 
-- `New`: open a local tmux client in `~/Documents/AI/Custom_Coding`.
+- `New`: start a tmux-backed session from the selected default launch profile.
 - `Clear`: detach all active sessions from the roster without stopping tmux.
 - `SSH`: open SSH/tmux hosts.
-- `More`: templates, SSH hosts, history, duplicate, detach, and stop tmux session.
+- `More`: launch profiles, templates, SSH hosts, history, duplicate, detach, and kill from roster.
 
-`New` starts the default tmux server out-of-band when no tmux server/session exists, then launches the terminal with `tmux` as the command. Holy Ghostty stays a tmux client and does not own the server process.
+Holy Ghostty creates generated launch profiles for `Local Mac` and configured SSH hosts. The `More` menu can launch from any profile and can set the default profile used by `New`.
 
-Each session row's `...` menu keeps `Detach From Roster` beside `Stop tmux session`. Detach leaves tmux alive; stop kills the backing tmux session before removing it from the roster.
+The default launch profile is stored in local SQLite state. This keeps personal defaults, such as starting new sessions on a remote workstation from a laptop, out of the public repository.
+
+Each session row's `...` menu keeps `Detach From Roster` beside `Kill from Roster`. Detach leaves tmux alive; kill attempts to stop the backing tmux session and always removes Holy's roster attachment.
 
 Section order:
 
@@ -85,7 +87,7 @@ Sections include:
 - Risk: branch, sync, and git state.
 - Coordination: worktree, branch, and file overlap risk.
 - Verification: last command outcome when shell integration is available.
-- Actions: copy handoff, copy diff, duplicate, detach from roster, and stop tmux session when available.
+- Actions: copy handoff, copy diff, duplicate, detach from roster, and kill from roster when available.
 - Details: launch metadata.
 
 ## Pane Layouts
@@ -101,7 +103,7 @@ Layouts:
 
 Shortcuts:
 
-- `Command-N`: new local tmux session.
+- `Command-N`: new session from the default launch profile.
 - `Command-Shift-R`: remote hosts.
 - `Command-W`: detach selected session.
 - `Option-Q`: kill selected tmux session when available.
@@ -146,7 +148,14 @@ Roster cues:
 
 ## Creating Sessions
 
-The `New` button creates a local tmux client immediately in `~/Documents/AI/Custom_Coding`.
+The `New` button creates a tmux-backed session from the selected default launch profile.
+
+Generated profiles:
+
+- `Local Mac`: local Holy-managed tmux session.
+- SSH hosts: remote Holy-managed tmux sessions over the configured host destination.
+
+When no profile state exists yet, Holy Ghostty creates these profiles automatically. If exactly one SSH host exists on first profile creation, that host becomes the default `New` target; otherwise `Local Mac` is the default. The default can be changed later from `More`.
 
 Session templates and advanced launch settings are available from the left-rail `More` menu and task/remote flows.
 
@@ -222,6 +231,7 @@ Persistence includes:
 - Latest runtime telemetry.
 - Latest budget telemetry.
 - Task records.
+- Launch profiles and the default `New` profile.
 - Compatibility views.
 
 The database uses schema migrations and WAL.

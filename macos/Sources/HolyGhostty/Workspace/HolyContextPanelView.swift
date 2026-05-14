@@ -606,7 +606,7 @@ struct HolyContextPanelView: View {
                     store.archive(session)
                 }
                 if store.canKillTmuxSession(session) {
-                    actionButton("Stop tmux session", systemImage: "xmark.octagon", role: .destructive) {
+                    actionButton("Kill from Roster", systemImage: "xmark.octagon", role: .destructive) {
                         store.killTmuxSession(session)
                     }
                 }

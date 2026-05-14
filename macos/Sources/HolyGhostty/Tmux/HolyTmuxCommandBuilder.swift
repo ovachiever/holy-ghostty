@@ -19,23 +19,14 @@ enum HolyTmuxCommandBuilder {
 
     static func surfaceConfiguration(for launchSpec: HolySessionLaunchSpec) -> Ghostty.SurfaceConfiguration {
         let realizedLaunchSpec = realizedLaunchSpec(launchSpec)
-        let hasTmuxSubstrate = realizedLaunchSpec.tmux?.normalized.sessionName?.holyTrimmed.nilIfEmpty != nil
-        let launchesViaCommand = !hasTmuxSubstrate || realizedLaunchSpec.transport.isRemote
-        let launchCommand = launchesViaCommand
-            ? command(for: realizedLaunchSpec)
-            : shellInput(for: realizedLaunchSpec)
+        let launchCommand = command(for: realizedLaunchSpec)
 
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = realizedLaunchSpec.transport.isRemote ? nil : realizedLaunchSpec.workingDirectory
-        config.command = launchesViaCommand ? launchCommand : nil
-        config.initialInput = !launchesViaCommand
-            ? combinedInitialInput(
-                primaryCommand: launchCommand,
-                trailingInput: realizedLaunchSpec.initialInput
-            )
-            : realizedLaunchSpec.initialInput
+        config.command = launchCommand
+        config.initialInput = realizedLaunchSpec.initialInput
         config.waitAfterCommand = false
-        config.environmentVariables = realizedLaunchSpec.environment
+        config.environmentVariables = sanitizedEnvironment(realizedLaunchSpec.environment)
         return config
     }
 
@@ -58,34 +49,31 @@ enum HolyTmuxCommandBuilder {
     }
 
     static func command(for launchSpec: HolySessionLaunchSpec) -> String? {
-        launchScript(for: launchSpec, interactiveShellInput: false)
+        launchScript(for: launchSpec)
     }
 
-    static func shellInput(for launchSpec: HolySessionLaunchSpec) -> String? {
-        launchScript(for: launchSpec, interactiveShellInput: true)
-    }
-
-    private static func launchScript(
-        for launchSpec: HolySessionLaunchSpec,
-        interactiveShellInput: Bool
-    ) -> String? {
+    private static func launchScript(for launchSpec: HolySessionLaunchSpec) -> String? {
         guard let tmux = launchSpec.tmux?.normalized,
               let sessionName = tmux.sessionName?.holyTrimmed.nilIfEmpty else {
             return launchSpec.command?.holyTrimmed.nilIfEmpty
         }
 
-        let tmuxPrefix = tmuxPrefixArguments(for: tmux)
+        let usesManagedServer = tmux.createIfMissing && tmux.socketName == HolySessionTmuxSpec.defaultSocketName
+        let tmuxPrefix = tmuxPrefixArguments(for: tmux, useCleanConfig: usesManagedServer)
         let bootstrapCommand = bootstrapCommand(for: launchSpec)
-        let metadataCommands = metadataCommands(for: launchSpec, tmux: tmux, sessionName: sessionName)
-
-        if launchSpec.transport.isRemote,
-           !tmux.createIfMissing,
-           let destination = launchSpec.transport.sshDestination?.holyTrimmed.nilIfEmpty {
-            return shellCommand(["ssh", "-t", destination] + tmuxPrefix + ["attach", "-t", sessionName])
-        }
+        let metadataCommands = metadataCommands(
+            for: launchSpec,
+            tmuxPrefix: tmuxPrefix,
+            tmux: tmux,
+            sessionName: sessionName
+        )
 
         var lines: [String] = []
         if tmux.createIfMissing {
+            if usesManagedServer {
+                lines.append("\(shellCommand(tmuxPrefix + ["set-option", "-gq", "destroy-unattached", "off"])) 2>/dev/null || true")
+            }
+
             var createArguments = tmuxPrefix + ["new-session", "-d", "-s", sessionName]
             if let workingDirectory = launchSpec.workingDirectory?.holyTrimmed.nilIfEmpty {
                 createArguments += ["-c", workingDirectory]
@@ -110,19 +98,10 @@ enum HolyTmuxCommandBuilder {
 
         if launchSpec.transport.isRemote {
             guard let destination = launchSpec.transport.sshDestination?.holyTrimmed.nilIfEmpty else {
-                return interactiveShellInput ? localScript : shellCommand(["zsh", "-lc", localScript])
+                return shellCommand(["zsh", "-lc", localScript])
             }
 
-            if interactiveShellInput {
-                return shellCommand(["ssh", "-t", destination, localScript])
-            }
-
-            let remoteCommand = shellCommand(["zsh", "-lc", localScript])
-            return shellCommand(["ssh", "-t", destination, remoteCommand])
-        }
-
-        if interactiveShellInput {
-            return localScript
+            return shellCommand(["zsh", "-lc", remoteLaunchWrapper(destination: destination, localScript: localScript)])
         }
 
         return shellCommand(["zsh", "-lc", localScript])
@@ -139,35 +118,55 @@ enum HolyTmuxCommandBuilder {
         return "sh -lc \(posixQuote(shellScript))"
     }
 
-    private static func combinedInitialInput(
-        primaryCommand: String?,
-        trailingInput: String?
-    ) -> String? {
-        let trimmedCommand = primaryCommand?.holyTrimmed.nilIfEmpty
-        let trimmedTrailingInput = trailingInput?.nilIfEmpty
+    private static func remoteLaunchWrapper(destination: String, localScript: String) -> String {
+        let sshCommand = shellCommand(["ssh", "-t", destination, shellCommand(["zsh", "-lc", localScript])])
+        let failureMessage = "Holy Ghostty could not reach \(destination). Reattach after SSH is reachable."
 
-        switch (trimmedCommand, trimmedTrailingInput) {
-        case let (command?, trailingInput?):
-            return "\(command)\n\(trailingInput)"
-        case let (command?, nil):
-            return "\(command)\n"
-        case let (nil, trailingInput?):
-            return trailingInput
-        case (nil, nil):
-            return nil
-        }
+        return [
+            sshCommand,
+            "holy_status=$?",
+            "if [ \"$holy_status\" -ne 0 ]; then",
+            "  printf '\\n%s\\n' \(posixQuote(failureMessage))",
+            "  printf 'SSH exited with status %s.\\n' \"$holy_status\"",
+            "  exec \"${SHELL:-/bin/zsh}\" -l",
+            "fi",
+            "exit 0",
+        ].joined(separator: "; ")
     }
 
-    private static func tmuxPrefixArguments(for tmux: HolySessionTmuxSpec) -> [String] {
+    private static func sanitizedEnvironment(_ environment: [String: String]) -> [String: String] {
+        var sanitized = environment
+        for key in inheritedDirenvStateKeys {
+            sanitized[key] = ""
+        }
+        return sanitized
+    }
+
+    private static let inheritedDirenvStateKeys = [
+        "DIRENV_DIR",
+        "DIRENV_DIFF",
+        "DIRENV_FILE",
+        "DIRENV_LAYOUT",
+        "DIRENV_WATCHES",
+    ]
+
+    private static func tmuxPrefixArguments(
+        for tmux: HolySessionTmuxSpec,
+        useCleanConfig: Bool = false
+    ) -> [String] {
         var arguments = ["tmux"]
         if let socketName = tmux.socketName?.holyTrimmed.nilIfEmpty {
             arguments += ["-L", socketName]
+        }
+        if useCleanConfig {
+            arguments += ["-f", "/dev/null"]
         }
         return arguments
     }
 
     private static func metadataCommands(
         for launchSpec: HolySessionLaunchSpec,
+        tmuxPrefix: [String],
         tmux: HolySessionTmuxSpec,
         sessionName: String
     ) -> [String] {
@@ -187,7 +186,7 @@ enum HolyTmuxCommandBuilder {
         ]
 
         return metadata.map { key, value in
-            shellCommand(tmuxPrefixArguments(for: tmux) + ["set-option", "-q", "-t", sessionName, key, value])
+            shellCommand(tmuxPrefix + ["set-option", "-q", "-t", sessionName, key, value])
         }
     }
 

@@ -245,7 +245,7 @@ actor HolyRemoteTmuxDiscoveryService {
           [[ "$lowered" == *"codex cli"* ]] && return 1
 
           case "$lowered" in
-            zsh|bash|sh|fish|tmux|"[tmux]"|node|python|python[0-9]*|*.exe|*.local|localhost|ai|coding|custom-coding|custom_coding|projects|repos|repositories|workspace|workspaces)
+            zsh|bash|sh|fish|tmux|"[tmux]"|node|python|python[0-9]*|*.exe|*.local|localhost|holy-*|ai|coding|custom-coding|custom_coding|projects|repos|repositories|workspace|workspaces)
               return 1
               ;;
           esac
@@ -263,6 +263,52 @@ actor HolyRemoteTmuxDiscoveryService {
               ;;
           esac
           return 1
+        }
+
+        generated_holy_title() {
+          local value lowered
+          value=$(trimmed_value "$1")
+          [[ -z "$value" ]] && return 0
+          lowered="${value:l}"
+          [[ "$lowered" == "shell" ]] && return 0
+          [[ "$lowered" =~ '^shell[[:space:]]+[0-9]+$' ]] && return 0
+          [[ "$lowered" == "claude" || "$lowered" == "codex" || "$lowered" == "opencode" ]] && return 0
+          [[ "$lowered" == "local" || "$lowered" == "mac" || "$lowered" == "local mac" || "$lowered" == "this mac" || "$lowered" == "localhost" ]] && return 0
+          return 1
+        }
+
+        inferred_runtime() {
+          local configured lowered candidate
+          configured=$(trimmed_value "$1")
+          shift
+
+          if [[ -n "$configured" && "$configured" != "shell" ]]; then
+            printf '%s' "$configured"
+            return
+          fi
+
+          for candidate in "$@"; do
+            lowered="$(trimmed_value "$candidate")"
+            lowered="${lowered:l}"
+            [[ -z "$lowered" ]] && continue
+
+            if [[ "$lowered" == *"opencode"* || "$lowered" == *"open code"* ]]; then
+              printf '%s' "opencode"
+              return
+            fi
+
+            if [[ "$lowered" == *"codex"* || "$lowered" == *"openai codex"* ]]; then
+              printf '%s' "codex"
+              return
+            fi
+
+            if [[ "$lowered" == *"claude"* ]]; then
+              printf '%s' "claude"
+              return
+            fi
+          done
+
+          printf '%s' "$configured"
         }
 
         inferred_working_directory() {
@@ -427,17 +473,25 @@ actor HolyRemoteTmuxDiscoveryService {
           title=$(option_value "$session_name" @holy_title)
           runtime=$(option_value "$session_name" @holy_runtime)
           objective=$(option_value "$session_name" @holy_objective)
-          working_directory=$(option_value "$session_name" @holy_working_directory)
           pane_title=$(pane_value "$session_name" '#{pane_title}')
           window_name=$(pane_value "$session_name" '#{window_name}')
-          if [[ -z "$working_directory" ]]; then
-            working_directory=$(pane_value "$session_name" '#{pane_current_path}')
+          pane_command=$(pane_value "$session_name" '#{pane_current_command}')
+          metadata_working_directory=$(option_value "$session_name" @holy_working_directory)
+          working_directory=$(pane_value "$session_name" '#{pane_current_path}')
+          if [[ -n "$working_directory" ]]; then
             working_directory=$(inferred_working_directory "$working_directory" "$pane_title" "$window_name" "$session_name")
+          else
+            working_directory="$metadata_working_directory"
+            working_directory=$(inferred_working_directory "$working_directory" "$pane_title" "$window_name" "$session_name")
+          fi
+          command=$(option_value "$session_name" @holy_command)
+          runtime=$(inferred_runtime "$runtime" "$pane_command" "$window_name" "$pane_title" "$title" "$command" "$session_name")
+          if generated_holy_title "$title"; then
+            title=""
           fi
           if [[ -z "$title" ]]; then
             title=$(fallback_session_title "$working_directory" "$session_name" "$pane_title" "$window_name")
           fi
-          command=$(option_value "$session_name" @holy_command)
           task_title=$(option_value "$session_name" @holy_task_title)
           task_source=$(option_value "$session_name" @holy_task_source)
           git_fields=$(git_metadata "$working_directory")

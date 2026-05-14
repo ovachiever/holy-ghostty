@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import GhosttyKit
@@ -25,15 +26,21 @@ final class HolySession: ObservableObject, Identifiable {
     private var previewEvidenceSignature: String?
     private var previewEvidenceFirstObservedAt: Date = .now
     private var repeatedPreviewEvidenceCount = 0
+    private var visibleActivitySignature: String?
+    private var visibleActivityChangedAt: Date = .distantPast
 
     init(record: HolySessionRecord, app: ghostty_app_t) {
         self.id = record.id
         self.record = record
         self.surfaceView = Ghostty.SurfaceView(app, baseConfig: record.launchSpec.surfaceConfiguration, uuid: record.id)
         self.activityAt = record.updatedAt
+        surfaceView.setFrameSize(Self.detachedSurfaceFallbackSize)
+        surfaceView.sizeDidChange(Self.detachedSurfaceFallbackSize)
         bind()
         refreshDerivedState(forceGitRefresh: true)
     }
+
+    private static let detachedSurfaceFallbackSize = CGSize(width: 1_240, height: 820)
 
     var title: String {
         let configured = record.launchSpec.resolvedTitle
@@ -85,13 +92,29 @@ final class HolySession: ObservableObject, Identifiable {
         return "\(displayTitle) — \(project)"
     }
 
+    var rosterTitleOverride: String? {
+        Self.rosterTitleOverride(
+            from: record.launchSpec.title,
+            runtime: runtime,
+            transport: record.launchSpec.transport
+        )
+    }
+
     var displayProjectName: String? {
         if let repositoryName = gitSnapshot?.repositoryName {
-            return repositoryName
+            return Self.displayName(fromPathComponent: repositoryName)
+        }
+
+        if let agentProjectName = Self.inferredAgentProjectName(
+            runtime: displayRuntime,
+            surfaceTitle: surfaceView.title,
+            preview: preview
+        ) {
+            return agentProjectName
         }
 
         if let directory = workingDirectory {
-            return URL(fileURLWithPath: directory).lastPathComponent
+            return Self.displayName(fromPathComponent: URL(fileURLWithPath: directory).lastPathComponent)
         }
 
         return nil
@@ -173,6 +196,48 @@ final class HolySession: ObservableObject, Identifiable {
 
     var statusText: String {
         phase.displayName
+    }
+
+    var compactStatusText: String {
+        switch phase {
+        case .active:
+            return phase.displayName
+        case .working:
+            switch runtimeTelemetry.activityKind {
+            case .reading:
+                return "Reading"
+            case .editing:
+                return "Editing"
+            case .command:
+                return "Running"
+            case .stalled:
+                return "Stalled"
+            case .looping:
+                return "Looping"
+            default:
+                return "Working"
+            }
+        case .waitingInput:
+            return "Needs Input"
+        case .completed:
+            return "Done"
+        case .failed:
+            return "Issue"
+        }
+    }
+
+    var activityHelpText: String {
+        guard phase != .active else {
+            return "\(displayRuntime.displayName): Ready"
+        }
+
+        if phase == .working, runtimeTelemetry.activityKind == .failure {
+            return "\(displayRuntime.displayName): Working"
+        }
+
+        return Self.normalizedMetadataString(runtimeTelemetry.headline)
+            ?? Self.normalizedMetadataString(runtimeTelemetry.detail)
+            ?? "\(displayRuntime.displayName): \(compactStatusText)"
     }
 
     var missionDisplay: String {
@@ -361,7 +426,12 @@ final class HolySession: ObservableObject, Identifiable {
             return false
         }
 
-        if Self.isDefaultTitle(record.launchSpec.title, for: runtime) {
+        if Self.isGenericLocalTitle(discoveredTitle, transport: record.launchSpec.transport) {
+            return false
+        }
+
+        if Self.isDefaultTitle(record.launchSpec.title, for: runtime) ||
+            Self.isGenericLocalTitle(record.launchSpec.title, transport: record.launchSpec.transport) {
             return true
         }
 
@@ -415,7 +485,13 @@ final class HolySession: ObservableObject, Identifiable {
         }
 
         let effectiveRuntime = inferredRuntime ?? runtime
-        var nextSignals = Self.detectSignals(runtime: effectiveRuntime, surfaceView: surfaceView, preview: nextPreview)
+        let previewChangedRecently = updateVisibleActivity(for: nextPreview, surfaceTitle: surfaceView.title)
+        var nextSignals = Self.detectSignals(
+            runtime: effectiveRuntime,
+            surfaceView: surfaceView,
+            preview: nextPreview,
+            previewChangedRecently: previewChangedRecently
+        )
         let previewStability = updatePreviewStability(for: nextPreview)
         let nextBudgetTelemetry = HolySessionBudgetParser.updatedTelemetry(
             from: nextPreview,
@@ -425,7 +501,11 @@ final class HolySession: ObservableObject, Identifiable {
         if let budgetSignal = Self.budgetSignal(for: budget, telemetry: effectiveBudgetTelemetry) {
             nextSignals.insert(budgetSignal, at: 0)
         }
-        let nextPhase = Self.classifyPhase(surfaceView: surfaceView, signals: nextSignals)
+        let nextPhase = Self.classifyPhase(
+            surfaceView: surfaceView,
+            signals: nextSignals,
+            stability: previewStability
+        )
         let nextRuntimeTelemetry = HolySessionRuntimeTelemetryParser.telemetry(
             from: .init(
                 runtime: effectiveRuntime,
@@ -536,6 +616,24 @@ final class HolySession: ObservableObject, Identifiable {
         record.updatedAt = date
     }
 
+    private func updateVisibleActivity(for preview: String, surfaceTitle: String) -> Bool {
+        let signature = Self.normalizedVisibleActivitySignature(from: preview, surfaceTitle: surfaceTitle)
+        let now = Date()
+
+        guard visibleActivitySignature != nil else {
+            visibleActivitySignature = signature
+            return false
+        }
+
+        if visibleActivitySignature != signature {
+            visibleActivitySignature = signature
+            visibleActivityChangedAt = now
+            return true
+        }
+
+        return now.timeIntervalSince(visibleActivityChangedAt) <= Self.agentScreenActivityFreshnessInterval
+    }
+
     private func updatePreviewStability(for preview: String) -> HolySessionPreviewStability {
         let evidence = Self.lastMeaningfulLine(from: preview) ?? preview
         let signature = Self.normalizedEvidenceSignature(from: evidence)
@@ -593,13 +691,22 @@ final class HolySession: ObservableObject, Identifiable {
 
     private static func classifyPhase(
         surfaceView: Ghostty.SurfaceView,
-        signals: [HolySessionSignal]
+        signals: [HolySessionSignal],
+        stability: HolySessionPreviewStability
     ) -> HolySessionPhase {
         if surfaceView.processExited {
             if signals.contains(where: { $0.kind == .failure }) {
                 return .failed
             }
             return .completed
+        }
+
+        if surfaceView.progressReport != nil {
+            return .working
+        }
+
+        if signals.contains(where: { $0.kind == .progress }) {
+            return .working
         }
 
         if signals.contains(where: { $0.kind == .failure }) {
@@ -610,19 +717,17 @@ final class HolySession: ObservableObject, Identifiable {
             return .waitingInput
         }
 
-        if surfaceView.progressReport != nil {
-            return .working
-        }
-
         if signals.contains(where: {
             switch $0.kind {
-            case .progress, .reading, .editing, .command:
+            case .reading, .editing, .command:
                 return true
             default:
                 return false
             }
         }) {
-            return .working
+            if stability.repeatedEvidenceCount <= 2 || stability.stagnantDuration < 8 {
+                return .working
+            }
         }
 
         if signals.contains(where: { $0.kind == .completion }) {
@@ -635,13 +740,24 @@ final class HolySession: ObservableObject, Identifiable {
     private static func detectSignals(
         runtime: HolySessionRuntime,
         surfaceView: Ghostty.SurfaceView,
-        preview: String
+        preview: String,
+        previewChangedRecently: Bool = false
     ) -> [HolySessionSignal] {
         let adapter = HolySessionAdapterRegistry.adapter(for: runtime)
         let evidence = lastMeaningfulLine(from: preview) ?? preview
         let activePreview = recentMeaningfulLines(from: preview, maxCount: 3).joined(separator: "\n")
         let lowerActivePreview = activePreview.lowercased()
         let evidenceLooksReady = isReadyLine(evidence)
+        let meaningfulLines = recentMeaningfulLines(from: preview, maxCount: 14)
+        let liveAgentWorkingEvidence = agentWorkingEvidence(
+            runtime: runtime,
+            surfaceTitle: surfaceView.title,
+            lines: meaningfulLines,
+            previewChangedRecently: previewChangedRecently
+        )
+        let hasFreshTerminalActivity = previewChangedRecently
+            || liveAgentWorkingEvidence != nil
+            || surfaceView.progressReport != nil
         var results: [HolySessionSignal] = []
 
         func append(_ signal: HolySessionSignal) {
@@ -655,6 +771,20 @@ final class HolySession: ObservableObject, Identifiable {
                 kind: .progress,
                 headline: progressHeadline(for: surfaceView.progressReport),
                 detail: evidence
+            ))
+        }
+
+        if let liveAgentWorkingEvidence {
+            append(.init(
+                kind: .progress,
+                headline: "\(runtime.displayName) is working",
+                detail: liveAgentWorkingEvidence
+            ))
+        } else if let waitingEvidence = agentWaitingEvidence(runtime: runtime, lines: meaningfulLines) {
+            append(.init(
+                kind: .approval,
+                headline: "\(runtime.displayName) is waiting on you",
+                detail: waitingEvidence
             ))
         }
 
@@ -672,7 +802,7 @@ final class HolySession: ObservableObject, Identifiable {
             "[y/n]",
             "(y/n)",
         ] + adapter.approvalMarkers
-        if approvalMarkers.contains(where: lowerActivePreview.contains) {
+        if liveAgentWorkingEvidence == nil, approvalMarkers.contains(where: lowerActivePreview.contains) {
             append(.init(
                 kind: .approval,
                 headline: "\(adapter.runtime.displayName) needs approval or confirmation",
@@ -699,7 +829,8 @@ final class HolySession: ObservableObject, Identifiable {
             ("can't find session", "Tmux session not found"),
             ("no sessions", "Tmux has no sessions"),
         ] + adapter.failureHeadlines
-        if let failure = failureHeadlines.first(where: { lowerActivePreview.contains($0.0) }) {
+        if liveAgentWorkingEvidence == nil || surfaceView.processExited,
+           let failure = failureHeadlines.first(where: { lowerActivePreview.contains($0.0) }) {
             append(.init(kind: .failure, headline: failure.1, detail: evidence))
         }
 
@@ -711,7 +842,9 @@ final class HolySession: ObservableObject, Identifiable {
             "scanning ",
             "searching ",
         ] + adapter.readingMarkers
-        if !evidenceLooksReady, readingMarkers.contains(where: lowerActivePreview.contains) {
+        if !evidenceLooksReady,
+           hasFreshTerminalActivity,
+           readingMarkers.contains(where: lowerActivePreview.contains) {
             append(.init(kind: .reading, headline: "\(adapter.runtime.displayName) is reading code and context", detail: evidence))
         }
 
@@ -723,7 +856,9 @@ final class HolySession: ObservableObject, Identifiable {
             "updated ",
             "modifying ",
         ] + adapter.editingMarkers
-        if !evidenceLooksReady, editingMarkers.contains(where: lowerActivePreview.contains) {
+        if !evidenceLooksReady,
+           hasFreshTerminalActivity,
+           editingMarkers.contains(where: lowerActivePreview.contains) {
             append(.init(kind: .editing, headline: "\(adapter.runtime.displayName) is editing project files", detail: evidence))
         }
 
@@ -738,7 +873,9 @@ final class HolySession: ObservableObject, Identifiable {
             "yarn ",
             "git ",
         ] + adapter.commandMarkers
-        if !evidenceLooksReady, commandMarkers.contains(where: lowerActivePreview.contains) {
+        if !evidenceLooksReady,
+           hasFreshTerminalActivity,
+           commandMarkers.contains(where: lowerActivePreview.contains) {
             append(.init(kind: .command, headline: "\(adapter.runtime.displayName) is running commands", detail: evidence))
         }
 
@@ -802,6 +939,141 @@ final class HolySession: ObservableObject, Identifiable {
         case .pause:
             return "Progress paused"
         }
+    }
+
+    private static let agentScreenActivityFreshnessInterval: TimeInterval = 4
+
+    private static let agentSpinnerTitlePrefixes: Set<Character> = [
+        "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+        "◐", "◓", "◑", "◒"
+    ]
+
+    private static func isAgentRuntime(_ runtime: HolySessionRuntime) -> Bool {
+        switch runtime {
+        case .claude, .codex, .opencode:
+            return true
+        case .shell:
+            return false
+        }
+    }
+
+    private static func agentWorkingEvidence(
+        runtime: HolySessionRuntime,
+        surfaceTitle: String,
+        lines: [String],
+        previewChangedRecently: Bool
+    ) -> String? {
+        guard isAgentRuntime(runtime) else { return nil }
+
+        if isBusyAgentTitle(surfaceTitle), previewChangedRecently {
+            return normalizedTerminalTitle(surfaceTitle) ?? surfaceTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        for line in lines.reversed() where isAgentBusyStatusLine(line) {
+            return line
+        }
+
+        guard previewChangedRecently else { return nil }
+        return lines.reversed().first(where: isAgentRecentOutputLine)
+    }
+
+    private static func agentWaitingEvidence(runtime: HolySessionRuntime, lines: [String]) -> String? {
+        guard isAgentRuntime(runtime) else { return nil }
+
+        return lines.suffix(8).reversed().first(where: isAgentPromptLine)
+    }
+
+    private static func isBusyAgentTitle(_ title: String) -> Bool {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        if let first = trimmed.first, agentSpinnerTitlePrefixes.contains(first) {
+            return true
+        }
+
+        let lower = trimmed.lowercased()
+        return lower.range(
+            of: #"\b(working|thinking|reasoning|running|searching|editing|writing)\b"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func isAgentBusyStatusLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let lower = trimmed.lowercased()
+        if lower.contains("esc to interrupt") || lower.contains("ctrl-c to interrupt") || lower.contains("ctrl+c to interrupt") {
+            return true
+        }
+
+        if lower.range(of: #"\bworking\s*\([0-9]"#, options: .regularExpression) != nil {
+            return true
+        }
+
+        if hasAgentStatusPrefix(trimmed), lower.range(
+            of: #"\b(working|thinking|reasoning|reading|searching|running|executing|editing|writing|applying|patching|using|calling)\b"#,
+            options: .regularExpression
+        ) != nil {
+            return true
+        }
+
+        return trimmed.range(
+            of: #"^\s*(working|thinking|reasoning|reading|searching|running|executing|editing|writing|applying|patching)\b"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private static func hasAgentStatusPrefix(_ line: String) -> Bool {
+        guard let first = line.first else { return false }
+        return "•✻✢⏺●○◐◓◑◒".contains(first) || agentSpinnerTitlePrefixes.contains(first)
+    }
+
+    private static func isAgentRecentOutputLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 1,
+              !isAgentPromptLine(trimmed),
+              !isAgentFooterLine(trimmed),
+              !isTerminalChromeLine(trimmed) else {
+            return false
+        }
+
+        return true
+    }
+
+    private static func isAgentPromptLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+
+        if lower.hasPrefix("? for shortcuts") || lower.contains("new task?") {
+            return true
+        }
+
+        if trimmed == "›" || trimmed.hasPrefix("› ") {
+            return true
+        }
+
+        if trimmed == ">" || trimmed.hasPrefix("> ") || trimmed.contains("│ >") {
+            return true
+        }
+
+        return lower.contains("type a message") || lower.contains("send a message")
+    }
+
+    private static func isAgentFooterLine(_ line: String) -> Bool {
+        let lower = line.lowercased()
+        return lower.range(of: #"\bgpt-[0-9a-z][0-9a-z.\-]*\b"#, options: .regularExpression) != nil
+            || lower.contains("tokens")
+            || lower.contains("context left")
+    }
+
+    private static func normalizedVisibleActivitySignature(from preview: String, surfaceTitle: String) -> String? {
+        var lines = recentMeaningfulLines(from: preview, maxCount: 16)
+        if let title = normalizedTerminalTitle(surfaceTitle) {
+            lines.append("title: \(title)")
+        }
+        guard !lines.isEmpty else { return nil }
+        return lines.joined(separator: "\n")
     }
 
     private static func lastMeaningfulLine(from preview: String) -> String? {
@@ -873,6 +1145,13 @@ final class HolySession: ObservableObject, Identifiable {
 
     private static func isDefaultTitle(_ title: String, for runtime: HolySessionRuntime) -> Bool {
         let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.range(
+            of: #"^Shell\s+\d+$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            return true
+        }
+
         return normalized.isEmpty
             || normalized == "Shell"
             || normalized == runtime.displayName
@@ -886,6 +1165,201 @@ final class HolySession: ObservableObject, Identifiable {
         }
 
         return normalized
+    }
+
+    private static func rosterTitleOverride(
+        from title: String,
+        runtime: HolySessionRuntime,
+        transport: HolySessionTransportSpec
+    ) -> String? {
+        guard let normalized = normalizedMetadataString(title),
+              !isDefaultTitle(normalized, for: runtime),
+              !isGenericLocalTitle(normalized, transport: transport),
+              !isInternalHolyTmuxTitle(normalized) else {
+            return nil
+        }
+
+        return displayName(fromPathComponent: normalized) ?? normalized
+    }
+
+    private static func isGenericLocalTitle(_ title: String, transport: HolySessionTransportSpec) -> Bool {
+        guard !transport.isRemote else { return false }
+
+        let titleKey = normalizedLocalMachineTitleKey(title)
+        guard !titleKey.isEmpty else { return true }
+
+        let genericKeys: Set<String> = [
+            "local",
+            "local mac",
+            "mac",
+            "machine",
+            "this mac",
+            "localhost",
+        ]
+        if genericKeys.contains(titleKey) {
+            return true
+        }
+
+        return localMachineTitleCandidates()
+            .map(normalizedLocalMachineTitleKey)
+            .contains(titleKey)
+    }
+
+    private static func localMachineTitleCandidates() -> [String] {
+        let processInfo = ProcessInfo.processInfo
+        return [
+            Host.current().localizedName,
+            processInfo.hostName,
+            processInfo.environment["HOSTNAME"],
+        ].compactMap { value in
+            guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                return nil
+            }
+            return trimmed
+        }
+    }
+
+    private static func normalizedLocalMachineTitleKey(_ value: String) -> String {
+        let scalars = value
+            .lowercased()
+            .unicodeScalars
+            .map { CharacterSet.alphanumerics.contains($0) ? Character($0) : " " }
+
+        return String(scalars)
+            .split(separator: " ")
+            .joined(separator: " ")
+    }
+
+    private static func isInternalHolyTmuxTitle(_ title: String) -> Bool {
+        title.range(
+            of: #"^holy-[a-z0-9-]+-[0-9A-Fa-f]{8}$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func displayName(fromPathComponent component: String) -> String? {
+        let normalized = component
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+        let words = normalized
+            .split(separator: " ")
+            .map(String.init)
+        guard !words.isEmpty else { return nil }
+
+        return words.map { word in
+            if word.contains(".") || word == word.uppercased() {
+                return word
+            }
+
+            return word.prefix(1).uppercased() + String(word.dropFirst())
+        }
+        .joined(separator: " ")
+    }
+
+    private static func inferredAgentProjectName(
+        runtime: HolySessionRuntime,
+        surfaceTitle: String,
+        preview: String
+    ) -> String? {
+        switch runtime {
+        case .claude, .codex, .opencode:
+            break
+        case .shell:
+            return nil
+        }
+
+        let evidence = [surfaceTitle, preview]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        guard !evidence.isEmpty else { return nil }
+
+        var seen: Set<String> = []
+        for candidate in inferredAgentProjectCandidates(from: evidence) {
+            guard let projectName = normalizedAgentProjectCandidate(candidate) else { continue }
+            let key = projectName.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            return projectName
+        }
+
+        return nil
+    }
+
+    private static func inferredAgentProjectCandidates(from evidence: String) -> [String] {
+        let patterns = [
+            #"/Custom_Coding/([A-Za-z][A-Za-z0-9._-]{1,47})(?:[/\s]|$)"#,
+            #"(?i)\bon\s+`?([A-Z][A-Za-z0-9._-]{2,47})`?\s+itself\b"#,
+            #"(?i)\b(?:in|inside|within|for|on)\s+`?([A-Z][A-Za-z0-9._-]{2,47})`?\s+(?:repo|repository|project|app|codebase|workspace)\b"#,
+            #"(?i)\b(?:project|repo|repository|workspace|app)\s+(?:called|named|is|for|on|to)?\s*`?([A-Z][A-Za-z0-9._-]{2,47})`?"#,
+            #"`([A-Za-z][A-Za-z0-9._-]{2,47})`\s+(?:repo|repository|project|app|codebase|workspace)\b"#,
+        ]
+
+        return patterns.flatMap { capturedMatches(in: evidence, pattern: $0) }
+    }
+
+    private static func capturedMatches(in text: String, pattern: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return []
+        }
+
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        return regex.matches(in: text, range: range).compactMap { match in
+            guard match.numberOfRanges > 1 else { return nil }
+            let captureRange = match.range(at: 1)
+            guard captureRange.location != NSNotFound else { return nil }
+            return nsText.substring(with: captureRange)
+        }
+    }
+
+    private static func normalizedAgentProjectCandidate(_ candidate: String) -> String? {
+        var trimCharacters = CharacterSet.whitespacesAndNewlines
+        trimCharacters.insert(charactersIn: "`'\".,;:()[]{}<>")
+
+        let trimmed = candidate.trimmingCharacters(in: trimCharacters)
+        guard trimmed.count >= 3,
+              trimmed.count <= 48,
+              trimmed.range(of: #"^[A-Za-z][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+
+        let lower = trimmed.lowercased()
+        let ignoredNames: Set<String> = [
+            "app",
+            "claude",
+            "claude.md",
+            "codebase",
+            "codex",
+            "custom",
+            "custom_coding",
+            "docs",
+            "documentation",
+            "firebase",
+            "ghostty",
+            "holy",
+            "opencode",
+            "project",
+            "readme",
+            "readme.md",
+            "repo",
+            "repository",
+            "root",
+            "shell",
+            "supabase",
+            "swift",
+            "workspace",
+        ]
+        guard !ignoredNames.contains(lower),
+              !lower.hasSuffix(".md"),
+              !lower.hasSuffix(".json"),
+              !lower.hasSuffix(".swift"),
+              !lower.hasSuffix(".txt") else {
+            return nil
+        }
+
+        return displayName(fromPathComponent: trimmed)
     }
 
     private static func inferredRuntime(
@@ -933,9 +1407,13 @@ final class HolySession: ObservableObject, Identifiable {
     private static func containsClaudeMarker(_ evidence: String) -> Bool {
         evidence.contains("claude code")
             || evidence.contains("claude max")
-            || evidence.contains(" claude ")
-            || evidence.hasPrefix("claude ")
-            || evidence.hasPrefix("claude-")
+            || evidence.contains("claude.exe")
+            || evidence.contains("claude.md")
+            || evidence.contains(".claude")
+            || evidence.range(
+                of: #"(^|[^a-z])claude([^a-z]|$)"#,
+                options: .regularExpression
+            ) != nil
     }
 
     private static func containsCodexMarker(_ evidence: String) -> Bool {
@@ -982,8 +1460,8 @@ final class HolySession: ObservableObject, Identifiable {
     private static func rank(for kind: HolySessionSignalKind) -> Int {
         switch kind {
         case .approval: return 0
-        case .failure: return 1
-        case .progress: return 2
+        case .progress: return 1
+        case .failure: return 2
         case .editing: return 3
         case .command: return 4
         case .reading: return 5
