@@ -120,20 +120,31 @@ enum HolyTmuxCommandBuilder {
     }
 
     private static func remoteLaunchWrapper(destination: String, localScript: String) -> String {
-        let sshCommand = shellCommand(["ssh", "-t", destination, shellCommand(["zsh", "-lc", localScript])])
+        let sshCommand = shellCommand(["ssh", "-tt", destination, shellCommand(["zsh", "-lc", localScript])])
         let failureMessage = "Holy Ghostty could not reach \(destination). Reattach after SSH is reachable."
 
         return [
+            terminalInputFlushCommand,
             sshCommand,
             "holy_status=$?",
             "if [ \"$holy_status\" -ne 0 ]; then",
-            "  printf '\\n%s\\n' \(posixQuote(failureMessage))",
-            "  printf 'SSH exited with status %s.\\n' \"$holy_status\"",
-            "  exec \"${SHELL:-/bin/zsh}\" -l",
+            "  \(terminalModeResetCommand)",
+            "  printf '\n%s\n' \(posixQuote(failureMessage))",
+            "  printf 'SSH exited with status %s.\n' \"$holy_status\"",
+            "  sleep 2",
+            "  exit \"$holy_status\"",
             "fi",
             "exit 0",
         ].joined(separator: "; ")
     }
+
+    private static let terminalInputFlushCommand = "python3 -c 'import sys, termios; termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)' 2>/dev/null || true"
+
+    private static let terminalModeResetCommand = [
+        "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?2004l\\033[?25h'",
+        "stty sane 2>/dev/null || true",
+        terminalInputFlushCommand,
+    ].joined(separator: "; ")
 
     private static func sanitizedEnvironment(_ environment: [String: String]) -> [String: String] {
         var sanitized = environment
@@ -222,10 +233,15 @@ enum HolyTmuxCommandBuilder {
         return String(collapsed.prefix(24))
     }
 
+    private static func isGeneratedHolyShellSessionName(_ sessionName: String) -> Bool {
+        let normalized = sessionName.holyTrimmed.lowercased()
+        return normalized.hasPrefix("holy-shell-") && normalized.contains("-shell-")
+    }
+
     private static func shouldDisableImplicitTmux(for launchSpec: HolySessionLaunchSpec) -> Bool {
         guard let tmux = launchSpec.tmux?.normalized,
               let sessionName = tmux.sessionName?.holyTrimmed.nilIfEmpty,
-              sessionName.hasPrefix("holy-shell-shell-") else {
+              isGeneratedHolyShellSessionName(sessionName) else {
             return false
         }
 

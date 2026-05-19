@@ -22,6 +22,7 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var draftLaunchGuardrail: HolyLaunchGuardrail = .clear
     @Published private(set) var draftOwnershipPreview: HolySessionOwnership?
     @Published private(set) var draftLaunchGuardrailRefreshing: Bool = false
+    @Published private(set) var attentionClock: Date = .now
     @Published var paneLayout: HolyPaneLayout = .single {
         didSet {
             guard !suppressAutomaticSelectionPersistence,
@@ -52,6 +53,7 @@ final class HolyWorkspaceStore: ObservableObject {
     private let sessionSupervisor: HolySessionSupervisor
     private var sessionObservationCancellables: Set<AnyCancellable> = []
     private var activeTmuxMetadataRefreshCancellable: AnyCancellable?
+    private var attentionClockCancellable: AnyCancellable?
     private var draftLaunchGuardrailTask: Task<Void, Never>?
     private var selectedSessionReadTask: Task<Void, Never>?
     private var selectedSessionReadTaskKey: String?
@@ -168,6 +170,11 @@ final class HolyWorkspaceStore: ObservableObject {
         sessions.first(where: { $0.id == id })
     }
 
+    func selectSession(_ sessionID: UUID) {
+        selectedSessionID = sessionID
+        clearUnreadAttentionIfNeeded(for: sessionID)
+    }
+
     func showSinglePane() {
         let selectedID = selectedSession?.id ?? sessions.first?.id
         paneLayout = .init(kind: .single, sessionIDs: selectedID.map { [$0] } ?? [])
@@ -194,6 +201,7 @@ final class HolyWorkspaceStore: ObservableObject {
         refreshLocalTmuxSessions()
         refreshActiveRemoteTmuxSessionMetadata()
         startActiveTmuxMetadataRefresh()
+        startAttentionClock()
         persist(pendingEvents: restoration.pendingEvents)
     }
 
@@ -980,10 +988,21 @@ final class HolyWorkspaceStore: ObservableObject {
             .sorted { $0.sessionID.uuidString < $1.sessionID.uuidString }
     }
 
+    private func clearUnreadAttentionIfNeeded(for sessionID: UUID) {
+        guard markSessionSeenIfNeeded(sessionID) else { return }
+        cancelSelectedSessionSeenMark()
+        persist()
+    }
+
     @discardableResult
     private func markSelectedSessionSeenIfNeeded(at date: Date = .init()) -> Bool {
-        guard let selectedSessionID,
-              let session = session(withID: selectedSessionID) else {
+        guard let selectedSessionID else { return false }
+        return markSessionSeenIfNeeded(selectedSessionID, at: date)
+    }
+
+    @discardableResult
+    private func markSessionSeenIfNeeded(_ sessionID: UUID, at date: Date = .init()) -> Bool {
+        guard let session = session(withID: sessionID) else {
             return false
         }
 
@@ -1003,17 +1022,19 @@ final class HolyWorkspaceStore: ObservableObject {
             return
         }
 
-        if attentionMetadataBySessionID[selectedSessionID]?.seenEvidenceSignature == signature {
+        let metadata = attentionMetadataBySessionID[selectedSessionID]
+        let becameAvailableAt = metadata?.lastAttentionBecameAvailableAt ?? session.activityAt
+        if hasSeenCurrentAttention(signature: signature, metadata: metadata, becameAvailableAt: becameAvailableAt) {
             cancelSelectedSessionSeenMark()
             return
         }
 
-        let taskKey = "\(selectedSessionID.uuidString)|\(signature)"
+        let taskKey = "\(selectedSessionID.uuidString)|\(becameAvailableAt.timeIntervalSinceReferenceDate)"
         guard selectedSessionReadTaskKey != taskKey else { return }
 
         selectedSessionReadTask?.cancel()
         selectedSessionReadTaskKey = taskKey
-        selectedSessionReadTask = Task { [weak self, selectedSessionID, signature] in
+        selectedSessionReadTask = Task { [weak self, selectedSessionID] in
             let nanoseconds = UInt64(Self.selectedSessionReadDelay * 1_000_000_000)
             try? await Task.sleep(nanoseconds: nanoseconds)
             guard !Task.isCancelled else { return }
@@ -1021,8 +1042,7 @@ final class HolyWorkspaceStore: ObservableObject {
             await MainActor.run {
                 guard let self,
                       self.selectedSessionID == selectedSessionID,
-                      let session = self.session(withID: selectedSessionID),
-                      self.attentionEvidenceSignature(for: session) == signature else {
+                      self.session(withID: selectedSessionID) != nil else {
                     return
                 }
 
@@ -1071,18 +1091,37 @@ final class HolyWorkspaceStore: ObservableObject {
         at date: Date = .init()
     ) -> Bool {
         let signature = attentionEvidenceSignature(for: session)
+        let isWaitingAttention = isWaitingAttention(session)
         var metadata = existing[session.id] ?? HolySessionAttentionMetadata(sessionID: session.id)
         var changed = false
 
         if metadata.lastAttentionEvidenceSignature != signature {
+            let wasWaitingAttention = metadata.lastAttentionWasWaiting == true
             metadata.lastAttentionEvidenceSignature = signature
-            metadata.lastAttentionBecameAvailableAt = signature == nil ? nil : date
+            if signature == nil {
+                metadata.lastAttentionBecameAvailableAt = nil
+            } else if isWaitingAttention {
+                if !wasWaitingAttention || metadata.lastAttentionBecameAvailableAt == nil {
+                    metadata.lastAttentionBecameAvailableAt = date
+                }
+            } else {
+                metadata.lastAttentionBecameAvailableAt = date
+            }
+            changed = true
+        }
+
+        if metadata.lastAttentionWasWaiting != isWaitingAttention {
+            metadata.lastAttentionWasWaiting = isWaitingAttention
             changed = true
         }
 
         if markSeen,
            signature != nil,
-           metadata.seenEvidenceSignature != signature {
+           !hasSeenCurrentAttention(
+               signature: signature,
+               metadata: metadata,
+               becameAvailableAt: metadata.lastAttentionBecameAvailableAt ?? date
+           ) {
             metadata.seenEvidenceSignature = signature
             metadata.lastSeenAt = date
             changed = true
@@ -1097,6 +1136,23 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         return changed
+    }
+
+    private func isWaitingAttention(_ session: HolySession) -> Bool {
+        session.phase == .waitingInput || session.runtimeTelemetry.activityKind == .approval
+    }
+
+    private func hasSeenCurrentAttention(
+        signature: String?,
+        metadata: HolySessionAttentionMetadata?,
+        becameAvailableAt: Date
+    ) -> Bool {
+        guard signature != nil,
+              let lastSeenAt = metadata?.lastSeenAt else {
+            return false
+        }
+
+        return lastSeenAt >= becameAvailableAt
     }
 
     private func attentionEvidenceSignature(for session: HolySession) -> String? {
@@ -1152,7 +1208,11 @@ final class HolyWorkspaceStore: ObservableObject {
         let metadata = attentionMetadataBySessionID[session.id]
         let signature = attentionEvidenceSignature(for: session)
         let becameAvailableAt = metadata?.lastAttentionBecameAvailableAt ?? session.activityAt
-        let hasSeenCurrentEvidence = signature != nil && metadata?.seenEvidenceSignature == signature
+        let hasSeenCurrentEvidence = hasSeenCurrentAttention(
+            signature: signature,
+            metadata: metadata,
+            becameAvailableAt: becameAvailableAt
+        )
         let detail = attentionDetail(for: session)
 
         if session.phase == .failed || session.runtimeTelemetry.activityKind == .failure {
@@ -1223,25 +1283,25 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         if session.phase == .waitingInput || session.runtimeTelemetry.activityKind == .approval {
-            let age = Date().timeIntervalSince(becameAvailableAt)
+            let age = attentionClock.timeIntervalSince(becameAvailableAt)
             if age >= Self.staleReplyInterval {
                 return .init(
-                    kind: .staleReply,
-                    symbolName: "clock.fill",
-                    title: "Reply overdue",
+                    kind: .dormantReply,
+                    symbolName: "moon.fill",
+                    title: "Dormant",
                     detail: detail,
-                    isProminent: true,
+                    isProminent: false,
                     becameAvailableAt: becameAvailableAt
                 )
             }
 
             if age >= Self.overdueReplyInterval {
                 return .init(
-                    kind: .overdueReply,
-                    symbolName: "clock",
-                    title: "Reply aging",
+                    kind: .sleepingReply,
+                    symbolName: "moon.zzz.fill",
+                    title: "Sleeping",
                     detail: detail,
-                    isProminent: true,
+                    isProminent: false,
                     becameAvailableAt: becameAvailableAt
                 )
             }
@@ -1465,6 +1525,16 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         refreshActiveRemoteTmuxSessionMetadata()
+    }
+
+    private func startAttentionClock() {
+        guard attentionClockCancellable == nil else { return }
+
+        attentionClockCancellable = Timer.publish(every: 60, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] date in
+                self?.attentionClock = date
+            }
     }
 
     private var hasActiveLocalTmuxSessions: Bool {

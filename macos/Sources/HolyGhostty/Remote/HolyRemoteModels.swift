@@ -104,6 +104,40 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
         .contains { ($0?.holyTrimmed.nilIfEmpty) != nil }
     }
 
+    var shouldHideFromDiscovery: Bool {
+        isGeneratedHolyShellSessionName && !hasMeaningfulDiscoveryIdentity
+    }
+
+    private var isGeneratedHolyShellSessionName: Bool {
+        let normalized = sessionName.holyTrimmed.lowercased()
+        return normalized.hasPrefix("holy-shell-") && normalized.contains("-shell-")
+    }
+
+    private var hasMeaningfulDiscoveryIdentity: Bool {
+        if let title = normalizedTitle,
+           !Self.isGeneratedDefaultTitle(title) {
+            return true
+        }
+
+        if let runtime,
+           runtime != .shell {
+            return true
+        }
+
+        if (objective?.holyTrimmed.nilIfEmpty) != nil
+            || (bootstrapCommand?.holyTrimmed.nilIfEmpty) != nil
+            || (taskTitle?.holyTrimmed.nilIfEmpty) != nil
+            || (taskSource?.holyTrimmed.nilIfEmpty) != nil {
+            return true
+        }
+
+        if gitSummary != nil || projectTitleForDefaultSession != nil {
+            return true
+        }
+
+        return false
+    }
+
     var displayTitle: String {
         if let projectTitle = projectTitleForDefaultSession {
             return projectTitle

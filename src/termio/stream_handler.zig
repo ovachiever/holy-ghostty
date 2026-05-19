@@ -14,6 +14,7 @@ const terminfo = @import("../terminfo/main.zig");
 const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
+const suppress_identity_reports = build_config.app_runtime == .none and builtin.target.os.tag == .macos;
 
 /// This is used as the handler for the terminal.Stream type. This is
 /// stateful and is expected to live for the entire lifetime of the terminal.
@@ -813,6 +814,8 @@ pub const StreamHandler = struct {
         self: *StreamHandler,
         req: terminal.DeviceAttributeReq,
     ) !void {
+        if (comptime suppress_identity_reports) return;
+
         // For the below, we quack as a VT220. We don't quack as
         // a 420 because we don't support DCS sequences.
         switch (req) {
@@ -975,6 +978,8 @@ pub const StreamHandler = struct {
     pub fn reportXtversion(
         self: *StreamHandler,
     ) !void {
+        if (comptime suppress_identity_reports) return;
+
         log.debug("reporting XTVERSION: ghostty {s}", .{build_config.version_string});
         var buf: [288]u8 = undefined;
         const resp = try std.fmt.bufPrint(

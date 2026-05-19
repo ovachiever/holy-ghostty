@@ -6,7 +6,7 @@ import AppKit
 
 private enum HolyWorkspaceLayout {
     static let rosterMinWidth: CGFloat = 180
-    static let rosterDefaultWidth: CGFloat = 250
+    static let rosterDefaultWidth: CGFloat = 272
     static let rosterMaxWidth: CGFloat = 560
     static let detailMinimumVisibleWidth: CGFloat = 420
     static let splitHandleWidth: CGFloat = 8
@@ -52,7 +52,7 @@ struct HolyWorkspaceRootView: View {
     @EnvironmentObject private var ghostty: Ghostty.App
     @ObservedObject var store: HolyWorkspaceStore
     @State private var diffCompareSessionIDRaw: String?
-    @AppStorage("holy.workspace.rosterWidth.v2") private var rosterWidthRaw = Double(HolyWorkspaceLayout.rosterDefaultWidth)
+    @AppStorage("holy.workspace.rosterWidth.v3") private var rosterWidthRaw = Double(HolyWorkspaceLayout.rosterDefaultWidth)
     @State private var rosterDragStartWidth: CGFloat?
 
     var body: some View {
@@ -91,6 +91,7 @@ struct HolyWorkspaceRootView: View {
         }
         .onAppear(perform: focusSelectedSession)
         .onChange(of: store.selectedSessionID) { _ in focusSelectedSession() }
+        .onChange(of: selectedSessionObjectIdentifier) { _ in focusSelectedSession() }
     }
 
     // MARK: - Helpers
@@ -677,18 +678,22 @@ struct HolyWorkspaceRootView: View {
         }
     }
 
+    private var selectedSessionObjectIdentifier: ObjectIdentifier? {
+        store.selectedSession.map(ObjectIdentifier.init)
+    }
+
     private func focusSelectedSession() {
         guard let session = store.selectedSession else { return }
         Ghostty.moveFocus(to: session.surfaceView)
     }
 
     private func select(_ session: HolySession) {
-        store.selectedSessionID = session.id
+        store.selectSession(session.id)
         Ghostty.moveFocus(to: session.surfaceView)
     }
 
     private func promote(_ session: HolySession) {
-        store.selectedSessionID = session.id
+        store.selectSession(session.id)
         Ghostty.moveFocus(to: session.surfaceView)
     }
 
@@ -718,7 +723,7 @@ struct HolyWorkspaceRootView: View {
         state: HolySessionAttentionPresentation
     ) -> String {
         switch state.kind {
-        case .approvalNeeded, .planningQuestion, .newReply, .waitingQuiet, .overdueReply, .staleReply:
+        case .approvalNeeded, .planningQuestion, .newReply, .waitingQuiet, .sleepingReply, .dormantReply, .overdueReply, .staleReply:
             return "\(state.title) \(elapsedText(since: state.becameAvailableAt ?? session.activityAt))"
         default:
             return state.title
@@ -975,6 +980,7 @@ private struct HolySessionGridTile: View {
                 Ghostty.SurfaceWrapper(surfaceView: session.surfaceView, isSplit: true)
                     .environmentObject(ghosttyApp)
                     .ghosttyLastFocusedSurface(Weak(session.surfaceView))
+                    .id(ObjectIdentifier(session))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 

@@ -65,8 +65,9 @@ Session roster controls:
 
 - `New`: start a tmux-backed session from the selected default launch profile.
 - `Clear`: detach all visible sessions from the workspace roster without stopping tmux.
-- `SSH`: open SSH/tmux hosts.
-- `More`: launch profiles, templates, SSH hosts, history, duplicate, detach, and kill from roster.
+- `Sync`: refresh and reconnect tmux sessions in the roster.
+- `Hosts`: open local and remote tmux hosts.
+- `More`: launch profiles, templates, hosts, history, duplicate, detach, and kill from roster.
 
 Holy Ghostty creates generated launch profiles for `Local Mac` and configured SSH hosts. The default `New` profile is stored in local SQLite state, so personal choices such as defaulting `New` to a remote workstation never need to be committed to the public repo.
 

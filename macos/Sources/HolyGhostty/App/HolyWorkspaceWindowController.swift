@@ -88,7 +88,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     func createSession(from baseConfig: Ghostty.SurfaceConfiguration? = nil) -> HolySession? {
         let session = workspaceStore.createSession(from: baseConfig)
         if let session {
-            workspaceStore.selectedSessionID = session.id
+            workspaceStore.selectSession(session.id)
             showAndActivate()
         }
         return session
@@ -101,7 +101,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     ) -> HolySession? {
         let session = workspaceStore.createSession(with: launchSpec, origin: origin)
         if let session {
-            workspaceStore.selectedSessionID = session.id
+            workspaceStore.selectSession(session.id)
             showAndActivate()
         }
         return session
@@ -154,7 +154,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     }
 
     func focus(surfaceView: Ghostty.SurfaceView) {
-        workspaceStore.selectedSessionID = surfaceView.id
+        workspaceStore.selectSession(surfaceView.id)
         showAndActivate()
     }
 

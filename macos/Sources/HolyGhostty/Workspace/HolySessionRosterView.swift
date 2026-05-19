@@ -64,7 +64,7 @@ struct HolySessionRosterView: View {
                                         attention: store.attentionPresentation(for: session),
                                         isSelected: store.selectedSessionID == session.id,
                                         compact: compact,
-                                        onSelect: { store.selectedSessionID = session.id },
+                                        onSelect: { store.selectSession(session.id) },
                                         onDuplicate: { store.duplicate(session.id) },
                                         canReattach: store.canReattachSession(session),
                                         onReattach: { store.reattach(session) },
@@ -165,7 +165,7 @@ struct HolySessionRosterView: View {
             Button {
                 onPresentRemoteHosts()
             } label: {
-                Label("SSH Hosts", systemImage: "network")
+                Label("Hosts", systemImage: "network")
             }
 
             Button {
@@ -249,17 +249,17 @@ struct HolySessionRosterView: View {
                 .disabled(store.sessions.isEmpty)
 
                 rosterActionButton(
-                    title: "Join",
+                    title: "Sync",
                     symbol: "arrow.triangle.2.circlepath",
-                    help: "Reattach every SSH tmux session in this roster",
+                    help: "Refresh and reconnect tmux sessions in this roster",
                     action: { store.reattachAllSessions() }
                 )
                 .disabled(!store.hasReattachableSessions)
 
                 rosterActionButton(
-                    title: "SSH",
+                    title: "Hosts",
                     symbol: "network",
-                    help: "Open SSH and tmux hosts",
+                    help: "Open local and remote tmux hosts",
                     action: onPresentRemoteHosts
                 )
             }
@@ -456,7 +456,8 @@ private struct HolyRosterRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             HolyAgentStatusOrb(
-                state: activityIndicatorState
+                state: activityIndicatorState,
+                newReplyBecameAvailableAt: attention.kind == .newReply ? attention.becameAvailableAt : nil
             )
             .frame(width: 18, height: 18)
             .help(attention.helpText)
@@ -660,6 +661,10 @@ private struct HolyRosterRow: View {
             return .newReply
         case .waitingQuiet:
             return .waitingQuiet
+        case .sleepingReply:
+            return .sleepingReply
+        case .dormantReply:
+            return .dormantReply
         case .overdueReply:
             return .overdueReply
         case .staleReply:
@@ -720,6 +725,8 @@ private enum HolyRosterActivityState {
     case approvalNeeded
     case newReply
     case waitingQuiet
+    case sleepingReply
+    case dormantReply
     case overdueReply
     case staleReply
     case done
@@ -747,6 +754,8 @@ enum HolyAgentPalette {
     static let done = Color(red: 0.42, green: 0.47, blue: 0.52)
     static let stalled = Color(red: 1.0, green: 0.47, blue: 0.22)
     static let waitingReply = Color(red: 0.30, green: 0.76, blue: 1.0)
+    static let sleepingReply = Color(red: 0.44, green: 0.55, blue: 0.66)
+    static let dormantReply = Color(red: 0.58, green: 0.54, blue: 0.48)
     static let approvalNeeded = Color(red: 1.0, green: 0.58, blue: 0.22)
     static let freshWait = Color(red: 0.12, green: 0.86, blue: 1.0)
     static let planningQuestion = Color(red: 1.0, green: 0.78, blue: 0.30)
@@ -767,6 +776,10 @@ extension HolySessionAttentionKind {
             return HolyAgentPalette.swarmGold
         case .newReply:
             return HolyAgentPalette.waitingReply
+        case .sleepingReply:
+            return HolyAgentPalette.sleepingReply
+        case .dormantReply:
+            return HolyAgentPalette.dormantReply
         case .overdueReply:
             return HolyAgentPalette.agingWait
         case .staleReply:
@@ -830,6 +843,7 @@ enum HolyWaitingFreshness {
 
 private struct HolyAgentStatusOrb: View {
     let state: HolyRosterActivityState
+    var newReplyBecameAvailableAt: Date?
 
     var body: some View {
         switch state {
@@ -845,10 +859,14 @@ private struct HolyAgentStatusOrb: View {
         case .approvalNeeded:
             HolyAgentSymbolOrb(systemName: "hand.raised.fill", color: HolyAgentPalette.approvalNeeded)
         case .newReply:
-            HolyAgentWaitingOrb()
-                .frame(width: 15, height: 15)
+            HolyAgentWaitingOrb(becameAvailableAt: newReplyBecameAvailableAt)
+                .frame(width: 16, height: 16)
         case .waitingQuiet:
             HolyAgentStaticOrb(color: HolyGhosttyTheme.textTertiary, symbol: nil, opacity: 0.40)
+        case .sleepingReply:
+            HolyAgentSymbolOrb(systemName: "moon.zzz.fill", color: HolyAgentPalette.sleepingReply)
+        case .dormantReply:
+            HolyAgentSymbolOrb(systemName: "moon.fill", color: HolyAgentPalette.dormantReply)
         case .overdueReply:
             HolyAgentSymbolOrb(systemName: "clock", color: HolyAgentPalette.agingWait)
         case .staleReply:
@@ -960,8 +978,48 @@ private struct HolyAgentWorkingSpinner: View {
 }
 
 private struct HolyAgentWaitingOrb: View {
+    private static let freshnessDuration: TimeInterval = 10 * 60
+
+    let becameAvailableAt: Date?
+
     var body: some View {
-        HolyAgentSymbolOrb(systemName: "arrowshape.turn.up.left.fill", color: HolyAgentPalette.waitingReply)
+        TimelineView(.animation) { context in
+            let remaining = freshnessRemaining(at: context.date)
+
+            ZStack {
+                if remaining > 0 {
+                    Circle()
+                        .stroke(HolyAgentPalette.waitingReply.opacity(0.18), lineWidth: 1.3)
+                        .frame(width: 16, height: 16)
+
+                    Circle()
+                        .trim(from: 0, to: remaining)
+                        .stroke(
+                            HolyAgentPalette.waitingReply.opacity(0.88),
+                            style: StrokeStyle(lineWidth: 1.45, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                        .frame(width: 16, height: 16)
+                }
+
+                Circle()
+                    .fill(HolyAgentPalette.waitingReply.opacity(0.18))
+                    .frame(width: 13.5, height: 13.5)
+
+                Image(systemName: "arrowshape.turn.up.left.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(HolyAgentPalette.waitingReply)
+                    .frame(width: 13.5, height: 13.5)
+            }
+            .frame(width: 16, height: 16)
+        }
+    }
+
+    private func freshnessRemaining(at date: Date) -> CGFloat {
+        guard let becameAvailableAt else { return 0 }
+        let age = max(0, date.timeIntervalSince(becameAvailableAt))
+        guard age < Self.freshnessDuration else { return 0 }
+        return CGFloat(max(0, min(1, 1 - (age / Self.freshnessDuration))))
     }
 }
 

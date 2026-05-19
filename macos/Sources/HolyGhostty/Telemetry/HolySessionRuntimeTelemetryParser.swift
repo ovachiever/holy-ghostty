@@ -34,7 +34,8 @@ enum HolySessionRuntimeTelemetryParser {
     ) -> HolySessionRuntimeTelemetry? {
         let evidence = lastMeaningfulLine(from: source.preview) ?? source.preview
         let primarySignal = source.signals.first
-        let progressPercent = source.surfaceView.progressReport?.progress.flatMap(Int.init)
+        let activeProgressReport = activeProgressReport(from: source.surfaceView.progressReport)
+        let progressPercent = activeProgressReport?.progress.flatMap(Int.init)
         let command = extractCommand(from: evidence)
         let filePath = extractFilePath(from: evidence)
         let nextStepHint = extractNextStepHint(from: evidence)
@@ -42,10 +43,10 @@ enum HolySessionRuntimeTelemetryParser {
         let stallKind = inferredStallKind(
             phase: source.phase,
             stability: source.stability,
-            hasProgressReport: source.surfaceView.progressReport != nil,
+            hasProgressReport: activeProgressReport != nil,
             primarySignal: primarySignal
         )
-        let hasStructuredSignal = source.surfaceView.progressReport != nil
+        let hasStructuredSignal = activeProgressReport != nil
             || primarySignal != nil
             || command != nil
             || nextStepHint != nil
@@ -59,7 +60,7 @@ enum HolySessionRuntimeTelemetryParser {
         let activityKind = inferredActivityKind(
             primarySignal: primarySignal,
             evidence: evidence,
-            hasProgressReport: source.surfaceView.progressReport != nil,
+            hasProgressReport: activeProgressReport != nil,
             hasCommand: command != nil,
             hasFilePath: filePath != nil,
             stallKind: stallKind
@@ -97,6 +98,18 @@ enum HolySessionRuntimeTelemetryParser {
         }
 
         return next
+    }
+
+    private static func activeProgressReport(
+        from report: Ghostty.Action.ProgressReport?
+    ) -> Ghostty.Action.ProgressReport? {
+        guard let report else { return nil }
+        switch report.state {
+        case .set, .indeterminate:
+            return report
+        case .remove, .error, .pause:
+            return nil
+        }
     }
 
     private static func activityKind(for signal: HolySessionSignal) -> HolySessionActivityKind {

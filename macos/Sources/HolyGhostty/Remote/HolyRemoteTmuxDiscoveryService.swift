@@ -151,7 +151,7 @@ actor HolyRemoteTmuxDiscoveryService {
 
                 guard fields.count >= 10 else { return nil }
 
-                return .init(
+                let session = HolyDiscoveredTmuxSession(
                     hostID: host.id,
                     hostLabel: host.displayTitle,
                     hostDestination: host.sshDestination,
@@ -169,6 +169,9 @@ actor HolyRemoteTmuxDiscoveryService {
                     windowCount: Int(fields[2]) ?? 0,
                     discoveredAt: discoveredAt
                 )
+
+                guard !session.shouldHideFromDiscovery else { return nil }
+                return session
             }
             .sorted(by: sessionSortOrder)
     }

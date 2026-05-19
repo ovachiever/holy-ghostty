@@ -540,7 +540,7 @@ final class HolySession: ObservableObject, Identifiable {
             || previousInferredRuntime != inferredRuntime
             || nextBudgetTelemetry != nil
             || nextRuntimeTelemetry != nil
-            || surfaceView.progressReport != nil {
+            || Self.activeProgressReport(from: surfaceView.progressReport) != nil {
             markUpdated()
         }
 
@@ -708,7 +708,7 @@ final class HolySession: ObservableObject, Identifiable {
             return .completed
         }
 
-        if surfaceView.progressReport != nil {
+        if activeProgressReport(from: surfaceView.progressReport) != nil {
             return .working
         }
 
@@ -763,9 +763,10 @@ final class HolySession: ObservableObject, Identifiable {
             lines: meaningfulLines,
             previewChangedRecently: previewChangedRecently
         )
+        let activeProgressReport = activeProgressReport(from: surfaceView.progressReport)
         let hasFreshTerminalActivity = liveAgentWorkingEvidence != nil
             || swarmEvidence != nil
-            || surfaceView.progressReport != nil
+            || activeProgressReport != nil
         var results: [HolySessionSignal] = []
 
         func append(_ signal: HolySessionSignal) {
@@ -774,10 +775,10 @@ final class HolySession: ObservableObject, Identifiable {
             results.append(signal)
         }
 
-        if surfaceView.progressReport != nil {
+        if activeProgressReport != nil {
             append(.init(
                 kind: .progress,
-                headline: progressHeadline(for: surfaceView.progressReport),
+                headline: progressHeadline(for: activeProgressReport),
                 detail: evidence
             ))
         }
@@ -965,6 +966,18 @@ final class HolySession: ObservableObject, Identifiable {
         }
     }
 
+    private static func activeProgressReport(
+        from report: Ghostty.Action.ProgressReport?
+    ) -> Ghostty.Action.ProgressReport? {
+        guard let report else { return nil }
+        switch report.state {
+        case .set, .indeterminate:
+            return report
+        case .remove, .error, .pause:
+            return nil
+        }
+    }
+
     private static let agentScreenActivityFreshnessInterval: TimeInterval = 4
 
     private static let agentSpinnerTitlePrefixes: Set<Character> = [
@@ -989,9 +1002,15 @@ final class HolySession: ObservableObject, Identifiable {
     ) -> String? {
         guard isAgentRuntime(runtime) else { return nil }
 
-        if isBusyAgentTitle(surfaceTitle) {
+        if let liveStatusEvidence = lines.suffix(8).reversed().first(where: isLiveAgentStatusLine) {
+            return liveStatusEvidence
+        }
+
+        if previewChangedRecently, isBusyAgentTitle(surfaceTitle) {
             return normalizedTerminalTitle(surfaceTitle) ?? surfaceTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+
+        guard previewChangedRecently else { return nil }
 
         for line in lines.reversed() where isAgentBusyStatusLine(line) {
             return line
@@ -1086,7 +1105,7 @@ final class HolySession: ObservableObject, Identifiable {
         ) != nil
     }
 
-    private static func isAgentBusyStatusLine(_ line: String) -> Bool {
+    private static func isLiveAgentStatusLine(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
 
@@ -1095,26 +1114,48 @@ final class HolySession: ObservableObject, Identifiable {
             return true
         }
 
+        if lower.contains("thinking with high effort")
+            || lower.contains("thinking with medium effort")
+            || lower.contains("thinking with low effort")
+            || lower.contains("almost done thinking") {
+            return true
+        }
+
+        return lower.range(
+            of: #"\([0-9]+(?:h|m|s)(?:\s+[0-9]+s)?[^)]*\b(thinking|reasoning|working|running|reading|searching|executing|editing|writing|applying|patching|tooling|scaffolding|implementing|installing|creating|fixing)\b"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func isAgentBusyStatusLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        if isLiveAgentStatusLine(trimmed) {
+            return true
+        }
+
+        let lower = trimmed.lowercased()
         if lower.range(of: #"\bworking\s*\([0-9]"#, options: .regularExpression) != nil {
             return true
         }
 
-        if hasAgentStatusPrefix(trimmed), lower.range(
-            of: #"\b(working|thinking|reasoning|reading|searching|running|executing|editing|writing|applying|patching|using|calling|doodling|tooling)\b"#,
-            options: .regularExpression
-        ) != nil {
-            return true
-        }
+        let statusBody = agentStatusBody(from: trimmed)
 
-        return trimmed.range(
-            of: #"^\s*(working|thinking|reasoning|reading|searching|running|executing|editing|writing|applying|patching|doodling|tooling)\b"#,
+        return statusBody.range(
+            of: #"^\s*(working|thinking|reasoning|reading|searching|running|executing|editing|writing|applying|patching|doodling|tooling|scaffolding|implementing|installing|creating|fixing)\b"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
     }
 
-    private static func hasAgentStatusPrefix(_ line: String) -> Bool {
-        guard let first = line.first else { return false }
-        return "•✻✢⏺●○◐◓◑◒".contains(first) || agentSpinnerTitlePrefixes.contains(first)
+    private static func agentStatusBody(from line: String) -> String {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first,
+              "•·✻✢⏺●○◐◓◑◒".contains(first) || agentSpinnerTitlePrefixes.contains(first) else {
+            return trimmed
+        }
+
+        return String(trimmed.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func isAgentRecentOutputLine(_ line: String) -> Bool {

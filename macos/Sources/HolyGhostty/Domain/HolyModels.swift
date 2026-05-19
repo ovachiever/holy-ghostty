@@ -98,6 +98,8 @@ enum HolySessionAttentionKind: String, Codable, Equatable {
     case swarming
     case newReply
     case waitingQuiet
+    case sleepingReply
+    case dormantReply
     case overdueReply
     case staleReply
     case planningQuestion
@@ -114,6 +116,7 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
     var seenEvidenceSignature: String?
     var lastAttentionEvidenceSignature: String?
     var lastAttentionBecameAvailableAt: Date?
+    var lastAttentionWasWaiting: Bool?
     var updatedAt: Date
 
     var id: UUID { sessionID }
@@ -124,6 +127,7 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
         seenEvidenceSignature: String? = nil,
         lastAttentionEvidenceSignature: String? = nil,
         lastAttentionBecameAvailableAt: Date? = nil,
+        lastAttentionWasWaiting: Bool? = nil,
         updatedAt: Date = .init()
     ) {
         self.sessionID = sessionID
@@ -131,6 +135,7 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
         self.seenEvidenceSignature = seenEvidenceSignature
         self.lastAttentionEvidenceSignature = lastAttentionEvidenceSignature
         self.lastAttentionBecameAvailableAt = lastAttentionBecameAvailableAt
+        self.lastAttentionWasWaiting = lastAttentionWasWaiting
         self.updatedAt = updatedAt
     }
 }

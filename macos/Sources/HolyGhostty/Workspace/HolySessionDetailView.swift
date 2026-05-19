@@ -101,7 +101,7 @@ struct HolySessionDetailView: View {
             Ghostty.SurfaceWrapper(surfaceView: session.surfaceView, isSplit: splitSurface)
                 .environmentObject(ghosttyApp)
                 .ghosttyLastFocusedSurface(Weak(session.surfaceView))
-                .id(session.id)
+                .id(ObjectIdentifier(session))
         } else {
             HolyGhosttyEmptyStateView(
                 title: "Surface unavailable",
