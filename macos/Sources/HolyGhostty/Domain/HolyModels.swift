@@ -4,7 +4,7 @@ import GhosttyKit
 enum HolyLocalTmuxDefaults {
     static var workingDirectory: String {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents/AI/Custom_Coding", isDirectory: true)
+            .appendingPathComponent("Custom-Coding", isDirectory: true)
             .path
     }
 

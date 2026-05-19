@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./holy-ghostty-logo.jpeg" alt="Holy Ghostty logo" width="120">
+  <img src="./docs/holy-ghostty/assets/holy-ghostty-logo.jpeg" alt="Holy Ghostty logo" width="120">
 </p>
 
 <h1 align="center">Holy Ghostty</h1>

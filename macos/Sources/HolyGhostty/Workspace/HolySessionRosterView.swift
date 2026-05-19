@@ -516,11 +516,25 @@ private struct HolyRosterRow: View {
         .padding(.vertical, 4)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(isSelected ? HolyGhosttyTheme.bgSurface : Color.clear)
+                .fill(
+                    isSelected
+                        ? HolyGhosttyTheme.halo.opacity(0.16)
+                        : Color.clear
+                )
+        )
+        .overlay(
+            HStack(spacing: 0) {
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(isSelected ? HolyGhosttyTheme.halo : Color.clear)
+                    .frame(width: 3)
+                    .padding(.vertical, 5)
+
+                Spacer(minLength: 0)
+            }
         )
         .overlay(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(isSelected ? rowOutlineColor.opacity(0.18) : Color.clear, lineWidth: 0.5)
+                .stroke(isSelected ? rowOutlineColor.opacity(0.55) : Color.clear, lineWidth: 0.8)
         )
         .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .onTapGesture(perform: onSelect)

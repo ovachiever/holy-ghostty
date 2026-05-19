@@ -1047,6 +1047,15 @@ extension Ghostty {
             var x = event.scrollingDeltaX
             var y = event.scrollingDeltaY
             let precision = event.hasPreciseScrollingDeltas
+            let momentum = Ghostty.Input.Momentum(event.momentumPhase)
+
+            // Terminal mouse protocols have no inertial-scroll primitive. If a
+            // mouse-aware terminal app such as tmux has captured mouse input,
+            // forwarding macOS momentum turns one trackpad gesture into a
+            // delayed backlog of real wheel events.
+            if precision, surfaceModel.mouseCaptured, momentum.isMomentum {
+                return
+            }
 
             if precision {
                 // We do a 2x speed multiplier. This is subjective, it "feels" better to me.
@@ -1059,7 +1068,7 @@ extension Ghostty {
             let scrollEvent = Ghostty.Input.MouseScrollEvent(
                 x: x,
                 y: y,
-                mods: .init(precision: precision, momentum: .init(event.momentumPhase))
+                mods: .init(precision: precision, momentum: momentum)
             )
             surfaceModel.sendMouseScroll(scrollEvent)
         }

@@ -134,10 +134,12 @@ extension Ghostty {
             }
 
             let imageURL = holyDir.appendingPathComponent("background.png")
-            if !fm.fileExists(atPath: imageURL.path) {
-                guard let asset = NSDataAsset(name: "HolyGhosttyLogoASCII") else {
-                    return nil
-                }
+            guard let asset = NSDataAsset(name: "HolyGhosttyLogoASCII") else {
+                return nil
+            }
+
+            let currentImageData = try? Data(contentsOf: imageURL)
+            if currentImageData != asset.data {
                 do {
                     try asset.data.write(to: imageURL, options: .atomic)
                 } catch {
@@ -151,9 +153,10 @@ extension Ghostty {
             # so anything you set in ~/.config/ghostty/config overrides these.
             background-image = \(imageURL.path)
             background-image-opacity = 0.04
-            background-image-fit = stretch
+            background-image-fit = contain
             background-image-position = center
             background-image-repeat = false
+            mouse-scroll-multiplier = precision:0.25,discrete:3
             window-padding-y = 34,2
             """
 

@@ -756,7 +756,11 @@ final class HolySession: ObservableObject, Identifiable {
         let lowerActivePreview = activePreview.lowercased()
         let evidenceLooksReady = isReadyLine(evidence)
         let meaningfulLines = recentMeaningfulLines(from: preview, maxCount: 14)
-        let swarmEvidence = agentSwarmEvidence(runtime: runtime, lines: meaningfulLines)
+        let swarmEvidence = agentSwarmEvidence(
+            runtime: runtime,
+            lines: meaningfulLines,
+            previewChangedRecently: previewChangedRecently
+        )
         let liveAgentWorkingEvidence = agentWorkingEvidence(
             runtime: runtime,
             surfaceTitle: surfaceView.title,
@@ -1000,7 +1004,7 @@ final class HolySession: ObservableObject, Identifiable {
         lines: [String],
         previewChangedRecently: Bool
     ) -> String? {
-        guard isAgentRuntime(runtime) else { return nil }
+        guard isAgentRuntime(runtime), previewChangedRecently else { return nil }
 
         if let liveStatusEvidence = lines.suffix(8).reversed().first(where: isLiveAgentStatusLine) {
             return liveStatusEvidence
@@ -1019,8 +1023,12 @@ final class HolySession: ObservableObject, Identifiable {
         return nil
     }
 
-    private static func agentSwarmEvidence(runtime: HolySessionRuntime, lines: [String]) -> String? {
-        guard isAgentRuntime(runtime) else { return nil }
+    private static func agentSwarmEvidence(
+        runtime: HolySessionRuntime,
+        lines: [String],
+        previewChangedRecently: Bool
+    ) -> String? {
+        guard isAgentRuntime(runtime), previewChangedRecently else { return nil }
 
         let recent = Array(lines.suffix(18))
         if let liveLine = recent.reversed().first(where: isLiveAgentSwarmLine) {
@@ -1418,7 +1426,7 @@ final class HolySession: ObservableObject, Identifiable {
 
     private static func inferredAgentProjectCandidates(from evidence: String) -> [String] {
         let patterns = [
-            #"/Custom_Coding/([A-Za-z][A-Za-z0-9._-]{1,47})(?:[/\s]|$)"#,
+            #"/Custom[-_]Coding/([A-Za-z][A-Za-z0-9._-]{1,47})(?:[/\s]|$)"#,
             #"(?i)\bon\s+`?([A-Z][A-Za-z0-9._-]{2,47})`?\s+itself\b"#,
             #"(?i)\b(?:in|inside|within|for|on)\s+`?([A-Z][A-Za-z0-9._-]{2,47})`?\s+(?:repo|repository|project|app|codebase|workspace)\b"#,
             #"(?i)\b(?:project|repo|repository|workspace|app)\s+(?:called|named|is|for|on|to)?\s*`?([A-Z][A-Za-z0-9._-]{2,47})`?"#,
