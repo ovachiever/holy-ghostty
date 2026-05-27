@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="./docs/holy-ghostty/assets/holy-ghostty-app.png" alt="Holy Ghostty workspace" width="920">
+  <img src="./docs/holy-ghostty/assets/holy-ghostty-app.jpg" alt="Holy Ghostty workspace" width="920">
 </p>
 
 ## Current State
