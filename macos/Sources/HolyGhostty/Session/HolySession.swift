@@ -19,14 +19,6 @@ final class HolySession: ObservableObject, Identifiable {
     @Published private(set) var activityAt: Date
     @Published private(set) var inferredRuntime: HolySessionRuntime?
 
-    /// Snapshot of `surfaceView.title` taken inside `refreshDerivedState`.
-    /// `title` and `displayTitle` read this instead of `surfaceView.title`
-    /// directly so the roster doesn't flip the session name during active
-    /// scroll — tmux re-emits OSC title sequences as the user scrolls through
-    /// copy-mode and the live `surfaceView.title` bounces. The cache only
-    /// updates inside `refreshDerivedState`, which is gated by Option C.
-    @Published private(set) var cachedSurfaceTitle: String = ""
-
     private var cancellables: Set<AnyCancellable> = []
     private var gitRefreshTask: Task<Void, Never>?
     private var lastGitRefreshDirectory: String?
@@ -36,15 +28,6 @@ final class HolySession: ObservableObject, Identifiable {
     private var repeatedPreviewEvidenceCount = 0
     private var visibleActivitySignature: String?
     private var visibleActivityChangedAt: Date = .distantPast
-    private var isPresentedInWorkspace = false
-    private var surfaceOcclusionVisible: Bool?
-    private var lastDerivedStateRefreshAt: Date = .distantPast
-
-    private static let visibleDerivedStateRefreshInterval: TimeInterval = 1.25
-    private static let backgroundDerivedStateRefreshInterval: TimeInterval = 15
-    private static let activeProgressActivityRefreshInterval: TimeInterval = 10
-    private static let visibleGitRefreshInterval: TimeInterval = 10
-    private static let backgroundGitRefreshInterval: TimeInterval = 120
 
     init(record: HolySessionRecord, app: ghostty_app_t) {
         self.id = record.id
@@ -53,7 +36,6 @@ final class HolySession: ObservableObject, Identifiable {
         self.activityAt = record.updatedAt
         surfaceView.setFrameSize(Self.detachedSurfaceFallbackSize)
         surfaceView.sizeDidChange(Self.detachedSurfaceFallbackSize)
-        setSurfaceOcclusionVisible(false)
         bind()
         refreshDerivedState(forceGitRefresh: true)
     }
@@ -62,11 +44,11 @@ final class HolySession: ObservableObject, Identifiable {
 
     var title: String {
         let configured = record.launchSpec.resolvedTitle
-        if configured != "Shell" || cachedSurfaceTitle.isEmpty {
+        if configured != "Shell" || surfaceView.title.isEmpty {
             return configured
         }
 
-        return cachedSurfaceTitle.isEmpty ? configured : cachedSurfaceTitle
+        return surfaceView.title.isEmpty ? configured : surfaceView.title
     }
 
     var runtime: HolySessionRuntime {
@@ -83,7 +65,7 @@ final class HolySession: ObservableObject, Identifiable {
             return configured
         }
 
-        if let terminalTitle = Self.normalizedTerminalTitle(cachedSurfaceTitle),
+        if let terminalTitle = Self.normalizedTerminalTitle(surfaceView.title),
            Self.inferredRuntime(
                launchRuntime: runtime,
                surfaceTitle: terminalTitle,
@@ -491,11 +473,6 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     func refreshDerivedState(forceGitRefresh: Bool = false) {
-        lastDerivedStateRefreshAt = Date()
-        let nextSurfaceTitle = surfaceView.title
-        if cachedSurfaceTitle != nextSurfaceTitle {
-            cachedSurfaceTitle = nextSurfaceTitle
-        }
         let previousPreview = preview
         let previousPhase = phase
         let previousInferredRuntime = inferredRuntime
@@ -510,8 +487,7 @@ final class HolySession: ObservableObject, Identifiable {
             tmuxSessionName: record.launchSpec.tmux?.sessionName,
             tmuxSocketName: record.launchSpec.tmux?.socketName,
             objective: record.launchSpec.objective
-        ),
-           inferredRuntime != nextInferredRuntime {
+        ) {
             inferredRuntime = nextInferredRuntime
         }
 
@@ -548,64 +524,34 @@ final class HolySession: ObservableObject, Identifiable {
             ),
             current: runtimeTelemetry
         )
-        let budgetTelemetryChanged = nextBudgetTelemetry.map { $0 != budgetTelemetry } ?? false
-        let runtimeTelemetryChanged = nextRuntimeTelemetry.map { $0 != runtimeTelemetry } ?? false
 
-        if preview != nextPreview {
-            preview = nextPreview
-        }
-        if signals != nextSignals {
-            signals = nextSignals
-        }
-        if phase != nextPhase {
-            phase = nextPhase
-        }
-        if let nextBudgetTelemetry,
-           budgetTelemetry != nextBudgetTelemetry {
+        preview = nextPreview
+        signals = nextSignals
+        phase = nextPhase
+        if let nextBudgetTelemetry {
             budgetTelemetry = nextBudgetTelemetry
         }
-        if let nextRuntimeTelemetry,
-           runtimeTelemetry != nextRuntimeTelemetry {
+        if let nextRuntimeTelemetry {
             runtimeTelemetry = nextRuntimeTelemetry
         }
-
-        let activeProgressReport = Self.activeProgressReport(from: surfaceView.progressReport)
-        let shouldRefreshProgressActivity = activeProgressReport != nil
-            && Date().timeIntervalSince(activityAt) >= Self.activeProgressActivityRefreshInterval
 
         if previousPreview != nextPreview
             || previousPhase != nextPhase
             || previousInferredRuntime != inferredRuntime
-            || budgetTelemetryChanged
-            || runtimeTelemetryChanged
-            || shouldRefreshProgressActivity {
+            || nextBudgetTelemetry != nil
+            || nextRuntimeTelemetry != nil
+            || Self.activeProgressReport(from: surfaceView.progressReport) != nil {
             markUpdated()
         }
 
         refreshGitSnapshotIfNeeded(force: forceGitRefresh)
     }
 
-    func setPresentedInWorkspace(_ isPresented: Bool) {
-        guard isPresentedInWorkspace != isPresented else { return }
-
-        isPresentedInWorkspace = isPresented
-        setSurfaceOcclusionVisible(isPresented)
-        if isPresented {
-            refreshDerivedStateIfNeeded(force: true, forceGitRefresh: true)
-        }
-    }
-
     private func bind() {
-        // Live roster updates: refresh derived state whenever the surface
-        // produces output. This is what keeps tab names, activity spinners,
-        // and the waiting-on-you signal current. It is internally throttled
-        // (visibleDerivedStateRefreshInterval, 1.25s) and suspended during an
-        // active scroll burst (Option C), so it stays affordable on the
-        // Release engine — the Debug engine, not this observation, was the
-        // original scroll-perf cost.
         surfaceView.objectWillChange
             .sink { [weak self] _ in
-                self?.refreshDerivedStateIfNeeded()
+                self?.objectWillChange.send()
+                self?.refreshDerivedState()
             }
             .store(in: &cancellables)
 
@@ -615,48 +561,12 @@ final class HolySession: ObservableObject, Identifiable {
             }
             .store(in: &cancellables)
 
-        // Backstop poll so a session whose output went quiet still advances
-        // time-based state (e.g. stagnation → completed).
         Timer.publish(every: 1.25, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                self?.refreshDerivedStateIfNeeded()
+                self?.refreshDerivedState()
             }
             .store(in: &cancellables)
-    }
-
-    private func refreshDerivedStateIfNeeded(force: Bool = false, forceGitRefresh: Bool = false) {
-        // Suspend derived-state work while the user is actively scrolling.
-        // tmux scrolling produces a continuous stream of output that would
-        // otherwise fire HolySession.objectWillChange (and the workspace
-        // coordination cascade behind it) on every frame, starving the main
-        // thread of the scroll-event delivery and Metal frame commits that
-        // have to share it. surfaceView.isActivelyScrolling debounces ~250ms
-        // after the last scroll event, so the roster catches up on the very
-        // next observer fire or 1.25s timer tick once scrolling is idle.
-        if !force && surfaceView.isActivelyScrolling { return }
-
-        if !force {
-            let minimumInterval = isPresentedInWorkspace
-                ? Self.visibleDerivedStateRefreshInterval
-                : Self.backgroundDerivedStateRefreshInterval
-
-            guard Date().timeIntervalSince(lastDerivedStateRefreshAt) >= minimumInterval else {
-                return
-            }
-        }
-
-        refreshDerivedState(forceGitRefresh: forceGitRefresh)
-    }
-
-    private func setSurfaceOcclusionVisible(_ visible: Bool) {
-        guard surfaceOcclusionVisible != visible,
-              let surface = surfaceView.surface else {
-            return
-        }
-
-        ghostty_surface_set_occlusion(surface, visible)
-        surfaceOcclusionVisible = visible
     }
 
     private func recordCommandFinished(from notification: Notification) {
@@ -685,13 +595,9 @@ final class HolySession: ObservableObject, Identifiable {
             markUpdated()
         }
 
-        let gitRefreshInterval = isPresentedInWorkspace
-            ? Self.visibleGitRefreshInterval
-            : Self.backgroundGitRefreshInterval
-
         guard force
             || directoryChanged
-            || Date().timeIntervalSince(lastGitRefreshAt) >= gitRefreshInterval else {
+            || Date().timeIntervalSince(lastGitRefreshAt) >= 2.5 else {
             return
         }
 
@@ -850,11 +756,7 @@ final class HolySession: ObservableObject, Identifiable {
         let lowerActivePreview = activePreview.lowercased()
         let evidenceLooksReady = isReadyLine(evidence)
         let meaningfulLines = recentMeaningfulLines(from: preview, maxCount: 14)
-        let swarmEvidence = agentSwarmEvidence(
-            runtime: runtime,
-            lines: meaningfulLines,
-            previewChangedRecently: previewChangedRecently
-        )
+        let swarmEvidence = agentSwarmEvidence(runtime: runtime, lines: meaningfulLines)
         let liveAgentWorkingEvidence = agentWorkingEvidence(
             runtime: runtime,
             surfaceTitle: surfaceView.title,
@@ -1098,7 +1000,7 @@ final class HolySession: ObservableObject, Identifiable {
         lines: [String],
         previewChangedRecently: Bool
     ) -> String? {
-        guard isAgentRuntime(runtime), previewChangedRecently else { return nil }
+        guard isAgentRuntime(runtime) else { return nil }
 
         if let liveStatusEvidence = lines.suffix(8).reversed().first(where: isLiveAgentStatusLine) {
             return liveStatusEvidence
@@ -1117,12 +1019,8 @@ final class HolySession: ObservableObject, Identifiable {
         return nil
     }
 
-    private static func agentSwarmEvidence(
-        runtime: HolySessionRuntime,
-        lines: [String],
-        previewChangedRecently: Bool
-    ) -> String? {
-        guard isAgentRuntime(runtime), previewChangedRecently else { return nil }
+    private static func agentSwarmEvidence(runtime: HolySessionRuntime, lines: [String]) -> String? {
+        guard isAgentRuntime(runtime) else { return nil }
 
         let recent = Array(lines.suffix(18))
         if let liveLine = recent.reversed().first(where: isLiveAgentSwarmLine) {
@@ -1419,37 +1317,37 @@ final class HolySession: ObservableObject, Identifiable {
         let titleKey = normalizedLocalMachineTitleKey(title)
         guard !titleKey.isEmpty else { return true }
 
-        if genericLocalTitleKeys.contains(titleKey) {
+        let genericKeys: Set<String> = [
+            "local",
+            "local mac",
+            "mac",
+            "machine",
+            "this mac",
+            "localhost",
+        ]
+        if genericKeys.contains(titleKey) {
             return true
         }
 
-        return localMachineTitleCandidateKeys.contains(titleKey)
+        return localMachineTitleCandidates()
+            .map(normalizedLocalMachineTitleKey)
+            .contains(titleKey)
     }
 
-    private static let genericLocalTitleKeys: Set<String> = [
-        "local",
-        "local mac",
-        "mac",
-        "machine",
-        "this mac",
-        "localhost",
-    ]
-
-    private static let localMachineTitleCandidateKeys: Set<String> = {
+    private static func localMachineTitleCandidates() -> [String] {
         let processInfo = ProcessInfo.processInfo
-        let candidates = [
+        return [
             Host.current().localizedName,
             processInfo.hostName,
             processInfo.environment["HOSTNAME"],
-        ].compactMap { value -> String? in
+        ].compactMap { value in
             guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !trimmed.isEmpty else {
                 return nil
             }
-            return normalizedLocalMachineTitleKey(trimmed)
+            return trimmed
         }
-        return Set(candidates.filter { !$0.isEmpty })
-    }()
+    }
 
     private static func normalizedLocalMachineTitleKey(_ value: String) -> String {
         let scalars = value

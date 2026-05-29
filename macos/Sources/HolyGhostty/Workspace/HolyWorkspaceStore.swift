@@ -25,7 +25,6 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var attentionClock: Date = .now
     @Published var paneLayout: HolyPaneLayout = .single {
         didSet {
-            refreshSessionPresentationState()
             guard !suppressAutomaticSelectionPersistence,
                   oldValue != paneLayout else { return }
             persist()
@@ -36,7 +35,6 @@ final class HolyWorkspaceStore: ObservableObject {
             guard !suppressAutomaticSelectionPersistence,
                   oldValue != selectedSessionID else { return }
             reconcilePaneLayoutForSelection()
-            refreshSessionPresentationState()
             scheduleSelectedSessionSeenMark()
             persist(pendingEvents: selectionEvents(from: oldValue, to: selectedSessionID))
         }
@@ -1399,22 +1397,11 @@ final class HolyWorkspaceStore: ObservableObject {
         )
         suppressAutomaticSelectionPersistence = false
         reconcilePaneLayoutForSelection()
-        refreshSessionPresentationState()
         bindSessions(seedMissingAsSeen: true)
         reconcileExternalTasks()
         scheduleSelectedSessionSeenMark()
     }
 
-    private func refreshSessionPresentationState() {
-        var presentedIDs = Set(normalizedPaneLayout.sessionIDs)
-        if presentedIDs.isEmpty, let selectedSessionID = selectedSession?.id {
-            presentedIDs.insert(selectedSessionID)
-        }
-
-        for session in sessions {
-            session.setPresentedInWorkspace(presentedIDs.contains(session.id))
-        }
-    }
 
     private func applyPaneLayout(kind: HolyPaneLayoutKind, preferredPaneCount: Int) {
         var paneSessionIDs = paneSeedSessionIDs()
