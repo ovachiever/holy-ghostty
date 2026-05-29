@@ -109,6 +109,17 @@ actor HolyRemoteTmuxDiscoveryService {
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-lc", remoteDiscoveryScript(socketName: socketName, includeGitMetadata: false)]
 
+        // Scrub the inherited tmux context. If Holy was launched from a shell
+        // running inside tmux, $TMUX makes a default-socket probe (no -L)
+        // resolve to that server instead of the real default socket — listing
+        // the same sessions twice in discovery. The probe must always mean the
+        // socket it names.
+        var environment = ProcessInfo.processInfo.environment
+        environment.removeValue(forKey: "TMUX")
+        environment.removeValue(forKey: "TMUX_PANE")
+        environment.removeValue(forKey: "TMUX_TMPDIR")
+        process.environment = environment
+
         return run(process: process, context: "local tmux")
     }
 
