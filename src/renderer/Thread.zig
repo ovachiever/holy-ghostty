@@ -606,6 +606,8 @@ fn renderCallback(
         return .disarm;
     };
 
+    if (!t.flags.visible) return .disarm;
+
     // Update our frame data
     t.renderer.updateFrame(
         t.state,
@@ -642,7 +644,7 @@ fn cursorTimerCallback(
     };
 
     t.flags.cursor_blink_visible = !t.flags.cursor_blink_visible;
-    t.wakeup.notify() catch {};
+    if (t.flags.visible) t.wakeup.notify() catch {};
 
     t.cursor_h.run(
         &t.loop,

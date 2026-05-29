@@ -156,7 +156,6 @@ extension Ghostty {
             background-image-fit = contain
             background-image-position = center
             background-image-repeat = false
-            mouse-scroll-multiplier = precision:0.25,discrete:3
             window-padding-y = 34,2
             """
 

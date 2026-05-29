@@ -39,6 +39,10 @@ final class HolySessionSupervisor {
     private var scheduledPersistTask: Task<Void, Never>?
     private var bufferedMutationEvents: [HolySessionEventDraft] = []
     private var observedRuntimeStatesBySessionID: [UUID: HolyObservedRuntimeState] = [:]
+    private var lastRoutineMutationPersistenceAt: Date = .distantPast
+
+    private static let mutationPersistenceDebounceNanoseconds: UInt64 = 350_000_000
+    private static let routineMutationPersistenceInterval: TimeInterval = 10
 
     init(ghostty: Ghostty.App, seedDefaultSession: Bool) {
         self.ghostty = ghostty
@@ -56,8 +60,49 @@ final class HolySessionSupervisor {
             AppDelegate.logger.notice("Holy Ghostty recovery cleanup: \(summary, privacy: .public)")
         }
         let recovery = recoverActiveRecords(snapshot.sessions)
-        let restoredSessions = recovery.restorableRecords.map { HolySession(record: $0, app: app) }
-        let archivedSessions = (snapshot.archivedSessions + recovery.recoveredArchivedSessions)
+
+        // Cold-boot detection. After a macOS reboot the `holy` tmux server is
+        // gone along with every session's process, pty, and scrollback. Auto-
+        // bootstrapping fresh empty shells with stale Claude/Codex labels
+        // lies about state. Probe the server: any saved local-managed session
+        // whose tmux session is missing gets archived instead of restored, so
+        // the roster starts empty after a reboot and the saved layouts
+        // surface in the history sheet where they can be explicitly
+        // relaunched. A graceful Holy quit (tmux server still alive, sessions
+        // still present) takes the restore-as-normal branch and is
+        // unaffected. Remote/SSH sessions skip the check — the remote tmux
+        // server is independent of macOS reboots.
+        let liveLocalHolySessions = Self.probeLocalHolyTmuxSessions()
+        var presentRecords: [HolySessionRecord] = []
+        var dormantRecords: [HolySessionRecord] = []
+        for record in recovery.restorableRecords {
+            if Self.isLocalManagedHolySession(record.launchSpec),
+               !liveLocalHolySessions.contains(record.launchSpec.tmux?.sessionName ?? "") {
+                dormantRecords.append(record)
+            } else {
+                presentRecords.append(record)
+            }
+        }
+        let coldBootArchived = dormantRecords.map { record in
+            HolyArchivedSession(
+                sourceSessionID: record.id,
+                record: record,
+                phase: .completed,
+                preview: "",
+                signals: [],
+                commandTelemetry: .empty,
+                budgetTelemetry: .empty,
+                runtimeTelemetry: .empty,
+                gitSnapshot: nil,
+                lastKnownWorkingDirectory: record.launchSpec.workingDirectory,
+                lastActivityAt: record.updatedAt,
+                archivedAt: .now,
+                recoveryReason: "Saved layout — the holy tmux server was not running at launch (probably a macOS reboot). Relaunch from history to recreate."
+            )
+        }
+
+        let restoredSessions = presentRecords.map { HolySession(record: $0, app: app) }
+        let archivedSessions = (snapshot.archivedSessions + recovery.recoveredArchivedSessions + coldBootArchived)
             .sorted { $0.archivedAt > $1.archivedAt }
 
         if restoredSessions.isEmpty {
@@ -118,6 +163,43 @@ final class HolySessionSupervisor {
                 .restored(session: $0, attention: nil)
             }
         )
+    }
+
+    /// Lists session names live on the local managed `holy` tmux server.
+    /// Returns an empty set if the server isn't running (cold boot) or if
+    /// the probe fails. Synchronous on purpose — the result feeds the very
+    /// first restoreWorkspace decision.
+    private static func probeLocalHolyTmuxSessions() -> Set<String> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [
+            "tmux",
+            "-L", HolySessionTmuxSpec.defaultSocketName,
+            "list-sessions",
+            "-F", "#{session_name}",
+        ]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe() // discard "no server running on /…/holy"
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return []
+        }
+        guard process.terminationStatus == 0 else { return [] }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        let text = String(data: data, encoding: .utf8) ?? ""
+        return Set(
+            text.split(separator: "\n", omittingEmptySubsequences: true)
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        )
+    }
+
+    private static func isLocalManagedHolySession(_ launchSpec: HolySessionLaunchSpec) -> Bool {
+        launchSpec.transport.kind == .local
+            && launchSpec.tmux?.socketName == HolySessionTmuxSpec.defaultSocketName
     }
 
     func createSession(
@@ -246,13 +328,25 @@ final class HolySessionSupervisor {
         attentionBySessionID: [UUID: HolySessionAttention],
         pendingEvents: [HolySessionEventDraft] = []
     ) {
-        if !pendingEvents.isEmpty {
+        let hasRuntimeEvents = !pendingEvents.isEmpty
+        if hasRuntimeEvents {
             bufferedMutationEvents.append(contentsOf: pendingEvents)
+        } else if scheduledPersistTask != nil {
+            return
         }
 
         scheduledPersistTask?.cancel()
+        let elapsed = Date().timeIntervalSince(lastRoutineMutationPersistenceAt)
+        let routineDelay = max(
+            0.35,
+            Self.routineMutationPersistenceInterval - elapsed
+        )
+        let delayNanoseconds = hasRuntimeEvents
+            ? Self.mutationPersistenceDebounceNanoseconds
+            : UInt64(routineDelay * 1_000_000_000)
+
         scheduledPersistTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 350_000_000)
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
@@ -309,6 +403,7 @@ final class HolySessionSupervisor {
 
         let combinedEvents = bufferedMutationEvents + additionalEvents
         bufferedMutationEvents.removeAll()
+        lastRoutineMutationPersistenceAt = .now
         HolyWorkspaceRepository.save(
             snapshot: state.snapshot,
             activeSessions: state.sessions,

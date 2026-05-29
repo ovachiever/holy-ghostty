@@ -490,15 +490,6 @@ extension Ghostty.Input {
         case cancelled = 5
         case mayBegin = 6
 
-        var isMomentum: Bool {
-            switch self {
-            case .none, .mayBegin, .ended, .cancelled:
-                return false
-            case .began, .stationary, .changed:
-                return true
-            }
-        }
-
         var cMomentum: ghostty_input_mouse_momentum_e {
             switch self {
             case .none: GHOSTTY_MOUSE_MOMENTUM_NONE

@@ -25,6 +25,7 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var attentionClock: Date = .now
     @Published var paneLayout: HolyPaneLayout = .single {
         didSet {
+            refreshSessionPresentationState()
             guard !suppressAutomaticSelectionPersistence,
                   oldValue != paneLayout else { return }
             persist()
@@ -35,6 +36,7 @@ final class HolyWorkspaceStore: ObservableObject {
             guard !suppressAutomaticSelectionPersistence,
                   oldValue != selectedSessionID else { return }
             reconcilePaneLayoutForSelection()
+            refreshSessionPresentationState()
             scheduleSelectedSessionSeenMark()
             persist(pendingEvents: selectionEvents(from: oldValue, to: selectedSessionID))
         }
@@ -1397,9 +1399,21 @@ final class HolyWorkspaceStore: ObservableObject {
         )
         suppressAutomaticSelectionPersistence = false
         reconcilePaneLayoutForSelection()
+        refreshSessionPresentationState()
         bindSessions(seedMissingAsSeen: true)
         reconcileExternalTasks()
         scheduleSelectedSessionSeenMark()
+    }
+
+    private func refreshSessionPresentationState() {
+        var presentedIDs = Set(normalizedPaneLayout.sessionIDs)
+        if presentedIDs.isEmpty, let selectedSessionID = selectedSession?.id {
+            presentedIDs.insert(selectedSessionID)
+        }
+
+        for session in sessions {
+            session.setPresentedInWorkspace(presentedIDs.contains(session.id))
+        }
     }
 
     private func applyPaneLayout(kind: HolyPaneLayoutKind, preferredPaneCount: Int) {
@@ -1512,7 +1526,7 @@ final class HolyWorkspaceStore: ObservableObject {
     private func startActiveTmuxMetadataRefresh() {
         guard activeTmuxMetadataRefreshCancellable == nil else { return }
 
-        activeTmuxMetadataRefreshCancellable = Timer.publish(every: 10, on: .main, in: .common)
+        activeTmuxMetadataRefreshCancellable = Timer.publish(every: 300, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 self?.refreshActiveTmuxSessionMetadata()
@@ -2275,7 +2289,36 @@ final class HolyWorkspaceStore: ObservableObject {
         )
     }
 
+    /// Cheap fingerprint of every input `makeCoordination` reads. Terminal
+    /// output (scrolling, redraws) churns `HolySession` constantly but never
+    /// touches these fields, so when the fingerprint is unchanged we skip the
+    /// O(N^2) coordination recompute entirely.
+    private var lastCoordinationInputSignature: [String]?
+
+    private func coordinationInputSignature(for session: HolySession) -> String {
+        let ownership = session.ownership
+        let snapshot = session.gitSnapshot
+        return [
+            session.id.uuidString,
+            String(describing: session.displayRuntime),
+            String(describing: ownership.repositoryRoot),
+            String(describing: ownership.worktreePath),
+            String(describing: ownership.branchName),
+            String(describing: snapshot?.repositoryRoot),
+            String(describing: snapshot?.changedFiles.map(\.path)),
+            String(describing: session.phase),
+            title(forSessionID: session.id),
+        ].joined(separator: "\u{1E}")
+    }
+
     private func recomputeCoordination() {
+        let signature = sessions.map { coordinationInputSignature(for: $0) }
+        if let lastCoordinationInputSignature,
+           lastCoordinationInputSignature == signature {
+            return
+        }
+        lastCoordinationInputSignature = signature
+
         var next: [UUID: HolySessionCoordination] = [:]
         for session in sessions {
             next[session.id] = makeCoordination(for: session)

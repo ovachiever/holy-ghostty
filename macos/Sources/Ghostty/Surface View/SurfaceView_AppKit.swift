@@ -1041,21 +1041,32 @@ extension Ghostty {
             self.mouseMoved(with: event)
         }
 
+        /// Tracks whether scroll input has arrived recently. Holy reads this in
+        /// `HolySession.refreshDerivedStateIfNeeded` to suspend its per-output
+        /// observer cascade while a scroll burst is in flight; otherwise the
+        /// main thread can't deliver scroll events and commit Metal frames at
+        /// the same time as the workspace re-evaluates SwiftUI on every output.
+        /// Intentionally NOT @Published — we do not want SwiftUI invalidations
+        /// on every scrollWheel call. Mutated only on the main thread.
+        var isActivelyScrolling: Bool = false
+        private var scrollIdleResetItem: DispatchWorkItem?
+
         override func scrollWheel(with event: NSEvent) {
             guard let surfaceModel else { return }
+
+            // Mark scroll input as active and schedule a debounced reset.
+            // 250ms of idle = scrolling considered over; the roster catches up.
+            isActivelyScrolling = true
+            scrollIdleResetItem?.cancel()
+            let resetItem = DispatchWorkItem { [weak self] in
+                self?.isActivelyScrolling = false
+            }
+            scrollIdleResetItem = resetItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: resetItem)
 
             var x = event.scrollingDeltaX
             var y = event.scrollingDeltaY
             let precision = event.hasPreciseScrollingDeltas
-            let momentum = Ghostty.Input.Momentum(event.momentumPhase)
-
-            // Terminal mouse protocols have no inertial-scroll primitive. If a
-            // mouse-aware terminal app such as tmux has captured mouse input,
-            // forwarding macOS momentum turns one trackpad gesture into a
-            // delayed backlog of real wheel events.
-            if precision, surfaceModel.mouseCaptured, momentum.isMomentum {
-                return
-            }
 
             if precision {
                 // We do a 2x speed multiplier. This is subjective, it "feels" better to me.
@@ -1068,7 +1079,7 @@ extension Ghostty {
             let scrollEvent = Ghostty.Input.MouseScrollEvent(
                 x: x,
                 y: y,
-                mods: .init(precision: precision, momentum: momentum)
+                mods: .init(precision: precision, momentum: .init(event.momentumPhase))
             )
             surfaceModel.sendMouseScroll(scrollEvent)
         }

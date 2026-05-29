@@ -106,17 +106,24 @@ struct HolyGhosttySurfaceFrame<Content: View>: View {
     }
 
     var body: some View {
-        content
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        return content
+            .clipShape(shape)
             .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(
-                        halo ? HolyGhosttyTheme.halo.opacity(0.28) : HolyGhosttyTheme.border,
-                        lineWidth: halo ? 1 : 0.5
-                    )
+                shape.stroke(
+                    halo ? HolyGhosttyTheme.halo.opacity(0.28) : HolyGhosttyTheme.border,
+                    lineWidth: halo ? 1 : 0.5
+                )
             )
-            .shadow(color: halo ? HolyGhosttyTheme.halo.opacity(0.15) : .clear, radius: 16, x: 0, y: 0)
-            .shadow(color: halo ? HolyGhosttyTheme.halo.opacity(0.08) : .clear, radius: 36, x: 0, y: 2)
+            .background(
+                // Cast the halo from a static shape so Core Animation rasterizes
+                // the shadow once, instead of re-deriving it from the live
+                // terminal layer on every rendered frame.
+                shape
+                    .fill(Color.black)
+                    .shadow(color: halo ? HolyGhosttyTheme.halo.opacity(0.15) : .clear, radius: 16, x: 0, y: 0)
+                    .shadow(color: halo ? HolyGhosttyTheme.halo.opacity(0.08) : .clear, radius: 36, x: 0, y: 2)
+            )
     }
 }
 
