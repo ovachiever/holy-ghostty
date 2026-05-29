@@ -91,6 +91,10 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
         runtimeRawValue.flatMap(HolySessionRuntime.init(rawValue:))
     }
 
+    var connectionRuntime: HolySessionRuntime {
+        runtime ?? .shell
+    }
+
     var isHolyManaged: Bool {
         [
             title,
@@ -105,7 +109,15 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
     }
 
     var shouldHideFromDiscovery: Bool {
-        isGeneratedHolyShellSessionName && !hasMeaningfulDiscoveryIdentity
+        if isGeneratedHolyShellSessionName && !hasMeaningfulDiscoveryIdentity {
+            return true
+        }
+
+        if isSymbolOnlyShellSession {
+            return true
+        }
+
+        return isHolyManagedShellSession && isGenericWorkspaceSession && !hasMeaningfulDiscoveryIdentity
     }
 
     private var isGeneratedHolyShellSessionName: Bool {
@@ -113,14 +125,40 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
         return normalized.hasPrefix("holy-shell-") && normalized.contains("-shell-")
     }
 
-    private var hasMeaningfulDiscoveryIdentity: Bool {
-        if let title = normalizedTitle,
-           !Self.isGeneratedDefaultTitle(title) {
+    private var isHolyManagedShellSession: Bool {
+        isHolyManaged && connectionRuntime == .shell
+    }
+
+    private var isSymbolOnlyShellSession: Bool {
+        guard connectionRuntime == .shell else { return false }
+
+        let candidate = normalizedTitle ?? sessionName
+        let trimmed = candidate.holyTrimmed
+        guard !trimmed.isEmpty, trimmed.count <= 2 else { return false }
+
+        return !trimmed.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
+    }
+
+    private var isGenericWorkspaceSession: Bool {
+        if Self.isGenericWorkspaceName(sessionName) {
             return true
         }
 
-        if let runtime,
-           runtime != .shell {
+        if let title = normalizedTitle,
+           Self.isGenericWorkspaceName(title) {
+            return true
+        }
+
+        if let workingDirectory = workingDirectory?.holyTrimmed.nilIfEmpty,
+           Self.isGenericWorkspaceName(URL(fileURLWithPath: workingDirectory).lastPathComponent) {
+            return true
+        }
+
+        return false
+    }
+
+    private var hasMeaningfulDiscoveryIdentity: Bool {
+        if usableExplicitTitle != nil {
             return true
         }
 
@@ -143,12 +181,12 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
             return projectTitle
         }
 
-        if let title = normalizedTitle {
+        if let title = usableExplicitTitle {
             return title
         }
 
         if let gitSummary {
-            return gitSummary.repositoryName
+            return Self.displayName(fromPathComponent: gitSummary.repositoryName) ?? gitSummary.repositoryName
         }
 
         if isLocalHost {
@@ -162,13 +200,25 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
         title?.holyTrimmed.nilIfEmpty
     }
 
+    private var usableExplicitTitle: String? {
+        guard let title = normalizedTitle,
+              !Self.isGeneratedDefaultTitle(title),
+              !Self.isInternalHolyTmuxTitle(title),
+              !Self.isLocalMachineTitle(title),
+              !Self.isGenericWorkspaceName(title) else {
+            return nil
+        }
+
+        return Self.displayName(fromPathComponent: title) ?? title
+    }
+
     private var projectTitleForDefaultSession: String? {
-        guard normalizedTitle.map(Self.isGeneratedDefaultTitle) ?? true else {
+        guard usableExplicitTitle == nil else {
             return nil
         }
 
         if let gitSummary {
-            return gitSummary.repositoryName
+            return Self.displayName(fromPathComponent: gitSummary.repositoryName) ?? gitSummary.repositoryName
         }
 
         guard let workingDirectory = workingDirectory?.holyTrimmed.nilIfEmpty else {
@@ -184,7 +234,7 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
             return nil
         }
 
-        return directoryName
+        return Self.displayName(fromPathComponent: directoryName) ?? directoryName
     }
 
     private static func isGeneratedDefaultTitle(_ title: String) -> Bool {
@@ -203,13 +253,96 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
         }
     }
 
+    private static func isInternalHolyTmuxTitle(_ title: String) -> Bool {
+        let isInternalComponent: (String) -> Bool = { component in
+            component.range(
+                of: #"^holy-[a-z0-9-]+-[0-9A-Fa-f]{8}$"#,
+                options: .regularExpression
+            ) != nil
+        }
+
+        if isInternalComponent(title) {
+            return true
+        }
+
+        return title
+            .components(separatedBy: CharacterSet(charactersIn: "/: "))
+            .contains(where: isInternalComponent)
+    }
+
+    private static func isLocalMachineTitle(_ title: String) -> Bool {
+        let key = normalizedComparisonKey(title)
+        guard !key.isEmpty else { return true }
+
+        let genericKeys: Set<String> = [
+            "local",
+            "local mac",
+            "mac",
+            "machine",
+            "this mac",
+            "localhost",
+        ]
+        if genericKeys.contains(key) || key.hasSuffix(" local") {
+            return true
+        }
+
+        return localMachineTitleCandidates()
+            .map(normalizedComparisonKey)
+            .contains(key)
+    }
+
     private static func isGenericWorkspaceName(_ name: String) -> Bool {
-        switch name.holyTrimmed.lowercased() {
-        case "custom-coding", "custom_coding", "projects", "repos", "repositories", "workspace", "workspaces":
+        switch normalizedComparisonKey(name) {
+        case "custom coding", "projects", "repos", "repositories", "workspace", "workspaces":
             return true
         default:
             return false
         }
+    }
+
+    private static func localMachineTitleCandidates() -> [String] {
+        let processInfo = ProcessInfo.processInfo
+        return [
+            Host.current().localizedName,
+            processInfo.hostName,
+            processInfo.environment["HOSTNAME"],
+        ].compactMap { value in
+            guard let trimmed = value?.holyTrimmed.nilIfEmpty else {
+                return nil
+            }
+            return trimmed
+        }
+    }
+
+    private static func normalizedComparisonKey(_ value: String) -> String {
+        let scalars = value
+            .lowercased()
+            .unicodeScalars
+            .map { CharacterSet.alphanumerics.contains($0) ? Character($0) : " " }
+
+        return String(scalars)
+            .split(separator: " ")
+            .joined(separator: " ")
+    }
+
+    private static func displayName(fromPathComponent component: String) -> String? {
+        let normalized = component
+            .holyTrimmed
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+        let words = normalized
+            .split(separator: " ")
+            .map(String.init)
+        guard !words.isEmpty else { return nil }
+
+        return words.map { word in
+            if word.contains(".") || word == word.uppercased() {
+                return word
+            }
+
+            return word.prefix(1).uppercased() + String(word.dropFirst())
+        }
+        .joined(separator: " ")
     }
 
     var subtitle: String {
@@ -239,6 +372,22 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
 
         if isHolyManaged {
             segments.append("Holy metadata")
+        }
+
+        return segments.joined(separator: " · ")
+    }
+
+    var connectionRosterSummary: String {
+        let attachmentSummary = attachedClientCount == 1
+            ? "1 client"
+            : "\(attachedClientCount) clients"
+        let windowSummary = windowCount == 1
+            ? "1 window"
+            : "\(windowCount) windows"
+        var segments = [attachmentSummary, windowSummary]
+
+        if let gitSummary {
+            segments.append(gitSummary.changeSummaryText)
         }
 
         return segments.joined(separator: " · ")

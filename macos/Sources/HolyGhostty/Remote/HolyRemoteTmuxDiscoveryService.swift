@@ -181,19 +181,33 @@ actor HolyRemoteTmuxDiscoveryService {
     }
 
     private func sessionSortOrder(_ lhs: HolyDiscoveredTmuxSession, _ rhs: HolyDiscoveredTmuxSession) -> Bool {
+        if lhs.connectionRuntime != rhs.connectionRuntime {
+            return Self.runtimeSortRank(lhs.connectionRuntime) < Self.runtimeSortRank(rhs.connectionRuntime)
+        }
+
+        let titleComparison = lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle)
+        if titleComparison != .orderedSame {
+            return titleComparison == .orderedAscending
+        }
+
         if lhs.isHolyManaged != rhs.isHolyManaged {
             return lhs.isHolyManaged && !rhs.isHolyManaged
         }
 
-        if lhs.attachedClientCount != rhs.attachedClientCount {
-            return lhs.attachedClientCount > rhs.attachedClientCount
-        }
+        return lhs.sessionName.localizedCaseInsensitiveCompare(rhs.sessionName) == .orderedAscending
+    }
 
-        if lhs.tmuxSocketName != rhs.tmuxSocketName {
-            return (lhs.tmuxSocketName ?? "").localizedCaseInsensitiveCompare(rhs.tmuxSocketName ?? "") == .orderedAscending
+    private static func runtimeSortRank(_ runtime: HolySessionRuntime) -> Int {
+        switch runtime {
+        case .claude:
+            return 0
+        case .codex:
+            return 1
+        case .opencode:
+            return 2
+        case .shell:
+            return 3
         }
-
-        return lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
     }
 
     private func remoteDiscoveryScript(socketName: String?, includeGitMetadata: Bool) -> String {
@@ -312,6 +326,32 @@ actor HolyRemoteTmuxDiscoveryService {
           done
 
           printf '%s' "$configured"
+        }
+
+        process_tree_commands() {
+          local root_pid="$1"
+          local -a frontier next_frontier children
+          local pid child command depth
+
+          [[ -z "$root_pid" ]] && return 0
+          frontier=("$root_pid")
+
+          for depth in 1 2 3 4; do
+            next_frontier=()
+
+            for pid in "${frontier[@]}"; do
+              children=($(pgrep -P "$pid" 2>/dev/null || true))
+              for child in "${children[@]}"; do
+                command=$(ps -p "$child" -o command= 2>/dev/null | head -n 1)
+                command=$(trimmed_value "$command")
+                [[ -n "$command" ]] && printf '%s\n' "$command"
+                next_frontier+=("$child")
+              done
+            done
+
+            (( ${#next_frontier[@]} == 0 )) && break
+            frontier=("${next_frontier[@]}")
+          done
         }
 
         inferred_working_directory() {
@@ -479,6 +519,8 @@ actor HolyRemoteTmuxDiscoveryService {
           pane_title=$(pane_value "$session_name" '#{pane_title}')
           window_name=$(pane_value "$session_name" '#{window_name}')
           pane_command=$(pane_value "$session_name" '#{pane_current_command}')
+          pane_pid=$(pane_value "$session_name" '#{pane_pid}')
+          process_context=$(process_tree_commands "$pane_pid" | tr '\n' ' ')
           metadata_working_directory=$(option_value "$session_name" @holy_working_directory)
           working_directory=$(pane_value "$session_name" '#{pane_current_path}')
           if [[ -n "$working_directory" ]]; then
@@ -488,7 +530,7 @@ actor HolyRemoteTmuxDiscoveryService {
             working_directory=$(inferred_working_directory "$working_directory" "$pane_title" "$window_name" "$session_name")
           fi
           command=$(option_value "$session_name" @holy_command)
-          runtime=$(inferred_runtime "$runtime" "$pane_command" "$window_name" "$pane_title" "$title" "$command" "$session_name")
+          runtime=$(inferred_runtime "$runtime" "$pane_command" "$process_context" "$window_name" "$pane_title" "$title" "$command" "$session_name")
           if generated_holy_title "$title"; then
             title=""
           fi
