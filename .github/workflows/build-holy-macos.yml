@@ -1,0 +1,68 @@
+name: Build Holy macOS (manual)
+
+# Minimal Holy-specific build workflow that does NOT depend on the
+# Namespace.so runner profile or Nix. Uses GitHub-hosted macos-14 with
+# mlugg/setup-zig (the same action upstream Ghostty pins) to install
+# Zig 0.15.2 directly, then builds libghostty (ReleaseFast) and the
+# macOS app, producing a downloadable .zip artifact.
+#
+# Trigger from the Actions tab → "Build Holy macOS (manual)" → Run workflow,
+# or via `gh workflow run "Build Holy macOS (manual)" --ref <branch>`.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "wip/**"
+
+concurrency:
+  group: build-holy-macos
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Holy Ghostty.app
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig 0.15.2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Show toolchain versions
+        run: |
+          zig version
+          xcodebuild -version
+
+      # The macOS app build is intentionally NOT run here. The GitHub runner's
+      # Xcode is older than the local toolchain and rejects code the local
+      # Xcode accepts (Swift 6 strict-concurrency). We only need CI for the
+      # one thing the local machine can't do: link the Zig engine (Zig 0.15.2
+      # can't link against the macOS 26 SDK). So CI emits ONLY the ReleaseFast
+      # GhosttyKit.xcframework; the app is then built locally against it.
+      - name: Build GhosttyKit xcframework (ReleaseFast)
+        run: |
+          zig build \
+            -Doptimize=ReleaseFast \
+            -Demit-macos-app=false \
+            -Dversion-string=0.40.0
+          echo "--- emitted framework ---"
+          ls -la macos/GhosttyKit.xcframework
+
+      - name: Package xcframework
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            macos/GhosttyKit.xcframework \
+            GhosttyKit-ReleaseFast.xcframework.zip
+          ls -la GhosttyKit-ReleaseFast.xcframework.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GhosttyKit-ReleaseFast
+          path: GhosttyKit-ReleaseFast.xcframework.zip
+          retention-days: 14
