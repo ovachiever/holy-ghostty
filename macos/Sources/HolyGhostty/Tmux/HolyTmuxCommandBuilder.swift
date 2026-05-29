@@ -180,6 +180,7 @@ enum HolyTmuxCommandBuilder {
     private static func managedServerConfigurationCommands(tmuxPrefix: [String]) -> [String] {
         let optionCommands = [
             ["set-option", "-gq", "destroy-unattached", "off"],
+            ["set-option", "-gq", "prefix", "`"],
             ["set-option", "-gq", "mouse", "on"],
             ["set-option", "-gq", "history-limit", managedTmuxHistoryLimit],
             ["set-option", "-sq", "escape-time", "0"],
@@ -235,6 +236,16 @@ enum HolyTmuxCommandBuilder {
     set -g allow-passthrough on
     set -g set-clipboard on
     setw -g aggressive-resize on
+
+    # Prefix: backtick instead of C-b. Press `` to type a literal backtick.
+    unbind C-b
+    set -g prefix `
+    bind ` send-prefix
+
+    # `<prefix> a` copies the entire pane history (full scrollback) to the
+    # macOS clipboard — the "select everything" the terminal's own select-all
+    # can't do while tmux owns the screen.
+    bind a run-shell 'tmux capture-pane -pJ -S - -t "#{pane_id}" | pbcopy'
     """
 
     private static func metadataCommands(
