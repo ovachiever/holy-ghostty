@@ -174,7 +174,7 @@ extension NSApplication {
 
         guard let appDelegate = delegate as? AppDelegate else {
             command.scriptErrorNumber = errAEEventFailed
-            command.scriptErrorString = "Ghostty app delegate is unavailable."
+            command.scriptErrorString = "Holy Ghostty app delegate is unavailable."
             return nil
         }
 
@@ -232,7 +232,7 @@ extension NSApplication {
 
         guard let appDelegate = delegate as? AppDelegate else {
             command.scriptErrorNumber = errAEEventFailed
-            command.scriptErrorString = "Ghostty app delegate is unavailable."
+            command.scriptErrorString = "Holy Ghostty app delegate is unavailable."
             return nil
         }
 
@@ -302,7 +302,7 @@ extension NSApplication {
 
         guard let appDelegate = delegate as? AppDelegate else {
             command.scriptErrorNumber = errAEEventFailed
-            command.scriptErrorString = "Ghostty app delegate is unavailable."
+            command.scriptErrorString = "Holy Ghostty app delegate is unavailable."
             return nil
         }
 
