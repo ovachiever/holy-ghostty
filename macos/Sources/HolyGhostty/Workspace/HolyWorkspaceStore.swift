@@ -60,6 +60,12 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private let sessionSupervisor: HolySessionSupervisor
     private var sessionObservationCancellables: Set<AnyCancellable> = []
+    /// Sessions restored on launch whose on-screen content must be treated as
+    /// already-seen the first time a live evidence signature appears — so a
+    /// session that was merely sitting at a prompt when Holy last quit does not
+    /// resurface as a "new reply" with a countdown synced to the restore moment.
+    /// A session is cleared from this set once its baseline signature is captured.
+    private var restoreSeenBaselinePending: Set<UUID> = []
     private var activeTmuxMetadataRefreshCancellable: AnyCancellable?
     private var attentionClockCancellable: AnyCancellable?
     private var draftLaunchGuardrailTask: Task<Void, Never>?
@@ -244,6 +250,11 @@ final class HolyWorkspaceStore: ObservableObject {
     func restore() {
         let restoration = sessionSupervisor.restoreWorkspace()
         applySessionStoreState(restoration.state)
+        // Anchor a seen-baseline for everything restored so pre-existing screen
+        // content never reads as a fresh reply (which would show a countdown
+        // synced to the restore timestamp across all sessions).
+        restoreSeenBaselinePending = Set(sessions.map(\.id))
+        reconcileAttentionMetadata(markSelectedSeen: false)
         loadTasks()
         loadRemoteHosts()
         loadLaunchProfiles()
@@ -1125,10 +1136,18 @@ final class HolyWorkspaceStore: ObservableObject {
         var changed = next.count != attentionMetadataBySessionID.count
 
         for session in sessions {
+            let baselinePending = restoreSeenBaselinePending.contains(session.id)
             let shouldMarkSeen = (markSelectedSeen && session.id == selectedSessionID)
                 || (seedMissingAsSeen && next[session.id] == nil)
+                || baselinePending
             if updateAttentionMetadata(for: session, markSeen: shouldMarkSeen, existing: &next, at: date) {
                 changed = true
+            }
+            // Clear the restore baseline once a real signature has been captured
+            // and marked seen; until then keep it pending (the signature is often
+            // empty in the instant right after attach).
+            if baselinePending, next[session.id]?.lastAttentionEvidenceSignature != nil {
+                restoreSeenBaselinePending.remove(session.id)
             }
         }
 
