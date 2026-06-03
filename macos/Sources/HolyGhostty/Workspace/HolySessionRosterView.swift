@@ -11,15 +11,68 @@ struct HolySessionRosterView: View {
     var onPresentHistory: () -> Void = {}
     var onToggleCollapse: (() -> Void)?
 
+    @AppStorage("holy.workspace.rosterLayout.v1") private var rosterLayoutRaw = HolyRosterLayout.classic.rawValue
+
+    private var layout: HolyRosterLayout {
+        HolyRosterLayout(rawValue: rosterLayoutRaw) ?? .classic
+    }
+
     private var sections: [HolyRosterSection] {
-        HolySessionRuntime.rosterOrder.compactMap { runtime in
-            let sessions = HolySessionRosterOrdering.orderedSessions(
-                store.sessions,
-                matching: runtime
-            )
-            guard !sessions.isEmpty else { return nil }
-            return HolyRosterSection(runtime: runtime, sessions: sessions)
+        switch layout {
+        case .classic, .calm:
+            return runtimeSections
+        case .triage:
+            return triageSections
+        case .focus:
+            return focusSections
         }
+    }
+
+    // Classic / Calm — sessions grouped by runtime (Codex, Claude, …).
+    private var runtimeSections: [HolyRosterSection] {
+        HolySessionRuntime.rosterOrder.compactMap { runtime in
+            let sessions = HolySessionRosterOrdering.orderedSessions(store.sessions, matching: runtime)
+            guard !sessions.isEmpty else { return nil }
+            return HolyRosterSection(id: "runtime.\(runtime.rawValue)", title: runtime.displayName, sessions: sessions)
+        }
+    }
+
+    // Triage — sessions regrouped into status lanes so what needs you floats up.
+    private var triageSections: [HolyRosterSection] {
+        let lanes = Dictionary(grouping: store.sessions) { session in
+            HolyRosterTriageLane(kind: store.attentionPresentation(for: session).kind)
+        }
+        return HolyRosterTriageLane.allCases.compactMap { lane in
+            guard let sessions = lanes[lane], !sessions.isEmpty else { return nil }
+            return HolyRosterSection(
+                id: "lane.\(lane.rawValue)",
+                title: lane.title,
+                sessions: HolySessionRosterOrdering.orderedSessions(sessions),
+                accent: lane.accent
+            )
+        }
+    }
+
+    // Focus — pinned "Today" sessions float to a zone on top; the rest dim back.
+    private var focusSections: [HolyRosterSection] {
+        let pinned = store.sessions.filter(\.isFocused)
+        guard !pinned.isEmpty else { return runtimeSections }
+
+        var result: [HolyRosterSection] = [
+            HolyRosterSection(
+                id: "focus.today",
+                title: "Today",
+                sessions: HolySessionRosterOrdering.orderedSessions(pinned),
+                accent: HolyGhosttyTheme.halo
+            )
+        ]
+        for runtime in HolySessionRuntime.rosterOrder {
+            let rest = HolySessionRosterOrdering.orderedSessions(store.sessions, matching: runtime)
+                .filter { !$0.isFocused }
+            guard !rest.isEmpty else { continue }
+            result.append(HolyRosterSection(id: "focus.\(runtime.rawValue)", title: runtime.displayName, sessions: rest, dimmed: true))
+        }
+        return result
     }
 
     var body: some View {
@@ -49,8 +102,9 @@ struct HolySessionRosterView: View {
                         ForEach(sections) { section in
                             VStack(alignment: .leading, spacing: 0) {
                                 HolyRosterSectionHeader(
-                                    runtime: section.runtime,
-                                    count: section.sessions.count
+                                    title: section.title,
+                                    count: section.sessions.count,
+                                    accent: section.accent
                                 )
 
                                 ForEach(section.sessions) { session in
@@ -61,6 +115,8 @@ struct HolySessionRosterView: View {
                                         coordination: store.coordination(for: session),
                                         attention: store.attentionPresentation(for: session),
                                         isSelected: store.selectedSessionID == session.id,
+                                        layout: layout,
+                                        dimmed: section.dimmed,
                                         compact: compact,
                                         onSelect: { store.selectSession(session.id) },
                                         onDuplicate: { store.duplicate(session.id) },
@@ -237,6 +293,8 @@ struct HolySessionRosterView: View {
 
                 Spacer(minLength: 4)
 
+                layoutSwitcher
+
                 Text("\(store.sessions.count)")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(HolyGhosttyTheme.textTertiary)
@@ -280,6 +338,39 @@ struct HolySessionRosterView: View {
         .padding(.top, 8)
         .padding(.bottom, 8)
         .background(HolyGhosttyTheme.bgElevated)
+    }
+
+    // Four-way roster layout switcher — one tap, visible active state.
+    private var layoutSwitcher: some View {
+        HStack(spacing: 1) {
+            ForEach(HolyRosterLayout.allCases) { option in
+                let isActive = layout == option
+                Button {
+                    rosterLayoutRaw = option.rawValue
+                } label: {
+                    Image(systemName: option.symbol)
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(isActive ? HolyGhosttyTheme.halo : HolyGhosttyTheme.textTertiary)
+                        .frame(width: 20, height: 18)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(isActive ? HolyGhosttyTheme.halo.opacity(0.16) : Color.clear)
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("\(option.displayName) — \(option.helpText)")
+            }
+        }
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(HolyGhosttyTheme.bg)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(HolyGhosttyTheme.borderActive, lineWidth: 0.5)
+        )
     }
 
     private func rosterActionButton(
@@ -407,10 +498,85 @@ enum HolySessionRosterOrdering {
 }
 
 private struct HolyRosterSection: Identifiable {
-    let runtime: HolySessionRuntime
+    let id: String
+    let title: String
     let sessions: [HolySession]
+    var accent: Color? = nil
+    var dimmed: Bool = false
+}
 
-    var id: String { runtime.rawValue }
+enum HolyRosterLayout: String, CaseIterable, Identifiable {
+    case classic
+    case calm
+    case triage
+    case focus
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .classic: return "Classic"
+        case .calm:    return "Calm"
+        case .triage:  return "Triage"
+        case .focus:   return "Focus"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .classic: return "rectangle.3.group"
+        case .calm:    return "moon"
+        case .triage:  return "arrow.up.arrow.down"
+        case .focus:   return "star"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .classic: return "Grouped by agent, full status vocabulary"
+        case .calm:    return "Quieter indicators, less motion"
+        case .triage:  return "Lanes by status: what needs you floats up"
+        case .focus:   return "Pinned Today sessions on top, the rest dimmed"
+        }
+    }
+}
+
+private enum HolyRosterTriageLane: String, CaseIterable {
+    case needsYou
+    case working
+    case idle
+    case done
+
+    init(kind: HolySessionAttentionKind) {
+        switch kind {
+        case .planningQuestion, .approvalNeeded, .newReply, .overdueReply, .staleReply, .conflict, .failed:
+            self = .needsYou
+        case .working, .swarming:
+            self = .working
+        case .done:
+            self = .done
+        case .quiet, .waitingQuiet, .sleepingReply, .dormantReply, .stalled:
+            self = .idle
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .needsYou: return "Needs You"
+        case .working:  return "Working"
+        case .idle:     return "Idle"
+        case .done:     return "Done"
+        }
+    }
+
+    var accent: Color {
+        switch self {
+        case .needsYou: return HolyAgentPalette.approvalNeeded
+        case .working:  return HolyAgentPalette.workingBlue
+        case .idle:     return HolyGhosttyTheme.textTertiary
+        case .done:     return HolyAgentPalette.done
+        }
+    }
 }
 
 private struct HolyRosterSortKey {
@@ -437,14 +603,21 @@ private struct HolyRosterActionButtonStyle: ButtonStyle {
 }
 
 private struct HolyRosterSectionHeader: View {
-    let runtime: HolySessionRuntime
+    let title: String
     let count: Int
+    var accent: Color? = nil
 
     var body: some View {
         HStack(spacing: 6) {
-            Text(runtime.displayName.uppercased())
+            if let accent {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 5, height: 5)
+            }
+
+            Text(title.uppercased())
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                .foregroundStyle(accent ?? HolyGhosttyTheme.textTertiary)
                 .lineLimit(1)
 
             Spacer(minLength: 4)
@@ -469,6 +642,8 @@ private struct HolyRosterRow: View {
     let coordination: HolySessionCoordination
     let attention: HolySessionAttentionPresentation
     let isSelected: Bool
+    var layout: HolyRosterLayout = .classic
+    var dimmed: Bool = false
     var compact: Bool = false
     let onSelect: () -> Void
     let onDuplicate: () -> Void
@@ -495,8 +670,8 @@ private struct HolyRosterRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             HolyAgentStatusOrb(
-                state: activityIndicatorState,
-                newReplyBecameAvailableAt: attention.kind == .newReply ? attention.becameAvailableAt : nil
+                state: displayActivityState,
+                newReplyBecameAvailableAt: displayActivityState == .newReply ? attention.becameAvailableAt : nil
             )
             .frame(width: 18, height: 18)
             .help(attention.helpText)
@@ -599,6 +774,7 @@ private struct HolyRosterRow: View {
                 .stroke(isSelected ? rowOutlineColor.opacity(0.55) : Color.clear, lineWidth: 0.8)
         )
         .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .opacity(dimmed && !isSelected ? 0.45 : 1)
         .onTapGesture(perform: onSelect)
     }
 
@@ -857,6 +1033,25 @@ private struct HolyRosterRow: View {
         case .conflict:
             return .conflict
         case .quiet:
+            return .idle
+        }
+    }
+
+    // Calm layout collapses the full 15-state vocabulary into a quiet set:
+    // the working throbber survives, everything that needs you reads as one
+    // amber cue, and the rest settle into idle/done/problem dots.
+    private var displayActivityState: HolyRosterActivityState {
+        guard layout == .calm else { return activityIndicatorState }
+        switch activityIndicatorState {
+        case .working, .swarming:
+            return .working
+        case .planningQuestion, .approvalNeeded, .newReply, .overdueReply, .staleReply:
+            return .approvalNeeded
+        case .failed, .conflict:
+            return .failed
+        case .done:
+            return .done
+        case .stalled, .waitingQuiet, .sleepingReply, .dormantReply, .idle:
             return .idle
         }
     }
