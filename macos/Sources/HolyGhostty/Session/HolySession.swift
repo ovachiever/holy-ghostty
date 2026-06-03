@@ -109,6 +109,10 @@ final class HolySession: ObservableObject, Identifiable {
         Self.normalizedMetadataString(record.launchSpec.note)
     }
 
+    var isFocused: Bool {
+        record.launchSpec.isFocused ?? false
+    }
+
     var displayProjectName: String? {
         // Stable identity only — repository name, then working directory.
         // Deliberately NOT inferred from live screen content (it produced
@@ -386,6 +390,13 @@ final class HolySession: ObservableObject, Identifiable {
 
     func setNote(_ note: String?) {
         record.launchSpec.note = Self.normalizedMetadataString(note)
+        markUpdated()
+        objectWillChange.send()
+    }
+
+    func setFocused(_ focused: Bool) {
+        // Store nil when unfocused so launch specs stay clean / template-safe.
+        record.launchSpec.isFocused = focused ? true : nil
         markUpdated()
         objectWillChange.send()
     }

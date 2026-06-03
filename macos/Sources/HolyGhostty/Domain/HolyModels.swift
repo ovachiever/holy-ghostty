@@ -944,6 +944,9 @@ struct HolySessionLaunchSpec: Codable, Equatable {
     var title: String
     var objective: String?
     var note: String?
+    /// User-pinned "focus / today" flag. Optional so existing persisted
+    /// launch-spec JSON (without this key) still decodes; nil == not focused.
+    var isFocused: Bool? = nil
     var task: HolyExternalTaskReference?
     var budget: HolySessionBudget?
     var transport: HolySessionTransportSpec
@@ -1063,6 +1066,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
     var normalizedForTemplate: Self {
         var copy = self
         copy.note = nil
+        copy.isFocused = nil
         copy.task = nil
         copy.workingDirectory = nil
         copy.tmux = copy.tmux?.normalized

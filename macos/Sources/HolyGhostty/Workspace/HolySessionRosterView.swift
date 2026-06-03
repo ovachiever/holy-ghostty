@@ -70,7 +70,8 @@ struct HolySessionRosterView: View {
                                         canKillTmux: store.canKillTmuxSession(session),
                                         onKillTmux: { store.killTmuxSession(session) },
                                         onRename: { store.rename(session, to: $0) },
-                                        onSetNote: { store.setNote(session, to: $0) }
+                                        onSetNote: { store.setNote(session, to: $0) },
+                                        onSetFocus: { store.setFocus(session, $0) }
                                     )
                                 }
                             }
@@ -478,6 +479,7 @@ private struct HolyRosterRow: View {
     let onKillTmux: () -> Void
     let onRename: (String) -> Void
     let onSetNote: (String?) -> Void
+    let onSetFocus: (Bool) -> Void
 
     @State private var isRenaming = false
     @State private var renameText = ""
@@ -512,6 +514,10 @@ private struct HolyRosterRow: View {
 
             Spacer(minLength: 0)
 
+            if !isRenaming && !isEditingNote {
+                ageLabel
+            }
+
             if !compact && !isRenaming && !isEditingNote {
                 Menu {
                     Button("Rename") { startRename() }
@@ -522,6 +528,9 @@ private struct HolyRosterRow: View {
                         Button("Clear Session Note") {
                             onSetNote(nil)
                         }
+                    }
+                    Button(session.isFocused ? "Unpin from Today" : "Pin to Today") {
+                        onSetFocus(!session.isFocused)
                     }
                     Divider()
                     Button("Duplicate") {
@@ -573,16 +582,12 @@ private struct HolyRosterRow: View {
         .padding(.vertical, 4)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(
-                    isSelected
-                        ? HolyGhosttyTheme.halo.opacity(0.16)
-                        : Color.clear
-                )
+                .fill(rowBackgroundColor)
         )
         .overlay(
             HStack(spacing: 0) {
                 RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(isSelected ? HolyGhosttyTheme.halo : Color.clear)
+                    .fill(leadingAccentColor)
                     .frame(width: 3)
                     .padding(.vertical, 5)
 
@@ -649,6 +654,13 @@ private struct HolyRosterRow: View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 4) {
                 connectionIndicator
+
+                if session.isFocused {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 7.5, weight: .semibold))
+                        .foregroundStyle(HolyGhosttyTheme.halo.opacity(isSelected ? 1 : 0.85))
+                        .help("Pinned to Today")
+                }
 
                 Text(primaryTitle)
                     .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
@@ -774,6 +786,44 @@ private struct HolyRosterRow: View {
         }
 
         return activityColor
+    }
+
+    // Pinned ("Today") sessions carry a quiet warm wash so they stand out
+    // from the roster without shouting — emphasis by de-emphasizing the rest.
+    private var rowBackgroundColor: Color {
+        if isSelected { return HolyGhosttyTheme.halo.opacity(0.16) }
+        if session.isFocused { return HolyGhosttyTheme.halo.opacity(0.06) }
+        return .clear
+    }
+
+    private var leadingAccentColor: Color {
+        if isSelected { return HolyGhosttyTheme.halo }
+        if session.isFocused { return HolyGhosttyTheme.halo.opacity(0.5) }
+        return .clear
+    }
+
+    // Age = time since the agent last produced output. Shown only once a
+    // session has aged past an hour, so fresh rows stay uncluttered.
+    private func ageLabelText(asOf now: Date) -> String? {
+        let seconds = now.timeIntervalSince(session.activityAt)
+        guard seconds >= 3600 else { return nil }
+        let hours = Int(seconds / 3600)
+        if hours < 24 { return "\(hours)h" }
+        return "\(hours / 24)d"
+    }
+
+    @ViewBuilder
+    private var ageLabel: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            if let text = ageLabelText(asOf: context.date) {
+                Text(text)
+                    .font(.system(size: 9, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                    .opacity(isSelected ? 0.95 : 0.7)
+                    .help("Last activity \(text) ago")
+            }
+        }
     }
 
     private var activityIndicatorState: HolyRosterActivityState {
