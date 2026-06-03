@@ -483,6 +483,12 @@ private struct HolyRosterRow: View {
     @State private var renameText = ""
     @State private var isEditingNote = false
     @State private var noteDraft = ""
+    @FocusState private var focusedEditField: RosterRowEditField?
+
+    private enum RosterRowEditField: Hashable {
+        case rename
+        case note
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
@@ -498,6 +504,7 @@ private struct HolyRosterRow: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white)
+                    .focused($focusedEditField, equals: .rename)
             } else {
                 displayLine
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -676,6 +683,7 @@ private struct HolyRosterRow: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 10.5, weight: .medium, design: .rounded))
                     .foregroundStyle(HolyGhosttyTheme.noteAccent)
+                    .focused($focusedEditField, equals: .note)
             }
             .padding(.leading, session.record.launchSpec.transport.isRemote ? 14 : 0)
         } else if let note = session.note {
@@ -722,7 +730,9 @@ private struct HolyRosterRow: View {
 
     private func startRename() {
         renameText = session.title
+        isEditingNote = false
         isRenaming = true
+        focusEditField(.rename)
     }
 
     private func commitRename() {
@@ -731,16 +741,27 @@ private struct HolyRosterRow: View {
             onRename(trimmed)
         }
         isRenaming = false
+        focusedEditField = nil
     }
 
     private func startNoteEdit() {
         noteDraft = session.note ?? ""
+        isRenaming = false
         isEditingNote = true
+        focusEditField(.note)
     }
 
     private func commitNote() {
         onSetNote(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
         isEditingNote = false
+        focusedEditField = nil
+    }
+
+    private func focusEditField(_ field: RosterRowEditField) {
+        focusedEditField = nil
+        DispatchQueue.main.async {
+            focusedEditField = field
+        }
     }
 
     private var activityColor: Color {
