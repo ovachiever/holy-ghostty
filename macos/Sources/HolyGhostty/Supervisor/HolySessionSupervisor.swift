@@ -30,6 +30,37 @@ struct HolySessionArchiveResult {
     let pendingEvents: [HolySessionEventDraft]
 }
 
+private struct LocalHolyTmuxProbe {
+    var metadataBySessionName: [String: LocalHolyTmuxSessionMetadata]
+    var unavailableReason: String?
+
+    var isUnavailable: Bool {
+        unavailableReason != nil
+    }
+
+    static func available(_ metadataBySessionName: [String: LocalHolyTmuxSessionMetadata]) -> Self {
+        .init(metadataBySessionName: metadataBySessionName, unavailableReason: nil)
+    }
+
+    static func unavailable(_ reason: String) -> Self {
+        .init(metadataBySessionName: [:], unavailableReason: reason)
+    }
+}
+
+private struct LocalHolyTmuxSessionMetadata {
+    let sessionName: String
+    let title: String?
+    let runtimeRawValue: String?
+    let workingDirectory: String?
+    let objective: String?
+    let command: String?
+}
+
+private struct RevivedArchivedLocalSession {
+    let archiveID: UUID
+    let record: HolySessionRecord
+}
+
 @MainActor
 final class HolySessionSupervisor {
     private let ghostty: Ghostty.App
@@ -59,30 +90,44 @@ final class HolySessionSupervisor {
         for summary in orphanCleanupSummaries {
             AppDelegate.logger.notice("Holy Ghostty recovery cleanup: \(summary, privacy: .public)")
         }
-        let recovery = recoverActiveRecords(snapshot.sessions)
+        let liveLocalHolySessions = Self.probeLocalHolyTmuxSessions()
+        let recovery = recoverActiveRecords(snapshot.sessions, localTmuxProbe: liveLocalHolySessions)
 
         // Cold-boot detection. After a macOS reboot the `holy` tmux server is
         // gone along with every session's process, pty, and scrollback. Auto-
         // bootstrapping fresh empty shells with stale Claude/Codex labels
-        // lies about state. Probe the server: any saved local-managed session
-        // whose tmux session is missing gets archived instead of restored, so
-        // the roster starts empty after a reboot and the saved layouts
-        // surface in the history sheet where they can be explicitly
-        // relaunched. A graceful Holy quit (tmux server still alive, sessions
-        // still present) takes the restore-as-normal branch and is
-        // unaffected. Remote/SSH sessions skip the check — the remote tmux
-        // server is independent of macOS reboots.
-        let liveLocalHolySessions = Self.probeLocalHolyTmuxSessions()
+        // lies about state. Probe the server: saved local-managed sessions
+        // are archived only when Holy cannot inspect the local tmux server at
+        // all. If the server is alive, a per-record stale path or stale title
+        // must not make a live session drop from the roster.
         var presentRecords: [HolySessionRecord] = []
         var dormantRecords: [HolySessionRecord] = []
         for record in recovery.restorableRecords {
             if Self.isLocalManagedHolySession(record.launchSpec),
-               !liveLocalHolySessions.contains(record.launchSpec.tmux?.sessionName ?? "") {
+               liveLocalHolySessions.isUnavailable {
+                if let sessionName = Self.localManagedTmuxSessionName(for: record) {
+                    AppDelegate.logger.notice(
+                        "Holy Ghostty restore archived dormant local tmux session \(sessionName, privacy: .public): server unavailable"
+                    )
+                }
                 dormantRecords.append(record)
             } else {
                 presentRecords.append(record)
             }
         }
+
+        let alreadyRestoredLocalSessionNames = Set(presentRecords.compactMap {
+            Self.localManagedTmuxSessionName(for: $0)
+        })
+        let revivedArchivedSessions = Self.liveArchivedLocalSessions(
+            from: snapshot.archivedSessions,
+            localTmuxProbe: liveLocalHolySessions,
+            excludingSessionNames: alreadyRestoredLocalSessionNames
+        )
+        if !revivedArchivedSessions.isEmpty {
+            presentRecords.append(contentsOf: revivedArchivedSessions.map(\.record))
+        }
+        let revivedArchiveIDs = Set(revivedArchivedSessions.map(\.archiveID))
         let coldBootArchived = dormantRecords.map { record in
             HolyArchivedSession(
                 sourceSessionID: record.id,
@@ -102,7 +147,9 @@ final class HolySessionSupervisor {
         }
 
         let restoredSessions = presentRecords.map { HolySession(record: $0, app: app) }
-        let archivedSessions = (snapshot.archivedSessions + recovery.recoveredArchivedSessions + coldBootArchived)
+        let retainedArchivedSessions = snapshot.archivedSessions
+            .filter { !revivedArchiveIDs.contains($0.id) }
+        let archivedSessions = (retainedArchivedSessions + recovery.recoveredArchivedSessions + coldBootArchived)
             .sorted { $0.archivedAt > $1.archivedAt }
 
         if restoredSessions.isEmpty {
@@ -165,41 +212,235 @@ final class HolySessionSupervisor {
         )
     }
 
-    /// Lists session names live on the local managed `holy` tmux server.
-    /// Returns an empty set if the server isn't running (cold boot) or if
-    /// the probe fails. Synchronous on purpose — the result feeds the very
+    /// Lists sessions live on the local managed `holy` tmux server, plus stable
+    /// `@holy_*` metadata. Synchronous on purpose — the result feeds the very
     /// first restoreWorkspace decision.
-    private static func probeLocalHolyTmuxSessions() -> Set<String> {
+    private static func probeLocalHolyTmuxSessions() -> LocalHolyTmuxProbe {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [
-            "tmux",
-            "-L", HolySessionTmuxSpec.defaultSocketName,
-            "list-sessions",
-            "-F", "#{session_name}",
-        ]
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", localHolyTmuxProbeScript()]
         let stdout = Pipe()
+        let stderr = Pipe()
         process.standardOutput = stdout
-        process.standardError = Pipe() // discard "no server running on /…/holy"
+        process.standardError = stderr
         do {
             try process.run()
             process.waitUntilExit()
         } catch {
-            return []
+            return .unavailable("Failed to launch local tmux probe.")
         }
-        guard process.terminationStatus == 0 else { return [] }
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0 else {
+            let reason = String(data: errorData, encoding: .utf8)?.holyTrimmed.nilIfEmpty
+                ?? String(data: data, encoding: .utf8)?.holyTrimmed.nilIfEmpty
+                ?? "Probe exited with status \(process.terminationStatus)."
+            return .unavailable(reason)
+        }
+
         let text = String(data: data, encoding: .utf8) ?? ""
-        return Set(
-            text.split(separator: "\n", omittingEmptySubsequences: true)
-                .map { String($0).trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-        )
+        let fieldSeparator = Character(UnicodeScalar(0x1F)!)
+        let metadata = text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line -> LocalHolyTmuxSessionMetadata? in
+                let fields = line.split(separator: fieldSeparator, omittingEmptySubsequences: false)
+                    .map(String.init)
+                guard fields.count >= 6,
+                      let sessionName = normalizedMetadataString(fields[0]) else {
+                    return nil
+                }
+
+                return .init(
+                    sessionName: sessionName,
+                    title: normalizedMetadataString(fields[1]),
+                    runtimeRawValue: normalizedMetadataString(fields[2]),
+                    workingDirectory: normalizedMetadataString(fields[3]),
+                    objective: normalizedMetadataString(fields[4]),
+                    command: normalizedMetadataString(fields[5])
+                )
+            }
+        return .available(Dictionary(uniqueKeysWithValues: metadata.map { ($0.sessionName, $0) }))
+    }
+
+    private static func localHolyTmuxProbeScript() -> String {
+        """
+        sep=$'\\x1f'
+        tmux_cmd=(tmux -L \(HolySessionTmuxSpec.defaultSocketName))
+
+        clean_value() {
+          local value="$1"
+          value=${value//$'\\n'/ }
+          value=${value//$'\\r'/ }
+          printf '%s' "$value"
+        }
+
+        option_value() {
+          local session_name="$1"
+          local option_name="$2"
+          "${tmux_cmd[@]}" show-options -qv -t "$session_name" "$option_name" 2>/dev/null || true
+        }
+
+        sessions=$("${tmux_cmd[@]}" list-sessions -F '#{session_name}' 2>&1)
+        exit_status=$?
+        if (( exit_status != 0 )); then
+          printf '%s' "$sessions" >&2
+          exit "$exit_status"
+        fi
+
+        while IFS= read -r session_name; do
+          [[ -z "$session_name" ]] && continue
+          printf '%s%s%s%s%s%s%s%s%s%s%s\\n' \
+            "$(clean_value "$session_name")" "$sep" \
+            "$(clean_value "$(option_value "$session_name" @holy_title)")" "$sep" \
+            "$(clean_value "$(option_value "$session_name" @holy_runtime)")" "$sep" \
+            "$(clean_value "$(option_value "$session_name" @holy_working_directory)")" "$sep" \
+            "$(clean_value "$(option_value "$session_name" @holy_objective)")" "$sep" \
+            "$(clean_value "$(option_value "$session_name" @holy_command)")"
+        done <<<"$sessions"
+        """
     }
 
     private static func isLocalManagedHolySession(_ launchSpec: HolySessionLaunchSpec) -> Bool {
         launchSpec.transport.kind == .local
             && launchSpec.tmux?.socketName == HolySessionTmuxSpec.defaultSocketName
+    }
+
+    private static func localManagedTmuxSessionName(for record: HolySessionRecord) -> String? {
+        guard isLocalManagedHolySession(record.launchSpec) else { return nil }
+        return record.launchSpec.tmux?.sessionName?.holyTrimmed.nilIfEmpty
+    }
+
+    private static func liveArchivedLocalSessions(
+        from archivedSessions: [HolyArchivedSession],
+        localTmuxProbe: LocalHolyTmuxProbe,
+        excludingSessionNames excludedSessionNames: Set<String>
+    ) -> [RevivedArchivedLocalSession] {
+        guard !localTmuxProbe.isUnavailable else { return [] }
+
+        var seenSessionNames = excludedSessionNames
+        var revived: [RevivedArchivedLocalSession] = []
+        for archivedSession in archivedSessions {
+            guard let sessionName = localManagedTmuxSessionName(for: archivedSession.record),
+                  !seenSessionNames.contains(sessionName),
+                  let metadata = localTmuxProbe.metadataBySessionName[sessionName] else {
+                continue
+            }
+
+            seenSessionNames.insert(sessionName)
+            let record = record(archivedSession.record, applyingLiveLocalTmuxMetadata: metadata)
+            AppDelegate.logger.notice(
+                "Holy Ghostty restore revived archived local tmux session \(sessionName, privacy: .public): session is live"
+            )
+            revived.append(.init(archiveID: archivedSession.id, record: record))
+        }
+        return revived
+    }
+
+    private static func record(
+        _ record: HolySessionRecord,
+        applyingLiveLocalTmuxMetadata metadata: LocalHolyTmuxSessionMetadata
+    ) -> HolySessionRecord {
+        var copy = record
+        var launchSpec = record.launchSpec
+        var changed = false
+
+        if let runtimeRawValue = metadata.runtimeRawValue,
+           let runtime = HolySessionRuntime(rawValue: runtimeRawValue),
+           launchSpec.runtime != runtime {
+            launchSpec.runtime = runtime
+            changed = true
+        }
+
+        if let workingDirectory = stableWorkingDirectory(metadata.workingDirectory),
+           launchSpec.workingDirectory?.holyTrimmed.nilIfEmpty != workingDirectory {
+            launchSpec.workingDirectory = workingDirectory
+            changed = true
+        } else if let repairedWorkingDirectory = repairedLiveStatusWorkingDirectory(launchSpec.workingDirectory),
+                  launchSpec.workingDirectory?.holyTrimmed.nilIfEmpty != repairedWorkingDirectory {
+            launchSpec.workingDirectory = repairedWorkingDirectory
+            changed = true
+        }
+
+        if let title = stableTitle(metadata.title),
+           launchSpec.title.holyTrimmed != title {
+            launchSpec.title = title
+            changed = true
+        } else if isLiveAgentStatusTitle(launchSpec.title) {
+            launchSpec.title = launchSpec.runtime.displayName
+            changed = true
+        }
+
+        if let objective = metadata.objective,
+           launchSpec.objective?.holyTrimmed.nilIfEmpty == nil {
+            launchSpec.objective = objective
+            changed = true
+        }
+
+        if let command = metadata.command,
+           launchSpec.command?.holyTrimmed.nilIfEmpty == nil {
+            launchSpec.command = command
+            changed = true
+        }
+
+        guard changed else { return record }
+
+        copy.launchSpec = launchSpec
+        copy.updatedAt = .now
+        AppDelegate.logger.notice(
+            "Holy Ghostty restore repaired live local tmux metadata for \(metadata.sessionName, privacy: .public)"
+        )
+        return copy
+    }
+
+    private static func stableTitle(_ title: String?) -> String? {
+        guard let title = normalizedMetadataString(title),
+              !isLiveAgentStatusTitle(title) else {
+            return nil
+        }
+        return title
+    }
+
+    private static func stableWorkingDirectory(_ workingDirectory: String?) -> String? {
+        guard let workingDirectory = normalizedMetadataString(workingDirectory) else {
+            return nil
+        }
+
+        let url = URL(fileURLWithPath: workingDirectory).standardizedFileURL
+        if isLiveAgentStatusTitle(url.lastPathComponent) {
+            return nil
+        }
+        return url.path
+    }
+
+    private static func repairedLiveStatusWorkingDirectory(_ workingDirectory: String?) -> String? {
+        guard let workingDirectory = normalizedMetadataString(workingDirectory) else {
+            return nil
+        }
+
+        let url = URL(fileURLWithPath: workingDirectory).standardizedFileURL
+        guard isLiveAgentStatusTitle(url.lastPathComponent) else {
+            return nil
+        }
+
+        let parent = url.deletingLastPathComponent()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: parent.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return nil
+        }
+        return parent.path
+    }
+
+    private static func normalizedMetadataString(_ value: String?) -> String? {
+        value?.holyTrimmed.nilIfEmpty
+    }
+
+    private static func isLiveAgentStatusTitle(_ title: String) -> Bool {
+        guard let first = title.trimmingCharacters(in: .whitespacesAndNewlines).first else {
+            return false
+        }
+
+        return "✱✳✻✽✢⏺●○◐◓◑◒•·⠂⠄⠆⠇⠋⠐⠴⠼⠿".contains(first)
     }
 
     func createSession(
@@ -412,12 +653,21 @@ final class HolySessionSupervisor {
         )
     }
 
-    private func recoverActiveRecords(_ records: [HolySessionRecord]) -> HolyActiveRecoveryResult {
+    private func recoverActiveRecords(
+        _ records: [HolySessionRecord],
+        localTmuxProbe: LocalHolyTmuxProbe
+    ) -> HolyActiveRecoveryResult {
         var restorableRecords: [HolySessionRecord] = []
         var recoveredArchivedSessions: [HolyArchivedSession] = []
         var pendingEvents: [HolySessionEventDraft] = []
 
         for record in records {
+            if let sessionName = Self.localManagedTmuxSessionName(for: record),
+               let metadata = localTmuxProbe.metadataBySessionName[sessionName] {
+                restorableRecords.append(Self.record(record, applyingLiveLocalTmuxMetadata: metadata))
+                continue
+            }
+
             let evaluation = recoveryEvaluation(for: record)
             guard let reason = evaluation.issue else {
                 restorableRecords.append(record)

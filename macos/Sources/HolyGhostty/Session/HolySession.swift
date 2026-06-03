@@ -1387,7 +1387,7 @@ final class HolySession: ObservableObject, Identifiable {
         guard let first = title.trimmingCharacters(in: .whitespacesAndNewlines).first else {
             return false
         }
-        return "✱✻✽✢⏺●○◐◓◑◒•·⠂⠄⠆⠇⠿".contains(first)
+        return "✱✳✻✽✢⏺●○◐◓◑◒•·⠂⠄⠆⠇⠋⠐⠴⠼⠿".contains(first)
     }
 
     private static func isGenericLocalTitle(_ title: String, transport: HolySessionTransportSpec) -> Bool {

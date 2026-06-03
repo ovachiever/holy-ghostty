@@ -205,7 +205,8 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
               !Self.isGeneratedDefaultTitle(title),
               !Self.isInternalHolyTmuxTitle(title),
               !Self.isLocalMachineTitle(title),
-              !Self.isGenericWorkspaceName(title) else {
+              !Self.isGenericWorkspaceName(title),
+              !Self.isLiveAgentStatusTitle(title) else {
             return nil
         }
 
@@ -298,6 +299,14 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
         default:
             return false
         }
+    }
+
+    private static func isLiveAgentStatusTitle(_ title: String) -> Bool {
+        guard let first = title.trimmingCharacters(in: .whitespacesAndNewlines).first else {
+            return false
+        }
+
+        return "✱✳✻✽✢⏺●○◐◓◑◒•·⠂⠄⠆⠇⠋⠐⠴⠼⠿".contains(first)
     }
 
     private static func localMachineTitleCandidates() -> [String] {

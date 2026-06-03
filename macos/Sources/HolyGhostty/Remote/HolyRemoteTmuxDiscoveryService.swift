@@ -266,6 +266,7 @@ actor HolyRemoteTmuxDiscoveryService {
           value=$(trimmed_value "$1")
           [[ -z "$value" ]] && return 1
           [[ "$value" == */* ]] && return 1
+          live_agent_status_title "$value" && return 1
 
           lowered="${value:l}"
           [[ "$lowered" =~ '^[0-9]+$' ]] && return 1
@@ -279,6 +280,21 @@ actor HolyRemoteTmuxDiscoveryService {
           esac
 
           printf '%s' "$value"
+        }
+
+        live_agent_status_title() {
+          local value first
+          value=$(trimmed_value "$1")
+          [[ -z "$value" ]] && return 1
+
+          first="${value[1,1]}"
+          case "$first" in
+            ✱|✳|✻|✽|✢|⏺|●|○|◐|◓|◑|◒|•|·|⠂|⠄|⠆|⠇|⠋|⠐|⠴|⠼|⠿)
+              return 0
+              ;;
+          esac
+
+          return 1
         }
 
         generic_directory_name() {
