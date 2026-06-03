@@ -9,6 +9,7 @@ struct HolySessionRosterView: View {
     var paneLabelsBySessionID: [UUID: String] = [:]
     var onPresentRemoteHosts: () -> Void = {}
     var onPresentHistory: () -> Void = {}
+    var onToggleCollapse: (() -> Void)?
 
     private var sections: [HolyRosterSection] {
         HolySessionRuntime.rosterOrder.compactMap { runtime in
@@ -101,6 +102,18 @@ struct HolySessionRosterView: View {
                     .lineLimit(1)
 
                 Spacer(minLength: 4)
+
+                if let onToggleCollapse {
+                    Button(action: onToggleCollapse) {
+                        Image(systemName: "sidebar.leading")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Collapse session sidebar")
+                }
 
                 moreMenu
             }

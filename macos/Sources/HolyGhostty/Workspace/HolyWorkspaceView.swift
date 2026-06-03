@@ -8,6 +8,7 @@ private enum HolyWorkspaceLayout {
     static let rosterMinWidth: CGFloat = 180
     static let rosterDefaultWidth: CGFloat = 272
     static let rosterMaxWidth: CGFloat = 560
+    static let rosterCollapsedWidth: CGFloat = 34
     static let detailMinimumVisibleWidth: CGFloat = 420
     static let splitHandleWidth: CGFloat = 8
     static let titlebarControlInset: CGFloat = 42
@@ -22,11 +23,12 @@ private struct HolyWorkspaceSplitHandle: View {
                 .fill(HolyGhosttyTheme.border.opacity(isHovering ? 0.9 : 0.65))
 
             Capsule(style: .continuous)
-                .fill(HolyGhosttyTheme.textTertiary.opacity(isHovering ? 0.45 : 0))
+                .fill(HolyGhosttyTheme.textTertiary.opacity(isHovering ? 0.48 : 0.16))
                 .frame(width: 3, height: 40)
         }
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
+        .help("Drag to resize session sidebar")
     }
 }
 
@@ -53,6 +55,7 @@ struct HolyWorkspaceRootView: View {
     @ObservedObject var store: HolyWorkspaceStore
     @State private var diffCompareSessionIDRaw: String?
     @AppStorage("holy.workspace.rosterWidth.v3") private var rosterWidthRaw = Double(HolyWorkspaceLayout.rosterDefaultWidth)
+    @AppStorage("holy.workspace.rosterCollapsed.v1") private var rosterCollapsed = false
     @State private var rosterDragStartWidth: CGFloat?
 
     var body: some View {
@@ -122,44 +125,55 @@ struct HolyWorkspaceRootView: View {
 
     private var standardContent: some View {
         GeometryReader { geometry in
-            let rosterWidth = clampedRosterWidth(for: geometry.size.width)
+            let expandedRosterWidth = clampedRosterWidth(for: geometry.size.width)
+            let rosterWidth = rosterCollapsed ? HolyWorkspaceLayout.rosterCollapsedWidth : expandedRosterWidth
 
             HStack(spacing: 0) {
-                VStack(spacing: 0) {
-                    HolySessionRosterView(
-                        store: store,
-                        titlebarInset: HolyWorkspaceLayout.titlebarControlInset,
-                        paneLabelsBySessionID: store.paneLabelsBySessionID,
-                        onPresentRemoteHosts: { store.presentRemoteHosts() },
-                        onPresentHistory: { store.presentHistory() }
-                    )
-                    .frame(maxHeight: .infinity)
+                Group {
+                    if rosterCollapsed {
+                        collapsedRosterRail
+                    } else {
+                        VStack(spacing: 0) {
+                            HolySessionRosterView(
+                                store: store,
+                                titlebarInset: HolyWorkspaceLayout.titlebarControlInset,
+                                paneLabelsBySessionID: store.paneLabelsBySessionID,
+                                onPresentRemoteHosts: { store.presentRemoteHosts() },
+                                onPresentHistory: { store.presentHistory() },
+                                onToggleCollapse: { toggleRosterCollapsed() }
+                            )
+                            .frame(maxHeight: .infinity)
 
-                    leftRailViewControls
+                            leftRailViewControls
+                        }
+                    }
                 }
                 .frame(width: rosterWidth)
                 .frame(maxHeight: .infinity)
                 .background(HolyGhosttyTheme.bgElevated)
 
-                HolyWorkspaceSplitHandle()
-                    .frame(width: HolyWorkspaceLayout.splitHandleWidth)
-                    .gesture(
-                        DragGesture(minimumDistance: 1)
-                            .onChanged { value in
-                                let startWidth = rosterDragStartWidth ?? rosterWidth
-                                rosterDragStartWidth = startWidth
-                                setRosterWidth(startWidth + value.translation.width, availableWidth: geometry.size.width)
-                            }
-                            .onEnded { _ in
-                                rosterDragStartWidth = nil
-                            }
-                    )
+                if !rosterCollapsed {
+                    HolyWorkspaceSplitHandle()
+                        .frame(width: HolyWorkspaceLayout.splitHandleWidth)
+                        .gesture(
+                            DragGesture(minimumDistance: 1)
+                                .onChanged { value in
+                                    let startWidth = rosterDragStartWidth ?? expandedRosterWidth
+                                    rosterDragStartWidth = startWidth
+                                    setRosterWidth(startWidth + value.translation.width, availableWidth: geometry.size.width)
+                                }
+                                .onEnded { _ in
+                                    rosterDragStartWidth = nil
+                                }
+                        )
+                }
 
                 mainWorkspaceContent
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(width: max(0, geometry.size.width), height: max(0, geometry.size.height))
             .clipped()
+            .animation(.easeInOut(duration: 0.18), value: rosterCollapsed)
         }
     }
 
@@ -329,6 +343,88 @@ struct HolyWorkspaceRootView: View {
         }
     }
 
+    private var collapsedRosterRail: some View {
+        VStack(spacing: 10) {
+            Button(action: toggleRosterCollapsed) {
+                Image(systemName: "sidebar.leading")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(HolyGhosttyTheme.halo)
+            .help("Expand session sidebar")
+
+            sessionCountCapsule
+
+            Spacer(minLength: 0)
+
+            collapsedRailButton(
+                title: "New Session",
+                systemName: "rectangle.stack.badge.plus"
+            ) {
+                _ = store.createSessionFromDefaultLaunchProfile()
+            }
+
+            collapsedRailButton(
+                title: "Sync Sessions",
+                systemName: "arrow.triangle.2.circlepath"
+            ) {
+                store.reattachAllSessions()
+            }
+            .disabled(!store.hasReattachableSessions)
+
+            collapsedRailButton(
+                title: "Hosts",
+                systemName: "network"
+            ) {
+                store.presentRemoteHosts()
+            }
+        }
+        .padding(.top, HolyWorkspaceLayout.titlebarControlInset + 8)
+        .padding(.bottom, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(HolyGhosttyTheme.border)
+                .frame(width: 0.5)
+        }
+    }
+
+    private var sessionCountCapsule: some View {
+        Text("\(store.sessions.count)")
+            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            .foregroundStyle(HolyGhosttyTheme.textSecondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.72)
+            .frame(width: 24, height: 18)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(HolyGhosttyTheme.bg.opacity(0.84))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(HolyGhosttyTheme.borderActive, lineWidth: 0.5)
+            )
+            .help("\(store.sessions.count) sessions")
+    }
+
+    private func collapsedRailButton(
+        title: String,
+        systemName: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 11, weight: .medium))
+                .frame(width: 26, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(HolyGhosttyTheme.textSecondary)
+        .help(title)
+    }
+
     @ViewBuilder
     private func paneView(at index: Int) -> some View {
         let sessions = store.visiblePaneSessions
@@ -416,6 +512,11 @@ struct HolyWorkspaceRootView: View {
 
     private func setRosterWidth(_ proposedWidth: CGFloat, availableWidth: CGFloat) {
         rosterWidthRaw = Double(clampedRosterWidth(proposedWidth, availableWidth: availableWidth))
+    }
+
+    private func toggleRosterCollapsed() {
+        rosterCollapsed.toggle()
+        rosterDragStartWidth = nil
     }
 
     private var gridContent: some View {
