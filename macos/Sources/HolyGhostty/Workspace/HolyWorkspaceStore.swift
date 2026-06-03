@@ -472,6 +472,11 @@ final class HolyWorkspaceStore: ObservableObject {
         }
     }
 
+    func setNote(_ session: HolySession, to note: String?) {
+        session.setNote(note)
+        persist()
+    }
+
     func duplicate(_ session: HolySession) {
         var launchSpec = session.record.launchSpec
         launchSpec.title = "\(session.title) Copy"

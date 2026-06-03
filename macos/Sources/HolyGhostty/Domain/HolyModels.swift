@@ -943,6 +943,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
     var runtime: HolySessionRuntime
     var title: String
     var objective: String?
+    var note: String?
     var task: HolyExternalTaskReference?
     var budget: HolySessionBudget?
     var transport: HolySessionTransportSpec
@@ -959,6 +960,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
             runtime: .shell,
             title: title,
             objective: nil,
+            note: nil,
             task: nil,
             budget: nil,
             transport: .local,
@@ -1000,6 +1002,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         runtime: HolySessionRuntime = .shell,
         title: String,
         objective: String? = nil,
+        note: String? = nil,
         task: HolyExternalTaskReference? = nil,
         budget: HolySessionBudget? = nil,
         transport: HolySessionTransportSpec = .local,
@@ -1014,6 +1017,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         self.runtime = runtime
         self.title = title
         self.objective = objective
+        self.note = note
         self.task = task
         self.budget = budget
         self.transport = transport
@@ -1030,6 +1034,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         self.runtime = .shell
         self.title = fallbackTitle
         self.objective = nil
+        self.note = nil
         self.task = nil
         self.budget = nil
         self.transport = .local
@@ -1057,6 +1062,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
 
     var normalizedForTemplate: Self {
         var copy = self
+        copy.note = nil
         copy.task = nil
         copy.workingDirectory = nil
         copy.tmux = copy.tmux?.normalized

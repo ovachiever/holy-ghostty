@@ -105,6 +105,10 @@ final class HolySession: ObservableObject, Identifiable {
         )
     }
 
+    var note: String? {
+        Self.normalizedMetadataString(record.launchSpec.note)
+    }
+
     var displayProjectName: String? {
         // Stable identity only — repository name, then working directory.
         // Deliberately NOT inferred from live screen content (it produced
@@ -376,6 +380,12 @@ final class HolySession: ObservableObject, Identifiable {
 
     func rename(to title: String) {
         record.launchSpec.title = title
+        markUpdated()
+        objectWillChange.send()
+    }
+
+    func setNote(_ note: String?) {
+        record.launchSpec.note = Self.normalizedMetadataString(note)
         markUpdated()
         objectWillChange.send()
     }

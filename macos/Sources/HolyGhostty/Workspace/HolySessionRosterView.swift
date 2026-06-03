@@ -68,7 +68,8 @@ struct HolySessionRosterView: View {
                                         onArchive: { store.close(session) },
                                         canKillTmux: store.canKillTmuxSession(session),
                                         onKillTmux: { store.killTmuxSession(session) },
-                                        onRename: { store.rename(session, to: $0) }
+                                        onRename: { store.rename(session, to: $0) },
+                                        onSetNote: { store.setNote(session, to: $0) }
                                     )
                                 }
                             }
@@ -463,9 +464,12 @@ private struct HolyRosterRow: View {
     let canKillTmux: Bool
     let onKillTmux: () -> Void
     let onRename: (String) -> Void
+    let onSetNote: (String?) -> Void
 
     @State private var isRenaming = false
     @State private var renameText = ""
+    @State private var isEditingNote = false
+    @State private var noteDraft = ""
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
@@ -488,9 +492,18 @@ private struct HolyRosterRow: View {
 
             Spacer(minLength: 0)
 
-            if !compact && !isRenaming {
+            if !compact && !isRenaming && !isEditingNote {
                 Menu {
                     Button("Rename") { startRename() }
+                    Button(session.note == nil ? "Add Session Note…" : "Edit Session Note…") {
+                        startNoteEdit()
+                    }
+                    if session.note != nil {
+                        Button("Clear Session Note") {
+                            onSetNote(nil)
+                        }
+                    }
+                    Divider()
                     Button("Duplicate") {
                         onSelect()
                         onDuplicate()
@@ -624,13 +637,47 @@ private struct HolyRosterRow: View {
                     .truncationMode(.tail)
             }
 
-            if let paneLabel {
+            if !compact {
+                noteLine
+            }
+
+            if let paneLabel, !isEditingNote {
                 Text(paneLabel)
                     .font(.system(size: 8, weight: .semibold, design: .rounded))
                     .textCase(.uppercase)
                     .foregroundStyle(HolyGhosttyTheme.halo.opacity(isSelected ? 0.95 : 0.72))
                     .lineLimit(1)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var noteLine: some View {
+        if isEditingNote {
+            HStack(spacing: 5) {
+                Capsule(style: .continuous)
+                    .fill(HolyGhosttyTheme.noteAccent.opacity(isSelected ? 0.85 : 0.64))
+                    .frame(width: 3, height: 11)
+
+                TextField("Session note", text: $noteDraft, onCommit: commitNote)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(HolyGhosttyTheme.noteAccent)
+            }
+            .padding(.leading, session.record.launchSpec.transport.isRemote ? 14 : 0)
+        } else if let note = session.note {
+            HStack(spacing: 5) {
+                Capsule(style: .continuous)
+                    .fill(HolyGhosttyTheme.noteAccent.opacity(isSelected ? 0.88 : 0.58))
+                    .frame(width: 3, height: 11)
+
+                Text(note)
+                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(HolyGhosttyTheme.noteAccent.opacity(isSelected ? 0.96 : 0.82))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .padding(.leading, session.record.launchSpec.transport.isRemote ? 14 : 0)
         }
     }
 
@@ -671,6 +718,16 @@ private struct HolyRosterRow: View {
             onRename(trimmed)
         }
         isRenaming = false
+    }
+
+    private func startNoteEdit() {
+        noteDraft = session.note ?? ""
+        isEditingNote = true
+    }
+
+    private func commitNote() {
+        onSetNote(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
+        isEditingNote = false
     }
 
     private var activityColor: Color {

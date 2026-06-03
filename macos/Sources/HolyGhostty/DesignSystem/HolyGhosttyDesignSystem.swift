@@ -16,6 +16,7 @@ enum HolyGhosttyTheme {
     // MARK: Accent — informational blue (calmer than old cyan)
     static let accent = Color(red: 0.45, green: 0.65, blue: 0.82)
     static let accentSoft = Color(red: 0.40, green: 0.48, blue: 0.58)
+    static let noteAccent = Color(red: 0.95, green: 0.57, blue: 0.22)
 
     // MARK: Semantic
     static let success = Color(red: 0.35, green: 0.75, blue: 0.52)
