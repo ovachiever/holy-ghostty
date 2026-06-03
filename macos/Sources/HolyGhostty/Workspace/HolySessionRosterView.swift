@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -10,17 +11,13 @@ struct HolySessionRosterView: View {
     var onPresentHistory: () -> Void = {}
 
     private var sections: [HolyRosterSection] {
-        let grouped = Dictionary(grouping: store.sessions, by: { $0.displayRuntime })
-
-        return HolySessionRuntime.rosterOrder.compactMap { runtime in
-            guard let sessions = grouped[runtime], !sessions.isEmpty else {
-                return nil
-            }
-
-            return HolyRosterSection(
-                runtime: runtime,
-                sessions: Self.sortedSessions(sessions)
+        HolySessionRuntime.rosterOrder.compactMap { runtime in
+            let sessions = HolySessionRosterOrdering.orderedSessions(
+                store.sessions,
+                matching: runtime
             )
+            guard !sessions.isEmpty else { return nil }
+            return HolyRosterSection(runtime: runtime, sessions: sessions)
         }
     }
 
@@ -58,7 +55,7 @@ struct HolySessionRosterView: View {
                                 ForEach(section.sessions) { session in
                                     HolyRosterRow(
                                         session: session,
-                                        primaryTitle: Self.primaryTitle(for: session),
+                                        primaryTitle: HolySessionRosterOrdering.primaryTitle(for: session),
                                         paneLabel: paneLabelsBySessionID[session.id],
                                         coordination: store.coordination(for: session),
                                         attention: store.attentionPresentation(for: session),
@@ -291,6 +288,23 @@ struct HolySessionRosterView: View {
         .help(help)
     }
 
+}
+
+@MainActor
+enum HolySessionRosterOrdering {
+    static func orderedSessions(_ sessions: [HolySession]) -> [HolySession] {
+        HolySessionRuntime.rosterOrder.flatMap { runtime in
+            orderedSessions(sessions, matching: runtime)
+        }
+    }
+
+    static func orderedSessions(
+        _ sessions: [HolySession],
+        matching runtime: HolySessionRuntime
+    ) -> [HolySession] {
+        sortedSessions(sessions.filter { $0.displayRuntime == runtime })
+    }
+
     private static func sortedSessions(_ sessions: [HolySession]) -> [HolySession] {
         sessions.sorted { lhs, rhs in
             let lhsKey = sortKey(for: lhs)
@@ -312,7 +326,7 @@ struct HolySessionRosterView: View {
         }
     }
 
-    private static func primaryTitle(for session: HolySession) -> String {
+    static func primaryTitle(for session: HolySession) -> String {
         if let title = session.rosterTitleOverride?.holyRosterTrimmed.nilIfEmpty {
             return title
         }
@@ -485,6 +499,16 @@ private struct HolyRosterRow: View {
                         Button("Reattach") {
                             onSelect()
                             onReattach()
+                        }
+                    }
+
+                    if let tmuxSessionName = session.record.launchSpec.tmux?.sessionName?
+                        .trimmingCharacters(in: .whitespacesAndNewlines), !tmuxSessionName.isEmpty {
+                        Divider()
+                        Button("Copy tmux Session ID") {
+                            let pasteboard = NSPasteboard.general
+                            pasteboard.clearContents()
+                            pasteboard.setString(tmuxSessionName, forType: .string)
                         }
                     }
 

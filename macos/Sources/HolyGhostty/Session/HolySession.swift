@@ -75,19 +75,14 @@ final class HolySession: ObservableObject, Identifiable {
             return configured
         }
 
-        if let terminalTitle = Self.normalizedTerminalTitle(surfaceView.title),
-           Self.inferredRuntime(
-               launchRuntime: runtime,
-               surfaceTitle: terminalTitle,
-               preview: "",
-               command: nil,
-               initialInput: nil,
-               launchTitle: record.launchSpec.resolvedTitle,
-               tmuxSessionName: record.launchSpec.tmux?.sessionName,
-               tmuxSocketName: record.launchSpec.tmux?.socketName,
-               objective: record.launchSpec.objective
-           ) == displayRuntime {
-            return terminalTitle
+        // Placeholder/default title. Derive a STABLE name from the session's
+        // identity — its repository or working directory — and fall back to the
+        // runtime name. Never the live terminal title: agents such as Claude
+        // Code rewrite the OSC title to a per-task summary that churns as they
+        // work (and produced garbage roster names like "Lives" scraped from
+        // on-screen prose).
+        if let project = displayProjectName {
+            return project
         }
 
         return displayRuntime.displayName
@@ -111,16 +106,11 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     var displayProjectName: String? {
+        // Stable identity only — repository name, then working directory.
+        // Deliberately NOT inferred from live screen content (it produced
+        // churning, wrong names like a word scraped from chat prose).
         if let repositoryName = gitSnapshot?.repositoryName {
             return Self.displayName(fromPathComponent: repositoryName)
-        }
-
-        if let agentProjectName = Self.inferredAgentProjectName(
-            runtime: displayRuntime,
-            surfaceTitle: surfaceView.title,
-            preview: preview
-        ) {
-            return agentProjectName
         }
 
         if let directory = workingDirectory {
@@ -440,6 +430,12 @@ final class HolySession: ObservableObject, Identifiable {
 
     private func shouldApplyDiscoveredTitle(_ discoveredTitle: String) -> Bool {
         guard Self.normalizedMetadataString(record.launchSpec.title) != discoveredTitle else {
+            return false
+        }
+
+        // Never adopt a live agent status line (e.g. "✱ Verify auto-commit") as
+        // the persistent session title.
+        if Self.isLiveAgentStatusTitle(discoveredTitle) {
             return false
         }
 
@@ -1376,11 +1372,22 @@ final class HolySession: ObservableObject, Identifiable {
         guard let normalized = normalizedMetadataString(title),
               !isDefaultTitle(normalized, for: runtime),
               !isGenericLocalTitle(normalized, transport: transport),
-              !isInternalHolyTmuxTitle(normalized) else {
+              !isInternalHolyTmuxTitle(normalized),
+              !isLiveAgentStatusTitle(normalized) else {
             return nil
         }
 
         return displayName(fromPathComponent: normalized) ?? normalized
+    }
+
+    /// True when a title is actually an agent's live status line (a Claude/Codex
+    /// task summary prefixed with a status glyph like ✱ ✻ ⏺). These churn per
+    /// task and must never become a session's persistent name.
+    private static func isLiveAgentStatusTitle(_ title: String) -> Bool {
+        guard let first = title.trimmingCharacters(in: .whitespacesAndNewlines).first else {
+            return false
+        }
+        return "✱✻✽✢⏺●○◐◓◑◒•·⠂⠄⠆⠇⠿".contains(first)
     }
 
     private static func isGenericLocalTitle(_ title: String, transport: HolySessionTransportSpec) -> Bool {
@@ -1583,26 +1590,38 @@ final class HolySession: ObservableObject, Identifiable {
         let commandText = [command, initialInput]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .joined(separator: "\n")
-        let evidence = [title, launchMetadata, preview, commandText]
+
+        // Launch intent (what was actually started) is authoritative. Screen
+        // scrollback is NOT — agents constantly discuss each other by name, so
+        // a bare "opencode"/"codex"/"claude" in the chat body must never decide
+        // the runtime.
+        let launchEvidence = [title, launchMetadata, commandText]
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
             .lowercased()
+        let previewEvidence = preview.lowercased()
 
-        guard !evidence.isEmpty else { return nil }
+        if containsOpenCodeMarker(launchEvidence) { return .opencode }
+        if containsCodexMarker(launchEvidence) { return .codex }
+        if containsClaudeMarker(launchEvidence) { return .claude }
 
-        if containsOpenCodeMarker(evidence) {
-            return .opencode
-        }
+        // Live, structural screen signals (not prose). The Codex model/effort
+        // status footer (e.g. "gpt-5.5 xhigh fast") is unambiguous.
+        if containsCodexStatusFooter(previewEvidence) { return .codex }
 
-        if containsCodexMarker(evidence) {
-            return .codex
-        }
-
-        if containsClaudeMarker(evidence) {
-            return .claude
-        }
+        // Last resort: looser content markers — but never opencode, whose only
+        // reliable signal is the launch command.
+        if containsClaudeMarker(previewEvidence) { return .claude }
+        if containsCodexMarker(previewEvidence) { return .codex }
 
         return nil
+    }
+
+    private static func containsCodexStatusFooter(_ evidence: String) -> Bool {
+        evidence.range(
+            of: #"\bgpt-[0-9a-z][0-9a-z.\-]*\s+(fast\s+)?(low|medium|high|xhigh)\b"#,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func containsClaudeMarker(_ evidence: String) -> Bool {

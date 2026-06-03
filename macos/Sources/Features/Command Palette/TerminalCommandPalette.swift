@@ -136,6 +136,10 @@ struct TerminalCommandPaletteView: View {
 
     /// Commands for jumping to other terminal surfaces.
     private var jumpOptions: [CommandOption] {
+        terminalJumpOptions + holyWorkspaceJumpOptions
+    }
+
+    private var terminalJumpOptions: [CommandOption] {
         TerminalController.all.flatMap { controller -> [CommandOption] in
             guard let window = controller.window else { return [] }
 
@@ -170,6 +174,27 @@ struct TerminalCommandPaletteView: View {
                         name: Ghostty.Notification.ghosttyPresentTerminal,
                         object: surface
                     )
+                }
+            }
+        }
+    }
+
+    private var holyWorkspaceJumpOptions: [CommandOption] {
+        HolyWorkspaceWindowController.all.flatMap { workspace -> [CommandOption] in
+            workspace.workspaceStore.sessions.map { session in
+                let subtitle: String? = if session.record.launchSpec.transport.isRemote {
+                    session.record.launchSpec.transport.summaryText
+                } else {
+                    session.workingDirectory?.abbreviatedPath
+                }
+
+                return CommandOption(
+                    title: "Focus: \(session.displayLineTitle)",
+                    subtitle: subtitle,
+                    leadingIcon: "rectangle.stack",
+                    sortKey: AnySortKey(ObjectIdentifier(session))
+                ) {
+                    workspace.focus(surfaceView: session.surfaceView)
                 }
             }
         }

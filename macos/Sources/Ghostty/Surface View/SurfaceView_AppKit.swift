@@ -1085,6 +1085,10 @@ extension Ghostty {
         }
 
         override func keyDown(with event: NSEvent) {
+            if holyWorkspaceController?.handleSessionCycleKey(event) == true {
+                return
+            }
+
             guard let surface = self.surface else {
                 self.interpretKeyEvents([event])
                 return
@@ -1514,12 +1518,16 @@ extension Ghostty {
             menu.addItem(.separator())
             item = menu.addItem(withTitle: "Split Right", action: #selector(splitRight(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "rectangle.righthalf.inset.filled")
-            item = menu.addItem(withTitle: "Split Left", action: #selector(splitLeft(_:)), keyEquivalent: "")
-            item.setImageIfDesired(systemSymbolName: "rectangle.leadinghalf.inset.filled")
+            if holyWorkspaceController == nil {
+                item = menu.addItem(withTitle: "Split Left", action: #selector(splitLeft(_:)), keyEquivalent: "")
+                item.setImageIfDesired(systemSymbolName: "rectangle.leadinghalf.inset.filled")
+            }
             item = menu.addItem(withTitle: "Split Down", action: #selector(splitDown(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "rectangle.bottomhalf.inset.filled")
-            item = menu.addItem(withTitle: "Split Up", action: #selector(splitUp(_:)), keyEquivalent: "")
-            item.setImageIfDesired(systemSymbolName: "rectangle.tophalf.inset.filled")
+            if holyWorkspaceController == nil {
+                item = menu.addItem(withTitle: "Split Up", action: #selector(splitUp(_:)), keyEquivalent: "")
+                item.setImageIfDesired(systemSymbolName: "rectangle.tophalf.inset.filled")
+            }
 
             menu.addItem(.separator())
             item = menu.addItem(withTitle: "Reset Terminal", action: #selector(resetTerminal(_:)), keyEquivalent: "")
@@ -1530,14 +1538,27 @@ extension Ghostty {
             item.setImageIfDesired(systemSymbolName: "eye.fill")
             item.state = readonly ? .on : .off
             menu.addItem(.separator())
-            item = menu.addItem(withTitle: "Change Tab Title...", action: #selector(BaseTerminalController.changeTabTitle(_:)), keyEquivalent: "")
-            item.setImageIfDesired(systemSymbolName: "pencil.line")
+            if holyWorkspaceController == nil {
+                item = menu.addItem(withTitle: "Change Tab Title...", action: #selector(BaseTerminalController.changeTabTitle(_:)), keyEquivalent: "")
+                item.setImageIfDesired(systemSymbolName: "pencil.line")
+            }
             item = menu.addItem(withTitle: "Change Terminal Title...", action: #selector(changeTitle(_:)), keyEquivalent: "")
 
             return menu
         }
 
         // MARK: Menu Handlers
+
+        private var holyWorkspaceController: HolyWorkspaceWindowController? {
+            window?.windowController as? HolyWorkspaceWindowController
+        }
+
+        private func performBindingAction(_ action: String) {
+            guard let surface = self.surface else { return }
+            if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
+                AppDelegate.logger.warning("action failed action=\(action)")
+            }
+        }
 
         @IBAction func copy(_ sender: Any?) {
             guard let surface = self.surface else { return }
@@ -1636,23 +1657,85 @@ extension Ghostty {
         }
 
         @IBAction func splitRight(_ sender: Any) {
+            if let holyWorkspaceController {
+                holyWorkspaceController.splitPaneRight()
+                return
+            }
+
             guard let surface = self.surface else { return }
             ghostty_surface_split(surface, GHOSTTY_SPLIT_DIRECTION_RIGHT)
         }
 
         @IBAction func splitLeft(_ sender: Any) {
+            if let holyWorkspaceController {
+                holyWorkspaceController.splitPaneRight()
+                return
+            }
+
             guard let surface = self.surface else { return }
             ghostty_surface_split(surface, GHOSTTY_SPLIT_DIRECTION_LEFT)
         }
 
         @IBAction func splitDown(_ sender: Any) {
+            if let holyWorkspaceController {
+                holyWorkspaceController.splitPaneDown()
+                return
+            }
+
             guard let surface = self.surface else { return }
             ghostty_surface_split(surface, GHOSTTY_SPLIT_DIRECTION_DOWN)
         }
 
         @IBAction func splitUp(_ sender: Any) {
+            if let holyWorkspaceController {
+                holyWorkspaceController.splitPaneDown()
+                return
+            }
+
             guard let surface = self.surface else { return }
             ghostty_surface_split(surface, GHOSTTY_SPLIT_DIRECTION_UP)
+        }
+
+        @IBAction func increaseFontSize(_ sender: Any) {
+            performBindingAction("increase_font_size:1")
+        }
+
+        @IBAction func decreaseFontSize(_ sender: Any) {
+            performBindingAction("decrease_font_size:1")
+        }
+
+        @IBAction func resetFontSize(_ sender: Any) {
+            performBindingAction("reset_font_size")
+        }
+
+        @IBAction func toggleCommandPalette(_ sender: Any?) {
+            if let holyWorkspaceController {
+                holyWorkspaceController.toggleCommandPalette()
+                return
+            }
+
+            NotificationCenter.default.post(
+                name: .ghosttyCommandPaletteDidToggle,
+                object: self
+            )
+        }
+
+        @IBAction func toggleGhosttyFullScreen(_ sender: Any?) {
+            if let holyWorkspaceController {
+                holyWorkspaceController.toggleGhosttyFullScreen(sender)
+                return
+            }
+
+            performBindingAction("toggle_fullscreen")
+        }
+
+        @IBAction func closeWindow(_ sender: Any?) {
+            if let holyWorkspaceController {
+                holyWorkspaceController.closeWorkspaceWindow()
+                return
+            }
+
+            window?.performClose(sender)
         }
 
         @objc func resetTerminal(_ sender: Any) {

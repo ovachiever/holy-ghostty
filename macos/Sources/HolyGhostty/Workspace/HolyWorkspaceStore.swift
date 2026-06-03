@@ -1,6 +1,11 @@
 import Combine
 import Foundation
 
+enum HolySessionCycleDirection {
+    case next
+    case previous
+}
+
 @MainActor
 final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var sessions: [HolySession] = []
@@ -44,6 +49,7 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published var selectedArchivedSessionID: UUID?
     @Published var selectedTaskID: UUID?
     @Published var selectedRemoteHostID: UUID?
+    @Published var commandPaletteIsShowing: Bool = false
     @Published var composerPresented: Bool = false
     @Published var composerBusy: Bool = false
     @Published var composerErrorMessage: String?
@@ -177,17 +183,58 @@ final class HolyWorkspaceStore: ObservableObject {
         clearUnreadAttentionIfNeeded(for: sessionID)
     }
 
+    @discardableResult
+    func cycleSelectedSession(_ direction: HolySessionCycleDirection) -> Bool {
+        let orderedSessions = HolySessionRosterOrdering.orderedSessions(sessions)
+        guard orderedSessions.count > 1 else { return false }
+
+        let selectedIndex = selectedSessionID.flatMap { selectedID in
+            orderedSessions.firstIndex { $0.id == selectedID }
+        }
+
+        let nextIndex: Int
+        if let selectedIndex {
+            switch direction {
+            case .next:
+                nextIndex = (selectedIndex + 1) % orderedSessions.count
+            case .previous:
+                nextIndex = (selectedIndex - 1 + orderedSessions.count) % orderedSessions.count
+            }
+        } else {
+            nextIndex = direction == .next ? 0 : orderedSessions.count - 1
+        }
+
+        selectSession(orderedSessions[nextIndex].id)
+        return true
+    }
+
     func showSinglePane() {
         let selectedID = selectedSession?.id ?? sessions.first?.id
         paneLayout = .init(kind: .single, sessionIDs: selectedID.map { [$0] } ?? [])
     }
 
-    func splitPaneRight() {
-        applyPaneLayout(kind: .splitRight, preferredPaneCount: 2)
+    func splitPaneRight(
+        cloning baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        from sourceSessionID: UUID? = nil
+    ) {
+        applyPaneLayout(
+            kind: .splitRight,
+            preferredPaneCount: 2,
+            sourceSessionID: sourceSessionID,
+            cloneConfig: baseConfig
+        )
     }
 
-    func splitPaneDown() {
-        applyPaneLayout(kind: .splitDown, preferredPaneCount: 2)
+    func splitPaneDown(
+        cloning baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        from sourceSessionID: UUID? = nil
+    ) {
+        applyPaneLayout(
+            kind: .splitDown,
+            preferredPaneCount: 2,
+            sourceSessionID: sourceSessionID,
+            cloneConfig: baseConfig
+        )
     }
 
     func showQuadPaneLayout() {
@@ -1416,9 +1463,26 @@ final class HolyWorkspaceStore: ObservableObject {
         }
     }
 
-    private func applyPaneLayout(kind: HolyPaneLayoutKind, preferredPaneCount: Int) {
-        var paneSessionIDs = paneSeedSessionIDs()
+    private func applyPaneLayout(
+        kind: HolyPaneLayoutKind,
+        preferredPaneCount: Int,
+        sourceSessionID: UUID? = nil,
+        cloneConfig: Ghostty.SurfaceConfiguration? = nil
+    ) {
+        var paneSessionIDs = paneSeedSessionIDs(preferredFirst: sourceSessionID)
         let minimumPaneCount = kind == .quad ? min(2, preferredPaneCount) : preferredPaneCount
+
+        if let cloneConfig,
+           kind.maxPaneCount > 1,
+           let session = createSession(from: cloneConfig) {
+            paneSessionIDs.removeAll(where: { $0 == session.id })
+            if let sourceSessionID,
+               let sourceIndex = paneSessionIDs.firstIndex(of: sourceSessionID) {
+                paneSessionIDs.insert(session.id, at: paneSessionIDs.index(after: sourceIndex))
+            } else {
+                paneSessionIDs.append(session.id)
+            }
+        }
 
         while paneSessionIDs.count < minimumPaneCount {
             guard let session = createSession(from: nil) else { break }
@@ -1445,10 +1509,16 @@ final class HolyWorkspaceStore: ObservableObject {
         selectedSessionID = finalIDs.last
     }
 
-    private func paneSeedSessionIDs() -> [UUID] {
+    private func paneSeedSessionIDs(preferredFirst preferredSessionID: UUID? = nil) -> [UUID] {
         var ids: [UUID] = []
 
-        if let selectedID = selectedSession?.id {
+        if let preferredSessionID,
+           sessions.contains(where: { $0.id == preferredSessionID }) {
+            ids.append(preferredSessionID)
+        }
+
+        if let selectedID = selectedSession?.id,
+           !ids.contains(selectedID) {
             ids.append(selectedID)
         }
 

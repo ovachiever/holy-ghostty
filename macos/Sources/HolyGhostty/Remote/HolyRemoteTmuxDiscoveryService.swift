@@ -425,13 +425,11 @@ actor HolyRemoteTmuxDiscoveryService {
             return
           fi
 
-          for raw_candidate in "$pane_title" "$window_name"; do
-            if candidate=$(project_candidate "$raw_candidate"); then
-              printf '%s' "$candidate"
-              return
-            fi
-          done
-
+          # Intentionally NOT falling back to pane_title / window_name: those
+          # reflect the live foreground command or an agent's per-task status
+          # line (e.g. "✱ Verify auto-commit"), which would churn and pollute
+          # the persistent session name. A session with no stable identity is
+          # left untitled rather than named after transient screen content.
           return 1
         }
 

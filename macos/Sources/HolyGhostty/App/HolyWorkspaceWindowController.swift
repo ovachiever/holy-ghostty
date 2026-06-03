@@ -1,5 +1,10 @@
 import AppKit
 import SwiftUI
+import GhosttyKit
+
+private enum HolyWorkspaceKeyCode {
+    static let tab: UInt16 = 48
+}
 
 @MainActor
 private final class HolyWorkspaceWindow: NSWindow {
@@ -63,10 +68,20 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         super.init(window: window)
         window.holyWorkspaceController = self
         window.delegate = self
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(ghosttyDidNewSplit(_:)),
+            name: Ghostty.Notification.ghosttyNewSplit,
+            object: nil
+        )
 
         if let initialConfig {
             _ = createSession(from: initialConfig)
         }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     @available(*, unavailable)
@@ -116,11 +131,37 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         closeSelectedSessionIfAvailable()
     }
 
+    func closeWorkspaceWindow() {
+        close()
+    }
+
     @discardableResult
     func closeSelectedSessionIfAvailable() -> Bool {
         guard let selected = workspaceStore.selectedSession else { return false }
         workspaceStore.close(selected)
         return true
+    }
+
+    func splitPaneRight(
+        cloning baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        from sourceSessionID: UUID? = nil
+    ) {
+        workspaceStore.splitPaneRight(cloning: baseConfig, from: sourceSessionID)
+    }
+
+    func splitPaneDown(
+        cloning baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        from sourceSessionID: UUID? = nil
+    ) {
+        workspaceStore.splitPaneDown(cloning: baseConfig, from: sourceSessionID)
+    }
+
+    func toggleCommandPalette() {
+        workspaceStore.commandPaletteIsShowing.toggle()
+    }
+
+    @IBAction func toggleGhosttyFullScreen(_ sender: Any?) {
+        window?.toggleFullScreen(sender)
     }
 
     @discardableResult
@@ -135,6 +176,10 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     }
 
     func handleWorkspaceKeyEquivalent(_ event: NSEvent) -> Bool {
+        if handleSessionCycleKey(event) {
+            return true
+        }
+
         guard event.type == .keyDown,
               let key = event.charactersIgnoringModifiers?.lowercased() else {
             return false
@@ -148,6 +193,24 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
 
         if key == "q", relevantFlags == .option {
             return killSelectedTmuxSessionIfAvailable()
+        }
+
+        return false
+    }
+
+    func handleSessionCycleKey(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown,
+              event.keyCode == HolyWorkspaceKeyCode.tab else {
+            return false
+        }
+
+        let relevantFlags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if relevantFlags.isEmpty {
+            return workspaceStore.cycleSelectedSession(.next)
+        }
+
+        if relevantFlags == .shift {
+            return workspaceStore.cycleSelectedSession(.previous)
         }
 
         return false
@@ -169,6 +232,28 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
 
     var allSurfaceViews: [Ghostty.SurfaceView] {
         workspaceStore.sessions.map(\.surfaceView)
+    }
+
+    @objc private func ghosttyDidNewSplit(_ notification: Notification) {
+        guard let surfaceView = notification.object as? Ghostty.SurfaceView,
+              let sourceSession = workspaceStore.sessions.first(where: { $0.surfaceView === surfaceView }) else {
+            return
+        }
+
+        guard let directionAny = notification.userInfo?["direction"],
+              let direction = directionAny as? ghostty_action_split_direction_e else {
+            return
+        }
+
+        let config = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey] as? Ghostty.SurfaceConfiguration
+        switch direction {
+        case GHOSTTY_SPLIT_DIRECTION_RIGHT, GHOSTTY_SPLIT_DIRECTION_LEFT:
+            splitPaneRight(cloning: config, from: sourceSession.id)
+        case GHOSTTY_SPLIT_DIRECTION_DOWN, GHOSTTY_SPLIT_DIRECTION_UP:
+            splitPaneDown(cloning: config, from: sourceSession.id)
+        default:
+            return
+        }
     }
 
     static var all: [HolyWorkspaceWindowController] {

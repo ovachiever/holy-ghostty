@@ -59,6 +59,16 @@ struct HolyWorkspaceRootView: View {
         ZStack {
             HolyGhosttyBackdrop()
             workspaceContent
+            if let selectedSession = store.selectedSession {
+                TerminalCommandPaletteView(
+                    surfaceView: selectedSession.surfaceView,
+                    isPresented: $store.commandPaletteIsShowing,
+                    ghosttyConfig: ghostty.config,
+                    updateViewModel: (NSApp.delegate as? AppDelegate)?.updateViewModel
+                ) { action in
+                    performCommandPaletteAction(action, on: selectedSession.surfaceView)
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea(.container, edges: .top)
@@ -685,6 +695,13 @@ struct HolyWorkspaceRootView: View {
     private func focusSelectedSession() {
         guard let session = store.selectedSession else { return }
         Ghostty.moveFocus(to: session.surfaceView)
+    }
+
+    private func performCommandPaletteAction(_ action: String, on surfaceView: Ghostty.SurfaceView) {
+        guard let surface = surfaceView.surface else { return }
+        if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
+            AppDelegate.logger.warning("action failed action=\(action)")
+        }
     }
 
     private func select(_ session: HolySession) {

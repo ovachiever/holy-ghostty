@@ -1052,13 +1052,35 @@ class AppDelegate: NSObject,
         }
     }
 
+    /// The workspace the menu bar should act on: the key window's, else the
+    /// preferred/first existing workspace. Used by the session/pane menu items
+    /// so they behave like the in-window rail controls regardless of focus.
+    @MainActor
+    private var menuTargetWorkspace: HolyWorkspaceWindowController? {
+        (NSApp.keyWindow?.windowController as? HolyWorkspaceWindowController)
+            ?? HolyWorkspaceWindowController.preferred
+            ?? HolyWorkspaceWindowController.all.first
+    }
+
+    // "New tmux" — mirrors the roster's New button: add a tmux-backed shell to
+    // the current workspace in place. Only opens a window if none exists.
     @MainActor
     @IBAction func newTab(_ sender: Any?) {
-        if let workspace = preferredWorkspace(createIfNeeded: false) {
-            workspace.createSession(from: nil)
-        } else {
+        guard let workspace = menuTargetWorkspace else {
             openWorkspaceWindow()
+            return
         }
+        _ = workspace.workspaceStore.createSessionFromDefaultLaunchProfile()
+    }
+
+    @MainActor
+    @IBAction func splitRight(_ sender: Any?) {
+        menuTargetWorkspace?.workspaceStore.splitPaneRight()
+    }
+
+    @MainActor
+    @IBAction func splitDown(_ sender: Any?) {
+        menuTargetWorkspace?.workspaceStore.splitPaneDown()
     }
 
     @MainActor
@@ -1069,6 +1091,16 @@ class AppDelegate: NSObject,
         }
 
         workspace.closeSelectedSessionIfAvailable()
+    }
+
+    @MainActor
+    @IBAction func closeWindow(_ sender: Any?) {
+        guard let keyWindow = NSApp.keyWindow else { return }
+        if let workspace = keyWindow.windowController as? HolyWorkspaceWindowController {
+            workspace.closeWorkspaceWindow()
+        } else {
+            keyWindow.performClose(sender)
+        }
     }
 
     @MainActor
