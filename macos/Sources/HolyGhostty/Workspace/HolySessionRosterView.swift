@@ -75,6 +75,42 @@ struct HolySessionRosterView: View {
         return result
     }
 
+    // Split a section's sessions into agent runs (preserving order). Used to
+    // draw agent sub-headers, but only when a section spans more than one
+    // agent — a single-agent lane stays flat, so there is no header tax.
+    private func agentGroups(
+        in sessions: [HolySession]
+    ) -> [(runtime: HolySessionRuntime, sessions: [HolySession])] {
+        HolySessionRuntime.rosterOrder.compactMap { runtime in
+            let matching = sessions.filter { $0.displayRuntime == runtime }
+            return matching.isEmpty ? nil : (runtime, matching)
+        }
+    }
+
+    private func rosterRow(for session: HolySession, dimmed: Bool) -> some View {
+        HolyRosterRow(
+            session: session,
+            primaryTitle: HolySessionRosterOrdering.primaryTitle(for: session),
+            paneLabel: paneLabelsBySessionID[session.id],
+            coordination: store.coordination(for: session),
+            attention: store.attentionPresentation(for: session),
+            isSelected: store.selectedSessionID == session.id,
+            layout: layout,
+            dimmed: dimmed,
+            compact: compact,
+            onSelect: { store.selectSession(session.id) },
+            onDuplicate: { store.duplicate(session.id) },
+            canReattach: store.canReattachSession(session),
+            onReattach: { store.reattach(session) },
+            onArchive: { store.close(session) },
+            canKillTmux: store.canKillTmuxSession(session),
+            onKillTmux: { store.killTmuxSession(session) },
+            onRename: { store.rename(session, to: $0) },
+            onSetNote: { store.setNote(session, to: $0) },
+            onSetFocus: { store.setFocus(session, $0) }
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             workspaceToolbar
@@ -107,28 +143,19 @@ struct HolySessionRosterView: View {
                                     accent: section.accent
                                 )
 
-                                ForEach(section.sessions) { session in
-                                    HolyRosterRow(
-                                        session: session,
-                                        primaryTitle: HolySessionRosterOrdering.primaryTitle(for: session),
-                                        paneLabel: paneLabelsBySessionID[session.id],
-                                        coordination: store.coordination(for: session),
-                                        attention: store.attentionPresentation(for: session),
-                                        isSelected: store.selectedSessionID == session.id,
-                                        layout: layout,
-                                        dimmed: section.dimmed,
-                                        compact: compact,
-                                        onSelect: { store.selectSession(session.id) },
-                                        onDuplicate: { store.duplicate(session.id) },
-                                        canReattach: store.canReattachSession(session),
-                                        onReattach: { store.reattach(session) },
-                                        onArchive: { store.close(session) },
-                                        canKillTmux: store.canKillTmuxSession(session),
-                                        onKillTmux: { store.killTmuxSession(session) },
-                                        onRename: { store.rename(session, to: $0) },
-                                        onSetNote: { store.setNote(session, to: $0) },
-                                        onSetFocus: { store.setFocus(session, $0) }
-                                    )
+                                let groups = agentGroups(in: section.sessions)
+                                let showAgentSubheaders = groups.count > 1
+                                ForEach(groups, id: \.runtime) { group in
+                                    if showAgentSubheaders {
+                                        HolyRosterAgentSubheader(
+                                            runtime: group.runtime,
+                                            count: group.sessions.count
+                                        )
+                                    }
+
+                                    ForEach(group.sessions) { session in
+                                        rosterRow(for: session, dimmed: section.dimmed)
+                                    }
                                 }
                             }
                         }
@@ -629,6 +656,39 @@ private struct HolyRosterSectionHeader: View {
         }
         .padding(.horizontal, 10)
         .padding(.top, 5)
+        .padding(.bottom, 1)
+    }
+}
+
+// Secondary header — names the agent for a run of rows inside a status/zone
+// section. Indented and quieter than the section header so the two levels
+// read as a hierarchy, not as competing labels.
+private struct HolyRosterAgentSubheader: View {
+    let runtime: HolySessionRuntime
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 6.5, weight: .bold))
+                .foregroundStyle(HolyGhosttyTheme.textTertiary.opacity(0.7))
+
+            Text(runtime.displayName)
+                .font(.system(size: 8.5, weight: .semibold))
+                .textCase(.uppercase)
+                .tracking(0.5)
+                .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            Text("\(count)")
+                .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(HolyGhosttyTheme.textTertiary.opacity(0.7))
+        }
+        .padding(.leading, 18)
+        .padding(.trailing, 10)
+        .padding(.top, 3)
         .padding(.bottom, 1)
     }
 }
