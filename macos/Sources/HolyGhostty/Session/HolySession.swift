@@ -1203,6 +1203,11 @@ final class HolySession: ObservableObject, Identifiable {
             return true
         }
 
+        // OpenCode shows "esc interrupt" (no "to") in its footer only while generating.
+        if lower.contains("esc interrupt") {
+            return true
+        }
+
         if lower.contains("thinking with high effort")
             || lower.contains("thinking with medium effort")
             || lower.contains("thinking with low effort")
@@ -1607,6 +1612,10 @@ final class HolySession: ObservableObject, Identifiable {
             tmuxSocketName: nil,
             objective: nil
         )
+    }
+
+    static func isLiveAgentStatusLineForTesting(_ line: String) -> Bool {
+        isLiveAgentStatusLine(line)
     }
 #endif
 
