@@ -1591,6 +1591,25 @@ final class HolySession: ObservableObject, Identifiable {
         return displayName(fromPathComponent: trimmed)
     }
 
+#if DEBUG
+    static func inferredRuntimeForTesting(
+        preview: String = "",
+        command: String? = nil
+    ) -> HolySessionRuntime? {
+        inferredRuntime(
+            launchRuntime: .shell,
+            surfaceTitle: "",
+            preview: preview,
+            command: command,
+            initialInput: nil,
+            launchTitle: "Shell",
+            tmuxSessionName: "holy-shell0",
+            tmuxSocketName: nil,
+            objective: nil
+        )
+    }
+#endif
+
     private static func inferredRuntime(
         launchRuntime: HolySessionRuntime,
         surfaceTitle: String,
@@ -1626,16 +1645,21 @@ final class HolySession: ObservableObject, Identifiable {
         if containsCodexMarker(launchEvidence) { return .codex }
         if containsClaudeMarker(launchEvidence) { return .claude }
 
-        // Live, structural screen signals (not prose). The Codex model/effort
-        // status footer (e.g. "gpt-5.5 xhigh fast") is unambiguous.
+        // Live, structural screen signals (not prose). Provider/model labels
+        // are not runtime labels: OpenCode can run Claude or OpenAI models.
+        if containsOpenCodeScreenMarker(previewEvidence) { return .opencode }
         if containsCodexStatusFooter(previewEvidence) { return .codex }
-
-        // Last resort: looser content markers — but never opencode, whose only
-        // reliable signal is the launch command.
-        if containsClaudeMarker(previewEvidence) { return .claude }
-        if containsCodexMarker(previewEvidence) { return .codex }
+        if containsClaudeScreenMarker(previewEvidence) { return .claude }
+        if containsCodexScreenMarker(previewEvidence) { return .codex }
 
         return nil
+    }
+
+    private static func containsOpenCodeScreenMarker(_ evidence: String) -> Bool {
+        evidence.range(
+            of: #"(?m)^\s*open\s*code\s*$|^\s*opencode\s*$"#,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func containsCodexStatusFooter(_ evidence: String) -> Bool {
@@ -1643,6 +1667,22 @@ final class HolySession: ObservableObject, Identifiable {
             of: #"\bgpt-[0-9a-z][0-9a-z.\-]*\s+(fast\s+)?(low|medium|high|xhigh)\b"#,
             options: .regularExpression
         ) != nil
+    }
+
+    private static func containsClaudeScreenMarker(_ evidence: String) -> Bool {
+        evidence.contains("claude code")
+            || evidence.contains("claude.exe")
+            || evidence.contains("claude.md")
+            || evidence.contains(".claude")
+    }
+
+    private static func containsCodexScreenMarker(_ evidence: String) -> Bool {
+        evidence.contains("openai codex")
+            || evidence.contains("codex cli")
+            || evidence.range(
+                of: #"(?m)^\s*codex\s*$"#,
+                options: .regularExpression
+            ) != nil
     }
 
     private static func containsClaudeMarker(_ evidence: String) -> Bool {

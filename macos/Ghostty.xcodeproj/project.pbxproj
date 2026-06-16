@@ -778,6 +778,7 @@
 					MARKETING_VERSION = 0.40;
 				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
 				PRODUCT_BUNDLE_IDENTIFIER = "org.holyghostty.app";
+				PRODUCT_MODULE_NAME = Ghostty;
 				PRODUCT_NAME = "Holy Ghostty";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Sources/App/macOS/ghostty-bridging-header.h";
@@ -961,7 +962,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Ghostty.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ghostty";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Holy Ghostty.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/holy-ghostty";
 			};
 			name = Debug;
 		};
@@ -984,7 +985,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Ghostty.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ghostty";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Holy Ghostty.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/holy-ghostty";
 			};
 			name = Release;
 		};
@@ -1007,7 +1008,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Ghostty.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ghostty";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Holy Ghostty.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/holy-ghostty";
 			};
 			name = ReleaseLocal;
 		};
@@ -1175,6 +1176,7 @@
 					MARKETING_VERSION = 0.40;
 				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
 				PRODUCT_BUNDLE_IDENTIFIER = "org.holyghostty.app.debug";
+				PRODUCT_MODULE_NAME = Ghostty;
 				PRODUCT_NAME = "Holy Ghostty";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Sources/App/macOS/ghostty-bridging-header.h";
@@ -1230,6 +1232,7 @@
 					MARKETING_VERSION = 0.40;
 				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
 				PRODUCT_BUNDLE_IDENTIFIER = "org.holyghostty.app";
+				PRODUCT_MODULE_NAME = Ghostty;
 				PRODUCT_NAME = "Holy Ghostty";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Sources/App/macOS/ghostty-bridging-header.h";
