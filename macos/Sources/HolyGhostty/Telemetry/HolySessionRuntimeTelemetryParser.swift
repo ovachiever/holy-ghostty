@@ -303,6 +303,15 @@ enum HolySessionRuntimeTelemetryParser {
     }
 
     private static func extractCommand(from text: String) -> String? {
+        // Agent TUIs (OpenCode, Claude, Codex) render a persistent status footer
+        // that brands themselves with a version, e.g. "... ctrl+p commands - OpenCode 1.17.7".
+        // That branding is chrome, not a command being run; extracting it as a command
+        // marks an idle session as actively working. A real invocation ("opencode run")
+        // is not followed by a version number, so it is unaffected.
+        if isAgentStatusFooterLine(text) {
+            return nil
+        }
+
         let patterns = [
             #"(xcodebuild[^\n]*)"#,
             #"(zig build[^\n]*)"#,
@@ -325,6 +334,13 @@ enum HolySessionRuntimeTelemetryParser {
         }
 
         return nil
+    }
+
+    private static func isAgentStatusFooterLine(_ text: String) -> Bool {
+        text.range(
+            of: #"\b(opencode|claude|codex)\s+v?\d+\.\d+"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
     }
 
     private static func extractNextStepHint(from text: String) -> String? {
@@ -428,3 +444,11 @@ enum HolySessionRuntimeTelemetryParser {
         return String(text[valueRange])
     }
 }
+
+#if DEBUG
+extension HolySessionRuntimeTelemetryParser {
+    static func extractCommandForTesting(from text: String) -> String? {
+        extractCommand(from: text)
+    }
+}
+#endif
