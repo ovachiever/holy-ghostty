@@ -48,7 +48,7 @@ sign_installed_app() {
   printf 'Signed %s with %s\n' "$DESTINATION" "$identity"
 }
 
-if [ ! -d "$APP_PATH" ]; then
+if [ "${HOLY_GHOSTTY_SKIP_BUILD:-}" != "1" ]; then
   (
     cd "$ROOT_DIR/macos"
     env -i \
@@ -61,6 +61,9 @@ if [ ! -d "$APP_PATH" ]; then
       "SYMROOT=build" \
       build
   )
+elif [ ! -d "$APP_PATH" ]; then
+  printf 'Build output not found at %s\n' "$APP_PATH" >&2
+  exit 1
 fi
 
 /usr/bin/pkill -f '/Applications/Holy Ghostty.app/Contents/MacOS/holy-ghostty' >/dev/null 2>&1 || true

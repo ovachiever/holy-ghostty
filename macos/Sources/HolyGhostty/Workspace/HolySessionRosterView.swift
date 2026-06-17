@@ -720,6 +720,7 @@ private struct HolyRosterRow: View {
     @State private var renameText = ""
     @State private var isEditingNote = false
     @State private var noteDraft = ""
+    @State private var actionPopoverPresented = false
     @FocusState private var focusedEditField: RosterRowEditField?
 
     private enum RosterRowEditField: Hashable {
@@ -754,63 +755,22 @@ private struct HolyRosterRow: View {
             }
 
             if !compact && !isRenaming && !isEditingNote {
-                Menu {
-                    Button("Rename") { startRename() }
-                    Button(session.note == nil ? "Add Session Note…" : "Edit Session Note…") {
-                        startNoteEdit()
-                    }
-                    if session.note != nil {
-                        Button("Clear Session Note") {
-                            onSetNote(nil)
-                        }
-                    }
-                    Button(session.isFocused ? "Unpin from Today" : "Pin to Today") {
-                        onSetFocus(!session.isFocused)
-                    }
-                    Divider()
-                    Button("Duplicate") {
-                        onSelect()
-                        onDuplicate()
-                    }
-                    if canReattach {
-                        Button("Reattach") {
-                            onSelect()
-                            onReattach()
-                        }
-                    }
-
-                    if let tmuxSessionName = session.record.launchSpec.tmux?.sessionName?
-                        .trimmingCharacters(in: .whitespacesAndNewlines), !tmuxSessionName.isEmpty {
-                        Divider()
-                        Button("Copy tmux Session ID") {
-                            let pasteboard = NSPasteboard.general
-                            pasteboard.clearContents()
-                            pasteboard.setString(tmuxSessionName, forType: .string)
-                        }
-                    }
-
-                    Divider()
-
-                    Button("Detach From Roster") {
-                        onSelect()
-                        onArchive()
-                    }
-                    if canKillTmux {
-                        Button("Kill from Roster", role: .destructive) {
-                            onSelect()
-                            onKillTmux()
-                        }
-                    }
+                Button {
+                    onSelect()
+                    actionPopoverPresented = true
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(HolyGhosttyTheme.textTertiary)
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
+                .buttonStyle(.plain)
                 .fixedSize()
                 .frame(width: 14, height: 14)
                 .opacity(isSelected ? 1 : 0.5)
+                .help("Session actions")
+                .popover(isPresented: $actionPopoverPresented, arrowEdge: .trailing) {
+                    actionPopover
+                }
             }
         }
         .padding(.horizontal, 10)
@@ -836,6 +796,84 @@ private struct HolyRosterRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .opacity(dimmed && !isSelected ? 0.45 : 1)
         .onTapGesture(perform: onSelect)
+    }
+
+    private var actionPopover: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            actionButton("Rename") {
+                startRename()
+            }
+
+            actionButton(session.note == nil ? "Add Session Note..." : "Edit Session Note...") {
+                startNoteEdit()
+            }
+
+            if session.note != nil {
+                actionButton("Clear Session Note") {
+                    onSetNote(nil)
+                }
+            }
+
+            actionButton(session.isFocused ? "Unpin from Today" : "Pin to Today") {
+                onSetFocus(!session.isFocused)
+            }
+
+            Divider()
+
+            actionButton("Duplicate") {
+                onDuplicate()
+            }
+
+            if canReattach {
+                actionButton("Reattach") {
+                    onReattach()
+                }
+            }
+
+            if let tmuxSessionName = session.record.launchSpec.tmux?.sessionName?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !tmuxSessionName.isEmpty {
+                Divider()
+                actionButton("Copy tmux Session ID") {
+                    copyTmuxSessionID(tmuxSessionName)
+                }
+            }
+
+            Divider()
+
+            actionButton("Detach From Roster") {
+                onArchive()
+            }
+
+            if canKillTmux {
+                actionButton("Kill from Roster", destructive: true) {
+                    onKillTmux()
+                }
+            }
+        }
+        .padding(8)
+        .frame(width: 190, alignment: .leading)
+        .background(HolyGhosttyTheme.bgElevated)
+    }
+
+    private func actionButton(
+        _ title: String,
+        destructive: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            actionPopoverPresented = false
+            action()
+        } label: {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(destructive ? HolyGhosttyTheme.danger : HolyGhosttyTheme.textPrimary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder
@@ -1003,6 +1041,12 @@ private struct HolyRosterRow: View {
         onSetNote(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
         isEditingNote = false
         focusedEditField = nil
+    }
+
+    private func copyTmuxSessionID(_ tmuxSessionName: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(tmuxSessionName, forType: .string)
     }
 
     private func focusEditField(_ field: RosterRowEditField) {
