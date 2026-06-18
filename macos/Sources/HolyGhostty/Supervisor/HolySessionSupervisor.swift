@@ -146,7 +146,13 @@ final class HolySessionSupervisor {
             )
         }
 
-        let restoredSessions = presentRecords.map { HolySession(record: $0, app: app) }
+        let restoredSessions = presentRecords.map { record in
+            HolySession(
+                record: record,
+                app: app,
+                surfaceAttachmentMode: Self.surfaceAttachmentModeForRestoredSession(record)
+            )
+        }
         let retainedArchivedSessions = snapshot.archivedSessions
             .filter { !revivedArchiveIDs.contains($0.id) }
         let archivedSessions = (retainedArchivedSessions + recovery.recoveredArchivedSessions + coldBootArchived)
@@ -597,6 +603,18 @@ final class HolySessionSupervisor {
                 )
             }
         }
+    }
+
+    private static func surfaceAttachmentModeForRestoredSession(
+        _ record: HolySessionRecord
+    ) -> HolySessionSurfaceAttachmentMode {
+        let launchSpec = record.launchSpec
+        guard launchSpec.transport.isRemote,
+              launchSpec.tmux?.normalized.sessionName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            return .attached
+        }
+
+        return .deferredRemoteRestore
     }
 
     func sessionBindingsDidChange(for state: HolySessionStoreState) {

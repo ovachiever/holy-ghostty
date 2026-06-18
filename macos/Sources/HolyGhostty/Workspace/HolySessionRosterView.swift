@@ -732,7 +732,8 @@ private struct HolyRosterRow: View {
         HStack(alignment: .center, spacing: 8) {
             HolyAgentStatusOrb(
                 state: displayActivityState,
-                newReplyBecameAvailableAt: displayActivityState == .newReply ? attention.becameAvailableAt : nil
+                newReplyBecameAvailableAt: displayActivityState == .newReply ? attention.becameAvailableAt : nil,
+                isAnimated: isSelected
             )
             .frame(width: 18, height: 18)
             .help(attention.helpText)
@@ -1322,23 +1323,36 @@ enum HolyWaitingFreshness {
 private struct HolyAgentStatusOrb: View {
     let state: HolyRosterActivityState
     var newReplyBecameAvailableAt: Date?
+    var isAnimated = true
 
     var body: some View {
         switch state {
         case .working:
-            HolyAgentWorkingSpinner(size: 13, lineWidth: 2)
-                .frame(width: 13, height: 13)
+            if isAnimated {
+                HolyAgentWorkingSpinner(size: 13, lineWidth: 2)
+                    .frame(width: 13, height: 13)
+            } else {
+                HolyAgentStaticOrb(color: HolyAgentPalette.workingBlue, symbol: nil, opacity: 0.85)
+            }
         case .swarming:
-            HolyAgentSwarmSpinner(size: 16)
-                .frame(width: 16, height: 16)
+            if isAnimated {
+                HolyAgentSwarmSpinner(size: 16)
+                    .frame(width: 16, height: 16)
+            } else {
+                HolyAgentSymbolOrb(systemName: "sparkles", color: HolyAgentPalette.swarmGold)
+            }
         case .planningQuestion:
             HolyAgentPlanningQuestionOrb()
                 .frame(width: 15, height: 15)
         case .approvalNeeded:
             HolyAgentSymbolOrb(systemName: "hand.raised.fill", color: HolyAgentPalette.approvalNeeded)
         case .newReply:
-            HolyAgentWaitingOrb(becameAvailableAt: newReplyBecameAvailableAt)
-                .frame(width: 16, height: 16)
+            if isAnimated {
+                HolyAgentWaitingOrb(becameAvailableAt: newReplyBecameAvailableAt)
+                    .frame(width: 16, height: 16)
+            } else {
+                HolyAgentSymbolOrb(systemName: "arrowshape.turn.up.left.fill", color: HolyAgentPalette.waitingReply)
+            }
         case .waitingQuiet:
             HolyAgentStaticOrb(color: HolyGhosttyTheme.textTertiary, symbol: nil, opacity: 0.40)
         case .sleepingReply:
