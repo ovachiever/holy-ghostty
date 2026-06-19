@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import SwiftUI
 
 enum HolySessionCycleDirection {
     case next
@@ -59,6 +60,7 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published var draft: HolySessionDraft = .init()
 
     private let sessionSupervisor: HolySessionSupervisor
+    private var refreshCoordinator: HolySessionRefreshCoordinator?
     private var sessionObservationCancellables: Set<AnyCancellable> = []
     private var activeTmuxMetadataRefreshCancellable: AnyCancellable?
     private var attentionClockCancellable: AnyCancellable?
@@ -76,6 +78,11 @@ final class HolyWorkspaceStore: ObservableObject {
             seedDefaultSession: seedDefaultSession
         )
         restore()
+        let coordinator = HolySessionRefreshCoordinator { [weak self] in
+            self?.sessions ?? []
+        }
+        self.refreshCoordinator = coordinator
+        coordinator.start()
     }
 
     var selectedSession: HolySession? {
@@ -1444,7 +1451,13 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private func applySessionStoreState(_ state: HolySessionStoreState) {
         suppressAutomaticSelectionPersistence = true
-        sessions = state.sessions
+        if sessions.map(\.id) != state.sessions.map(\.id) {
+            withAnimation(.easeInOut(duration: 0.12)) {
+                sessions = state.sessions
+            }
+        } else {
+            sessions = state.sessions
+        }
         savedTemplates = state.savedTemplates
         archivedSessions = state.archivedSessions
         attentionMetadataBySessionID = Dictionary(uniqueKeysWithValues: state.attentionMetadata.map { ($0.sessionID, $0) })

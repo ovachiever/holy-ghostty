@@ -673,21 +673,29 @@ final class HolySession: ObservableObject, Identifiable {
             }
             .store(in: &cancellables)
 
-        Timer.publish(every: 1.25, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                self?.refreshDerivedStateIfNeeded()
-            }
-            .store(in: &cancellables)
+        // Derived-state polling is driven by HolySessionRefreshCoordinator, a single
+        // shared cadence owned by the workspace store. Per-session Timers were removed
+        // because N RunLoop timers each woke the main actor every 1.25s, which stalled
+        // the main thread with large session rosters.
     }
 
-    private func refreshDerivedStateIfNeeded(force: Bool = false, forceGitRefresh: Bool = false) {
-        if !force {
-            let minimumInterval = isPresentedInWorkspace
-                ? Self.visibleDerivedStateRefreshInterval
-                : Self.backgroundDerivedStateRefreshInterval
+    /// Minimum interval before this session is eligible for another derived-state poll,
+    /// based on whether it is currently presented in the workspace.
+    var derivedStateRefreshInterval: TimeInterval {
+        isPresentedInWorkspace
+            ? Self.visibleDerivedStateRefreshInterval
+            : Self.backgroundDerivedStateRefreshInterval
+    }
 
-            guard Date().timeIntervalSince(lastDerivedStateRefreshAt) >= minimumInterval else {
+    /// Whether enough time has elapsed since the last derived-state poll for this session
+    /// to be refreshed again. Cheap to evaluate; used by the shared coordinator to scan.
+    func isDueForDerivedStateRefresh(at now: Date = .init()) -> Bool {
+        now.timeIntervalSince(lastDerivedStateRefreshAt) >= derivedStateRefreshInterval
+    }
+
+    func refreshDerivedStateIfNeeded(force: Bool = false, forceGitRefresh: Bool = false) {
+        if !force {
+            guard isDueForDerivedStateRefresh() else {
                 return
             }
         }

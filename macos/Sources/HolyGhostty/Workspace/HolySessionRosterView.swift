@@ -109,6 +109,7 @@ struct HolySessionRosterView: View {
             onSetNote: { store.setNote(session, to: $0) },
             onSetFocus: { store.setFocus(session, $0) }
         )
+        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
     var body: some View {
@@ -164,7 +165,6 @@ struct HolySessionRosterView: View {
                     }
                     .padding(.vertical, 4)
                     .padding(.horizontal, 6)
-                    .animation(.easeInOut(duration: 0.12), value: store.sessions.map(\.id))
                 }
                 .scrollIndicators(.hidden)
             }
