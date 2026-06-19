@@ -550,6 +550,12 @@ final class HolyWorkspaceStore: ObservableObject {
 
     func setFocus(_ session: HolySession, _ focused: Bool) {
         session.setFocused(focused)
+        // The roster's Focus layout groups by session.isFocused, but that lives on
+        // the session, not a @Published store property — so toggling it does not by
+        // itself re-run the roster body. Republish the store so the session moves
+        // into/out of the Today section immediately, instead of only after the next
+        // unrelated store change (e.g. selecting another session).
+        objectWillChange.send()
         persist()
     }
 
