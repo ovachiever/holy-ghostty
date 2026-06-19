@@ -754,21 +754,10 @@ private struct HolyRosterRow: View {
             }
 
             if !compact && !isRenaming && !isEditingNote {
-                Menu {
-                    rowActionMenuItems
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                        .frame(width: 14, height: 14)
-                        .contentShape(Rectangle())
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .frame(width: 14, height: 14)
-                .opacity(isSelected ? 1 : 0.5)
-                .help("Session actions")
+                HolyRowActionMenuButton(actions: rowActionMenuActions)
+                    .frame(width: 14, height: 14)
+                    .opacity(isSelected ? 1 : 0.5)
+                    .help("Session actions")
             }
         }
         .padding(.horizontal, 10)
@@ -796,43 +785,46 @@ private struct HolyRosterRow: View {
         .onTapGesture(perform: onSelect)
     }
 
-    @ViewBuilder
-    private var rowActionMenuItems: some View {
-        Button("Rename") { startRename() }
-
-        Button(session.note == nil ? "Add Session Note..." : "Edit Session Note...") {
-            startNoteEdit()
-        }
+    // Plain data, built cheaply on each render. The actual NSMenu is constructed
+    // only when the button is clicked (see HolyRowActionMenuButton), so SwiftUI
+    // never materializes per-row menu items — which previously froze the main
+    // thread by resolving SF Symbol accessibility text for every row's menu on
+    // every view-graph update.
+    private var rowActionMenuActions: [HolyRowMenuAction] {
+        var actions: [HolyRowMenuAction] = [
+            .item("Rename") { startRename() },
+            .item(session.note == nil ? "Add Session Note..." : "Edit Session Note...") { startNoteEdit() },
+        ]
 
         if session.note != nil {
-            Button("Clear Session Note") { onSetNote(nil) }
+            actions.append(.item("Clear Session Note") { onSetNote(nil) })
         }
 
-        Button(session.isFocused ? "Unpin from Today" : "Pin to Today") {
+        actions.append(.item(session.isFocused ? "Unpin from Today" : "Pin to Today") {
             onSetFocus(!session.isFocused)
-        }
+        })
 
-        Divider()
-
-        Button("Duplicate") { onDuplicate() }
+        actions.append(.separator)
+        actions.append(.item("Duplicate") { onDuplicate() })
 
         if canReattach {
-            Button("Reattach") { onReattach() }
+            actions.append(.item("Reattach") { onReattach() })
         }
 
         if let tmuxSessionName = session.record.launchSpec.tmux?.sessionName?
             .trimmingCharacters(in: .whitespacesAndNewlines), !tmuxSessionName.isEmpty {
-            Divider()
-            Button("Copy tmux Session ID") { copyTmuxSessionID(tmuxSessionName) }
+            actions.append(.separator)
+            actions.append(.item("Copy tmux Session ID") { copyTmuxSessionID(tmuxSessionName) })
         }
 
-        Divider()
-
-        Button("Detach From Roster") { onArchive() }
+        actions.append(.separator)
+        actions.append(.item("Detach From Roster") { onArchive() })
 
         if canKillTmux {
-            Button("Kill from Roster", role: .destructive) { onKillTmux() }
+            actions.append(.item("Kill from Roster", isDestructive: true) { onKillTmux() })
         }
+
+        return actions
     }
 
     @ViewBuilder
@@ -1275,6 +1267,96 @@ enum HolyWaitingFreshness {
         case .aging:        return "Aging handoff"
         case .stale:        return "Stale handoff"
         }
+    }
+}
+
+private enum HolyRowMenuAction {
+    case item(String, isDestructive: Bool = false, action: () -> Void)
+    case separator
+}
+
+/// A roster-row "more actions" button that builds its NSMenu lazily, only when
+/// clicked. Using a SwiftUI Menu per row froze the main thread: SwiftUI eagerly
+/// materializes every row's menu items during view-graph updates and resolves
+/// SF Symbol accessibility text via CFBundle string lookups for each one, so
+/// scrolling a large roster spent ~90% of the main thread in
+/// AppKitPopUpAdaptor/AXSwiftUIDescriptionForSymbolName. An AppKit NSButton +
+/// on-demand NSMenu constructs nothing until the user clicks, and pops up the
+/// native menu reliably on the first click.
+private struct HolyRowActionMenuButton: NSViewRepresentable {
+    let actions: [HolyRowMenuAction]
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(actions: actions)
+    }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton()
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.image = NSImage(
+            systemSymbolName: "ellipsis",
+            accessibilityDescription: "Session actions"
+        )
+        button.contentTintColor = NSColor.tertiaryLabelColor
+        button.setButtonType(.momentaryChange)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.present(_:))
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentHuggingPriority(.required, for: .vertical)
+        return button
+    }
+
+    func updateNSView(_ nsView: NSButton, context: Context) {
+        // Only swap the (cheap) action list. No menu is built here.
+        context.coordinator.actions = actions
+    }
+
+    final class Coordinator: NSObject {
+        var actions: [HolyRowMenuAction]
+
+        init(actions: [HolyRowMenuAction]) {
+            self.actions = actions
+        }
+
+        @objc func present(_ sender: NSButton) {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            for action in actions {
+                switch action {
+                case .separator:
+                    menu.addItem(.separator())
+                case let .item(title, isDestructive, handler):
+                    let item = NSMenuItem(
+                        title: title,
+                        action: #selector(invoke(_:)),
+                        keyEquivalent: ""
+                    )
+                    item.target = self
+                    item.representedObject = MenuHandler(handler)
+                    if isDestructive {
+                        item.attributedTitle = NSAttributedString(
+                            string: title,
+                            attributes: [.foregroundColor: NSColor.systemRed]
+                        )
+                    }
+                    menu.addItem(item)
+                }
+            }
+
+            let origin = NSPoint(x: 0, y: sender.bounds.height + 4)
+            menu.popUp(positioning: nil, at: origin, in: sender)
+        }
+
+        @objc private func invoke(_ sender: NSMenuItem) {
+            (sender.representedObject as? MenuHandler)?.handler()
+        }
+    }
+
+    private final class MenuHandler {
+        let handler: () -> Void
+        init(_ handler: @escaping () -> Void) { self.handler = handler }
     }
 }
 
