@@ -3,16 +3,10 @@ import Combine
 import Foundation
 import GhosttyKit
 
-enum HolySessionSurfaceAttachmentMode: Equatable {
-    case attached
-    case deferredRemoteRestore
-}
-
 @MainActor
 final class HolySession: ObservableObject, Identifiable {
     let id: UUID
     let surfaceView: Ghostty.SurfaceView
-    let isRemoteRestoreDeferred: Bool
 
     @Published private(set) var record: HolySessionRecord
     @Published private(set) var phase: HolySessionPhase = .active
@@ -46,23 +40,12 @@ final class HolySession: ObservableObject, Identifiable {
 
     init(
         record: HolySessionRecord,
-        app: ghostty_app_t,
-        surfaceAttachmentMode: HolySessionSurfaceAttachmentMode = .attached
+        app: ghostty_app_t
     ) {
         self.id = record.id
         self.record = record
-        self.isRemoteRestoreDeferred = surfaceAttachmentMode == .deferredRemoteRestore
-        let surfaceConfiguration: Ghostty.SurfaceConfiguration = switch surfaceAttachmentMode {
-        case .attached:
-            record.launchSpec.surfaceConfiguration
-        case .deferredRemoteRestore:
-            HolyTmuxCommandBuilder.deferredRemoteRestoreSurfaceConfiguration(for: record.launchSpec)
-        }
-        self.surfaceView = Ghostty.SurfaceView(app, baseConfig: surfaceConfiguration, uuid: record.id)
+        self.surfaceView = Ghostty.SurfaceView(app, baseConfig: record.launchSpec.surfaceConfiguration, uuid: record.id)
         self.activityAt = record.updatedAt
-        if surfaceAttachmentMode == .deferredRemoteRestore {
-            self.preview = HolyTmuxCommandBuilder.deferredRemoteRestorePreview(for: record.launchSpec)
-        }
         surfaceView.setFrameSize(Self.detachedSurfaceFallbackSize)
         surfaceView.sizeDidChange(Self.detachedSurfaceFallbackSize)
         setSurfaceOcclusionVisible(false)
@@ -74,10 +57,6 @@ final class HolySession: ObservableObject, Identifiable {
 
     var title: String {
         let configured = record.launchSpec.resolvedTitle
-        if isRemoteRestoreDeferred {
-            return configured
-        }
-
         if configured != "Shell" || surfaceView.title.isEmpty {
             return configured
         }
@@ -158,10 +137,6 @@ final class HolySession: ObservableObject, Identifiable {
 
     var workingDirectory: String? {
         let recordedWorkingDirectory = Self.normalizedMetadataString(record.launchSpec.workingDirectory)
-        if isRemoteRestoreDeferred {
-            return recordedWorkingDirectory
-        }
-
         if prefersTmuxWorkingDirectory,
            let recordedWorkingDirectory {
             return recordedWorkingDirectory
@@ -529,20 +504,6 @@ final class HolySession: ObservableObject, Identifiable {
 
     func refreshDerivedState(forceGitRefresh: Bool = false) {
         lastDerivedStateRefreshAt = Date()
-        if isRemoteRestoreDeferred {
-            let nextPreview = HolyTmuxCommandBuilder.deferredRemoteRestorePreview(for: record.launchSpec)
-            if preview != nextPreview {
-                preview = nextPreview
-            }
-            if !signals.isEmpty {
-                signals = []
-            }
-            if phase != .active {
-                phase = .active
-            }
-            return
-        }
-
         let previousPreview = preview
         let previousPhase = phase
         let previousInferredRuntime = inferredRuntime

@@ -1602,9 +1602,6 @@ final class HolyWorkspaceStore: ObservableObject {
         }) {
             reusableSession.applyDiscoveredLaunchMetadata(from: launchSpec)
             selectedSessionID = reusableSession.id
-            if reusableSession.isRemoteRestoreDeferred {
-                reattach(reusableSession)
-            }
             composerBusy = false
             composerErrorMessage = nil
             composerPresented = false

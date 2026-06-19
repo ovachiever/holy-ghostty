@@ -30,27 +30,6 @@ enum HolyTmuxCommandBuilder {
         return config
     }
 
-    static func deferredRemoteRestoreSurfaceConfiguration(for launchSpec: HolySessionLaunchSpec) -> Ghostty.SurfaceConfiguration {
-        var config = Ghostty.SurfaceConfiguration()
-        config.workingDirectory = nil
-        config.command = shellCommand([
-            "zsh",
-            "-lc",
-            "printf '%s\\n' \(posixQuote(deferredRemoteRestorePreview(for: launchSpec))); exit 0",
-        ])
-        config.initialInput = nil
-        config.waitAfterCommand = false
-        config.environmentVariables = sanitizedEnvironment(launchSpec.environment)
-        return config
-    }
-
-    static func deferredRemoteRestorePreview(for launchSpec: HolySessionLaunchSpec) -> String {
-        let destination = launchSpec.transport.destinationDisplayName
-        let tmuxSession = launchSpec.tmux?.normalized.sessionName?.holyTrimmed.nilIfEmpty
-        let target = tmuxSession.map { "tmux \($0)" } ?? "the saved tmux session"
-        return "Remote session kept disconnected during startup.\nUse Reattach to connect \(target) on \(destination)."
-    }
-
     static func suggestedSessionName(for launchSpec: HolySessionLaunchSpec) -> String {
         let base = sanitizedSessionComponent(launchSpec.resolvedTitle)
         let runtime = sanitizedSessionComponent(launchSpec.runtime.displayName)
