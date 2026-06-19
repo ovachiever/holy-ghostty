@@ -643,10 +643,27 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     private func bind() {
-        surfaceView.objectWillChange
+        // Subscribe only to the surface signals that feed derived session state.
+        // SurfaceView.objectWillChange fires for every published property, including
+        // per-frame churn (cursor blink, mouse movement, focus, bell). Forwarding that
+        // firehose to every roster row caused a main-thread invalidation storm with many
+        // sessions. Terminal output is polled by the timer below via cachedVisibleContents;
+        // only title and pwd change derived state between ticks.
+        surfaceView.$title
+            .dropFirst()
+            .removeDuplicates()
             .sink { [weak self] _ in
-                self?.objectWillChange.send()
-                self?.refreshDerivedState()
+                guard let self else { return }
+                self.objectWillChange.send()
+                self.refreshDerivedStateIfNeeded(force: true)
+            }
+            .store(in: &cancellables)
+
+        surfaceView.$pwd
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                self?.refreshDerivedStateIfNeeded(force: true)
             }
             .store(in: &cancellables)
 
