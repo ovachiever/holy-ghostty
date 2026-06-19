@@ -720,7 +720,6 @@ private struct HolyRosterRow: View {
     @State private var renameText = ""
     @State private var isEditingNote = false
     @State private var noteDraft = ""
-    @State private var actionPopoverPresented = false
     @FocusState private var focusedEditField: RosterRowEditField?
 
     private enum RosterRowEditField: Hashable {
@@ -756,22 +755,21 @@ private struct HolyRosterRow: View {
             }
 
             if !compact && !isRenaming && !isEditingNote {
-                Button {
-                    onSelect()
-                    actionPopoverPresented = true
+                Menu {
+                    rowActionMenuItems
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                        .frame(width: 14, height: 14)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
                 .fixedSize()
                 .frame(width: 14, height: 14)
                 .opacity(isSelected ? 1 : 0.5)
                 .help("Session actions")
-                .popover(isPresented: $actionPopoverPresented, arrowEdge: .trailing) {
-                    actionPopover
-                }
             }
         }
         .padding(.horizontal, 10)
@@ -799,82 +797,43 @@ private struct HolyRosterRow: View {
         .onTapGesture(perform: onSelect)
     }
 
-    private var actionPopover: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            actionButton("Rename") {
-                startRename()
-            }
+    @ViewBuilder
+    private var rowActionMenuItems: some View {
+        Button("Rename") { startRename() }
 
-            actionButton(session.note == nil ? "Add Session Note..." : "Edit Session Note...") {
-                startNoteEdit()
-            }
-
-            if session.note != nil {
-                actionButton("Clear Session Note") {
-                    onSetNote(nil)
-                }
-            }
-
-            actionButton(session.isFocused ? "Unpin from Today" : "Pin to Today") {
-                onSetFocus(!session.isFocused)
-            }
-
-            Divider()
-
-            actionButton("Duplicate") {
-                onDuplicate()
-            }
-
-            if canReattach {
-                actionButton("Reattach") {
-                    onReattach()
-                }
-            }
-
-            if let tmuxSessionName = session.record.launchSpec.tmux?.sessionName?
-                .trimmingCharacters(in: .whitespacesAndNewlines), !tmuxSessionName.isEmpty {
-                Divider()
-                actionButton("Copy tmux Session ID") {
-                    copyTmuxSessionID(tmuxSessionName)
-                }
-            }
-
-            Divider()
-
-            actionButton("Detach From Roster") {
-                onArchive()
-            }
-
-            if canKillTmux {
-                actionButton("Kill from Roster", destructive: true) {
-                    onKillTmux()
-                }
-            }
+        Button(session.note == nil ? "Add Session Note..." : "Edit Session Note...") {
+            startNoteEdit()
         }
-        .padding(8)
-        .frame(width: 190, alignment: .leading)
-        .background(HolyGhosttyTheme.bgElevated)
-    }
 
-    private func actionButton(
-        _ title: String,
-        destructive: Bool = false,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button {
-            actionPopoverPresented = false
-            action()
-        } label: {
-            Text(title)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(destructive ? HolyGhosttyTheme.danger : HolyGhosttyTheme.textPrimary)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 5)
-                .contentShape(Rectangle())
+        if session.note != nil {
+            Button("Clear Session Note") { onSetNote(nil) }
         }
-        .buttonStyle(.plain)
+
+        Button(session.isFocused ? "Unpin from Today" : "Pin to Today") {
+            onSetFocus(!session.isFocused)
+        }
+
+        Divider()
+
+        Button("Duplicate") { onDuplicate() }
+
+        if canReattach {
+            Button("Reattach") { onReattach() }
+        }
+
+        if let tmuxSessionName = session.record.launchSpec.tmux?.sessionName?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !tmuxSessionName.isEmpty {
+            Divider()
+            Button("Copy tmux Session ID") { copyTmuxSessionID(tmuxSessionName) }
+        }
+
+        Divider()
+
+        Button("Detach From Roster") { onArchive() }
+
+        if canKillTmux {
+            Button("Kill from Roster", role: .destructive) { onKillTmux() }
+        }
     }
 
     @ViewBuilder
