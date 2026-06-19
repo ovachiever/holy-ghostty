@@ -134,7 +134,15 @@ struct HolySessionRosterView: View {
                 .frame(maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 6) {
+                    // VStack (not LazyVStack) so the ScrollView knows the full
+                    // content height up front and the scrollbar thumb stays a
+                    // stable size while scrolling. LazyVStack only measures rows
+                    // as they appear, so it constantly re-estimated total height
+                    // and resized the scroller mid-scroll. Rows are cheap to build
+                    // now (the action menu is a lazy on-demand NSMenu and the pane
+                    // layout is memoized), so eager layout of a few dozen rows is
+                    // fine.
+                    VStack(spacing: 6) {
                         ForEach(sections) { section in
                             VStack(alignment: .leading, spacing: 0) {
                                 HolyRosterSectionHeader(
