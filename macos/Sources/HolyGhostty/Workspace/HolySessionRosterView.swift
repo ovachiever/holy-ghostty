@@ -109,7 +109,6 @@ struct HolySessionRosterView: View {
             onSetNote: { store.setNote(session, to: $0) },
             onSetFocus: { store.setFocus(session, $0) }
         )
-        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
     var body: some View {

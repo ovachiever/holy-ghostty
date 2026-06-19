@@ -7,6 +7,12 @@ enum HolySessionCycleDirection {
     case previous
 }
 
+private struct PaneLayoutMemoKey: Equatable {
+    let sessionIDs: [UUID]
+    let paneLayout: HolyPaneLayout
+    let selectedSessionID: UUID?
+}
+
 @MainActor
 final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var sessions: [HolySession] = []
@@ -61,6 +67,16 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private let sessionSupervisor: HolySessionSupervisor
     private var refreshCoordinator: HolySessionRefreshCoordinator?
+    /// Sessions restored this launch that were ALREADY SEEN before the last quit.
+    /// Restoring a session walks it active -> attached -> waitingInput, which
+    /// changes its attention signature and would otherwise stamp a fresh
+    /// "became available" time — making a reply the user had already viewed
+    /// resurface as a blue "new reply" after relaunch. For these sessions we
+    /// carry the seen verdict forward: the first stable post-attach signature is
+    /// marked seen. Genuinely-unseen pre-quit replies are NOT added here, so they
+    /// correctly remain blue. Each id is cleared once its signature is captured.
+    private var restoreSeenBaselinePending: Set<UUID> = []
+    private var paneLayoutMemo: (key: PaneLayoutMemoKey, layout: HolyPaneLayout, labels: [UUID: String])?
     private var sessionObservationCancellables: Set<AnyCancellable> = []
     private var activeTmuxMetadataRefreshCancellable: AnyCancellable?
     private var attentionClockCancellable: AnyCancellable?
@@ -95,18 +111,43 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     var normalizedPaneLayout: HolyPaneLayout {
-        paneLayout.normalized(
-            availableSessionIDs: sessions.map(\.id),
-            selectedSessionID: selectedSessionID
-        )
+        paneLayoutMemoEntry().layout
     }
 
     var paneLabelsBySessionID: [UUID: String] {
-        Dictionary(
-            uniqueKeysWithValues: normalizedPaneLayout.sessionIDs.compactMap { id in
-                normalizedPaneLayout.label(for: id).map { (id, $0) }
+        paneLayoutMemoEntry().labels
+    }
+
+    /// Memoized normalized pane layout + per-session labels.
+    ///
+    /// Both values are O(sessions) to derive and were previously recomputed for
+    /// every roster row on every layout pass — O(rows²) per frame, which froze
+    /// the main thread while scrolling a large roster. They only change when the
+    /// session id list, the pane layout, or the selection changes, so cache them
+    /// keyed on exactly those inputs and rebuild only when one of them moves.
+    private func paneLayoutMemoEntry() -> (layout: HolyPaneLayout, labels: [UUID: String]) {
+        let key = PaneLayoutMemoKey(
+            sessionIDs: sessions.map(\.id),
+            paneLayout: paneLayout,
+            selectedSessionID: selectedSessionID
+        )
+
+        if let memo = paneLayoutMemo, memo.key == key {
+            return (memo.layout, memo.labels)
+        }
+
+        let layout = paneLayout.normalized(
+            availableSessionIDs: key.sessionIDs,
+            selectedSessionID: selectedSessionID
+        )
+        let labels = Dictionary(
+            uniqueKeysWithValues: layout.sessionIDs.compactMap { id in
+                layout.label(for: id).map { (id, $0) }
             }
         )
+
+        paneLayoutMemo = (key, layout, labels)
+        return (layout, labels)
     }
 
     var selectedArchivedSession: HolyArchivedSession? {
@@ -250,6 +291,15 @@ final class HolyWorkspaceStore: ObservableObject {
 
     func restore() {
         let restoration = sessionSupervisor.restoreWorkspace()
+        // Capture the pre-quit seen verdict from the pristine persisted metadata
+        // BEFORE applySessionStoreState runs bindSessions/reconcile, which rewrites
+        // the attention timestamps during the restore transition. Sessions whose
+        // reply was already seen are carried forward so they don't resurface blue.
+        restoreSeenBaselinePending = Set(
+            restoration.state.attentionMetadata
+                .filter { attentionMetadataWasSeen($0) }
+                .map(\.sessionID)
+        )
         applySessionStoreState(restoration.state)
         loadTasks()
         loadRemoteHosts()
@@ -1220,7 +1270,8 @@ final class HolyWorkspaceStore: ObservableObject {
             changed = true
         }
 
-        if markSeen,
+        let baselinePending = restoreSeenBaselinePending.contains(session.id)
+        if (markSeen || baselinePending),
            signature != nil,
            !hasSeenCurrentAttention(
                signature: signature,
@@ -1232,6 +1283,14 @@ final class HolyWorkspaceStore: ObservableObject {
             changed = true
         }
 
+        // Once a restored-and-already-seen session has settled on a real
+        // signature and been re-marked seen, drop it from the baseline set so
+        // future genuine replies light blue normally. Keep it pending until the
+        // signature is non-nil (it is often nil in the instant after attach).
+        if baselinePending, signature != nil {
+            restoreSeenBaselinePending.remove(session.id)
+        }
+
         if changed {
             metadata.updatedAt = date
             existing[session.id] = metadata
@@ -1241,6 +1300,22 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         return changed
+    }
+
+    /// Whether persisted attention metadata says this session's last reply had
+    /// already been seen before the previous quit. Used to decide which restored
+    /// sessions get their seen verdict carried across relaunch.
+    private func attentionMetadataWasSeen(_ metadata: HolySessionAttentionMetadata) -> Bool {
+        guard let lastSeenAt = metadata.lastSeenAt else {
+            return false
+        }
+
+        // No prior attention timestamp means nothing was pending — treat as seen.
+        guard let becameAvailableAt = metadata.lastAttentionBecameAvailableAt else {
+            return true
+        }
+
+        return lastSeenAt >= becameAvailableAt
     }
 
     private func isWaitingAttention(_ session: HolySession) -> Bool {
