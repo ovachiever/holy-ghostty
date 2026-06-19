@@ -67,15 +67,6 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private let sessionSupervisor: HolySessionSupervisor
     private var refreshCoordinator: HolySessionRefreshCoordinator?
-    /// Sessions restored this launch that were ALREADY SEEN before the last quit.
-    /// Restoring a session walks it active -> attached -> waitingInput, which
-    /// changes its attention signature and would otherwise stamp a fresh
-    /// "became available" time — making a reply the user had already viewed
-    /// resurface as a blue "new reply" after relaunch. For these sessions we
-    /// carry the seen verdict forward: the first stable post-attach signature is
-    /// marked seen. Genuinely-unseen pre-quit replies are NOT added here, so they
-    /// correctly remain blue. Each id is cleared once its signature is captured.
-    private var restoreSeenBaselinePending: Set<UUID> = []
     private var paneLayoutMemo: (key: PaneLayoutMemoKey, layout: HolyPaneLayout, labels: [UUID: String])?
     private var sessionObservationCancellables: Set<AnyCancellable> = []
     private var activeTmuxMetadataRefreshCancellable: AnyCancellable?
@@ -85,6 +76,7 @@ final class HolyWorkspaceStore: ObservableObject {
     private var selectedSessionReadTaskKey: String?
     private var suppressAutomaticSelectionPersistence = false
     private static let selectedSessionReadDelay: TimeInterval = 3
+    private static let freshReplyInterval: TimeInterval = 10 * 60
     private static let overdueReplyInterval: TimeInterval = 2 * 60 * 60
     private static let staleReplyInterval: TimeInterval = 24 * 60 * 60
 
@@ -291,15 +283,6 @@ final class HolyWorkspaceStore: ObservableObject {
 
     func restore() {
         let restoration = sessionSupervisor.restoreWorkspace()
-        // Capture the pre-quit seen verdict from the pristine persisted metadata
-        // BEFORE applySessionStoreState runs bindSessions/reconcile, which rewrites
-        // the attention timestamps during the restore transition. Sessions whose
-        // reply was already seen are carried forward so they don't resurface blue.
-        restoreSeenBaselinePending = Set(
-            restoration.state.attentionMetadata
-                .filter { attentionMetadataWasSeen($0) }
-                .map(\.sessionID)
-        )
         applySessionStoreState(restoration.state)
         loadTasks()
         loadRemoteHosts()
@@ -1170,44 +1153,10 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     private func scheduleSelectedSessionSeenMark() {
-        guard let selectedSessionID,
-              let session = session(withID: selectedSessionID),
-              let signature = attentionEvidenceSignature(for: session) else {
-            cancelSelectedSessionSeenMark()
-            return
-        }
-
-        let metadata = attentionMetadataBySessionID[selectedSessionID]
-        let becameAvailableAt = metadata?.lastAttentionBecameAvailableAt ?? session.activityAt
-        if hasSeenCurrentAttention(signature: signature, metadata: metadata, becameAvailableAt: becameAvailableAt) {
-            cancelSelectedSessionSeenMark()
-            return
-        }
-
-        let taskKey = "\(selectedSessionID.uuidString)|\(becameAvailableAt.timeIntervalSinceReferenceDate)"
-        guard selectedSessionReadTaskKey != taskKey else { return }
-
-        selectedSessionReadTask?.cancel()
-        selectedSessionReadTaskKey = taskKey
-        selectedSessionReadTask = Task { [weak self, selectedSessionID] in
-            let nanoseconds = UInt64(Self.selectedSessionReadDelay * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: nanoseconds)
-            guard !Task.isCancelled else { return }
-
-            await MainActor.run {
-                guard let self,
-                      self.selectedSessionID == selectedSessionID,
-                      self.session(withID: selectedSessionID) != nil else {
-                    return
-                }
-
-                if self.markSelectedSessionSeenIfNeeded() {
-                    self.persist()
-                }
-                self.selectedSessionReadTask = nil
-                self.selectedSessionReadTaskKey = nil
-            }
-        }
+        // No-op: the "new reply" (blue) state is now purely a function of how
+        // long ago the agent reply arrived, so viewing a session no longer needs
+        // to mark it seen. Kept as a stub so existing call sites stay simple.
+        cancelSelectedSessionSeenMark()
     }
 
     private func cancelSelectedSessionSeenMark() {
@@ -1245,50 +1194,30 @@ final class HolyWorkspaceStore: ObservableObject {
         existing: inout [UUID: HolySessionAttentionMetadata],
         at date: Date = .init()
     ) -> Bool {
-        let signature = attentionEvidenceSignature(for: session)
         let isWaitingAttention = isWaitingAttention(session)
         var metadata = existing[session.id] ?? HolySessionAttentionMetadata(sessionID: session.id)
         var changed = false
 
-        if metadata.lastAttentionEvidenceSignature != signature {
-            let wasWaitingAttention = metadata.lastAttentionWasWaiting == true
-            metadata.lastAttentionEvidenceSignature = signature
-            if signature == nil {
-                metadata.lastAttentionBecameAvailableAt = nil
-            } else if isWaitingAttention {
-                if !wasWaitingAttention || metadata.lastAttentionBecameAvailableAt == nil {
-                    metadata.lastAttentionBecameAvailableAt = date
-                }
-            } else {
+        // Anchor "became available" to the moment the session ENTERS the waiting
+        // state — i.e. when the agent's reply lands. The "new reply" (blue) state
+        // is purely a function of how long ago that was (see attentionPresentation),
+        // so the timestamp must be set once on the not-waiting -> waiting edge and
+        // then preserved. It is persisted, so a reply that landed hours ago reads
+        // as old regardless of relaunch; relaunch is not a special case.
+        let wasWaitingAttention = metadata.lastAttentionWasWaiting == true
+        if isWaitingAttention {
+            if metadata.lastAttentionBecameAvailableAt == nil || !wasWaitingAttention {
                 metadata.lastAttentionBecameAvailableAt = date
+                changed = true
             }
+        } else if metadata.lastAttentionBecameAvailableAt != nil {
+            metadata.lastAttentionBecameAvailableAt = nil
             changed = true
         }
 
         if metadata.lastAttentionWasWaiting != isWaitingAttention {
             metadata.lastAttentionWasWaiting = isWaitingAttention
             changed = true
-        }
-
-        let baselinePending = restoreSeenBaselinePending.contains(session.id)
-        if (markSeen || baselinePending),
-           signature != nil,
-           !hasSeenCurrentAttention(
-               signature: signature,
-               metadata: metadata,
-               becameAvailableAt: metadata.lastAttentionBecameAvailableAt ?? date
-           ) {
-            metadata.seenEvidenceSignature = signature
-            metadata.lastSeenAt = date
-            changed = true
-        }
-
-        // Once a restored-and-already-seen session has settled on a real
-        // signature and been re-marked seen, drop it from the baseline set so
-        // future genuine replies light blue normally. Keep it pending until the
-        // signature is non-nil (it is often nil in the instant after attach).
-        if baselinePending, signature != nil {
-            restoreSeenBaselinePending.remove(session.id)
         }
 
         if changed {
@@ -1305,62 +1234,8 @@ final class HolyWorkspaceStore: ObservableObject {
     /// Whether persisted attention metadata says this session's last reply had
     /// already been seen before the previous quit. Used to decide which restored
     /// sessions get their seen verdict carried across relaunch.
-    private func attentionMetadataWasSeen(_ metadata: HolySessionAttentionMetadata) -> Bool {
-        guard let lastSeenAt = metadata.lastSeenAt else {
-            return false
-        }
-
-        // No prior attention timestamp means nothing was pending — treat as seen.
-        guard let becameAvailableAt = metadata.lastAttentionBecameAvailableAt else {
-            return true
-        }
-
-        return lastSeenAt >= becameAvailableAt
-    }
-
     private func isWaitingAttention(_ session: HolySession) -> Bool {
         session.phase == .waitingInput || session.runtimeTelemetry.activityKind == .approval
-    }
-
-    private func hasSeenCurrentAttention(
-        signature: String?,
-        metadata: HolySessionAttentionMetadata?,
-        becameAvailableAt: Date
-    ) -> Bool {
-        guard signature != nil,
-              let lastSeenAt = metadata?.lastSeenAt else {
-            return false
-        }
-
-        return lastSeenAt >= becameAvailableAt
-    }
-
-    private func attentionEvidenceSignature(for session: HolySession) -> String? {
-        guard session.phase != .active
-            || session.runtimeTelemetry.activityKind != .idle
-            || coordination(for: session).attention != .none else {
-            return nil
-        }
-
-        // Build the identity from stable, semantic fields only. Volatile screen
-        // content (the live preview tail, the raw-evidence fallback in
-        // telemetry.detail, the time-stamped generated headline, and the
-        // evidence-derived nextStepHint) all shift when a session re-attaches to
-        // tmux on launch — which previously made a relaunch read as a brand-new
-        // reply and lit the blue "new reply" orb across most waiting sessions.
-        // Structured signal text survives re-attach because it is parsed, not
-        // screen-scraped; the enum fields and command are stable by construction.
-        let telemetry = session.runtimeTelemetry
-        let signal = session.primarySignal
-        let components = [
-            session.phase.rawValue,
-            telemetry.activityKind.rawValue,
-            normalizedAttentionText(telemetry.command),
-            normalizedAttentionText(signal?.headline),
-            normalizedAttentionText(signal?.detail),
-        ].compactMap { $0 }
-
-        return components.joined(separator: "|").nilIfAttentionBlank
     }
 
     private func normalizedAttentionText(_ text: String?) -> String? {
@@ -1377,13 +1252,7 @@ final class HolyWorkspaceStore: ObservableObject {
         coordination: HolySessionCoordination
     ) -> HolySessionAttentionPresentation {
         let metadata = attentionMetadataBySessionID[session.id]
-        let signature = attentionEvidenceSignature(for: session)
         let becameAvailableAt = metadata?.lastAttentionBecameAvailableAt ?? session.activityAt
-        let hasSeenCurrentEvidence = hasSeenCurrentAttention(
-            signature: signature,
-            metadata: metadata,
-            becameAvailableAt: becameAvailableAt
-        )
         let detail = attentionDetail(for: session)
 
         if session.phase == .failed || session.runtimeTelemetry.activityKind == .failure {
@@ -1477,7 +1346,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 )
             }
 
-            if !hasSeenCurrentEvidence {
+            if age < Self.freshReplyInterval {
                 return .init(
                     kind: .newReply,
                     symbolName: "arrowshape.turn.up.left.fill",
