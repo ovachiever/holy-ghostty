@@ -1267,34 +1267,25 @@ final class HolyWorkspaceStore: ObservableObject {
             return nil
         }
 
+        // Build the identity from stable, semantic fields only. Volatile screen
+        // content (the live preview tail, the raw-evidence fallback in
+        // telemetry.detail, the time-stamped generated headline, and the
+        // evidence-derived nextStepHint) all shift when a session re-attaches to
+        // tmux on launch — which previously made a relaunch read as a brand-new
+        // reply and lit the blue "new reply" orb across most waiting sessions.
+        // Structured signal text survives re-attach because it is parsed, not
+        // screen-scraped; the enum fields and command are stable by construction.
         let telemetry = session.runtimeTelemetry
         let signal = session.primarySignal
         let components = [
             session.phase.rawValue,
             telemetry.activityKind.rawValue,
-            normalizedAttentionText(telemetry.headline),
-            normalizedAttentionText(telemetry.detail),
-            normalizedAttentionText(telemetry.nextStepHint),
             normalizedAttentionText(telemetry.command),
             normalizedAttentionText(signal?.headline),
             normalizedAttentionText(signal?.detail),
-            previewAttentionTail(for: session.preview),
         ].compactMap { $0 }
 
         return components.joined(separator: "|").nilIfAttentionBlank
-    }
-
-    private func previewAttentionTail(for preview: String) -> String? {
-        let lines = preview
-            .split(whereSeparator: \.isNewline)
-            .map(String.init)
-            .map(normalizedAttentionText)
-            .compactMap { $0 }
-            .suffix(12)
-            .joined(separator: " ")
-
-        guard !lines.isEmpty else { return nil }
-        return String(lines.suffix(512))
     }
 
     private func normalizedAttentionText(_ text: String?) -> String? {
