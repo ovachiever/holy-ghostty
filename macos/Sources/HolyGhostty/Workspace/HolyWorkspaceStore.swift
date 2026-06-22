@@ -1200,29 +1200,17 @@ final class HolyWorkspaceStore: ObservableObject {
         existing: inout [UUID: HolySessionAttentionMetadata],
         at date: Date = .init()
     ) -> Bool {
-        let isWaitingAttention = isWaitingAttention(session)
+        let isActiveWork = session.phase == .working || session.runtimeTelemetry.activityKind.isActiveWork
         var metadata = existing[session.id] ?? HolySessionAttentionMetadata(sessionID: session.id)
         var changed = false
 
-        // Anchor "became available" to the moment the session ENTERS the waiting
-        // state — i.e. when the agent's reply lands. The "new reply" (blue) state
-        // is purely a function of how long ago that was (see attentionPresentation),
-        // so the timestamp must be set once on the not-waiting -> waiting edge and
-        // then preserved. It is persisted, so a reply that landed hours ago reads
-        // as old regardless of relaunch; relaunch is not a special case.
-        let wasWaitingAttention = metadata.lastAttentionWasWaiting == true
-        if isWaitingAttention {
-            if metadata.lastAttentionBecameAvailableAt == nil || !wasWaitingAttention {
-                metadata.lastAttentionBecameAvailableAt = date
-                changed = true
-            }
-        } else if metadata.lastAttentionBecameAvailableAt != nil {
-            metadata.lastAttentionBecameAvailableAt = nil
+        if metadata.lastAttentionWasActiveWork == true && !isActiveWork {
+            metadata.lastAgentFinishedAt = date
             changed = true
         }
 
-        if metadata.lastAttentionWasWaiting != isWaitingAttention {
-            metadata.lastAttentionWasWaiting = isWaitingAttention
+        if metadata.lastAttentionWasActiveWork != isActiveWork {
+            metadata.lastAttentionWasActiveWork = isActiveWork
             changed = true
         }
 
@@ -1258,7 +1246,8 @@ final class HolyWorkspaceStore: ObservableObject {
         coordination: HolySessionCoordination
     ) -> HolySessionAttentionPresentation {
         let metadata = attentionMetadataBySessionID[session.id]
-        let becameAvailableAt = metadata?.lastAttentionBecameAvailableAt ?? session.activityAt
+        let finishedAt = metadata?.lastAgentFinishedAt
+        let becameAvailableAt = finishedAt ?? session.activityAt
         let detail = attentionDetail(for: session)
 
         if session.phase == .failed || session.runtimeTelemetry.activityKind == .failure {
@@ -1328,6 +1317,18 @@ final class HolyWorkspaceStore: ObservableObject {
             )
         }
 
+        if let finishedAt,
+           attentionClock.timeIntervalSince(finishedAt) < Self.freshReplyInterval {
+            return .init(
+                kind: .newReply,
+                symbolName: "circle.fill",
+                title: "Recent reply",
+                detail: detail,
+                isProminent: true,
+                becameAvailableAt: finishedAt
+            )
+        }
+
         if session.phase == .waitingInput || session.runtimeTelemetry.activityKind == .approval {
             let age = attentionClock.timeIntervalSince(becameAvailableAt)
             if age >= Self.staleReplyInterval {
@@ -1348,17 +1349,6 @@ final class HolyWorkspaceStore: ObservableObject {
                     title: "Sleeping",
                     detail: detail,
                     isProminent: false,
-                    becameAvailableAt: becameAvailableAt
-                )
-            }
-
-            if age < Self.freshReplyInterval {
-                return .init(
-                    kind: .newReply,
-                    symbolName: "arrowshape.turn.up.left.fill",
-                    title: "New reply",
-                    detail: detail,
-                    isProminent: true,
                     becameAvailableAt: becameAvailableAt
                 )
             }
@@ -1431,13 +1421,7 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private func applySessionStoreState(_ state: HolySessionStoreState) {
         suppressAutomaticSelectionPersistence = true
-        if sessions.map(\.id) != state.sessions.map(\.id) {
-            withAnimation(.easeInOut(duration: 0.12)) {
-                sessions = state.sessions
-            }
-        } else {
-            sessions = state.sessions
-        }
+        sessions = state.sessions
         savedTemplates = state.savedTemplates
         archivedSessions = state.archivedSessions
         attentionMetadataBySessionID = Dictionary(uniqueKeysWithValues: state.attentionMetadata.map { ($0.sessionID, $0) })

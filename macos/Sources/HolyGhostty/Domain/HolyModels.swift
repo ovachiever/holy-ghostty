@@ -117,6 +117,8 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
     var lastAttentionEvidenceSignature: String?
     var lastAttentionBecameAvailableAt: Date?
     var lastAttentionWasWaiting: Bool?
+    var lastAgentFinishedAt: Date?
+    var lastAttentionWasActiveWork: Bool?
     var updatedAt: Date
 
     var id: UUID { sessionID }
@@ -128,6 +130,8 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
         lastAttentionEvidenceSignature: String? = nil,
         lastAttentionBecameAvailableAt: Date? = nil,
         lastAttentionWasWaiting: Bool? = nil,
+        lastAgentFinishedAt: Date? = nil,
+        lastAttentionWasActiveWork: Bool? = nil,
         updatedAt: Date = .init()
     ) {
         self.sessionID = sessionID
@@ -136,6 +140,8 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
         self.lastAttentionEvidenceSignature = lastAttentionEvidenceSignature
         self.lastAttentionBecameAvailableAt = lastAttentionBecameAvailableAt
         self.lastAttentionWasWaiting = lastAttentionWasWaiting
+        self.lastAgentFinishedAt = lastAgentFinishedAt
+        self.lastAttentionWasActiveWork = lastAttentionWasActiveWork
         self.updatedAt = updatedAt
     }
 }

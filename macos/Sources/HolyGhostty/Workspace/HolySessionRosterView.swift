@@ -1395,12 +1395,7 @@ private struct HolyAgentStatusOrb: View {
         case .approvalNeeded:
             HolyAgentSymbolOrb(systemName: "hand.raised.fill", color: HolyAgentPalette.approvalNeeded)
         case .newReply:
-            if isAnimated {
-                HolyAgentWaitingOrb(becameAvailableAt: newReplyBecameAvailableAt)
-                    .frame(width: 16, height: 16)
-            } else {
-                HolyAgentSymbolOrb(systemName: "arrowshape.turn.up.left.fill", color: HolyAgentPalette.waitingReply)
-            }
+            HolyAgentStaticOrb(color: HolyAgentPalette.waitingReply, symbol: nil, opacity: 0.95)
         case .waitingQuiet:
             HolyAgentStaticOrb(color: HolyGhosttyTheme.textTertiary, symbol: nil, opacity: 0.40)
         case .sleepingReply:
