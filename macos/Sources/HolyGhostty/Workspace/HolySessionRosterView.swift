@@ -739,7 +739,7 @@ private struct HolyRosterRow: View {
             HolyAgentStatusOrb(
                 state: displayActivityState,
                 newReplyBecameAvailableAt: displayActivityState == .newReply ? attention.becameAvailableAt : nil,
-                isAnimated: isSelected
+                isAnimated: true
             )
             .frame(width: 18, height: 18)
             .help(attention.helpText)
