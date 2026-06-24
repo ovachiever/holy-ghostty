@@ -156,13 +156,13 @@ zig build -Demit-xcframework
 Build the macOS app:
 
 ```bash
-xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug SYMROOT=build build
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal SYMROOT=build build
 ```
 
 Install and launch:
 
 ```bash
-scripts/install-holy-ghostty.sh Debug
+scripts/install-holy-ghostty.sh
 open -a "Holy Ghostty"
 ```
 
@@ -180,10 +180,10 @@ zig build -Demit-macos-app=false
 
 ## Data Locations
 
-Debug bundle identifier:
+Local app bundle identifier:
 
 ```text
-org.holyghostty.app.debug
+org.holyghostty.app
 ```
 
 Workspace database:

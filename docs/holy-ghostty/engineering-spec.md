@@ -791,7 +791,7 @@ zig build -Demit-macos-app=false
 macOS app build:
 
 ```bash
-xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug SYMROOT=build
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal SYMROOT=build
 ```
 
 Install script:

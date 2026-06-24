@@ -257,8 +257,8 @@ Commands:
 
 ```bash
 zig build -Demit-xcframework
-xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug SYMROOT=build build
-scripts/install-holy-ghostty.sh Debug
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal SYMROOT=build build
+scripts/install-holy-ghostty.sh
 open -a "Holy Ghostty"
 ```
 

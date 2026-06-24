@@ -2,13 +2,27 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-CONFIGURATION=${1:-Debug}
+CONFIGURATION=${1:-ReleaseLocal}
 APP_NAME="Holy Ghostty.app"
 BUILD_DIR="$ROOT_DIR/macos/build/$CONFIGURATION"
 APP_PATH="$BUILD_DIR/$APP_NAME"
 DESTINATION="/Applications/$APP_NAME"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
 ENTITLEMENTS="$ROOT_DIR/macos/GhosttyReleaseLocal.entitlements"
+EXPECTED_BUNDLE_ID="org.holyghostty.app"
+
+if [ "$#" -gt 1 ]; then
+  printf 'Usage: %s [ReleaseLocal]\n' "$0" >&2
+  exit 64
+fi
+
+case "$CONFIGURATION" in
+  ReleaseLocal) ;;
+  *)
+    printf 'Refusing to install %s. /Applications Holy Ghostty installs must use ReleaseLocal.\n' "$CONFIGURATION" >&2
+    exit 64
+    ;;
+esac
 
 find_codesign_identity() {
   if [ "${HOLY_GHOSTTY_CODE_SIGN_IDENTITY:-}" ]; then
@@ -64,6 +78,13 @@ if [ "${HOLY_GHOSTTY_SKIP_BUILD:-}" != "1" ]; then
 elif [ ! -d "$APP_PATH" ]; then
   printf 'Build output not found at %s\n' "$APP_PATH" >&2
   exit 1
+fi
+
+INFO_PLIST="$APP_PATH/Contents/Info.plist"
+ACTUAL_BUNDLE_ID=$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$INFO_PLIST" 2>/dev/null || true)
+if [ "$ACTUAL_BUNDLE_ID" != "$EXPECTED_BUNDLE_ID" ]; then
+  printf 'Refusing to install %s: expected bundle id %s, got %s\n' "$APP_PATH" "$EXPECTED_BUNDLE_ID" "${ACTUAL_BUNDLE_ID:-<none>}" >&2
+  exit 65
 fi
 
 /usr/bin/pkill -f '/Applications/Holy Ghostty.app/Contents/MacOS/holy-ghostty' >/dev/null 2>&1 || true
