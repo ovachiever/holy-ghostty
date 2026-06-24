@@ -763,8 +763,9 @@ private struct HolyRosterRow: View {
 
             if !compact && !isRenaming && !isEditingNote {
                 HolyRowActionMenuButton(actions: rowActionMenuActions)
-                    .frame(width: 14, height: 14)
-                    .opacity(isSelected ? 1 : 0.5)
+                    .frame(width: 26, height: 22)
+                    .contentShape(Rectangle())
+                    .opacity(isSelected ? 1 : 0.65)
                     .help("Session actions")
             }
         }
@@ -791,6 +792,14 @@ private struct HolyRosterRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .opacity(dimmed && !isSelected ? 0.45 : 1)
         .onTapGesture(perform: onSelect)
+        .overlay {
+            if !isRenaming && !isEditingNote {
+                HolyRowActionContextMenuOverlay(
+                    actions: rowActionMenuActions,
+                    onOpen: onSelect
+                )
+            }
+        }
     }
 
     // Plain data, built cheaply on each render. The actual NSMenu is constructed
@@ -1283,6 +1292,50 @@ private enum HolyRowMenuAction {
     case separator
 }
 
+private class HolyRowActionMenuCoordinator: NSObject {
+    var actions: [HolyRowMenuAction]
+
+    init(actions: [HolyRowMenuAction]) {
+        self.actions = actions
+    }
+
+    func makeMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for action in actions {
+            switch action {
+            case .separator:
+                menu.addItem(.separator())
+            case let .item(title, isDestructive, handler):
+                let item = NSMenuItem(
+                    title: title,
+                    action: #selector(invoke(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = HolyRowMenuHandler(handler)
+                if isDestructive {
+                    item.attributedTitle = NSAttributedString(
+                        string: title,
+                        attributes: [.foregroundColor: NSColor.systemRed]
+                    )
+                }
+                menu.addItem(item)
+            }
+        }
+        return menu
+    }
+
+    @objc private func invoke(_ sender: NSMenuItem) {
+        (sender.representedObject as? HolyRowMenuHandler)?.handler()
+    }
+}
+
+private final class HolyRowMenuHandler {
+    let handler: () -> Void
+    init(_ handler: @escaping () -> Void) { self.handler = handler }
+}
+
 /// A roster-row "more actions" button that builds its NSMenu lazily, only when
 /// clicked. Using a SwiftUI Menu per row froze the main thread: SwiftUI eagerly
 /// materializes every row's menu items during view-graph updates and resolves
@@ -1307,12 +1360,14 @@ private struct HolyRowActionMenuButton: NSViewRepresentable {
             systemSymbolName: "ellipsis",
             accessibilityDescription: "Session actions"
         )
+        button.imageScaling = .scaleNone
+        button.alignment = .center
         button.contentTintColor = NSColor.tertiaryLabelColor
         button.setButtonType(.momentaryChange)
         button.target = context.coordinator
         button.action = #selector(Coordinator.present(_:))
-        button.setContentHuggingPriority(.required, for: .horizontal)
-        button.setContentHuggingPriority(.required, for: .vertical)
+        button.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        button.setContentHuggingPriority(.defaultLow, for: .vertical)
         return button
     }
 
@@ -1321,50 +1376,81 @@ private struct HolyRowActionMenuButton: NSViewRepresentable {
         context.coordinator.actions = actions
     }
 
-    final class Coordinator: NSObject {
-        var actions: [HolyRowMenuAction]
-
-        init(actions: [HolyRowMenuAction]) {
-            self.actions = actions
-        }
-
+    final class Coordinator: HolyRowActionMenuCoordinator {
         @objc func present(_ sender: NSButton) {
-            let menu = NSMenu()
-            menu.autoenablesItems = false
-            for action in actions {
-                switch action {
-                case .separator:
-                    menu.addItem(.separator())
-                case let .item(title, isDestructive, handler):
-                    let item = NSMenuItem(
-                        title: title,
-                        action: #selector(invoke(_:)),
-                        keyEquivalent: ""
-                    )
-                    item.target = self
-                    item.representedObject = MenuHandler(handler)
-                    if isDestructive {
-                        item.attributedTitle = NSAttributedString(
-                            string: title,
-                            attributes: [.foregroundColor: NSColor.systemRed]
-                        )
-                    }
-                    menu.addItem(item)
-                }
-            }
-
             let origin = NSPoint(x: 0, y: sender.bounds.height + 4)
-            menu.popUp(positioning: nil, at: origin, in: sender)
+            makeMenu().popUp(positioning: nil, at: origin, in: sender)
+        }
+    }
+}
+
+private struct HolyRowActionContextMenuOverlay: NSViewRepresentable {
+    let actions: [HolyRowMenuAction]
+    let onOpen: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(actions: actions, onOpen: onOpen)
+    }
+
+    func makeNSView(context: Context) -> HolyRowContextMenuView {
+        let view = HolyRowContextMenuView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateNSView(_ nsView: HolyRowContextMenuView, context: Context) {
+        context.coordinator.actions = actions
+        context.coordinator.onOpen = onOpen
+        nsView.coordinator = context.coordinator
+    }
+
+    final class Coordinator: HolyRowActionMenuCoordinator {
+        var onOpen: () -> Void
+
+        init(actions: [HolyRowMenuAction], onOpen: @escaping () -> Void) {
+            self.onOpen = onOpen
+            super.init(actions: actions)
         }
 
-        @objc private func invoke(_ sender: NSMenuItem) {
-            (sender.representedObject as? MenuHandler)?.handler()
+        func menuForContextClick() -> NSMenu {
+            onOpen()
+            return makeMenu()
         }
     }
 
-    private final class MenuHandler {
-        let handler: () -> Void
-        init(_ handler: @escaping () -> Void) { self.handler = handler }
+    final class HolyRowContextMenuView: NSView {
+        weak var coordinator: Coordinator?
+
+        override var isFlipped: Bool { true }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard bounds.contains(point),
+                  let event = window?.currentEvent ?? NSApp.currentEvent,
+                  Self.isContextMenuEvent(event) else {
+                return nil
+            }
+
+            return self
+        }
+
+        override func menu(for event: NSEvent) -> NSMenu? {
+            guard Self.isContextMenuEvent(event) else {
+                return nil
+            }
+
+            return coordinator?.menuForContextClick()
+        }
+
+        private static func isContextMenuEvent(_ event: NSEvent) -> Bool {
+            switch event.type {
+            case .rightMouseDown:
+                return true
+            case .leftMouseDown:
+                return event.modifierFlags.contains(.control)
+            default:
+                return false
+            }
+        }
     }
 }
 
