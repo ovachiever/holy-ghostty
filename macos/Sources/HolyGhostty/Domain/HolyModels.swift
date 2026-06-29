@@ -1109,6 +1109,7 @@ enum HolyPaneLayoutKind: String, Codable, Equatable {
     case single
     case splitRight
     case splitDown
+    case triple
     case quad
 
     var maxPaneCount: Int {
@@ -1117,67 +1118,221 @@ enum HolyPaneLayoutKind: String, Codable, Equatable {
             return 1
         case .splitRight, .splitDown:
             return 2
+        case .triple:
+            return 3
         case .quad:
             return 4
+        }
+    }
+
+    var isSplit: Bool {
+        self != .single
+    }
+
+    static func countToKind(_ paneCount: Int, preserving orientation: HolyPaneLayoutKind = .splitRight) -> Self {
+        switch paneCount {
+        case ...1:
+            return .single
+        case 2:
+            return orientation == .splitDown ? .splitDown : .splitRight
+        case 3:
+            return .triple
+        default:
+            return .quad
         }
     }
 }
 
 struct HolyPaneLayout: Codable, Equatable {
+    static let maxSlotCount = 4
+
     var kind: HolyPaneLayoutKind
-    var sessionIDs: [UUID]
+    var slotSessionIDs: [UUID?]
 
     static let single = Self(kind: .single, sessionIDs: [])
 
+    var sessionIDs: [UUID] {
+        slotSessionIDs.compactMap(\.self)
+    }
+
+    var renderedSlotSessionIDs: [UUID?] {
+        Array(normalizedSlotStorage().prefix(kind.maxPaneCount))
+    }
+
+    var highestOccupiedSlot: Int? {
+        normalizedSlotStorage().lastIndex { $0 != nil }.map { $0 + 1 }
+    }
+
+    var occupiedSlotCount: Int {
+        sessionIDs.count
+    }
+
+    init(kind: HolyPaneLayoutKind, sessionIDs: [UUID]) {
+        self.kind = kind
+        self.slotSessionIDs = Self.slots(fromPackedSessionIDs: sessionIDs)
+    }
+
+    init(kind: HolyPaneLayoutKind, slotSessionIDs: [UUID?]) {
+        self.kind = kind
+        self.slotSessionIDs = Self.normalizedSlotStorage(slotSessionIDs)
+    }
+
     func normalized(
         availableSessionIDs: [UUID],
-        selectedSessionID: UUID?
+        selectedSessionID: UUID?,
+        fillsEmptySlots: Bool = true
     ) -> Self {
         let available = Set(availableSessionIDs)
-        var uniqueIDs: [UUID] = []
-
-        for id in sessionIDs where available.contains(id) && !uniqueIDs.contains(id) {
-            uniqueIDs.append(id)
+        var seenIDs: Set<UUID> = []
+        var slots = normalizedSlotStorage().map { candidate -> UUID? in
+            guard let candidate,
+                  available.contains(candidate),
+                  !seenIDs.contains(candidate) else {
+                return nil
+            }
+            seenIDs.insert(candidate)
+            return candidate
         }
 
-        if uniqueIDs.isEmpty,
+        if fillsEmptySlots,
+           slots.allSatisfy({ $0 == nil }),
            let selectedSessionID,
            available.contains(selectedSessionID) {
-            uniqueIDs.append(selectedSessionID)
+            slots[0] = selectedSessionID
+            seenIDs.insert(selectedSessionID)
         }
 
-        if uniqueIDs.isEmpty,
+        if fillsEmptySlots,
+           slots.allSatisfy({ $0 == nil }),
            let fallback = availableSessionIDs.first {
-            uniqueIDs.append(fallback)
+            slots[0] = fallback
         }
 
-        let resolvedKind: HolyPaneLayoutKind
-        if uniqueIDs.count <= 1 {
-            resolvedKind = .single
-        } else {
-            resolvedKind = kind
-        }
+        let resolvedKind = resolvedKind(for: slots)
 
         return .init(
             kind: resolvedKind,
-            sessionIDs: Array(uniqueIDs.prefix(resolvedKind.maxPaneCount))
+            slotSessionIDs: slots
         )
     }
 
     func label(for sessionID: UUID) -> String? {
-        guard let index = sessionIDs.firstIndex(of: sessionID) else { return nil }
+        guard let slot = slot(for: sessionID) else { return nil }
 
         switch kind {
         case .single:
             return nil
         case .splitRight:
-            return index == 0 ? "Left" : "Right"
+            return slot == 1 ? "Left" : "Right"
         case .splitDown:
-            return index == 0 ? "Top" : "Bottom"
+            return slot == 1 ? "Top" : "Bottom"
+        case .triple:
+            let labels = ["Left", "Top Right", "Bottom Right"]
+            return slot <= labels.count ? labels[slot - 1] : nil
         case .quad:
             let labels = ["Top Left", "Top Right", "Bottom Left", "Bottom Right"]
-            return index < labels.count ? labels[index] : nil
+            return slot <= labels.count ? labels[slot - 1] : nil
         }
+    }
+
+    func slot(for sessionID: UUID) -> Int? {
+        normalizedSlotStorage().firstIndex { $0 == sessionID }.map { $0 + 1 }
+    }
+
+    func sessionID(atSlot slot: Int) -> UUID? {
+        guard (1...Self.maxSlotCount).contains(slot) else { return nil }
+        return normalizedSlotStorage()[slot - 1]
+    }
+
+    func assigning(_ sessionID: UUID, toSlot slot: Int) -> Self {
+        guard (1...Self.maxSlotCount).contains(slot) else { return self }
+        var slots = normalizedSlotStorage().map { $0 == sessionID ? nil : $0 }
+        slots[slot - 1] = sessionID
+        return Self(kind: resolvedKind(for: slots), slotSessionIDs: slots)
+    }
+
+    func removingSession(_ sessionID: UUID) -> Self {
+        let slots = normalizedSlotStorage().map { $0 == sessionID ? nil : $0 }
+        return Self(kind: resolvedKind(for: slots), slotSessionIDs: slots)
+    }
+
+    func removingSlot(_ slot: Int) -> Self {
+        guard (1...Self.maxSlotCount).contains(slot) else { return self }
+        var slots = normalizedSlotStorage()
+        slots[slot - 1] = nil
+        return Self(kind: resolvedKind(for: slots), slotSessionIDs: slots)
+    }
+
+    func oriented(_ targetKind: HolyPaneLayoutKind) -> Self {
+        var slots = normalizedSlotStorage()
+        if targetKind.maxPaneCount < Self.maxSlotCount {
+            for index in targetKind.maxPaneCount..<Self.maxSlotCount {
+                slots[index] = nil
+            }
+        }
+        return Self(kind: targetKind, slotSessionIDs: slots)
+    }
+
+    private func resolvedKind(for slots: [UUID?]) -> HolyPaneLayoutKind {
+        let normalizedSlots = Self.normalizedSlotStorage(slots)
+        guard let highestSlot = normalizedSlots.lastIndex(where: { $0 != nil }).map({ $0 + 1 }) else {
+            return .single
+        }
+
+        if sessionCount(in: normalizedSlots) <= 1, highestSlot == 1 {
+            return .single
+        }
+
+        return .countToKind(highestSlot, preserving: kind)
+    }
+
+    private func normalizedSlotStorage() -> [UUID?] {
+        Self.normalizedSlotStorage(slotSessionIDs)
+    }
+
+    private func sessionCount(in slots: [UUID?]) -> Int {
+        slots.reduce(0) { count, slot in count + (slot == nil ? 0 : 1) }
+    }
+
+    private static func normalizedSlotStorage(_ slots: [UUID?]) -> [UUID?] {
+        var result = Array(slots.prefix(maxSlotCount))
+        while result.count < maxSlotCount {
+            result.append(nil)
+        }
+        return result
+    }
+
+    private static func slots(fromPackedSessionIDs sessionIDs: [UUID]) -> [UUID?] {
+        var slots = [UUID?](repeating: nil, count: maxSlotCount)
+        for (index, sessionID) in sessionIDs.prefix(maxSlotCount).enumerated() {
+            slots[index] = sessionID
+        }
+        return slots
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case sessionIDs
+        case slotSessionIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decodeIfPresent(HolyPaneLayoutKind.self, forKey: .kind) ?? .single
+
+        if let decodedSlots = try container.decodeIfPresent([UUID?].self, forKey: .slotSessionIDs) {
+            slotSessionIDs = Self.normalizedSlotStorage(decodedSlots)
+        } else {
+            let legacySessionIDs = try container.decodeIfPresent([UUID].self, forKey: .sessionIDs) ?? []
+            slotSessionIDs = Self.slots(fromPackedSessionIDs: legacySessionIDs)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(sessionIDs, forKey: .sessionIDs)
+        try container.encode(normalizedSlotStorage(), forKey: .slotSessionIDs)
     }
 }
 

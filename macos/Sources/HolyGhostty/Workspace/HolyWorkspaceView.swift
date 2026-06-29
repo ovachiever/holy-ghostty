@@ -138,6 +138,7 @@ struct HolyWorkspaceRootView: View {
                                 store: store,
                                 titlebarInset: HolyWorkspaceLayout.titlebarControlInset,
                                 paneLabelsBySessionID: store.paneLabelsBySessionID,
+                                paneSlotsBySessionID: store.paneSlotsBySessionID,
                                 onPresentRemoteHosts: { store.presentRemoteHosts() },
                                 onPresentHistory: { store.presentHistory() },
                                 onToggleCollapse: { toggleRosterCollapsed() }
@@ -191,29 +192,38 @@ struct HolyWorkspaceRootView: View {
 
     @ViewBuilder
     private var primaryWorkspaceContent: some View {
-        switch store.normalizedPaneLayout.kind {
+        switch store.visiblePaneLayoutKind {
         case .single:
             singlePaneContent
         case .splitRight:
             HSplitView {
-                paneView(at: 0)
-                paneView(at: 1)
+                paneView(atSlot: 1)
+                paneView(atSlot: 2)
             }
         case .splitDown:
             VSplitView {
-                paneView(at: 0)
-                paneView(at: 1)
+                paneView(atSlot: 1)
+                paneView(atSlot: 2)
+            }
+        case .triple:
+            HSplitView {
+                paneView(atSlot: 1)
+
+                VSplitView {
+                    paneView(atSlot: 2)
+                    paneView(atSlot: 3)
+                }
             }
         case .quad:
             VSplitView {
                 HSplitView {
-                    paneView(at: 0)
-                    paneView(at: 1)
+                    paneView(atSlot: 1)
+                    paneView(atSlot: 2)
                 }
 
                 HSplitView {
-                    paneView(at: 2)
-                    paneView(at: 3)
+                    paneView(atSlot: 3)
+                    paneView(atSlot: 4)
                 }
             }
         }
@@ -263,8 +273,8 @@ struct HolyWorkspaceRootView: View {
 
     @ViewBuilder
     private var singlePaneContent: some View {
-        if let session = store.visiblePaneSessions.first ?? store.selectedSession {
-            paneSurface(for: session)
+        if let session = store.visiblePaneSlots.compactMap(\.self).first ?? store.selectedSession {
+            paneSurface(for: session, slot: nil)
         } else {
             HolyGhosttyEmptyStateView(
                 title: "No session selected",
@@ -291,7 +301,7 @@ struct HolyWorkspaceRootView: View {
                 layoutControlButton(
                     title: "Single",
                     systemName: "rectangle",
-                    isActive: store.normalizedPaneLayout.kind == .single
+                    isActive: store.visiblePaneLayoutKind == .single
                 ) {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         store.showSinglePane()
@@ -301,7 +311,7 @@ struct HolyWorkspaceRootView: View {
                 layoutControlButton(
                     title: "Split Right",
                     systemName: "rectangle.split.2x1",
-                    isActive: store.normalizedPaneLayout.kind == .splitRight
+                    isActive: store.visiblePaneLayoutKind == .splitRight
                 ) {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         store.splitPaneRight()
@@ -312,7 +322,7 @@ struct HolyWorkspaceRootView: View {
                     title: "Split Down",
                     systemName: "rectangle.split.2x1",
                     rotation: .degrees(90),
-                    isActive: store.normalizedPaneLayout.kind == .splitDown
+                    isActive: store.visiblePaneLayoutKind == .splitDown
                 ) {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         store.splitPaneDown()
@@ -322,7 +332,7 @@ struct HolyWorkspaceRootView: View {
                 layoutControlButton(
                     title: "Quad",
                     systemName: "square.grid.2x2",
-                    isActive: store.normalizedPaneLayout.kind == .quad
+                    isActive: store.visiblePaneLayoutKind == .quad
                 ) {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         store.showQuadPaneLayout()
@@ -426,30 +436,86 @@ struct HolyWorkspaceRootView: View {
     }
 
     @ViewBuilder
-    private func paneView(at index: Int) -> some View {
-        let sessions = store.visiblePaneSessions
-        if index < sessions.count {
-            paneSurface(for: sessions[index])
+    private func paneView(atSlot slot: Int) -> some View {
+        let panes = store.visiblePaneSlots
+        if slot - 1 < panes.count,
+           let session = panes[slot - 1] {
+            paneSurface(for: session, slot: slot)
         } else {
             HolyGhosttyEmptyStateView(
                 title: "Empty pane",
-                subtitle: "Select another session or start a new tmux session.",
+                subtitle: "Use Command-\(slot) or a session menu to assign this pane.",
                 symbol: "rectangle.dashed"
             )
+            .frame(minWidth: 220, maxWidth: .infinity, maxHeight: .infinity)
+            .background(HolyGhosttyTheme.bg)
+            .overlay(alignment: .topTrailing) {
+                paneSlotBadge(slot: slot, session: nil)
+            }
         }
     }
 
-    private func paneSurface(for session: HolySession) -> some View {
+    private func paneSurface(for session: HolySession, slot: Int?) -> some View {
         HolySessionDetailView(
             session: session,
             coordination: store.coordination(for: session),
             ghosttyApp: ghostty,
             showsSessionHeader: false,
-            splitSurface: store.normalizedPaneLayout.kind != .single
+            splitSurface: store.visiblePaneLayoutKind != .single
         )
         .frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity)
         .background(HolyGhosttyTheme.bg)
+        .overlay {
+            if let slot,
+               store.focusedPaneSlot == slot,
+               store.isShowingLinkedSplit {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(HolyGhosttyTheme.halo.opacity(0.62), lineWidth: 1)
+                    .padding(1)
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if let slot {
+                paneSlotBadge(slot: slot, session: session)
+            }
+        }
         .layoutPriority(1)
+    }
+
+    private func paneSlotBadge(slot: Int, session: HolySession?) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "link")
+                .font(.system(size: 8, weight: .bold))
+
+            Text("\(slot)")
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+        }
+        .foregroundStyle(HolyGhosttyTheme.halo)
+        .padding(.horizontal, 7)
+        .frame(height: 20)
+        .background(
+            Capsule(style: .continuous)
+                .fill(HolyGhosttyTheme.bgElevated.opacity(0.92))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(HolyGhosttyTheme.halo.opacity(0.38), lineWidth: 0.7)
+        )
+        .padding(7)
+        .contentShape(Capsule(style: .continuous))
+        .onTapGesture {
+            if let session {
+                select(session)
+                store.enterSplit(focusedSlot: slot)
+            }
+        }
+        .onTapGesture(count: 2) {
+            if let session {
+                store.maximize(session.id)
+            }
+        }
+        .help(session == nil ? "Pane \(slot)" : "Pane \(slot). Double-click to maximize.")
     }
 
     private func layoutControlButton(

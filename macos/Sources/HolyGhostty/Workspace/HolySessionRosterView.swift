@@ -7,6 +7,7 @@ struct HolySessionRosterView: View {
     var compact: Bool = false
     var titlebarInset: CGFloat = 0
     var paneLabelsBySessionID: [UUID: String] = [:]
+    var paneSlotsBySessionID: [UUID: Int] = [:]
     var onPresentRemoteHosts: () -> Void = {}
     var onPresentHistory: () -> Void = {}
     var onToggleCollapse: (() -> Void)?
@@ -92,13 +93,18 @@ struct HolySessionRosterView: View {
             session: session,
             primaryTitle: HolySessionRosterOrdering.primaryTitle(for: session),
             paneLabel: paneLabelsBySessionID[session.id],
+            paneSlot: paneSlotsBySessionID[session.id],
             coordination: store.coordination(for: session),
             attention: store.attentionPresentation(for: session),
             isSelected: store.selectedSessionID == session.id,
             layout: layout,
             dimmed: dimmed,
             compact: compact,
-            onSelect: { store.selectSession(session.id) },
+            onSelect: { store.handleRosterSelect(session.id) },
+            onMenuOpen: { store.selectSession(session.id) },
+            onAssignToPane: { store.assignSession(session.id, toSlot: $0) },
+            onRemoveFromSplit: { store.removeFromLinkage(session.id) },
+            onBreakSplit: { store.breakLinkage() },
             onDuplicate: { store.duplicate(session.id) },
             canReattach: store.canReattachSession(session),
             onReattach: { store.reattach(session) },
@@ -706,6 +712,7 @@ private struct HolyRosterRow: View {
     @ObservedObject var session: HolySession
     let primaryTitle: String
     let paneLabel: String?
+    let paneSlot: Int?
     let coordination: HolySessionCoordination
     let attention: HolySessionAttentionPresentation
     let isSelected: Bool
@@ -713,6 +720,10 @@ private struct HolyRosterRow: View {
     var dimmed: Bool = false
     var compact: Bool = false
     let onSelect: () -> Void
+    let onMenuOpen: () -> Void
+    let onAssignToPane: (Int) -> Void
+    let onRemoveFromSplit: () -> Void
+    let onBreakSplit: () -> Void
     let onDuplicate: () -> Void
     let canReattach: Bool
     let onReattach: () -> Void
@@ -796,7 +807,7 @@ private struct HolyRosterRow: View {
             if !isRenaming && !isEditingNote {
                 HolyRowActionContextMenuOverlay(
                     actions: rowActionMenuActions,
-                    onOpen: onSelect
+                    onOpen: onMenuOpen
                 )
             }
         }
@@ -824,7 +835,18 @@ private struct HolyRosterRow: View {
         actions.append(.separator)
         actions.append(.item("Duplicate") { onDuplicate() })
 
+        actions.append(.separator)
+        for slot in 1...HolyPaneLayout.maxSlotCount {
+            actions.append(.item("Assign to Pane \(slot)") { onAssignToPane(slot) })
+        }
+
+        if paneSlot != nil {
+            actions.append(.item("Remove from Split") { onRemoveFromSplit() })
+            actions.append(.item("Break Split") { onBreakSplit() })
+        }
+
         if canReattach {
+            actions.append(.separator)
             actions.append(.item("Reattach") { onReattach() })
         }
 
@@ -904,6 +926,8 @@ private struct HolyRosterRow: View {
                         .help("Pinned to Today")
                 }
 
+                linkageMarker
+
                 Text(primaryTitle)
                     .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
                     .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
@@ -922,6 +946,32 @@ private struct HolyRosterRow: View {
                     .foregroundStyle(HolyGhosttyTheme.halo.opacity(isSelected ? 0.95 : 0.72))
                     .lineLimit(1)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var linkageMarker: some View {
+        if let paneSlot {
+            HStack(spacing: 2) {
+                Image(systemName: "link")
+                    .font(.system(size: 7, weight: .bold))
+
+                Text("\(paneSlot)")
+                    .font(.system(size: 8, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+            }
+            .foregroundStyle(HolyGhosttyTheme.halo.opacity(isSelected ? 1 : 0.82))
+            .padding(.horizontal, 4)
+            .frame(height: 13)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(HolyGhosttyTheme.halo.opacity(isSelected ? 0.18 : 0.1))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(HolyGhosttyTheme.halo.opacity(isSelected ? 0.38 : 0.24), lineWidth: 0.5)
+            )
+            .help("Linked split pane \(paneSlot)")
         }
     }
 
@@ -1040,12 +1090,14 @@ private struct HolyRosterRow: View {
     // from the roster without shouting — emphasis by de-emphasizing the rest.
     private var rowBackgroundColor: Color {
         if isSelected { return HolyGhosttyTheme.halo.opacity(0.16) }
+        if paneSlot != nil { return HolyGhosttyTheme.halo.opacity(0.035) }
         if session.isFocused { return HolyGhosttyTheme.halo.opacity(0.06) }
         return .clear
     }
 
     private var leadingAccentColor: Color {
         if isSelected { return HolyGhosttyTheme.halo }
+        if paneSlot != nil { return HolyGhosttyTheme.halo.opacity(0.68) }
         if session.isFocused { return HolyGhosttyTheme.halo.opacity(0.5) }
         return .clear
     }

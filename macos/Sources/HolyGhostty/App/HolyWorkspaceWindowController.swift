@@ -187,6 +187,13 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
 
         let relevantFlags = event.modifierFlags.intersection([.command, .option, .control, .shift])
 
+        if relevantFlags == .command,
+           let slot = Int(key),
+           (1...HolyPaneLayout.maxSlotCount).contains(slot) {
+            workspaceStore.assignCurrentSessionToSlot(slot)
+            return true
+        }
+
         if key == "w", relevantFlags == .command {
             return closeSelectedSessionIfAvailable()
         }

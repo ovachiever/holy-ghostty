@@ -47,12 +47,18 @@ final class HolyWorkspaceStore: ObservableObject {
         didSet {
             guard !suppressAutomaticSelectionPersistence,
                   oldValue != selectedSessionID else { return }
-            reconcilePaneLayoutForSelection()
             refreshSessionPresentationState()
             scheduleSelectedSessionSeenMark()
             persist(pendingEvents: selectionEvents(from: oldValue, to: selectedSessionID))
         }
     }
+    @Published var soloSessionID: UUID? {
+        didSet {
+            guard oldValue != soloSessionID else { return }
+            refreshSessionPresentationState()
+        }
+    }
+    @Published private(set) var focusedPaneSlot: Int?
     @Published var selectedArchivedSessionID: UUID?
     @Published var selectedTaskID: UUID?
     @Published var selectedRemoteHostID: UUID?
@@ -98,8 +104,32 @@ final class HolyWorkspaceStore: ObservableObject {
         return sessions.first(where: { $0.id == selectedSessionID }) ?? sessions.first
     }
 
+    var soloSession: HolySession? {
+        guard let soloSessionID else { return nil }
+        return session(withID: soloSessionID)
+    }
+
+    var visiblePaneLayoutKind: HolyPaneLayoutKind {
+        soloSession == nil ? normalizedPaneLayout.kind : .single
+    }
+
+    var isShowingLinkedSplit: Bool {
+        soloSession == nil && normalizedPaneLayout.kind.isSplit
+    }
+
+    var visiblePaneSlots: [HolySession?] {
+        if let soloSession {
+            return [soloSession]
+        }
+
+        let layout = normalizedPaneLayout
+        return layout.renderedSlotSessionIDs.map { sessionID in
+            sessionID.flatMap(session(withID:))
+        }
+    }
+
     var visiblePaneSessions: [HolySession] {
-        normalizedPaneLayout.sessionIDs.compactMap(session(withID:))
+        visiblePaneSlots.compactMap(\.self)
     }
 
     var normalizedPaneLayout: HolyPaneLayout {
@@ -108,6 +138,14 @@ final class HolyWorkspaceStore: ObservableObject {
 
     var paneLabelsBySessionID: [UUID: String] {
         paneLayoutMemoEntry().labels
+    }
+
+    var paneSlotsBySessionID: [UUID: Int] {
+        Dictionary(
+            uniqueKeysWithValues: normalizedPaneLayout.sessionIDs.compactMap { id in
+                normalizedPaneLayout.slot(for: id).map { (id, $0) }
+            }
+        )
     }
 
     /// Memoized normalized pane layout + per-session labels.
@@ -220,7 +258,28 @@ final class HolyWorkspaceStore: ObservableObject {
 
     func selectSession(_ sessionID: UUID) {
         selectedSessionID = sessionID
+        if soloSessionID == nil,
+           let slot = normalizedPaneLayout.slot(for: sessionID) {
+            focusedPaneSlot = slot
+        }
         clearUnreadAttentionIfNeeded(for: sessionID)
+    }
+
+    func handleRosterSelect(_ sessionID: UUID) {
+        selectSession(sessionID)
+
+        let layout = normalizedPaneLayout
+        if layout.kind.isSplit,
+           let slot = layout.slot(for: sessionID) {
+            enterSplit(focusedSlot: slot)
+        } else if layout.kind.isSplit {
+            soloSessionID = sessionID
+            focusedPaneSlot = nil
+        } else {
+            soloSessionID = nil
+            focusedPaneSlot = nil
+            paneLayout = HolyPaneLayout(kind: .single, sessionIDs: [sessionID])
+        }
     }
 
     @discardableResult
@@ -244,13 +303,21 @@ final class HolyWorkspaceStore: ObservableObject {
             nextIndex = direction == .next ? 0 : orderedSessions.count - 1
         }
 
-        selectSession(orderedSessions[nextIndex].id)
+        handleRosterSelect(orderedSessions[nextIndex].id)
         return true
     }
 
     func showSinglePane() {
         let selectedID = selectedSession?.id ?? sessions.first?.id
-        paneLayout = .init(kind: .single, sessionIDs: selectedID.map { [$0] } ?? [])
+        if normalizedPaneLayout.kind.isSplit,
+           let selectedID {
+            soloSessionID = selectedID
+            focusedPaneSlot = nil
+        } else {
+            paneLayout = .init(kind: .single, sessionIDs: selectedID.map { [$0] } ?? [])
+            soloSessionID = nil
+            focusedPaneSlot = nil
+        }
     }
 
     func splitPaneRight(
@@ -259,7 +326,6 @@ final class HolyWorkspaceStore: ObservableObject {
     ) {
         applyPaneLayout(
             kind: .splitRight,
-            preferredPaneCount: 2,
             sourceSessionID: sourceSessionID,
             cloneConfig: baseConfig
         )
@@ -271,14 +337,96 @@ final class HolyWorkspaceStore: ObservableObject {
     ) {
         applyPaneLayout(
             kind: .splitDown,
-            preferredPaneCount: 2,
             sourceSessionID: sourceSessionID,
             cloneConfig: baseConfig
         )
     }
 
     func showQuadPaneLayout() {
-        applyPaneLayout(kind: .quad, preferredPaneCount: 4)
+        applyPaneLayout(kind: .quad)
+    }
+
+    func assignCurrentSessionToSlot(_ slot: Int) {
+        guard let selectedSessionID else { return }
+        assignSession(selectedSessionID, toSlot: slot)
+    }
+
+    func assignSession(_ sessionID: UUID, toSlot slot: Int) {
+        guard sessions.contains(where: { $0.id == sessionID }),
+              (1...HolyPaneLayout.maxSlotCount).contains(slot) else {
+            return
+        }
+
+        selectedSessionID = sessionID
+        paneLayout = normalizedPaneLayout
+            .assigning(sessionID, toSlot: slot)
+            .normalized(
+                availableSessionIDs: sessions.map(\.id),
+                selectedSessionID: sessionID
+            )
+        soloSessionID = nil
+        focusedPaneSlot = slot
+        clearUnreadAttentionIfNeeded(for: sessionID)
+    }
+
+    func removeFromLinkage(_ sessionID: UUID) {
+        guard normalizedPaneLayout.slot(for: sessionID) != nil else { return }
+
+        let shouldSoloRemovedSession = selectedSessionID == sessionID || soloSessionID == sessionID
+        paneLayout = normalizedPaneLayout
+            .removingSession(sessionID)
+            .normalized(
+                availableSessionIDs: sessions.map(\.id),
+                selectedSessionID: selectedSessionID,
+                fillsEmptySlots: false
+            )
+
+        if shouldSoloRemovedSession,
+           sessions.contains(where: { $0.id == sessionID }) {
+            soloSessionID = sessionID
+            focusedPaneSlot = nil
+        } else if focusedPaneSlot.flatMap({ paneLayout.sessionID(atSlot: $0) }) == nil {
+            focusedPaneSlot = paneLayout.highestOccupiedSlot
+        }
+    }
+
+    func breakLinkage() {
+        let selectedID = selectedSession?.id ?? sessions.first?.id
+        paneLayout = HolyPaneLayout(kind: .single, sessionIDs: selectedID.map { [$0] } ?? [])
+        soloSessionID = nil
+        focusedPaneSlot = nil
+    }
+
+    func maximize(_ sessionID: UUID) {
+        guard normalizedPaneLayout.slot(for: sessionID) != nil,
+              sessions.contains(where: { $0.id == sessionID }) else {
+            return
+        }
+
+        selectedSessionID = sessionID
+        soloSessionID = sessionID
+        focusedPaneSlot = nil
+        clearUnreadAttentionIfNeeded(for: sessionID)
+    }
+
+    func enterSplit(focusedSlot: Int? = nil) {
+        guard normalizedPaneLayout.kind.isSplit else { return }
+        soloSessionID = nil
+
+        if let focusedSlot,
+           let focusedSessionID = normalizedPaneLayout.sessionID(atSlot: focusedSlot) {
+            selectedSessionID = focusedSessionID
+            self.focusedPaneSlot = focusedSlot
+            clearUnreadAttentionIfNeeded(for: focusedSessionID)
+        } else if let selectedSessionID,
+                  let slot = normalizedPaneLayout.slot(for: selectedSessionID) {
+            self.focusedPaneSlot = slot
+        } else if let firstSessionID = normalizedPaneLayout.sessionIDs.first,
+                  let slot = normalizedPaneLayout.slot(for: firstSessionID) {
+            selectedSessionID = firstSessionID
+            self.focusedPaneSlot = slot
+            clearUnreadAttentionIfNeeded(for: firstSessionID)
+        }
     }
 
     func restore() {
@@ -321,6 +469,10 @@ final class HolyWorkspaceStore: ObservableObject {
 
         let previousSelectedSessionID = selectedSessionID
         applySessionStoreState(result.state)
+        if normalizedPaneLayout.kind.isSplit {
+            soloSessionID = result.sessionID
+            focusedPaneSlot = nil
+        }
         composerBusy = false
         composerErrorMessage = nil
         composerPresented = false
@@ -1431,8 +1583,9 @@ final class HolyWorkspaceStore: ObservableObject {
             availableSessionIDs: state.sessions.map(\.id),
             selectedSessionID: state.selectedSessionID
         )
+        soloSessionID = nil
+        focusedPaneSlot = state.selectedSessionID.flatMap { paneLayout.slot(for: $0) }
         suppressAutomaticSelectionPersistence = false
-        reconcilePaneLayoutForSelection()
         refreshSessionPresentationState()
         bindSessions(seedMissingAsSeen: true)
         reconcileExternalTasks()
@@ -1440,7 +1593,7 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     private func refreshSessionPresentationState() {
-        var presentedIDs = Set(normalizedPaneLayout.sessionIDs)
+        var presentedIDs = Set(visiblePaneSessions.map(\.id))
         if presentedIDs.isEmpty, let selectedSessionID = selectedSession?.id {
             presentedIDs.insert(selectedSessionID)
         }
@@ -1452,101 +1605,33 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private func applyPaneLayout(
         kind: HolyPaneLayoutKind,
-        preferredPaneCount: Int,
         sourceSessionID: UUID? = nil,
         cloneConfig: Ghostty.SurfaceConfiguration? = nil
     ) {
-        var paneSessionIDs = paneSeedSessionIDs(preferredFirst: sourceSessionID)
-        let minimumPaneCount = kind == .quad ? min(2, preferredPaneCount) : preferredPaneCount
+        var layout = normalizedPaneLayout
 
         if let cloneConfig,
            kind.maxPaneCount > 1,
            let session = createSession(from: cloneConfig) {
-            paneSessionIDs.removeAll(where: { $0 == session.id })
-            if let sourceSessionID,
-               let sourceIndex = paneSessionIDs.firstIndex(of: sourceSessionID) {
-                paneSessionIDs.insert(session.id, at: paneSessionIDs.index(after: sourceIndex))
-            } else {
-                paneSessionIDs.append(session.id)
-            }
+            let targetSlot = sourceSessionID.flatMap { layout.slot(for: $0).map { min($0 + 1, kind.maxPaneCount) } }
+                ?? min(max(layout.highestOccupiedSlot ?? 0, 1) + 1, kind.maxPaneCount)
+            layout = layout.assigning(session.id, toSlot: targetSlot)
         }
 
-        while paneSessionIDs.count < minimumPaneCount {
-            guard let session = createSession(from: nil) else { break }
-            if !paneSessionIDs.contains(session.id) {
-                paneSessionIDs.append(session.id)
-            }
+        if layout.sessionIDs.isEmpty,
+           let selectedID = selectedSession?.id ?? sessions.first?.id {
+            layout = layout.assigning(selectedID, toSlot: 1)
         }
 
-        for session in sessions where paneSessionIDs.count < preferredPaneCount {
-            guard !paneSessionIDs.contains(session.id) else { continue }
-            paneSessionIDs.append(session.id)
-        }
-
-        let finalIDs = Array(paneSessionIDs.prefix(kind.maxPaneCount))
-        guard !finalIDs.isEmpty else {
-            paneLayout = .single
-            return
-        }
-
-        paneLayout = HolyPaneLayout(kind: kind, sessionIDs: finalIDs).normalized(
-            availableSessionIDs: sessions.map(\.id),
-            selectedSessionID: selectedSessionID
-        )
-        selectedSessionID = finalIDs.last
-    }
-
-    private func paneSeedSessionIDs(preferredFirst preferredSessionID: UUID? = nil) -> [UUID] {
-        var ids: [UUID] = []
-
-        if let preferredSessionID,
-           sessions.contains(where: { $0.id == preferredSessionID }) {
-            ids.append(preferredSessionID)
-        }
-
-        if let selectedID = selectedSession?.id,
-           !ids.contains(selectedID) {
-            ids.append(selectedID)
-        }
-
-        for id in normalizedPaneLayout.sessionIDs where !ids.contains(id) {
-            ids.append(id)
-        }
-
-        for session in sessions where !ids.contains(session.id) {
-            ids.append(session.id)
-        }
-
-        return ids
-    }
-
-    private func reconcilePaneLayoutForSelection() {
-        guard let selectedSessionID,
-              sessions.contains(where: { $0.id == selectedSessionID }) else {
-            return
-        }
-
-        var layout = normalizedPaneLayout
-        switch layout.kind {
-        case .single:
-            layout.sessionIDs = [selectedSessionID]
-        case .splitRight, .splitDown, .quad:
-            if !layout.sessionIDs.contains(selectedSessionID) {
-                if layout.sessionIDs.isEmpty {
-                    layout.sessionIDs = [selectedSessionID]
-                } else {
-                    layout.sessionIDs[layout.sessionIDs.count - 1] = selectedSessionID
-                }
-            }
-        }
-
-        let previousSuppression = suppressAutomaticSelectionPersistence
-        suppressAutomaticSelectionPersistence = true
-        paneLayout = layout.normalized(
-            availableSessionIDs: sessions.map(\.id),
-            selectedSessionID: selectedSessionID
-        )
-        suppressAutomaticSelectionPersistence = previousSuppression
+        paneLayout = layout
+            .normalized(
+                availableSessionIDs: sessions.map(\.id),
+                selectedSessionID: selectedSessionID
+            )
+            .oriented(kind)
+        soloSessionID = nil
+        focusedPaneSlot = selectedSessionID.flatMap { paneLayout.slot(for: $0) }
+            ?? paneLayout.highestOccupiedSlot
     }
 
     private func prepareRemoteTmuxLaunch(for launchSpec: HolySessionLaunchSpec) -> HolySession? {
