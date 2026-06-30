@@ -228,6 +228,10 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         showAndActivate()
     }
 
+    func noteSurfaceFocused(_ surfaceView: Ghostty.SurfaceView) {
+        workspaceStore.selectSession(surfaceView.id)
+    }
+
     func windowDidBecomeKey(_ notification: Notification) {
         guard let selected = workspaceStore.selectedSession else { return }
         Ghostty.moveFocus(to: selected.surfaceView)

@@ -1503,6 +1503,9 @@ extension Ghostty {
                 return nil
             }
 
+            holyWorkspaceController?.noteSurfaceFocused(self)
+            window?.makeFirstResponder(self)
+
             let menu = NSMenu()
 
             // We just use a floating var so we can easily setup metadata on each item

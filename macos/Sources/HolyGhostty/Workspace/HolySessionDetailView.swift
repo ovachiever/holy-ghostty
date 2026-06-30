@@ -100,7 +100,6 @@ struct HolySessionDetailView: View {
         if let ghosttyApp {
             Ghostty.SurfaceWrapper(surfaceView: session.surfaceView, isSplit: splitSurface)
                 .environmentObject(ghosttyApp)
-                .ghosttyLastFocusedSurface(Weak(session.surfaceView))
                 .id(ObjectIdentifier(session))
         } else {
             HolyGhosttyEmptyStateView(

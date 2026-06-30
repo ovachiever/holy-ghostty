@@ -103,6 +103,8 @@ struct HolySessionRosterView: View {
             onSelect: { store.handleRosterSelect(session.id) },
             onMenuOpen: { store.selectSession(session.id) },
             onAssignToPane: { store.assignSession(session.id, toSlot: $0) },
+            isPaneZoomed: store.soloSessionID == session.id && store.paneSlotsBySessionID[session.id] != nil,
+            onTogglePaneZoom: { store.togglePaneZoom(session.id) },
             onRemoveFromSplit: { store.removeFromLinkage(session.id) },
             onBreakSplit: { store.breakLinkage() },
             onDuplicate: { store.duplicate(session.id) },
@@ -722,6 +724,8 @@ private struct HolyRosterRow: View {
     let onSelect: () -> Void
     let onMenuOpen: () -> Void
     let onAssignToPane: (Int) -> Void
+    let isPaneZoomed: Bool
+    let onTogglePaneZoom: () -> Void
     let onRemoveFromSplit: () -> Void
     let onBreakSplit: () -> Void
     let onDuplicate: () -> Void
@@ -841,6 +845,7 @@ private struct HolyRosterRow: View {
         }
 
         if paneSlot != nil {
+            actions.append(.item(isPaneZoomed ? "Show Linked Split" : "Zoom Pane") { onTogglePaneZoom() })
             actions.append(.item("Remove from Split") { onRemoveFromSplit() })
             actions.append(.item("Break Split") { onBreakSplit() })
         }

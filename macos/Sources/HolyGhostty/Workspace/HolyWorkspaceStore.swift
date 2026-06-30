@@ -409,6 +409,16 @@ final class HolyWorkspaceStore: ObservableObject {
         clearUnreadAttentionIfNeeded(for: sessionID)
     }
 
+    func togglePaneZoom(_ sessionID: UUID) {
+        guard let slot = normalizedPaneLayout.slot(for: sessionID) else { return }
+
+        if soloSessionID == sessionID {
+            enterSplit(focusedSlot: slot)
+        } else {
+            maximize(sessionID)
+        }
+    }
+
     func enterSplit(focusedSlot: Int? = nil) {
         guard normalizedPaneLayout.kind.isSplit else { return }
         soloSessionID = nil

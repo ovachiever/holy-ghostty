@@ -48,12 +48,86 @@ private final class HolyWindowDragRegionView: NSView {
         window?.performDrag(with: event)
     }
 }
+
+private struct HolyPaneFocusBridge: NSViewRepresentable {
+    let onFocus: (NSEvent.EventType) -> Void
+
+    func makeNSView(context: Context) -> HolyPaneFocusBridgeView {
+        HolyPaneFocusBridgeView(onFocus: onFocus)
+    }
+
+    func updateNSView(_ nsView: HolyPaneFocusBridgeView, context: Context) {
+        nsView.onFocus = onFocus
+    }
+}
+
+private final class HolyPaneFocusBridgeView: NSView {
+    var onFocus: (NSEvent.EventType) -> Void
+    private var monitor: Any?
+
+    init(onFocus: @escaping (NSEvent.EventType) -> Void) {
+        self.onFocus = onFocus
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        removeMonitor()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            removeMonitor()
+        } else {
+            installMonitorIfNeeded()
+        }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    private func installMonitorIfNeeded() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
+            self?.handle(event) ?? event
+        }
+    }
+
+    private func removeMonitor() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+    }
+
+    private func handle(_ event: NSEvent) -> NSEvent {
+        guard let window,
+              event.window == window else {
+            return event
+        }
+
+        let location = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(location) else { return event }
+
+        onFocus(event.type)
+        return event
+    }
+}
 #endif
 
 struct HolyWorkspaceRootView: View {
     @EnvironmentObject private var ghostty: Ghostty.App
     @ObservedObject var store: HolyWorkspaceStore
     @State private var diffCompareSessionIDRaw: String?
+    @State private var lastFocusedSurface: Weak<Ghostty.SurfaceView>?
+    @FocusState private var workspaceFocused: Bool
+    @FocusedValue(\.ghosttySurfaceView) private var focusedSurface
     @AppStorage("holy.workspace.rosterWidth.v3") private var rosterWidthRaw = Double(HolyWorkspaceLayout.rosterDefaultWidth)
     @AppStorage("holy.workspace.rosterCollapsed.v1") private var rosterCollapsed = false
     @State private var rosterDragStartWidth: CGFloat?
@@ -76,6 +150,8 @@ struct HolyWorkspaceRootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea(.container, edges: .top)
         .clipped()
+        .focused($workspaceFocused)
+        .ghosttyLastFocusedSurface(lastFocusedSurface)
         .sheet(isPresented: $store.composerPresented) {
             HolyNewSessionSheet(
                 draft: $store.draft,
@@ -102,9 +178,13 @@ struct HolyWorkspaceRootView: View {
         .sheet(isPresented: $store.remoteHostsPresented) {
             HolyRemoteHostsSheet(store: store)
         }
-        .onAppear(perform: focusSelectedSession)
+        .onAppear {
+            workspaceFocused = true
+            focusSelectedSession()
+        }
         .onChange(of: store.selectedSessionID) { _ in focusSelectedSession() }
         .onChange(of: selectedSessionObjectIdentifier) { _ in focusSelectedSession() }
+        .onChange(of: focusedSurface) { handleFocusedSurfaceChange($0) }
     }
 
     // MARK: - Helpers
@@ -274,7 +354,8 @@ struct HolyWorkspaceRootView: View {
     @ViewBuilder
     private var singlePaneContent: some View {
         if let session = store.visiblePaneSlots.compactMap(\.self).first ?? store.selectedSession {
-            paneSurface(for: session, slot: nil)
+            let zoomedSlot = store.soloSessionID == session.id ? store.normalizedPaneLayout.slot(for: session.id) : nil
+            paneSurface(for: session, slot: zoomedSlot)
         } else {
             HolyGhosttyEmptyStateView(
                 title: "No session selected",
@@ -465,6 +546,13 @@ struct HolyWorkspaceRootView: View {
         )
         .frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity)
         .background(HolyGhosttyTheme.bg)
+        #if os(macOS)
+        .background {
+            HolyPaneFocusBridge { eventType in
+                focus(session, eventType: eventType)
+            }
+        }
+        #endif
         .overlay {
             if let slot,
                store.focusedPaneSlot == slot,
@@ -484,12 +572,19 @@ struct HolyWorkspaceRootView: View {
     }
 
     private func paneSlotBadge(slot: Int, session: HolySession?) -> some View {
-        HStack(spacing: 4) {
+        let isZoomed = session.map { store.soloSessionID == $0.id } ?? false
+
+        return HStack(spacing: 4) {
             Image(systemName: "link")
                 .font(.system(size: 8, weight: .bold))
 
             Text("\(slot)")
                 .font(.system(size: 9, weight: .bold, design: .rounded))
+
+            if session != nil {
+                Image(systemName: isZoomed ? "rectangle.split.2x1" : "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 8, weight: .bold))
+            }
         }
         .foregroundStyle(HolyGhosttyTheme.halo)
         .padding(.horizontal, 7)
@@ -506,16 +601,22 @@ struct HolyWorkspaceRootView: View {
         .contentShape(Capsule(style: .continuous))
         .onTapGesture {
             if let session {
-                select(session)
-                store.enterSplit(focusedSlot: slot)
+                if isZoomed {
+                    store.enterSplit(focusedSlot: slot)
+                    focus(session)
+                } else {
+                    focus(session)
+                    store.enterSplit(focusedSlot: slot)
+                }
             }
         }
         .onTapGesture(count: 2) {
             if let session {
-                store.maximize(session.id)
+                store.togglePaneZoom(session.id)
+                focus(session)
             }
         }
-        .help(session == nil ? "Pane \(slot)" : "Pane \(slot). Double-click to maximize.")
+        .help(session == nil ? "Pane \(slot)" : "Pane \(slot). Double-click to \(isZoomed ? "show split" : "zoom").")
     }
 
     private func layoutControlButton(
@@ -861,7 +962,20 @@ struct HolyWorkspaceRootView: View {
 
     private func focusSelectedSession() {
         guard let session = store.selectedSession else { return }
+        lastFocusedSurface = Weak(session.surfaceView)
         Ghostty.moveFocus(to: session.surfaceView)
+    }
+
+    private func handleFocusedSurfaceChange(_ surfaceView: Ghostty.SurfaceView?) {
+        guard let surfaceView,
+              let session = store.sessions.first(where: { $0.surfaceView === surfaceView }) else {
+            return
+        }
+
+        lastFocusedSurface = Weak(surfaceView)
+        if store.selectedSessionID != session.id {
+            store.selectSession(session.id)
+        }
     }
 
     private func performCommandPaletteAction(_ action: String, on surfaceView: Ghostty.SurfaceView) {
@@ -872,12 +986,23 @@ struct HolyWorkspaceRootView: View {
     }
 
     private func select(_ session: HolySession) {
-        store.selectSession(session.id)
-        Ghostty.moveFocus(to: session.surfaceView)
+        focus(session)
     }
 
     private func promote(_ session: HolySession) {
+        focus(session)
+    }
+
+    private func focus(_ session: HolySession, eventType: NSEvent.EventType? = nil) {
         store.selectSession(session.id)
+        lastFocusedSurface = Weak(session.surfaceView)
+
+        #if os(macOS)
+        if eventType != nil {
+            session.surfaceView.window?.makeFirstResponder(session.surfaceView)
+        }
+        #endif
+
         Ghostty.moveFocus(to: session.surfaceView)
     }
 
@@ -1163,7 +1288,6 @@ private struct HolySessionGridTile: View {
             HolyGhosttySurfaceFrame(halo: isSelected) {
                 Ghostty.SurfaceWrapper(surfaceView: session.surfaceView, isSplit: true)
                     .environmentObject(ghosttyApp)
-                    .ghosttyLastFocusedSurface(Weak(session.surfaceView))
                     .id(ObjectIdentifier(session))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
