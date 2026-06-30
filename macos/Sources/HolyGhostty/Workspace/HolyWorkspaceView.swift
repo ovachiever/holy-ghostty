@@ -411,6 +411,16 @@ struct HolyWorkspaceRootView: View {
                 }
 
                 layoutControlButton(
+                    title: "Triple",
+                    systemName: "rectangle.split.3x1",
+                    isActive: store.visiblePaneLayoutKind == .triple
+                ) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        store.showTriplePaneLayout()
+                    }
+                }
+
+                layoutControlButton(
                     title: "Quad",
                     systemName: "square.grid.2x2",
                     isActive: store.visiblePaneLayoutKind == .quad

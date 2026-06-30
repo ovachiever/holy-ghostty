@@ -141,7 +141,9 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     var paneSlotsBySessionID: [UUID: Int] {
-        Dictionary(
+        guard normalizedPaneLayout.kind.isSplit else { return [:] }
+
+        return Dictionary(
             uniqueKeysWithValues: normalizedPaneLayout.sessionIDs.compactMap { id in
                 normalizedPaneLayout.slot(for: id).map { (id, $0) }
             }
@@ -340,6 +342,10 @@ final class HolyWorkspaceStore: ObservableObject {
             sourceSessionID: sourceSessionID,
             cloneConfig: baseConfig
         )
+    }
+
+    func showTriplePaneLayout() {
+        applyPaneLayout(kind: .triple)
     }
 
     func showQuadPaneLayout() {
@@ -1639,9 +1645,9 @@ final class HolyWorkspaceStore: ObservableObject {
                 selectedSessionID: selectedSessionID
             )
             .oriented(kind)
-        soloSessionID = nil
-        focusedPaneSlot = selectedSessionID.flatMap { paneLayout.slot(for: $0) }
+        let focusedSlot = selectedSessionID.flatMap { paneLayout.slot(for: $0) }
             ?? paneLayout.highestOccupiedSlot
+        enterSplit(focusedSlot: focusedSlot)
     }
 
     private func prepareRemoteTmuxLaunch(for launchSpec: HolySessionLaunchSpec) -> HolySession? {
