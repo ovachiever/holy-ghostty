@@ -7,6 +7,12 @@ enum HolySessionCycleDirection {
     case previous
 }
 
+enum HolyConvergeReason: String {
+    case manual
+    case wake
+    case paneExit
+}
+
 private struct PaneLayoutMemoKey: Equatable {
     let sessionIDs: [UUID]
     let paneLayout: HolyPaneLayout
@@ -35,6 +41,8 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var draftOwnershipPreview: HolySessionOwnership?
     @Published private(set) var draftLaunchGuardrailRefreshing: Bool = false
     @Published private(set) var attentionClock: Date = .now
+    @Published private(set) var isConverging = false
+    private var lastConvergeStartedAt: Date?
     @Published var paneLayout: HolyPaneLayout = .single {
         didSet {
             refreshSessionPresentationState()
@@ -571,38 +579,171 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func reattachAllSessions() {
-        let reattachableSessions = sessions.filter { canReattachSession($0) }
-        guard !reattachableSessions.isEmpty else { return }
+        convergeRoster(reason: .manual)
+    }
 
-        let sessionIDs = reattachableSessions.map(\.id)
-        let detachCommands = reattachableSessions.compactMap {
-            HolyTmuxClientDetachCommand.command(for: $0.record.launchSpec)
+    static func shouldStartConverge(
+        now: Date,
+        lastStartedAt: Date?,
+        isRunning: Bool,
+        reason: HolyConvergeReason
+    ) -> Bool {
+        if isRunning { return false }
+        if reason == .manual { return true }
+        guard let lastStartedAt else { return true }
+        return now.timeIntervalSince(lastStartedAt) >= 10
+    }
+
+    func convergeRoster(reason: HolyConvergeReason) {
+        guard Self.shouldStartConverge(
+            now: Date(),
+            lastStartedAt: lastConvergeStartedAt,
+            isRunning: isConverging,
+            reason: reason
+        ) else { return }
+
+        isConverging = true
+        lastConvergeStartedAt = Date()
+
+        // Snapshot roster identity on the main actor.
+        let rosterEntries: [HolyConvergeRosterEntry] = sessions.map { session in
+            let spec = session.record.launchSpec
+            if let key = HolyRemoteTmuxSessionKey(launchSpec: spec) {
+                let hostKey = Self.convergeHostKey(destination: key.sshDestination, socketName: key.tmuxSocketName)
+                return HolyConvergeRosterEntry(
+                    sessionID: session.id,
+                    matchKey: "\(hostKey)|\(key.tmuxSessionName)",
+                    hostKey: hostKey,
+                    localProcessExited: session.surfaceView.processExited
+                )
+            }
+            let realized = HolyTmuxCommandBuilder.realizedLaunchSpec(spec)
+            if !realized.transport.isRemote,
+               let tmux = realized.tmux?.normalized,
+               let name = tmux.sessionName?.nilIfBlank {
+                let hostKey = Self.convergeHostKey(destination: "local", socketName: tmux.socketName?.nilIfBlank)
+                return HolyConvergeRosterEntry(
+                    sessionID: session.id,
+                    matchKey: "\(hostKey)|\(name)",
+                    hostKey: hostKey,
+                    localProcessExited: session.surfaceView.processExited
+                )
+            }
+            return HolyConvergeRosterEntry(sessionID: session.id, matchKey: nil, hostKey: nil, localProcessExited: false)
         }
 
-        Task {
-            _ = await Task.detached(priority: .utility) {
-                for command in detachCommands {
-                    _ = command.run()
+        // Hosts to sweep: every saved remote host plus hosts inferable from
+        // live roster records (covers sessions on unsaved hosts).
+        var hostsByKey: [String: HolyRemoteHostRecord] = [:]
+        for host in remoteHosts + activeRemoteTmuxDiscoveryHosts() {
+            let normalized = host.normalized()
+            let key = Self.convergeHostKey(
+                destination: normalized.sshDestination,
+                socketName: normalized.tmuxSocketName?.nilIfBlank
+            )
+            if hostsByKey[key] == nil { hostsByKey[key] = host }
+        }
+        let remoteSweep = hostsByKey
+
+        Task { [weak self] in
+            var discoveredEntries: [HolyConvergeDiscoveredEntry] = []
+            var reachable: Set<String> = []
+            var discoveredByMatchKey: [String: (session: HolyDiscoveredTmuxSession, host: HolyRemoteHostRecord?)] = [:]
+
+            await withTaskGroup(of: (String, HolyRemoteHostRecord?, [HolyDiscoveredTmuxSession])?.self) { group in
+                for (hostKey, host) in remoteSweep {
+                    group.addTask {
+                        do {
+                            let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverSessionsThrowing(for: host)
+                            return (hostKey, host, sessions)
+                        } catch {
+                            return nil // unreachable: leave its records untouched
+                        }
+                    }
                 }
-            }.value
-
-            var nextState = currentSessionStoreState
-            var pendingEvents: [HolySessionEventDraft] = []
-
-            for sessionID in sessionIDs {
-                guard let currentSession = nextState.sessions.first(where: { $0.id == sessionID }),
-                      let result = sessionSupervisor.reattach(currentSession, in: nextState) else {
-                    continue
+                group.addTask {
+                    let localHostKey = Self.convergeHostKey(destination: "local", socketName: nil)
+                    do {
+                        let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverLocalSessionsThrowing(
+                            hostID: UUID(),
+                            hostLabel: "This Mac"
+                        )
+                        return (localHostKey, nil, sessions)
+                    } catch {
+                        return nil
+                    }
                 }
 
-                nextState = result.state
-                pendingEvents.append(contentsOf: result.pendingEvents)
+                for await result in group {
+                    guard let (hostKey, host, sessions) = result else { continue }
+                    reachable.insert(hostKey)
+                    for discovered in sessions {
+                        let entryHostKey: String
+                        if host == nil {
+                            entryHostKey = Self.convergeHostKey(
+                                destination: "local",
+                                socketName: discovered.tmuxSocketName?.nilIfBlank
+                            )
+                            reachable.insert(entryHostKey)
+                        } else {
+                            entryHostKey = hostKey
+                        }
+                        let matchKey = "\(entryHostKey)|\(discovered.sessionName)"
+                        discoveredEntries.append(HolyConvergeDiscoveredEntry(
+                            matchKey: matchKey,
+                            hostKey: entryHostKey,
+                            attachedClientCount: discovered.attachedClientCount
+                        ))
+                        if discoveredByMatchKey[matchKey] == nil {
+                            discoveredByMatchKey[matchKey] = (discovered, host)
+                        }
+                    }
+                }
             }
 
-            applySessionStoreState(nextState)
-            persist(pendingEvents: pendingEvents)
-            refreshActiveRemoteTmuxSessionMetadata()
+            let actions = HolyConvergePlanner.plan(
+                roster: rosterEntries,
+                discovered: discoveredEntries,
+                reachableHostKeys: reachable
+            )
+
+            await MainActor.run {
+                guard let self else { return }
+                self.applyConvergeActions(actions, discoveredByMatchKey: discoveredByMatchKey)
+                self.isConverging = false
+            }
         }
+    }
+
+    private func applyConvergeActions(
+        _ actions: [HolyConvergeAction],
+        discoveredByMatchKey: [String: (session: HolyDiscoveredTmuxSession, host: HolyRemoteHostRecord?)]
+    ) {
+        for action in actions {
+            switch action {
+            case let .attachNew(matchKey):
+                guard let found = discoveredByMatchKey[matchKey],
+                      !found.session.shouldHideFromDiscovery else { break }
+                if let host = found.host {
+                    launchRemoteTmuxSessions([found.session], on: host, keepHostsOpen: true)
+                } else {
+                    launchLocalTmuxSessions([found.session], keepHostsOpen: true)
+                }
+            case let .repair(sessionID):
+                if let session = sessions.first(where: { $0.id == sessionID }) {
+                    reattach(session)
+                }
+            case let .archive(sessionID):
+                if let session = sessions.first(where: { $0.id == sessionID }) {
+                    archive(session)
+                }
+            }
+        }
+    }
+
+    nonisolated private static func convergeHostKey(destination: String, socketName: String?) -> String {
+        let scheme = destination == "local" ? "local" : "ssh"
+        return [scheme, destination.lowercased(), socketName?.lowercased() ?? "auto"].joined(separator: "|")
     }
 
     func canKillTmuxSession(_ session: HolySession) -> Bool {
