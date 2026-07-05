@@ -78,8 +78,17 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published var tasksPresented: Bool = false
     @Published var remoteHostsPresented: Bool = false
     @Published var draft: HolySessionDraft = .init()
+    @Published var keepAwakeWhileRemoteAttached: Bool = UserDefaults.standard.object(
+        forKey: HolyWorkspaceStore.keepAwakeDefaultsKey
+    ) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(keepAwakeWhileRemoteAttached, forKey: Self.keepAwakeDefaultsKey)
+            updatePowerAssertion()
+        }
+    }
 
     private let sessionSupervisor: HolySessionSupervisor
+    private let powerAssertionManager = HolyPowerAssertionManager()
     private var refreshCoordinator: HolySessionRefreshCoordinator?
     private var paneLayoutMemo: (key: PaneLayoutMemoKey, layout: HolyPaneLayout, labels: [UUID: String])?
     private var sessionObservationCancellables: Set<AnyCancellable> = []
@@ -90,6 +99,7 @@ final class HolyWorkspaceStore: ObservableObject {
     private var selectedSessionReadTaskKey: String?
     private var suppressAutomaticSelectionPersistence = false
     private static let selectedSessionReadDelay: TimeInterval = 3
+    private static let keepAwakeDefaultsKey = "HolyKeepAwakeWhileRemoteAttached"
     private static let freshReplyInterval: TimeInterval = 10 * 60
     private static let overdueReplyInterval: TimeInterval = 2 * 60 * 60
     private static let staleReplyInterval: TimeInterval = 24 * 60 * 60
@@ -552,6 +562,11 @@ final class HolyWorkspaceStore: ObservableObject {
         HolyRemoteTmuxSessionKey(launchSpec: session.record.launchSpec) != nil
     }
 
+    private func updatePowerAssertion() {
+        let hasRemoteSessions = sessions.contains { canReattachSession($0) }
+        powerAssertionManager.setActive(keepAwakeWhileRemoteAttached && hasRemoteSessions)
+    }
+
     func reattach(_ session: HolySession) {
         guard canReattachSession(session) else {
             return
@@ -775,6 +790,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 }
             }
         }
+        updatePowerAssertion()
     }
 
     // MARK: - Converge key construction (single source of truth)
@@ -1823,6 +1839,7 @@ final class HolyWorkspaceStore: ObservableObject {
         bindSessions(seedMissingAsSeen: true)
         reconcileExternalTasks()
         scheduleSelectedSessionSeenMark()
+        updatePowerAssertion()
     }
 
     private func refreshSessionPresentationState() {
