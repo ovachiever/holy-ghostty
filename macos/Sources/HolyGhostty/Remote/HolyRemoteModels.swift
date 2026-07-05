@@ -121,6 +121,13 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
     }
 
     private var isGeneratedHolyShellSessionName: Bool {
+        Self.isGeneratedHolyShellSessionName(sessionName)
+    }
+
+    /// A generated placeholder name for a bare Holy shell (e.g. "holy-shell-1a2b").
+    /// Single source of truth shared with converge's roster snapshot so both the
+    /// discovery filter and the roster hide the same sessions.
+    static func isGeneratedHolyShellSessionName(_ sessionName: String) -> Bool {
         let normalized = sessionName.holyTrimmed.lowercased()
         return normalized.hasPrefix("holy-shell-") && normalized.contains("-shell-")
     }

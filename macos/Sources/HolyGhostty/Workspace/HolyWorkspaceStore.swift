@@ -605,15 +605,18 @@ final class HolyWorkspaceStore: ObservableObject {
         isConverging = true
         lastConvergeStartedAt = Date()
 
-        // Snapshot roster identity on the main actor.
+        // Snapshot roster identity on the main actor. Both the remote and local
+        // branches feed the SESSION's own socket into the shared key builder, so
+        // the roster and the discovery loop below key an identical session the
+        // same way.
         let rosterEntries: [HolyConvergeRosterEntry] = sessions.map { session in
             let spec = session.record.launchSpec
             if let key = HolyRemoteTmuxSessionKey(launchSpec: spec) {
-                let hostKey = Self.convergeHostKey(destination: key.sshDestination, socketName: key.tmuxSocketName)
-                return HolyConvergeRosterEntry(
+                return Self.convergeRosterEntry(
                     sessionID: session.id,
-                    matchKey: "\(hostKey)|\(key.tmuxSessionName)",
-                    hostKey: hostKey,
+                    destination: key.sshDestination,
+                    socketName: key.tmuxSocketName,
+                    sessionName: key.tmuxSessionName,
                     localProcessExited: session.surfaceView.processExited
                 )
             }
@@ -621,11 +624,11 @@ final class HolyWorkspaceStore: ObservableObject {
             if !realized.transport.isRemote,
                let tmux = realized.tmux?.normalized,
                let name = tmux.sessionName?.nilIfBlank {
-                let hostKey = Self.convergeHostKey(destination: "local", socketName: tmux.socketName?.nilIfBlank)
-                return HolyConvergeRosterEntry(
+                return Self.convergeRosterEntry(
                     sessionID: session.id,
-                    matchKey: "\(hostKey)|\(name)",
-                    hostKey: hostKey,
+                    destination: "local",
+                    socketName: tmux.socketName?.nilIfBlank,
+                    sessionName: name,
                     localProcessExited: session.surfaceView.processExited
                 )
             }
@@ -650,45 +653,62 @@ final class HolyWorkspaceStore: ObservableObject {
             var reachable: Set<String> = []
             var discoveredByMatchKey: [String: (session: HolyDiscoveredTmuxSession, host: HolyRemoteHostRecord?)] = [:]
 
-            await withTaskGroup(of: (String, HolyRemoteHostRecord?, [HolyDiscoveredTmuxSession])?.self) { group in
-                for (hostKey, host) in remoteSweep {
+            await withTaskGroup(of: (HolyRemoteHostRecord?, [HolyDiscoveredTmuxSession])?.self) { group in
+                for host in remoteSweep.values {
                     group.addTask {
                         do {
                             let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverSessionsThrowing(for: host)
-                            return (hostKey, host, sessions)
+                            return (host, sessions)
                         } catch {
                             return nil // unreachable: leave its records untouched
                         }
                     }
                 }
                 group.addTask {
-                    let localHostKey = Self.convergeHostKey(destination: "local", socketName: nil)
                     do {
                         let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverLocalSessionsThrowing(
                             hostID: UUID(),
                             hostLabel: "This Mac"
                         )
-                        return (localHostKey, nil, sessions)
+                        return (nil, sessions)
                     } catch {
                         return nil
                     }
                 }
 
                 for await result in group {
-                    guard let (hostKey, host, sessions) = result else { continue }
-                    reachable.insert(hostKey)
+                    guard let (host, sessions) = result else { continue }
+
+                    // Reachability = probe coverage, not the sockets we happened
+                    // to find sessions on. A vanished session may only be
+                    // archived when discovery actually inspected its socket
+                    // namespace, so mark reachable every socket the service
+                    // probes on this host. The probe list is owned by the
+                    // discovery service (single source of truth).
+                    let discoveryService = HolyRemoteTmuxDiscoveryService.shared
+                    let reachableDestination: String
+                    let probedSockets: [String?]
+                    if let host {
+                        reachableDestination = host.normalized().sshDestination
+                        probedSockets = discoveryService.probedSocketNames(for: host)
+                    } else {
+                        reachableDestination = "local"
+                        probedSockets = discoveryService.localProbedSocketNames
+                    }
+                    for socketName in probedSockets {
+                        reachable.insert(Self.convergeHostKey(destination: reachableDestination, socketName: socketName))
+                    }
+
                     for discovered in sessions {
-                        let entryHostKey: String
-                        if host == nil {
-                            entryHostKey = Self.convergeHostKey(
-                                destination: "local",
-                                socketName: discovered.tmuxSocketName?.nilIfBlank
-                            )
-                            reachable.insert(entryHostKey)
-                        } else {
-                            entryHostKey = hostKey
-                        }
-                        let matchKey = "\(entryHostKey)|\(discovered.sessionName)"
+                        // Key the discovered entry from the SESSION's own socket
+                        // (mirrors the roster snapshot). Keying from the sweep
+                        // host's recorded socket would let a live "holy"-socket
+                        // session look "new" and get duplicated.
+                        let entryHostKey = Self.convergeHostKey(
+                            destination: host == nil ? "local" : discovered.hostDestination,
+                            socketName: discovered.tmuxSocketName
+                        )
+                        let matchKey = Self.convergeMatchKey(hostKey: entryHostKey, sessionName: discovered.sessionName)
                         discoveredEntries.append(HolyConvergeDiscoveredEntry(
                             matchKey: matchKey,
                             hostKey: entryHostKey,
@@ -722,8 +742,10 @@ final class HolyWorkspaceStore: ObservableObject {
         for action in actions {
             switch action {
             case let .attachNew(matchKey):
-                guard let found = discoveredByMatchKey[matchKey],
-                      !found.session.shouldHideFromDiscovery else { break }
+                // Discovery already filters hidden sessions, and the roster
+                // snapshot drops the hostKey of Holy's own hidden shells, so a
+                // planner .attachNew is always a genuinely new session here.
+                guard let found = discoveredByMatchKey[matchKey] else { break }
                 if let host = found.host {
                     launchRemoteTmuxSessions([found.session], on: host, keepHostsOpen: true)
                 } else {
@@ -741,9 +763,46 @@ final class HolyWorkspaceStore: ObservableObject {
         }
     }
 
+    // MARK: - Converge key construction (single source of truth)
+    //
+    // Both the roster snapshot and the discovery loop build identity keys here
+    // so a session is keyed identically on both sides. The identity socket is
+    // always the SESSION's own socket, normalized the same way everywhere:
+    // blank -> nil -> "auto", lowercased.
+
     nonisolated private static func convergeHostKey(destination: String, socketName: String?) -> String {
         let scheme = destination == "local" ? "local" : "ssh"
-        return [scheme, destination.lowercased(), socketName?.lowercased() ?? "auto"].joined(separator: "|")
+        let normalizedSocket = socketName?.nilIfBlank?.lowercased() ?? "auto"
+        return [scheme, destination.lowercased(), normalizedSocket].joined(separator: "|")
+    }
+
+    nonisolated private static func convergeMatchKey(hostKey: String, sessionName: String) -> String {
+        "\(hostKey)|\(sessionName)"
+    }
+
+    /// Builds a roster entry from a session's own identity. Hidden shells (Holy's
+    /// own generated bare shells) are filtered out of discovery, so they can
+    /// never be matched. Keep their matchKey so a discovered twin can never
+    /// duplicate them, but drop their hostKey so the planner never archives or
+    /// repairs a session discovery cannot see. (Local sessions cannot be
+    /// reattached at all - `canReattachSession` requires an SSH transport - so
+    /// dropping repair for a local shell loses nothing.)
+    nonisolated private static func convergeRosterEntry(
+        sessionID: UUID,
+        destination: String,
+        socketName: String?,
+        sessionName: String,
+        localProcessExited: Bool
+    ) -> HolyConvergeRosterEntry {
+        let hostKey = convergeHostKey(destination: destination, socketName: socketName)
+        let matchKey = convergeMatchKey(hostKey: hostKey, sessionName: sessionName)
+        let isHidden = HolyDiscoveredTmuxSession.isGeneratedHolyShellSessionName(sessionName)
+        return HolyConvergeRosterEntry(
+            sessionID: sessionID,
+            matchKey: matchKey,
+            hostKey: isHidden ? nil : hostKey,
+            localProcessExited: localProcessExited
+        )
     }
 
     func canKillTmuxSession(_ session: HolySession) -> Bool {
@@ -3256,6 +3315,30 @@ extension HolyWorkspaceStore {
             socketName: socketName,
             sessionName: sessionName
         ).arguments
+    }
+
+    static func convergeHostKeyForTesting(destination: String, socketName: String?) -> String {
+        convergeHostKey(destination: destination, socketName: socketName)
+    }
+
+    static func convergeMatchKeyForTesting(hostKey: String, sessionName: String) -> String {
+        convergeMatchKey(hostKey: hostKey, sessionName: sessionName)
+    }
+
+    static func convergeRosterEntryForTesting(
+        sessionID: UUID,
+        destination: String,
+        socketName: String?,
+        sessionName: String,
+        localProcessExited: Bool
+    ) -> HolyConvergeRosterEntry {
+        convergeRosterEntry(
+            sessionID: sessionID,
+            destination: destination,
+            socketName: socketName,
+            sessionName: sessionName,
+            localProcessExited: localProcessExited
+        )
     }
 }
 #endif

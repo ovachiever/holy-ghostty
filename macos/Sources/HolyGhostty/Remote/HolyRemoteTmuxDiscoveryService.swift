@@ -591,7 +591,23 @@ actor HolyRemoteTmuxDiscoveryService {
         return "'\(escaped)'"
     }
 
-    private func probeTargets(for host: HolyRemoteHostRecord) -> [HolyRemoteProbeTarget] {
+    /// The tmux socket namespaces discovery probes for a host. Converge treats
+    /// exactly these namespaces as reachable on a successful sweep, so it never
+    /// archives a session on a socket discovery never inspected. This is the
+    /// single source of truth for probe coverage - callers must not hardcode
+    /// socket names.
+    nonisolated func probedSocketNames(for host: HolyRemoteHostRecord) -> [String?] {
+        probeTargets(for: host.normalized()).map(\.socketName)
+    }
+
+    /// Socket namespaces probed by the local sweep. Mirrors the synthesized
+    /// localhost host `discoverLocalSessionsThrowing` uses (default socket, no
+    /// explicit override).
+    nonisolated var localProbedSocketNames: [String?] {
+        probeTargets(for: HolyRemoteHostRecord(sshDestination: "localhost")).map(\.socketName)
+    }
+
+    nonisolated private func probeTargets(for host: HolyRemoteHostRecord) -> [HolyRemoteProbeTarget] {
         if let explicitSocketName = host.tmuxSocketName?.holyTrimmed.nilIfEmpty {
             return [.init(socketName: explicitSocketName, isExplicit: true)]
         }
