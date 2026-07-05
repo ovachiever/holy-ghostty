@@ -43,6 +43,10 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var attentionClock: Date = .now
     @Published private(set) var isConverging = false
     private var lastConvergeStartedAt: Date?
+    /// Per-host wall-clock cap on the converge discovery sweep (spec's 5s/host).
+    /// Applied only at the converge call sites so the Hosts panel and metadata
+    /// refresh keep answering slow-but-alive hosts uncapped.
+    private static let convergeDiscoveryTimeoutSeconds: TimeInterval = 5
     @Published var paneLayout: HolyPaneLayout = .single {
         didSet {
             refreshSessionPresentationState()
@@ -247,10 +251,6 @@ final class HolyWorkspaceStore: ObservableObject {
 
     var sessionCountText: String {
         "\(sessions.count) session" + (sessions.count == 1 ? "" : "s")
-    }
-
-    var hasReattachableSessions: Bool {
-        sessions.contains { canReattachSession($0) }
     }
 
     var conflictCountText: String {
@@ -712,10 +712,22 @@ final class HolyWorkspaceStore: ObservableObject {
             var discoveredByMatchKey: [String: (session: HolyDiscoveredTmuxSession, host: HolyRemoteHostRecord?)] = [:]
 
             await withTaskGroup(of: (HolyRemoteHostRecord?, [HolyDiscoveredTmuxSession])?.self) { group in
+                // Every child (remote and local) runs under the per-host
+                // wall-clock cap. Discovery is now genuinely async (no blocking
+                // waitUntilExit), so the actor services all children
+                // concurrently: sweep wall-clock is max(per-host), not the sum.
+                // A host that exceeds the cap is treated exactly like an
+                // unreachable one - the child yields nil and its records are left
+                // untouched - so isConverging always returns to false in bounded
+                // time no matter what any discovery process does.
+                let timeout = Self.convergeDiscoveryTimeoutSeconds
                 for host in remoteSweep.values {
                     group.addTask {
                         do {
-                            let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverSessionsThrowing(for: host)
+                            let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverSessionsThrowing(
+                                for: host,
+                                timeout: timeout
+                            )
                             return (host, sessions)
                         } catch {
                             return nil // unreachable: leave its records untouched
@@ -726,7 +738,8 @@ final class HolyWorkspaceStore: ObservableObject {
                     do {
                         let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverLocalSessionsThrowing(
                             hostID: UUID(),
-                            hostLabel: "This Mac"
+                            hostLabel: "This Mac",
+                            timeout: timeout
                         )
                         return (nil, sessions)
                     } catch {
@@ -812,7 +825,12 @@ final class HolyWorkspaceStore: ObservableObject {
                     launchLocalTmuxSessions([found.session], keepHostsOpen: true)
                 }
             case let .repair(sessionID):
-                if let session = sessions.first(where: { $0.id == sessionID }) {
+                if let session = sessions.first(where: { $0.id == sessionID }),
+                   canReattachSession(session) {
+                    // Local repair is out of scope: reattach requires an SSH
+                    // transport (canReattachSession). Wake/Sync/keepalive cover
+                    // remote repair; a local zombie has no reattach path, so skip
+                    // it rather than call a silent no-op.
                     reattach(session)
                 }
             case let .archive(sessionID):
