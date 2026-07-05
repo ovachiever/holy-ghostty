@@ -74,6 +74,12 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
             name: Ghostty.Notification.ghosttyNewSplit,
             object: nil
         )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(holySystemDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
 
         if let initialConfig {
             _ = createSession(from: initialConfig)
@@ -82,6 +88,15 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    @objc private func holySystemDidWake(_ notification: Notification) {
+        Task { @MainActor [weak self] in
+            // Tailscale and Wi-Fi need a moment after wake before SSH works.
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            self?.workspaceStore.convergeOnSystemWake()
+        }
     }
 
     @available(*, unavailable)

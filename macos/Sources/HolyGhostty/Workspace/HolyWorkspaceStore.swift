@@ -92,6 +92,8 @@ final class HolyWorkspaceStore: ObservableObject {
     private var refreshCoordinator: HolySessionRefreshCoordinator?
     private var paneLayoutMemo: (key: PaneLayoutMemoKey, layout: HolyPaneLayout, labels: [UUID: String])?
     private var sessionObservationCancellables: Set<AnyCancellable> = []
+    private var cancellables: Set<AnyCancellable> = []
+    private var repairBackoff = HolyRepairBackoff()
     private var activeTmuxMetadataRefreshCancellable: AnyCancellable?
     private var attentionClockCancellable: AnyCancellable?
     private var draftLaunchGuardrailTask: Task<Void, Never>?
@@ -115,6 +117,13 @@ final class HolyWorkspaceStore: ObservableObject {
         }
         self.refreshCoordinator = coordinator
         coordinator.start()
+
+        NotificationCenter.default.publisher(for: .holyRemoteSessionPaneDied)
+            .compactMap { $0.userInfo?["sessionID"] as? UUID }
+            .sink { [weak self] sessionID in
+                self?.scheduleRepair(sessionID: sessionID)
+            }
+            .store(in: &cancellables)
     }
 
     var selectedSession: HolySession? {
@@ -597,6 +606,26 @@ final class HolyWorkspaceStore: ObservableObject {
         convergeRoster(reason: .manual)
     }
 
+    private func scheduleRepair(sessionID: UUID) {
+        guard let delay = repairBackoff.nextDelay(for: sessionID) else { return }
+
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            await MainActor.run {
+                guard let self,
+                      let session = self.sessions.first(where: { $0.id == sessionID }),
+                      session.surfaceView.processExited,
+                      self.canReattachSession(session) else { return }
+                self.reattach(session)
+            }
+        }
+    }
+
+    func convergeOnSystemWake() {
+        repairBackoff.resetAll()
+        convergeRoster(reason: .wake)
+    }
+
     static func shouldStartConverge(
         now: Date,
         lastStartedAt: Date?,
@@ -610,6 +639,8 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func convergeRoster(reason: HolyConvergeReason) {
+        if reason == .manual { repairBackoff.resetAll() }
+
         guard Self.shouldStartConverge(
             now: Date(),
             lastStartedAt: lastConvergeStartedAt,

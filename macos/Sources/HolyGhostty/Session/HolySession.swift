@@ -567,6 +567,7 @@ final class HolySession: ObservableObject, Identifiable {
         }
         if phase != nextPhase {
             phase = nextPhase
+            notifyIfRemotePaneDied(previousPhase: previousPhase, nextPhase: nextPhase)
         }
         if let nextBudgetTelemetry,
            budgetTelemetry != nextBudgetTelemetry {
@@ -591,6 +592,21 @@ final class HolySession: ObservableObject, Identifiable {
         }
 
         refreshGitSnapshotIfNeeded(force: forceGitRefresh)
+    }
+
+    private func notifyIfRemotePaneDied(previousPhase: HolySessionPhase, nextPhase: HolySessionPhase) {
+        guard nextPhase == .completed || nextPhase == .failed,
+              previousPhase != .completed, previousPhase != .failed,
+              record.launchSpec.transport.isRemote,
+              record.launchSpec.tmux?.sessionName?.isEmpty == false else {
+            return
+        }
+
+        NotificationCenter.default.post(
+            name: .holyRemoteSessionPaneDied,
+            object: nil,
+            userInfo: ["sessionID": id]
+        )
     }
 
     func setPresentedInWorkspace(_ isPresented: Bool) {
@@ -1811,4 +1827,8 @@ final class HolySession: ObservableObject, Identifiable {
 
         return String(format: "$%.2f", value)
     }
+}
+
+extension Notification.Name {
+    static let holyRemoteSessionPaneDied = Notification.Name("holyRemoteSessionPaneDied")
 }
