@@ -119,7 +119,15 @@ enum HolyTmuxCommandBuilder {
     }
 
     private static func remoteLaunchWrapper(destination: String, localScript: String) -> String {
-        let sshCommand = shellCommand(["ssh", "-tt", destination, shellCommand(["zsh", "-lc", localScript])])
+        let sshCommand = shellCommand([
+            "ssh", "-tt",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=4",
+            "-o", "TCPKeepAlive=no",
+            "-o", "ConnectTimeout=8",
+            destination,
+            shellCommand(["zsh", "-lc", localScript]),
+        ])
         let failureMessage = "Holy Ghostty could not reach \(destination). Reattach after SSH is reachable."
 
         return [
@@ -345,3 +353,11 @@ private extension String {
         isEmpty ? nil : self
     }
 }
+
+#if DEBUG
+extension HolyTmuxCommandBuilder {
+    static func remoteLaunchWrapperForTesting(destination: String, localScript: String) -> String {
+        remoteLaunchWrapper(destination: destination, localScript: localScript)
+    }
+}
+#endif
