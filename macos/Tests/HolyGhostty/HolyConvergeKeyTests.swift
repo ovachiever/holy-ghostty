@@ -143,4 +143,58 @@ struct HolyConvergeKeyTests {
         #expect(localReachable.contains("local|local|auto"))
         #expect(localReachable.contains("local|local|holy"))
     }
+
+    // (e) Branch 3 of shouldHideFromDiscovery: a Holy-managed shell whose only
+    // identity is a generic workspace directory. Its name is NOT "holy-shell-*"
+    // (the old name-only roster check missed it), yet discovery hides it, so it
+    // must never be archived even though its socket is probe-covered and
+    // discovery returns nothing.
+    @Test func genericWorkspaceShellIsExcludedFromArchiving() {
+        let entry = HolyWorkspaceStore.convergeRosterEntryForTesting(
+            sessionID: UUID(),
+            destination: "local",
+            socketName: "holy",
+            sessionName: "holy-workspace-shell-4f3e2d1c",
+            title: nil,
+            workingDirectory: "/Users/erik/Custom Coding",
+            runtime: .shell,
+            localProcessExited: false
+        )
+
+        #expect(entry.matchKey != nil)
+        #expect(entry.hostKey == nil)
+
+        let actions = HolyConvergePlanner.plan(
+            roster: [entry],
+            discovered: [],
+            reachableHostKeys: ["local|local|holy"]
+        )
+        #expect(actions.isEmpty)
+    }
+
+    // (f) Branch 2 of shouldHideFromDiscovery: a symbol-only shell title (an
+    // agent status glyph on the live pane). Discovery hides it; converge keys
+    // the roster from the live title, so it must be protected from archive.
+    @Test func symbolOnlyShellTitleIsExcludedFromArchiving() {
+        let entry = HolyWorkspaceStore.convergeRosterEntryForTesting(
+            sessionID: UUID(),
+            destination: "local",
+            socketName: "holy",
+            sessionName: "holy-agent-do-7a6b5c4d",
+            title: "~",
+            workingDirectory: nil,
+            runtime: .shell,
+            localProcessExited: false
+        )
+
+        #expect(entry.matchKey != nil)
+        #expect(entry.hostKey == nil)
+
+        let actions = HolyConvergePlanner.plan(
+            roster: [entry],
+            discovered: [],
+            reachableHostKeys: ["local|local|holy"]
+        )
+        #expect(actions.isEmpty)
+    }
 }

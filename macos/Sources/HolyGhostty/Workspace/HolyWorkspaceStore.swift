@@ -617,6 +617,12 @@ final class HolyWorkspaceStore: ObservableObject {
                     destination: key.sshDestination,
                     socketName: key.tmuxSocketName,
                     sessionName: key.tmuxSessionName,
+                    couldBeHidden: HolyDiscoveredTmuxSession.rosterEntryCouldBeHiddenFromDiscovery(
+                        sessionName: key.tmuxSessionName,
+                        title: session.title,
+                        workingDirectory: spec.workingDirectory,
+                        runtime: spec.runtime
+                    ),
                     localProcessExited: session.surfaceView.processExited
                 )
             }
@@ -629,6 +635,12 @@ final class HolyWorkspaceStore: ObservableObject {
                     destination: "local",
                     socketName: tmux.socketName?.nilIfBlank,
                     sessionName: name,
+                    couldBeHidden: HolyDiscoveredTmuxSession.rosterEntryCouldBeHiddenFromDiscovery(
+                        sessionName: name,
+                        title: session.title,
+                        workingDirectory: spec.workingDirectory,
+                        runtime: spec.runtime
+                    ),
                     localProcessExited: session.surfaceView.processExited
                 )
             }
@@ -743,7 +755,9 @@ final class HolyWorkspaceStore: ObservableObject {
             switch action {
             case let .attachNew(matchKey):
                 // Discovery already filters hidden sessions, and the roster
-                // snapshot drops the hostKey of Holy's own hidden shells, so a
+                // snapshot drops the hostKey of any session discovery could hide
+                // (generated bare shells, symbol-only shell titles, and
+                // generic-workspace shells) while keeping its matchKey, so a
                 // planner .attachNew is always a genuinely new session here.
                 guard let found = discoveredByMatchKey[matchKey] else { break }
                 if let host = found.host {
@@ -780,27 +794,30 @@ final class HolyWorkspaceStore: ObservableObject {
         "\(hostKey)|\(sessionName)"
     }
 
-    /// Builds a roster entry from a session's own identity. Hidden shells (Holy's
-    /// own generated bare shells) are filtered out of discovery, so they can
-    /// never be matched. Keep their matchKey so a discovered twin can never
-    /// duplicate them, but drop their hostKey so the planner never archives or
-    /// repairs a session discovery cannot see. (Local sessions cannot be
-    /// reattached at all - `canReattachSession` requires an SSH transport - so
-    /// dropping repair for a local shell loses nothing.)
+    /// Builds a roster entry from a session's own identity. Any session that
+    /// discovery could hide - a generated bare shell, a symbol-only shell title,
+    /// or a Holy-managed shell whose only identity is a generic workspace name -
+    /// is filtered out of discovery, so it can never be matched. Keep its
+    /// matchKey so a discovered twin can never duplicate it, but drop its hostKey
+    /// so the planner never archives or repairs a session discovery cannot see.
+    /// (Local sessions cannot be reattached at all - `canReattachSession`
+    /// requires an SSH transport - so dropping repair for a local shell loses
+    /// nothing, and a hidden session is by definition absent from discovery, so
+    /// its repair path is never reachable regardless of host.)
     nonisolated private static func convergeRosterEntry(
         sessionID: UUID,
         destination: String,
         socketName: String?,
         sessionName: String,
+        couldBeHidden: Bool,
         localProcessExited: Bool
     ) -> HolyConvergeRosterEntry {
         let hostKey = convergeHostKey(destination: destination, socketName: socketName)
         let matchKey = convergeMatchKey(hostKey: hostKey, sessionName: sessionName)
-        let isHidden = HolyDiscoveredTmuxSession.isGeneratedHolyShellSessionName(sessionName)
         return HolyConvergeRosterEntry(
             sessionID: sessionID,
             matchKey: matchKey,
-            hostKey: isHidden ? nil : hostKey,
+            hostKey: couldBeHidden ? nil : hostKey,
             localProcessExited: localProcessExited
         )
     }
@@ -3330,6 +3347,9 @@ extension HolyWorkspaceStore {
         destination: String,
         socketName: String?,
         sessionName: String,
+        title: String? = nil,
+        workingDirectory: String? = nil,
+        runtime: HolySessionRuntime = .shell,
         localProcessExited: Bool
     ) -> HolyConvergeRosterEntry {
         convergeRosterEntry(
@@ -3337,6 +3357,12 @@ extension HolyWorkspaceStore {
             destination: destination,
             socketName: socketName,
             sessionName: sessionName,
+            couldBeHidden: HolyDiscoveredTmuxSession.rosterEntryCouldBeHiddenFromDiscovery(
+                sessionName: sessionName,
+                title: title,
+                workingDirectory: workingDirectory,
+                runtime: runtime
+            ),
             localProcessExited: localProcessExited
         )
     }

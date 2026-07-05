@@ -313,15 +313,10 @@ enum HolyTmuxCommandBuilder {
         return String(collapsed.prefix(24))
     }
 
-    private static func isGeneratedHolyShellSessionName(_ sessionName: String) -> Bool {
-        let normalized = sessionName.holyTrimmed.lowercased()
-        return normalized.hasPrefix("holy-shell-") && normalized.contains("-shell-")
-    }
-
     private static func shouldDisableImplicitTmux(for launchSpec: HolySessionLaunchSpec) -> Bool {
         guard let tmux = launchSpec.tmux?.normalized,
               let sessionName = tmux.sessionName?.holyTrimmed.nilIfEmpty,
-              isGeneratedHolyShellSessionName(sessionName) else {
+              HolyDiscoveredTmuxSession.isGeneratedHolyShellSessionName(sessionName) else {
             return false
         }
 

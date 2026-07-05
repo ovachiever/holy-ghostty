@@ -132,36 +132,104 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
         return normalized.hasPrefix("holy-shell-") && normalized.contains("-shell-")
     }
 
-    private var isHolyManagedShellSession: Bool {
-        isHolyManaged && connectionRuntime == .shell
-    }
+    /// Shared branch checks reused verbatim by both the discovery filter (the
+    /// instance vars below) and converge's roster snapshot, so the two sides can
+    /// never drift on what counts as a hidden shell.
 
-    private var isSymbolOnlyShellSession: Bool {
-        guard connectionRuntime == .shell else { return false }
+    static func isSymbolOnlyShellSession(
+        runtime: HolySessionRuntime,
+        title: String?,
+        sessionName: String
+    ) -> Bool {
+        guard runtime == .shell else { return false }
 
-        let candidate = normalizedTitle ?? sessionName
+        let candidate = title?.holyTrimmed.nilIfEmpty ?? sessionName
         let trimmed = candidate.holyTrimmed
         guard !trimmed.isEmpty, trimmed.count <= 2 else { return false }
 
         return !trimmed.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
     }
 
-    private var isGenericWorkspaceSession: Bool {
-        if Self.isGenericWorkspaceName(sessionName) {
+    static func isGenericWorkspaceSession(
+        sessionName: String,
+        title: String?,
+        workingDirectory: String?
+    ) -> Bool {
+        if isGenericWorkspaceName(sessionName) {
             return true
         }
 
-        if let title = normalizedTitle,
-           Self.isGenericWorkspaceName(title) {
+        if let title = title?.holyTrimmed.nilIfEmpty,
+           isGenericWorkspaceName(title) {
             return true
         }
 
         if let workingDirectory = workingDirectory?.holyTrimmed.nilIfEmpty,
-           Self.isGenericWorkspaceName(URL(fileURLWithPath: workingDirectory).lastPathComponent) {
+           isGenericWorkspaceName(URL(fileURLWithPath: workingDirectory).lastPathComponent) {
             return true
         }
 
         return false
+    }
+
+    /// Converge mirror of `shouldHideFromDiscovery`, evaluated from a LIVE
+    /// session's derivable inputs (tmux session name, live title, working
+    /// directory, runtime). Discovery deliberately hides some of Holy's own
+    /// managed shells, so their absence from a sweep does NOT mean they are
+    /// gone; converge must never archive a session discovery could have hidden.
+    ///
+    /// Errs toward protection. The discovery-only signals that make an identity
+    /// "meaningful" (git summary, task metadata, bootstrap command, and the
+    /// discovery-time pane title) are not reliably reconstructable from a live
+    /// roster entry, so the `!hasMeaningfulDiscoveryIdentity` guard in branches
+    /// 1 and 3 is treated as always-possible, and every roster session is
+    /// Holy-managed so `isHolyManagedShellSession` reduces to a shell check.
+    /// Over-protecting leaves one stale roster row a user archives by hand;
+    /// under-protecting would let converge destroy a live pane.
+    static func rosterEntryCouldBeHiddenFromDiscovery(
+        sessionName: String,
+        title: String?,
+        workingDirectory: String?,
+        runtime: HolySessionRuntime
+    ) -> Bool {
+        // Branch 1: generated bare-shell name ("holy-shell-...").
+        if isGeneratedHolyShellSessionName(sessionName) {
+            return true
+        }
+
+        // Branch 2: symbol-only shell title (e.g. an agent status glyph).
+        if isSymbolOnlyShellSession(runtime: runtime, title: title, sessionName: sessionName) {
+            return true
+        }
+
+        // Branch 3: Holy-managed shell whose only identity is a generic
+        // workspace name/title/directory.
+        return runtime == .shell
+            && isGenericWorkspaceSession(
+                sessionName: sessionName,
+                title: title,
+                workingDirectory: workingDirectory
+            )
+    }
+
+    private var isHolyManagedShellSession: Bool {
+        isHolyManaged && connectionRuntime == .shell
+    }
+
+    private var isSymbolOnlyShellSession: Bool {
+        Self.isSymbolOnlyShellSession(
+            runtime: connectionRuntime,
+            title: title,
+            sessionName: sessionName
+        )
+    }
+
+    private var isGenericWorkspaceSession: Bool {
+        Self.isGenericWorkspaceSession(
+            sessionName: sessionName,
+            title: title,
+            workingDirectory: workingDirectory
+        )
     }
 
     private var hasMeaningfulDiscoveryIdentity: Bool {
