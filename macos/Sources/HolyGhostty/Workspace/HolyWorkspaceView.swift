@@ -468,12 +468,12 @@ struct HolyWorkspaceRootView: View {
             }
 
             collapsedRailButton(
-                title: "Sync Sessions",
+                title: store.isConverging ? "Syncing Sessions" : "Sync Sessions",
                 systemName: "arrow.triangle.2.circlepath"
             ) {
                 store.reattachAllSessions()
             }
-            .disabled(!store.hasReattachableSessions)
+            .disabled(store.isConverging)
 
             collapsedRailButton(
                 title: "Hosts",

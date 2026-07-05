@@ -307,6 +307,16 @@ struct HolySessionRosterView: View {
                     }
                 }
             }
+
+            Divider()
+
+            Toggle(
+                "Keep Mac Awake While Remote Sessions Attached",
+                isOn: Binding(
+                    get: { store.keepAwakeWhileRemoteAttached },
+                    set: { store.keepAwakeWhileRemoteAttached = $0 }
+                )
+            )
         } label: {
             Image(systemName: "ellipsis.circle")
                 .font(.system(size: 13, weight: .medium))
@@ -361,12 +371,12 @@ struct HolySessionRosterView: View {
                 .disabled(store.sessions.isEmpty)
 
                 rosterActionButton(
-                    title: "Sync",
+                    title: store.isConverging ? "Syncing" : "Sync",
                     symbol: "arrow.triangle.2.circlepath",
-                    help: "Refresh and reconnect tmux sessions in this roster",
+                    help: "Converge the roster with live tmux sessions: attach new, repair dead, never touch healthy panes",
                     action: { store.reattachAllSessions() }
                 )
-                .disabled(!store.hasReattachableSessions)
+                .disabled(store.isConverging)
 
                 rosterActionButton(
                     title: "Hosts",
