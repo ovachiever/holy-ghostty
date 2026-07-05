@@ -16,4 +16,19 @@ struct HolyTmuxCommandFlagTests {
         #expect(wrapper.contains("ConnectTimeout=8"))
         #expect(!wrapper.contains("BatchMode"))
     }
+
+    // Detach commands are headless; without ConnectTimeout+BatchMode one
+    // unreachable host stalls Sync for the full kernel TCP timeout per
+    // session (the old minutes-long hang).
+    @MainActor
+    @Test func detachCommandFailsFast() {
+        let arguments = HolyWorkspaceStore.detachCommandArgumentsForTesting(
+            destination: "erik@example-host",
+            socketName: "holy",
+            sessionName: "demo"
+        )
+        #expect(arguments.contains("ConnectTimeout=5"))
+        #expect(arguments.contains("BatchMode=yes"))
+        #expect(arguments.first == "ssh")
+    }
 }

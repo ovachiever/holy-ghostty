@@ -2787,15 +2787,25 @@ private struct HolyTmuxClientDetachCommand: Sendable {
             return nil
         }
 
+        return make(destination: destination, socketName: tmux.socketName?.holyTerminatorTrimmed.nilIfEmpty, sessionName: sessionName)
+    }
+
+    static func make(destination: String, socketName: String?, sessionName: String) -> Self {
         var tmuxArguments = ["tmux"]
-        if let socketName = tmux.socketName?.holyTerminatorTrimmed.nilIfEmpty {
+        if let socketName {
             tmuxArguments += ["-L", socketName]
         }
         tmuxArguments += ["detach-client", "-s", sessionName]
 
         return Self(
             executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-            arguments: ["ssh", destination, "zsh", "-lc", shellCommand(tmuxArguments)]
+            arguments: [
+                "ssh",
+                "-o", "ConnectTimeout=5",
+                "-o", "BatchMode=yes",
+                destination,
+                "zsh", "-lc", shellCommand(tmuxArguments),
+            ]
         )
     }
 
@@ -3092,3 +3102,19 @@ private extension HolySessionActivityKind {
         }
     }
 }
+
+#if DEBUG
+extension HolyWorkspaceStore {
+    static func detachCommandArgumentsForTesting(
+        destination: String,
+        socketName: String?,
+        sessionName: String
+    ) -> [String] {
+        HolyTmuxClientDetachCommand.make(
+            destination: destination,
+            socketName: socketName,
+            sessionName: sessionName
+        ).arguments
+    }
+}
+#endif
