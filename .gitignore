@@ -38,3 +38,5 @@ vgcore.*
 GhosttyKit.xcframework.debug-backup/
 .claude/
 /.handoff/
+/.manna/
+/.superpowers/

@@ -320,6 +320,40 @@ Generated profile types:
 
 The selected default profile is stored in `app_state` under `default_launch_profile_id`. On first profile creation, Holy Ghostty defaults `New` to the only configured SSH host when exactly one exists; otherwise it defaults to `Local Mac`.
 
+## 8D. SSH Resilience And Roster Convergence
+
+- `macos/Sources/HolyGhostty/Tmux/HolyTmuxCommandBuilder.swift`
+- `macos/Sources/HolyGhostty/Workspace/HolyConvergePlanner.swift`
+- `macos/Sources/HolyGhostty/Workspace/HolyRepairBackoff.swift`
+- `macos/Sources/HolyGhostty/App/HolyPowerAssertionManager.swift`
+- `macos/Sources/HolyGhostty/Workspace/HolyWorkspaceStore.swift`
+
+Remote SSH/tmux sessions used to die silently across sleep and network drops, and the old `Sync` action detached every session serially with no timeout, so one asleep host stalled it for minutes. Three cooperating layers replace that.
+
+Connection hygiene:
+
+- the long-lived attach `ssh` carries `ServerAliveInterval=15`, `ServerAliveCountMax=4`, `TCPKeepAlive=no`, `ConnectTimeout=8` (no `BatchMode` — the pane is interactive), so a dead peer is detected in ~60s
+- the headless detach `ssh` carries `ConnectTimeout=5`, `BatchMode=yes`, so an unreachable host fails fast instead of hanging
+
+Converge-to-truth `Sync`:
+
+- `HolyConvergePlanner` is a pure diff engine: it buckets the roster against a live discovery sweep into attach-new / repair-dead / archive-vanished actions and never touches healthy panes
+- a session is "dead" when its local process exited, or it runs while the remote session reports zero attached clients (a zombie whose TCP died); a nonzero remote client count masks the zombie until the keepalive kills the local process
+- session identity keys derive from the session's own tmux socket on both the roster and discovery sides; reachability is judged by the sockets the discovery service actually probes, so a vanished session is archived only on a host whose namespace was covered
+- discovery-hidden shells (Holy's own generated shells) are protected from archive by mirroring the discovery hide predicate onto the roster snapshot
+- the sweep runs each host concurrently under a per-host wall-clock cap; a timed-out host is treated as unreachable, and a single-flight gate with debounce prevents overlapping runs
+
+Self-healing triggers, all firing the same converge engine:
+
+- the `Sync` button (manual, bypasses debounce)
+- `NSWorkspace.didWakeNotification` in `HolyWorkspaceWindowController`, after a 4s settle for Wi-Fi/Tailscale
+- per-session pane death (`HolySession` posts on the transition into a terminal phase), retried on the `HolyRepairBackoff` schedule of 4s, 10s, 25s, then silent until the next wake or manual `Sync`
+
+Keep-awake:
+
+- `HolyPowerAssertionManager` holds a single `PreventUserIdleSystemSleep` assertion while remote sessions are in the roster (the display may still sleep)
+- controlled by `keepAwakeWhileRemoteAttached`, persisted in `UserDefaults` (device-local policy, default on) with a roster overflow-menu toggle
+
 ## 9. Session Supervisor
 
 - `macos/Sources/HolyGhostty/Supervisor/HolySessionSupervisor.swift`
