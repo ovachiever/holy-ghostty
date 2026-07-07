@@ -1040,12 +1040,29 @@ final class HolyWorkspaceStore: ObservableObject {
 
     @discardableResult
     func createSessionFromDefaultLaunchProfile() -> HolySession? {
-        createSession(with: newDefaultLaunchProfileSpec(), origin: .directLaunch)
+        guard let session = createSession(with: newDefaultLaunchProfileSpec(), origin: .directLaunch) else {
+            return nil
+        }
+        revealAndFocusNewSession(session)
+        return session
     }
 
     @discardableResult
     func createSession(using profile: HolyLaunchProfile) -> HolySession? {
-        createSession(with: launchSpec(for: profile), origin: .directLaunch)
+        guard let session = createSession(with: launchSpec(for: profile), origin: .directLaunch) else {
+            return nil
+        }
+        revealAndFocusNewSession(session)
+        return session
+    }
+
+    /// Bring a user-created session fully to the foreground: switch the visible
+    /// pane to it (identical to clicking its roster row) and move keyboard focus
+    /// into its terminal. Only explicit "New" actions call this; bulk creation
+    /// (restore, converge attach, duplicate) must not steal the pane or focus.
+    private func revealAndFocusNewSession(_ session: HolySession) {
+        handleRosterSelect(session.id)
+        Ghostty.moveFocus(to: session.surfaceView)
     }
 
     @discardableResult
