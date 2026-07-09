@@ -58,6 +58,24 @@ struct HolyConvergePlannerTests {
         #expect(actions == [.repair(sessionID: id)])
     }
 
+    @Test func exitedPaneWithLiveLocalSessionIsRepaired() {
+        let id = UUID()
+        let localHost = "local|local|holy"
+        let key = "\(localHost)|agent-do"
+        let actions = HolyConvergePlanner.plan(
+            roster: [roster(id, key: key, hostKey: localHost, exited: true)],
+            discovered: [
+                HolyConvergeDiscoveredEntry(
+                    matchKey: key,
+                    hostKey: localHost,
+                    attachedClientCount: 0
+                ),
+            ],
+            reachableHostKeys: [localHost]
+        )
+        #expect(actions == [.repair(sessionID: id)])
+    }
+
     @Test func zombiePaneIsRepaired() {
         // Local process still running, but the remote session reports zero
         // attached clients: our TCP died without the process noticing.

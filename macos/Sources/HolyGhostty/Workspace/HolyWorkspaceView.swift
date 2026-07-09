@@ -178,6 +178,19 @@ struct HolyWorkspaceRootView: View {
         .sheet(isPresented: $store.remoteHostsPresented) {
             HolyRemoteHostsSheet(store: store)
         }
+        .alert(
+            "Couldn’t Kill tmux Session",
+            isPresented: Binding(
+                get: { store.tmuxSessionTerminationError != nil },
+                set: { if !$0 { store.tmuxSessionTerminationError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                store.tmuxSessionTerminationError = nil
+            }
+        } message: {
+            Text(store.tmuxSessionTerminationError ?? "tmux did not confirm the session was killed.")
+        }
         .onAppear {
             workspaceFocused = true
             focusSelectedSession()

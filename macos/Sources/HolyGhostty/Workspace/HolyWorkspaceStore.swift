@@ -78,6 +78,7 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published var composerPresented: Bool = false
     @Published var composerBusy: Bool = false
     @Published var composerErrorMessage: String?
+    @Published var tmuxSessionTerminationError: String?
     @Published var historyPresented: Bool = false
     @Published var tasksPresented: Bool = false
     @Published var remoteHostsPresented: Bool = false
@@ -568,11 +569,18 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func canReattachSession(_ session: HolySession) -> Bool {
-        HolyRemoteTmuxSessionKey(launchSpec: session.record.launchSpec) != nil
+        Self.canReattachLaunchSpec(session.record.launchSpec)
+    }
+
+    nonisolated private static func canReattachLaunchSpec(_ launchSpec: HolySessionLaunchSpec) -> Bool {
+        HolyLocalTmuxSessionKey(launchSpec: launchSpec) != nil
+            || HolyRemoteTmuxSessionKey(launchSpec: launchSpec) != nil
     }
 
     private func updatePowerAssertion() {
-        let hasRemoteSessions = sessions.contains { canReattachSession($0) }
+        let hasRemoteSessions = sessions.contains {
+            HolyRemoteTmuxSessionKey(launchSpec: $0.record.launchSpec) != nil
+        }
         powerAssertionManager.setActive(keepAwakeWhileRemoteAttached && hasRemoteSessions)
     }
 
@@ -827,10 +835,9 @@ final class HolyWorkspaceStore: ObservableObject {
             case let .repair(sessionID):
                 if let session = sessions.first(where: { $0.id == sessionID }),
                    canReattachSession(session) {
-                    // Local repair is out of scope: reattach requires an SSH
-                    // transport (canReattachSession). Wake/Sync/keepalive cover
-                    // remote repair; a local zombie has no reattach path, so skip
-                    // it rather than call a silent no-op.
+                    // Discovery confirmed that the backing tmux session is live.
+                    // Recreate the local Ghostty surface for both local and remote
+                    // transports, mirroring the working app-restore path.
                     reattach(session)
                 }
             case let .archive(sessionID):
@@ -865,10 +872,9 @@ final class HolyWorkspaceStore: ObservableObject {
     /// is filtered out of discovery, so it can never be matched. Keep its
     /// matchKey so a discovered twin can never duplicate it, but drop its hostKey
     /// so the planner never archives or repairs a session discovery cannot see.
-    /// (Local sessions cannot be reattached at all - `canReattachSession`
-    /// requires an SSH transport - so dropping repair for a local shell loses
-    /// nothing, and a hidden session is by definition absent from discovery, so
-    /// its repair path is never reachable regardless of host.)
+    /// A hidden session is by definition absent from discovery, so its repair
+    /// path is never reachable regardless of host. Dropping its hostKey also
+    /// prevents convergence from archiving it as missing.
     nonisolated private static func convergeRosterEntry(
         sessionID: UUID,
         destination: String,
@@ -897,11 +903,23 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         let sessionID = session.id
+        let sessionTitle = session.displayTitle
+        tmuxSessionTerminationError = nil
 
         Task {
-            _ = await Task.detached(priority: .utility) {
+            let result = await Task.detached(priority: .utility) {
                 command.run()
             }.value
+
+            guard case .success = result else {
+                if case let .failure(failure) = result {
+                    AppDelegate.logger.error(
+                        "Holy Ghostty failed to kill tmux session \(sessionTitle, privacy: .public): \(failure.message, privacy: .public)"
+                    )
+                    tmuxSessionTerminationError = "Holy Ghostty left \(sessionTitle) in the roster because tmux did not confirm it was killed. \(failure.message)"
+                }
+                return
+            }
 
             guard let currentSession = sessions.first(where: { $0.id == sessionID }) else {
                 return
@@ -933,12 +951,22 @@ final class HolyWorkspaceStore: ObservableObject {
             return
         }
 
+        tmuxSessionTerminationError = nil
+
         Task {
-            _ = await Task.detached(priority: .utility) {
+            let result = await Task.detached(priority: .utility) {
                 command.run()
             }.value
 
-            onCompletion()
+            switch result {
+            case .success:
+                onCompletion()
+            case let .failure(failure):
+                AppDelegate.logger.error(
+                    "Holy Ghostty failed to kill discovered tmux session: \(failure.message, privacy: .public)"
+                )
+                tmuxSessionTerminationError = "Holy Ghostty left the tmux session running because tmux did not confirm it was killed. \(failure.message)"
+            }
         }
     }
 
@@ -3205,6 +3233,10 @@ private struct HolyTmuxSessionTitleUpdateCommand: Sendable {
 }
 
 private struct HolyTmuxSessionTerminationCommand: Sendable {
+    struct Failure: Error, Sendable {
+        let message: String
+    }
+
     let executableURL: URL
     let arguments: [String]
 
@@ -3233,24 +3265,34 @@ private struct HolyTmuxSessionTerminationCommand: Sendable {
         }
 
         return Self(
-            executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-            arguments: tmuxArguments
+            executableURL: URL(fileURLWithPath: "/bin/zsh"),
+            arguments: ["-lc", shellCommand(tmuxArguments)]
         )
     }
 
-    func run() -> Bool {
+    func run() -> Result<Void, Failure> {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
 
         do {
             try process.run()
             process.waitUntilExit()
-            return process.terminationStatus == 0
+            guard process.terminationStatus == 0 else {
+                let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+                let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+                let detail = String(data: errorData, encoding: .utf8)?.holyTerminatorTrimmed.nilIfEmpty
+                    ?? String(data: outputData, encoding: .utf8)?.holyTerminatorTrimmed.nilIfEmpty
+                    ?? "tmux exited with status \(process.terminationStatus)."
+                return .failure(.init(message: detail))
+            }
+            return .success(())
         } catch {
-            return false
+            return .failure(.init(message: error.localizedDescription))
         }
     }
 
@@ -3415,6 +3457,19 @@ extension HolyWorkspaceStore {
             socketName: socketName,
             sessionName: sessionName
         ).arguments
+    }
+
+    static func terminationCommandForTesting(
+        launchSpec: HolySessionLaunchSpec
+    ) -> (executablePath: String, arguments: [String])? {
+        guard let command = HolyTmuxSessionTerminationCommand.command(for: launchSpec) else {
+            return nil
+        }
+        return (command.executableURL.path, command.arguments)
+    }
+
+    static func canReattachLaunchSpecForTesting(_ launchSpec: HolySessionLaunchSpec) -> Bool {
+        canReattachLaunchSpec(launchSpec)
     }
 
     static func convergeHostKeyForTesting(destination: String, socketName: String?) -> String {

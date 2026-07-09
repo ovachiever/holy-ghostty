@@ -31,4 +31,27 @@ struct HolyTmuxCommandFlagTests {
         #expect(arguments.contains("BatchMode=yes"))
         #expect(arguments.first == "ssh")
     }
+
+    // A Dock/Finder launch does not inherit Homebrew's bin directory. Local
+    // termination must resolve tmux through the same login shell used by local
+    // session launch instead of relying on the GUI process PATH.
+    @MainActor
+    @Test func localTerminationResolvesTmuxThroughLoginShell() {
+        var launchSpec = HolySessionLaunchSpec.interactiveTmuxShell()
+        launchSpec.tmux = .init(socketName: "holy", sessionName: "demo", createIfMissing: true)
+
+        let command = HolyWorkspaceStore.terminationCommandForTesting(launchSpec: launchSpec)
+
+        #expect(command?.executablePath == "/bin/zsh")
+        #expect(command?.arguments == ["-lc", "'tmux' '-L' 'holy' 'kill-session' '-t' 'demo'"])
+    }
+
+    @MainActor
+    @Test func localTmuxSessionIsEligibleForReattach() {
+        var launchSpec = HolySessionLaunchSpec.interactiveTmuxShell()
+        launchSpec.tmux = .init(socketName: "holy", sessionName: "demo", createIfMissing: true)
+
+        #expect(HolyWorkspaceStore.canReattachLaunchSpecForTesting(launchSpec))
+        #expect(!HolyWorkspaceStore.canReattachLaunchSpecForTesting(.interactiveShell()))
+    }
 }
