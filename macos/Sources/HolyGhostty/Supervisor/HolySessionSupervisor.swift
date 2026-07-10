@@ -31,6 +31,10 @@ struct HolySessionArchiveResult {
 }
 
 private struct LocalHolyTmuxProbe {
+    private static let localHostID = UUID(
+        uuidString: "00000000-0000-0000-0000-000000000001"
+    )!
+
     var metadataBySessionName: [String: LocalHolyTmuxSessionMetadata]
     var unavailableReason: String?
 
@@ -44,6 +48,29 @@ private struct LocalHolyTmuxProbe {
 
     static func unavailable(_ reason: String) -> Self {
         .init(metadataBySessionName: [:], unavailableReason: reason)
+    }
+
+    var discoveredSessions: [HolyDiscoveredTmuxSession] {
+        metadataBySessionName.values.map { metadata in
+            HolyDiscoveredTmuxSession(
+                hostID: Self.localHostID,
+                hostLabel: ProcessInfo.processInfo.hostName,
+                hostDestination: "localhost",
+                tmuxSocketName: HolySessionTmuxSpec.defaultSocketName,
+                sessionName: metadata.sessionName,
+                title: metadata.title,
+                runtimeRawValue: metadata.runtimeRawValue,
+                objective: metadata.objective,
+                workingDirectory: metadata.workingDirectory,
+                bootstrapCommand: metadata.command,
+                taskTitle: nil,
+                taskSource: nil,
+                gitSummary: nil,
+                attachedClientCount: 0,
+                windowCount: 0,
+                discoveredAt: .now
+            )
+        }
     }
 }
 
@@ -59,6 +86,22 @@ private struct LocalHolyTmuxSessionMetadata {
 private struct RevivedArchivedLocalSession {
     let archiveID: UUID
     let record: HolySessionRecord
+}
+
+private enum HolyTmuxRestorePreflightDecision {
+    case restore(HolySessionRecord)
+    case quarantine(reason: String)
+}
+
+private struct HolyQuarantinedRestoreRecord {
+    let archivedSession: HolyArchivedSession
+    let pendingEvent: HolySessionEventDraft
+}
+
+private struct HolyTmuxRestorePreflightResult {
+    let restorableRecords: [HolySessionRecord]
+    let quarantinedRecords: [HolyQuarantinedRestoreRecord]
+    let deferredTmuxIdentityRecordIDs: Set<UUID>
 }
 
 @MainActor
@@ -155,7 +198,10 @@ final class HolySessionSupervisor {
             .sorted { $0.archivedAt > $1.archivedAt }
 
         if restoredSessions.isEmpty {
-            guard seedDefaultSession else {
+            guard Self.shouldSeedDefaultSession(
+                seedEnabled: seedDefaultSession,
+                deferredTmuxIdentityRecordIDs: recovery.deferredTmuxIdentityRecordIDs
+            ) else {
                 return .init(
                     state: .init(
                         sessions: [],
@@ -394,6 +440,106 @@ final class HolySessionSupervisor {
         return copy
     }
 
+    /// Runs before any `HolySession` (and therefore any Ghostty surface) is
+    /// constructed. Incomplete persisted tmux identity may only cross this
+    /// boundary when a live local probe resolves it uniquely; otherwise the
+    /// record is quarantined for asynchronous converge/Hosts discovery.
+    nonisolated private static func restorePreflightDecision(
+        _ record: HolySessionRecord,
+        discoveredLocalSessions: [HolyDiscoveredTmuxSession]
+    ) -> HolyTmuxRestorePreflightDecision {
+        let launchSpec = record.launchSpec
+        guard let tmux = launchSpec.tmux?.normalized else {
+            return .restore(record)
+        }
+
+        let missingSessionName = tmux.sessionName?.holyTrimmed.nilIfEmpty == nil
+        let missingSocketName = tmux.socketName?.holyTrimmed.nilIfEmpty == nil
+        let missingRemoteDestination = launchSpec.transport.isRemote
+            && launchSpec.transport.normalized.sshDestination?.holyTrimmed.nilIfEmpty == nil
+        guard missingSessionName || missingSocketName || missingRemoteDestination else {
+            return .restore(record)
+        }
+
+        if launchSpec.transport.isRemote {
+            return .quarantine(
+                reason: "Restore deferred this remote session because its saved tmux identity is incomplete. Holy will re-adopt it only after remote discovery confirms the exact socket and session name."
+            )
+        }
+
+        // The synchronous launch probe intentionally covers only Holy's
+        // managed socket. A missing socket cannot be resolved against that
+        // partial inventory because the same name may also exist on tmux's
+        // default server. Likewise, an explicitly different socket is outside
+        // the probe's authority. Leave those records for full converge, which
+        // discovers every supported local namespace before matching.
+        guard missingSessionName,
+              !missingSocketName,
+              tmux.socketName == HolySessionTmuxSpec.defaultSocketName else {
+            return .quarantine(
+                reason: "Restore deferred this local session because its saved tmux identity cannot be resolved safely from the launch-time Holy-socket probe. Holy will re-adopt it only after full local discovery confirms the exact socket and session name."
+            )
+        }
+
+        guard case let .matched(discovered) = HolyTmuxIdentityResolver.resolve(
+            launchSpec: launchSpec,
+            among: discoveredLocalSessions
+        ) else {
+            return .quarantine(
+                reason: "Restore deferred this local session because its saved tmux identity is incomplete and the launch-time probe found no unique live match. Use Hosts to inspect or re-attach the exact session."
+            )
+        }
+
+        var repairedRecord = record
+        var repairedLaunchSpec = launchSpec
+        repairedLaunchSpec.transport = repairedLaunchSpec.transport.normalized
+        repairedLaunchSpec.tmux = HolySessionTmuxSpec(
+            socketName: discovered.tmuxSocketName,
+            sessionName: discovered.sessionName,
+            createIfMissing: false
+        )
+        repairedRecord.launchSpec = repairedLaunchSpec
+        repairedRecord.updatedAt = .now
+        return .restore(repairedRecord)
+    }
+
+    nonisolated private static func restorePreflight(
+        _ records: [HolySessionRecord],
+        discoveredLocalSessions: [HolyDiscoveredTmuxSession]
+    ) -> HolyTmuxRestorePreflightResult {
+        var restorableRecords: [HolySessionRecord] = []
+        var quarantinedRecords: [HolyQuarantinedRestoreRecord] = []
+        var deferredIDs: Set<UUID> = []
+
+        for record in records {
+            switch restorePreflightDecision(
+                record,
+                discoveredLocalSessions: discoveredLocalSessions
+            ) {
+            case let .restore(safeRecord):
+                restorableRecords.append(safeRecord)
+            case let .quarantine(reason):
+                deferredIDs.insert(record.id)
+                quarantinedRecords.append(
+                    quarantinedRestoreRecord(record, reason: reason)
+                )
+            }
+        }
+
+        return .init(
+            restorableRecords: restorableRecords,
+            quarantinedRecords: quarantinedRecords,
+            deferredTmuxIdentityRecordIDs: deferredIDs
+        )
+    }
+
+    nonisolated private static func shouldSeedDefaultSession(
+        seedEnabled: Bool,
+        deferredTmuxIdentityRecordIDs: Set<UUID>
+    ) -> Bool {
+        seedEnabled && deferredTmuxIdentityRecordIDs.isEmpty
+    }
+
     private static func stableTitle(_ title: String?) -> String? {
         guard let title = normalizedMetadataString(title),
               !isLiveAgentStatusTitle(title) else {
@@ -480,6 +626,55 @@ final class HolySessionSupervisor {
             state: nextState,
             sessionID: session.id,
             pendingEvents: pendingEvents
+        )
+    }
+
+    /// Re-links a positively discovered live tmux session to its archived
+    /// record without manufacturing a new session UUID or changing selection.
+    /// The caller supplies a discovery-backed launch spec with
+    /// `createIfMissing == false`, so constructing the surface only attaches.
+    func readoptArchivedSession(
+        _ archivedSession: HolyArchivedSession,
+        with launchSpec: HolySessionLaunchSpec,
+        in state: HolySessionStoreState
+    ) -> HolySessionCreationResult? {
+        guard let app = ghostty.app,
+              !state.sessions.contains(where: { $0.id == archivedSession.sourceSessionID }) else {
+            return nil
+        }
+
+        let record = Self.readoptedRecord(
+            archivedSession,
+            launchSpec: launchSpec,
+            updatedAt: .now
+        )
+        let session = HolySession(record: record, app: app)
+        var nextState = state
+        nextState.archivedSessions.removeAll { $0.id == archivedSession.id }
+        if nextState.selectedArchivedSessionID == archivedSession.id {
+            nextState.selectedArchivedSessionID = nextState.archivedSessions.first?.id
+        }
+        nextState.sessions.append(session)
+
+        return .init(
+            state: nextState,
+            sessionID: session.id,
+            pendingEvents: [
+                .relaunched(session: session, archivedSession: archivedSession, attention: nil),
+            ]
+        )
+    }
+
+    nonisolated private static func readoptedRecord(
+        _ archivedSession: HolyArchivedSession,
+        launchSpec: HolySessionLaunchSpec,
+        updatedAt: Date
+    ) -> HolySessionRecord {
+        HolySessionRecord(
+            id: archivedSession.sourceSessionID,
+            launchSpec: launchSpec,
+            createdAt: archivedSession.record.createdAt,
+            updatedAt: updatedAt
         )
     }
 
@@ -659,11 +854,15 @@ final class HolySessionSupervisor {
         _ records: [HolySessionRecord],
         localTmuxProbe: LocalHolyTmuxProbe
     ) -> HolyActiveRecoveryResult {
+        let preflight = Self.restorePreflight(
+            records,
+            discoveredLocalSessions: localTmuxProbe.discoveredSessions
+        )
         var restorableRecords: [HolySessionRecord] = []
-        var recoveredArchivedSessions: [HolyArchivedSession] = []
-        var pendingEvents: [HolySessionEventDraft] = []
+        var recoveredArchivedSessions = preflight.quarantinedRecords.map(\.archivedSession)
+        var pendingEvents = preflight.quarantinedRecords.map(\.pendingEvent)
 
-        for record in records {
+        for record in preflight.restorableRecords {
             if let sessionName = Self.localManagedTmuxSessionName(for: record),
                let metadata = localTmuxProbe.metadataBySessionName[sessionName] {
                 restorableRecords.append(Self.record(record, applyingLiveLocalTmuxMetadata: metadata))
@@ -676,7 +875,7 @@ final class HolySessionSupervisor {
                 continue
             }
 
-            let archivedSession = recoveredArchivedSession(
+            let archivedSession = Self.recoveredArchivedSession(
                 for: record,
                 reason: reason,
                 cleanupSummary: evaluation.cleanupSummary
@@ -688,7 +887,8 @@ final class HolySessionSupervisor {
         return .init(
             restorableRecords: restorableRecords,
             recoveredArchivedSessions: recoveredArchivedSessions,
-            pendingEvents: pendingEvents
+            pendingEvents: pendingEvents,
+            deferredTmuxIdentityRecordIDs: preflight.deferredTmuxIdentityRecordIDs
         )
     }
 
@@ -707,7 +907,26 @@ final class HolySessionSupervisor {
         return .empty
     }
 
-    private func recoveredArchivedSession(
+    nonisolated private static func quarantinedRestoreRecord(
+        _ record: HolySessionRecord,
+        reason: String
+    ) -> HolyQuarantinedRestoreRecord {
+        let archivedSession = recoveredArchivedSession(
+            for: record,
+            reason: reason,
+            cleanupSummary: nil
+        )
+        return .init(
+            archivedSession: archivedSession,
+            pendingEvent: .recovered(
+                record: record,
+                archivedSession: archivedSession,
+                reason: reason
+            )
+        )
+    }
+
+    nonisolated private static func recoveredArchivedSession(
         for record: HolySessionRecord,
         reason: String,
         cleanupSummary: String?
@@ -807,10 +1026,74 @@ final class HolySessionSupervisor {
     }
 }
 
+#if DEBUG
+extension HolySessionSupervisor {
+    nonisolated static func preflightRestoredRecordForTesting(
+        _ record: HolySessionRecord,
+        discoveredLocalSessions: [HolyDiscoveredTmuxSession]
+    ) -> HolySessionRecord? {
+        switch restorePreflightDecision(record, discoveredLocalSessions: discoveredLocalSessions) {
+        case let .restore(record):
+            return record
+        case .quarantine:
+            return nil
+        }
+    }
+
+    nonisolated static func restorePreflightPartitionForTesting(
+        _ records: [HolySessionRecord],
+        discoveredLocalSessions: [HolyDiscoveredTmuxSession]
+    ) -> (
+        restorableRecords: [HolySessionRecord],
+        archivedSessions: [HolyArchivedSession],
+        pendingEvents: [HolySessionEventDraft],
+        deferredTmuxIdentityRecordIDs: Set<UUID>
+    ) {
+        let result = restorePreflight(
+            records,
+            discoveredLocalSessions: discoveredLocalSessions
+        )
+        return (
+            result.restorableRecords,
+            result.quarantinedRecords.map(\.archivedSession),
+            result.quarantinedRecords.map(\.pendingEvent),
+            result.deferredTmuxIdentityRecordIDs
+        )
+    }
+
+    nonisolated static func quarantinedRestoreRecordForTesting(
+        _ record: HolySessionRecord,
+        reason: String = "Deferred incomplete tmux identity"
+    ) -> (archivedSession: HolyArchivedSession, pendingEvent: HolySessionEventDraft) {
+        let quarantine = quarantinedRestoreRecord(record, reason: reason)
+        return (quarantine.archivedSession, quarantine.pendingEvent)
+    }
+
+    nonisolated static func shouldSeedDefaultSessionForTesting(
+        seedEnabled: Bool,
+        deferredTmuxIdentityRecordIDs: Set<UUID>
+    ) -> Bool {
+        shouldSeedDefaultSession(
+            seedEnabled: seedEnabled,
+            deferredTmuxIdentityRecordIDs: deferredTmuxIdentityRecordIDs
+        )
+    }
+
+    nonisolated static func readoptedRecordForTesting(
+        _ archivedSession: HolyArchivedSession,
+        launchSpec: HolySessionLaunchSpec,
+        updatedAt: Date
+    ) -> HolySessionRecord {
+        readoptedRecord(archivedSession, launchSpec: launchSpec, updatedAt: updatedAt)
+    }
+}
+#endif
+
 private struct HolyActiveRecoveryResult {
     let restorableRecords: [HolySessionRecord]
     let recoveredArchivedSessions: [HolyArchivedSession]
     let pendingEvents: [HolySessionEventDraft]
+    let deferredTmuxIdentityRecordIDs: Set<UUID>
 }
 
 private struct HolyObservedRuntimeState: Equatable {

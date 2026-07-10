@@ -404,6 +404,47 @@ final class HolySession: ObservableObject, Identifiable {
         objectWillChange.send()
     }
 
+    /// Repairs incomplete legacy tmux identity only from a session that was
+    /// actually observed on a live server. Existing non-empty identity fields
+    /// are immutable here; a contradictory discovery must be resolved by the
+    /// caller instead of silently retargeting the record.
+    @discardableResult
+    func applyDiscoveredTmuxIdentity(_ discoveredSession: HolyDiscoveredTmuxSession) -> Bool {
+        guard var tmux = record.launchSpec.tmux?.normalized else { return false }
+
+        let discoveredName = discoveredSession.sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !discoveredName.isEmpty else { return false }
+
+        if let storedName = tmux.sessionName,
+           storedName != discoveredName {
+            return false
+        }
+
+        let trimmedDiscoveredSocket = discoveredSession.tmuxSocketName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let discoveredSocket = trimmedDiscoveredSocket?.isEmpty == false ? trimmedDiscoveredSocket : nil
+        if let storedSocket = tmux.socketName,
+           storedSocket != (discoveredSocket ?? "") {
+            return false
+        }
+
+        var changed = false
+        if tmux.sessionName == nil {
+            tmux.sessionName = discoveredName
+            changed = true
+        }
+        if tmux.socketName == nil, let discoveredSocket {
+            tmux.socketName = discoveredSocket
+            changed = true
+        }
+
+        guard changed else { return false }
+        record.launchSpec.tmux = tmux
+        markUpdated()
+        objectWillChange.send()
+        return true
+    }
+
     @discardableResult
     func applyDiscoveredLaunchMetadata(
         from launchSpec: HolySessionLaunchSpec,

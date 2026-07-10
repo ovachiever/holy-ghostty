@@ -18,13 +18,24 @@ struct HolyConvergePlannerTests {
         HolyConvergeDiscoveredEntry(matchKey: key, hostKey: host, attachedClientCount: attached)
     }
 
-    @Test func discoveredUnknownSessionIsAttached() {
+    @Test func discoveredUnknownSessionIsSurfacedWithoutAutomaticAttach() {
         let actions = HolyConvergePlanner.plan(
             roster: [],
             discovered: [found("\(host)|agent-do")],
             reachableHostKeys: [host]
         )
-        #expect(actions == [.attachNew(matchKey: "\(host)|agent-do")])
+        #expect(actions == [.surfaceOrphan(matchKey: "\(host)|agent-do")])
+    }
+
+    @Test func discoveredArchivedSessionIsReadopted() {
+        let key = "\(host)|agent-do"
+        let actions = HolyConvergePlanner.plan(
+            roster: [],
+            discovered: [found(key)],
+            reachableHostKeys: [host],
+            adoptableMatchKeys: [key]
+        )
+        #expect(actions == [.adoptArchived(matchKey: key)])
     }
 
     @Test func duplicateDiscoveriesAttachOnce() {

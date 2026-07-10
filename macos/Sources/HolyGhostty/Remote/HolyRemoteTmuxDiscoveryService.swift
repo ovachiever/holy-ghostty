@@ -23,12 +23,16 @@ actor HolyRemoteTmuxDiscoveryService {
     ///   a slow-but-alive host must still be allowed to answer.
     func discoverSessionsThrowing(
         for host: HolyRemoteHostRecord,
-        timeout: TimeInterval? = nil
+        timeout: TimeInterval? = nil,
+        includeHiddenSessions: Bool = false
     ) async throws -> [HolyDiscoveredTmuxSession] {
         let normalizedHost = host.normalized()
         guard !normalizedHost.sshDestination.isEmpty else { return [] }
 
-        return try await discoverSessionsThrowing(for: normalizedHost) { host, socketName in
+        return try await discoverSessionsThrowing(
+            for: normalizedHost,
+            includeHiddenSessions: includeHiddenSessions
+        ) { host, socketName in
             await runRemoteDiscovery(for: host, socketName: socketName, timeout: timeout)
         }
     }
@@ -36,22 +40,28 @@ actor HolyRemoteTmuxDiscoveryService {
     func discoverLocalSessionsThrowing(
         hostID: UUID,
         hostLabel: String,
-        timeout: TimeInterval? = nil
+        tmuxSocketName: String? = nil,
+        timeout: TimeInterval? = nil,
+        includeHiddenSessions: Bool = false
     ) async throws -> [HolyDiscoveredTmuxSession] {
         let localHost = HolyRemoteHostRecord(
             id: hostID,
             label: hostLabel,
             sshDestination: "localhost",
-            tmuxSocketName: nil
+            tmuxSocketName: tmuxSocketName
         )
 
-        return try await discoverSessionsThrowing(for: localHost) { _, socketName in
+        return try await discoverSessionsThrowing(
+            for: localHost,
+            includeHiddenSessions: includeHiddenSessions
+        ) { _, socketName in
             await runLocalDiscovery(socketName: socketName, timeout: timeout)
         }
     }
 
     private func discoverSessionsThrowing(
         for normalizedHost: HolyRemoteHostRecord,
+        includeHiddenSessions: Bool,
         using runDiscovery: (HolyRemoteHostRecord, String?) async -> HolyRemoteCommandResult?
     ) async throws -> [HolyDiscoveredTmuxSession] {
         var discoveredSessions: [HolyDiscoveredTmuxSession] = []
@@ -76,7 +86,8 @@ actor HolyRemoteTmuxDiscoveryService {
                 output: result.stdout,
                 host: normalizedHost,
                 tmuxSocketName: probeTarget.socketName,
-                discoveredAt: .now
+                discoveredAt: .now,
+                includeHiddenSessions: includeHiddenSessions
             )
 
             if probeTarget.isExplicit {
@@ -191,7 +202,8 @@ actor HolyRemoteTmuxDiscoveryService {
         output: String,
         host: HolyRemoteHostRecord,
         tmuxSocketName: String?,
-        discoveredAt: Date
+        discoveredAt: Date,
+        includeHiddenSessions: Bool
     ) -> [HolyDiscoveredTmuxSession] {
         output
             .split(whereSeparator: \.isNewline)
@@ -221,7 +233,7 @@ actor HolyRemoteTmuxDiscoveryService {
                     discoveredAt: discoveredAt
                 )
 
-                guard !session.shouldHideFromDiscovery else { return nil }
+                guard includeHiddenSessions || !session.shouldHideFromDiscovery else { return nil }
                 return session
             }
             .sorted(by: sessionSortOrder)

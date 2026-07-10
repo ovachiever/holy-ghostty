@@ -20,7 +20,8 @@ struct HolyConvergeDiscoveredEntry: Equatable {
 }
 
 enum HolyConvergeAction: Equatable {
-    case attachNew(matchKey: String)
+    case adoptArchived(matchKey: String)
+    case surfaceOrphan(matchKey: String)
     case repair(sessionID: UUID)
     case archive(sessionID: UUID)
 }
@@ -29,7 +30,8 @@ enum HolyConvergePlanner {
     static func plan(
         roster: [HolyConvergeRosterEntry],
         discovered: [HolyConvergeDiscoveredEntry],
-        reachableHostKeys: Set<String>
+        reachableHostKeys: Set<String>,
+        adoptableMatchKeys: Set<String> = []
     ) -> [HolyConvergeAction] {
         var actions: [HolyConvergeAction] = []
         let discoveredByKey = Dictionary(
@@ -41,7 +43,11 @@ enum HolyConvergePlanner {
 
         for entry in discovered
         where !rosterKeys.contains(entry.matchKey) && attachedKeys.insert(entry.matchKey).inserted {
-            actions.append(.attachNew(matchKey: entry.matchKey))
+            if adoptableMatchKeys.contains(entry.matchKey) {
+                actions.append(.adoptArchived(matchKey: entry.matchKey))
+            } else {
+                actions.append(.surfaceOrphan(matchKey: entry.matchKey))
+            }
         }
 
         for entry in roster {

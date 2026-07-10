@@ -337,10 +337,12 @@ Connection hygiene:
 
 Converge-to-truth `Sync`:
 
-- `HolyConvergePlanner` is a pure diff engine: it buckets the roster against a live discovery sweep into attach-new / repair-dead / archive-vanished actions and never touches healthy panes
+- `HolyConvergePlanner` is a pure diff engine: it buckets the roster against a live discovery sweep into adopt-archived / surface-orphan / repair-dead / archive-vanished actions and never touches healthy panes
+- a discovery-only session that matches an archived record is re-adopted with the discovered socket and session name; an unknown orphan remains visible in Hosts for explicit Attach or confirmed Kill and is never attached or reaped automatically
 - a session is "dead" when its local process exited, or it runs while the remote session reports zero attached clients (a zombie whose TCP died); a nonzero remote client count masks the zombie until the keepalive kills the local process
 - session identity keys derive from the session's own tmux socket on both the roster and discovery sides; reachability is judged by the sockets the discovery service actually probes, so a vanished session is archived only on a host whose namespace was covered
-- discovery-hidden shells (Holy's own generated shells) are protected from archive by mirroring the discovery hide predicate onto the roster snapshot
+- incomplete legacy identity is repaired only from a unique live discovery match; convergence never calls launch-spec realization to invent a missing name or silently select the default socket
+- convergence requests the full inventory, including shells normally hidden from the Hosts list; if such a shell still cannot be resolved, the roster fallback removes archive authority rather than guessing that it vanished
 - the sweep runs each host concurrently under a per-host wall-clock cap; a timed-out host is treated as unreachable, and a single-flight gate with debounce prevents overlapping runs
 
 Self-healing triggers, all firing the same converge engine:
@@ -368,6 +370,10 @@ The supervisor owns lifecycle orchestration that was previously embedded in `Hol
 - persistence (writing to both database and JSON during the transition period)
 - scheduled persistence (debounced)
 - alert coordination
+
+Tmux termination is discovery-driven. Holy resolves a roster record against the live inventory, backfills an incomplete legacy identity only when the match is unique and strongly evidenced, kills that exact socket/session pair, and polls `has-session` for absence before archiving the roster row. An incomplete or ambiguous target fails closed and directs the user to the explicit Hosts controls. Normal session creation already persists `HolyTmuxCommandBuilder.realizedLaunchSpec`, so newly created records retain their generated name and socket.
+
+Workspace restoration applies the same boundary before constructing a Ghostty surface. A missing name on the explicit `holy` socket may be repaired from the synchronous launch probe; records whose socket or remote target is incomplete are preserved as deferred archives until the full converge inventory can prove one exact live identity. Deferred records suppress default-session seeding so startup cannot create a replacement shell beside the still-live session.
 
 ### Alert coordinator
 
@@ -433,7 +439,7 @@ Core SQLite connection wrapper using the system `SQLite3` framework directly. Co
 - `macos/Sources/HolyGhostty/Database/HolyDatabaseMigrator.swift`
 - `macos/Sources/HolyGhostty/Database/HolyDatabaseModels.swift`
 
-Sequential schema migration runner with 7 migrations:
+Sequential schema migration runner with 8 migrations:
 
 1. Full initial schema (sessions, events, git_snapshots, templates, alerts, annotations, indexes, and `agent-sessions` compatibility views)
 2. `latest_budget_json` column on sessions
@@ -442,8 +448,9 @@ Sequential schema migration runner with 7 migrations:
 5. `tasks` table
 6. `remote_hosts` table
 7. `launch_profiles` table
+8. bounded-retention tombstones (`sessions.purge_pending_at`) and compatibility-view filtering
 
-Current schema version: 7.
+Current schema version: 8.
 
 ### Database paths
 
@@ -512,6 +519,14 @@ The primary persistence layer. Saves and loads the full workspace state from SQL
 - save templates
 - manage `app_state` key-value pairs (selected session, ordering)
 - trigger budget sample recording and event appending within each save transaction
+
+Retention is bounded and interruption-safe:
+
+- unchanged git state reuses the session's referenced snapshot row instead of inserting another poll sample
+- product reads retain only `sessions.latest_git_snapshot_id`; unreferenced legacy snapshots drain oldest-first in bounded utility-queue batches
+- removed sessions are hidden with `purge_pending_at` before their dependent history drains, then physically deleted once the cascade is small
+- archived history keeps the newest 64 records unconditionally, then records no older than 90 days up to a normal cap of 256; positively discovered live matches are protected until re-adoption
+- `HolyDatabaseMaintenance.createCompactedCopy` provides an explicit, free-space-gated `VACUUM INTO` copy with integrity, schema-version, and row-count checks; it never runs at startup and never swaps or deletes the live database
 
 ### JSON persistence (legacy, dual-write)
 

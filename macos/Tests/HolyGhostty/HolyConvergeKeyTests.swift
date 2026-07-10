@@ -67,10 +67,10 @@ struct HolyConvergeKeyTests {
         #expect(fromNil == fromEmpty)
         #expect(fromNil == fromBlank)
 
-        // Case-insensitive: an uppercased destination and socket collapse to the
-        // same key the lowercased roster/discovery inputs produce.
+        // SSH destinations normalize case, but tmux socket labels are
+        // case-sensitive filesystem namespaces and must remain exact.
         let mixedCase = HolyWorkspaceStore.convergeHostKeyForTesting(destination: "Erik@Studio", socketName: "HOLY")
-        #expect(mixedCase == "ssh|erik@studio|holy")
+        #expect(mixedCase == "ssh|erik@studio|HOLY")
     }
 
     // (c) A hidden local shell (generated "holy-shell-*" name) must be excluded

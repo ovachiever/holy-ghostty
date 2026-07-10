@@ -1,4 +1,5 @@
 import Combine
+import Darwin
 import Foundation
 import SwiftUI
 
@@ -11,12 +12,20 @@ enum HolyConvergeReason: String {
     case manual
     case wake
     case paneExit
+    case periodic
 }
 
 private struct PaneLayoutMemoKey: Equatable {
     let sessionIDs: [UUID]
     let paneLayout: HolyPaneLayout
     let selectedSessionID: UUID?
+}
+
+private struct HolyConvergeRosterSnapshot {
+    let sessionID: UUID
+    let launchSpec: HolySessionLaunchSpec
+    let title: String
+    let localProcessExited: Bool
 }
 
 @MainActor
@@ -484,6 +493,7 @@ final class HolyWorkspaceStore: ObservableObject {
         startActiveTmuxMetadataRefresh()
         startAttentionClock()
         persist(pendingEvents: restoration.pendingEvents)
+        convergeRoster(reason: .periodic)
     }
 
     @discardableResult
@@ -659,47 +669,19 @@ final class HolyWorkspaceStore: ObservableObject {
         isConverging = true
         lastConvergeStartedAt = Date()
 
-        // Snapshot roster identity on the main actor. Both the remote and local
-        // branches feed the SESSION's own socket into the shared key builder, so
-        // the roster and the discovery loop below key an identical session the
-        // same way.
-        let rosterEntries: [HolyConvergeRosterEntry] = sessions.map { session in
-            let spec = session.record.launchSpec
-            if let key = HolyRemoteTmuxSessionKey(launchSpec: spec) {
-                return Self.convergeRosterEntry(
-                    sessionID: session.id,
-                    destination: key.sshDestination,
-                    socketName: key.tmuxSocketName,
-                    sessionName: key.tmuxSessionName,
-                    couldBeHidden: HolyDiscoveredTmuxSession.rosterEntryCouldBeHiddenFromDiscovery(
-                        sessionName: key.tmuxSessionName,
-                        title: session.title,
-                        workingDirectory: spec.workingDirectory,
-                        runtime: spec.runtime
-                    ),
-                    localProcessExited: session.surfaceView.processExited
-                )
-            }
-            let realized = HolyTmuxCommandBuilder.realizedLaunchSpec(spec)
-            if !realized.transport.isRemote,
-               let tmux = realized.tmux?.normalized,
-               let name = tmux.sessionName?.nilIfBlank {
-                return Self.convergeRosterEntry(
-                    sessionID: session.id,
-                    destination: "local",
-                    socketName: tmux.socketName?.nilIfBlank,
-                    sessionName: name,
-                    couldBeHidden: HolyDiscoveredTmuxSession.rosterEntryCouldBeHiddenFromDiscovery(
-                        sessionName: name,
-                        title: session.title,
-                        workingDirectory: spec.workingDirectory,
-                        runtime: spec.runtime
-                    ),
-                    localProcessExited: session.surfaceView.processExited
-                )
-            }
-            return HolyConvergeRosterEntry(sessionID: session.id, matchKey: nil, hostKey: nil, localProcessExited: false)
+        // Keep incomplete legacy specs intact until the live inventory exists.
+        // Building identity here would re-realize a missing name and recreate
+        // the phantom-target bug. The task below resolves each snapshot only
+        // against sessions discovery actually observed.
+        let rosterSnapshots = sessions.map { session in
+            HolyConvergeRosterSnapshot(
+                sessionID: session.id,
+                launchSpec: session.record.launchSpec,
+                title: session.title,
+                localProcessExited: session.surfaceView.processExited
+            )
         }
+        let archivedSnapshots = archivedSessions
 
         // Hosts to sweep: every saved remote host plus hosts inferable from
         // live roster records (covers sessions on unsaved hosts).
@@ -712,12 +694,31 @@ final class HolyWorkspaceStore: ObservableObject {
             )
             if hostsByKey[key] == nil { hostsByKey[key] = host }
         }
+        for archived in archivedSnapshots {
+            let spec = archived.record.launchSpec
+            guard spec.transport.kind == .ssh,
+                  spec.tmux != nil,
+                  let destination = spec.transport.normalized.sshDestination?.nilIfBlank else {
+                continue
+            }
+
+            let socketName = spec.tmux?.normalized.socketName?.nilIfBlank
+            let host = remoteDiscoveryHost(
+                destination: destination,
+                label: spec.transport.hostLabel,
+                socketName: socketName
+            )
+            let key = Self.convergeHostKey(destination: destination, socketName: socketName)
+            if hostsByKey[key] == nil { hostsByKey[key] = host }
+        }
         let remoteSweep = hostsByKey
 
         Task { [weak self] in
             var discoveredEntries: [HolyConvergeDiscoveredEntry] = []
             var reachable: Set<String> = []
             var discoveredByMatchKey: [String: (session: HolyDiscoveredTmuxSession, host: HolyRemoteHostRecord?)] = [:]
+            var successfulRemoteHostIDs: Set<UUID> = []
+            var localDiscoverySucceeded = false
 
             await withTaskGroup(of: (HolyRemoteHostRecord?, [HolyDiscoveredTmuxSession])?.self) { group in
                 // Every child (remote and local) runs under the per-host
@@ -734,7 +735,8 @@ final class HolyWorkspaceStore: ObservableObject {
                         do {
                             let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverSessionsThrowing(
                                 for: host,
-                                timeout: timeout
+                                timeout: timeout,
+                                includeHiddenSessions: true
                             )
                             return (host, sessions)
                         } catch {
@@ -747,7 +749,8 @@ final class HolyWorkspaceStore: ObservableObject {
                         let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverLocalSessionsThrowing(
                             hostID: UUID(),
                             hostLabel: "This Mac",
-                            timeout: timeout
+                            timeout: timeout,
+                            includeHiddenSessions: true
                         )
                         return (nil, sessions)
                     } catch {
@@ -757,6 +760,11 @@ final class HolyWorkspaceStore: ObservableObject {
 
                 for await result in group {
                     guard let (host, sessions) = result else { continue }
+                    if let host {
+                        successfulRemoteHostIDs.insert(host.id)
+                    } else {
+                        localDiscoverySucceeded = true
+                    }
 
                     // Reachability = probe coverage, not the sockets we happened
                     // to find sessions on. A vanished session may only be
@@ -800,15 +808,138 @@ final class HolyWorkspaceStore: ObservableObject {
                 }
             }
 
+            let allDiscoveredSessions = discoveredByMatchKey.values.map(\.session)
+            let activeMatches = HolyTmuxIdentityResolver.resolveOneToOne(
+                launchSpecsByID: Dictionary(
+                    uniqueKeysWithValues: rosterSnapshots.map { ($0.sessionID, $0.launchSpec) }
+                ),
+                among: allDiscoveredSessions
+            )
+            var reconciledIdentityBySessionID: [UUID: HolyDiscoveredTmuxSession] = [:]
+            var unresolvedRosterSnapshots: [HolyConvergeRosterSnapshot] = []
+            let rosterEntries = rosterSnapshots.map { snapshot -> HolyConvergeRosterEntry in
+                guard let discovered = activeMatches[snapshot.sessionID] else {
+                    if snapshot.launchSpec.tmux != nil {
+                        unresolvedRosterSnapshots.append(snapshot)
+                    }
+                    return Self.storedConvergeRosterEntry(snapshot)
+                }
+
+                let destination = snapshot.launchSpec.transport.isRemote
+                    ? discovered.hostDestination
+                    : "local"
+                reconciledIdentityBySessionID[snapshot.sessionID] = discovered
+                return Self.convergeRosterEntry(
+                    sessionID: snapshot.sessionID,
+                    destination: destination,
+                    socketName: discovered.tmuxSocketName,
+                    sessionName: discovered.sessionName,
+                    couldBeHidden: false,
+                    localProcessExited: snapshot.localProcessExited
+                )
+            }
+
+            let activeMatchKeys = Set(rosterEntries.compactMap(\.matchKey))
+            var protectedArchiveIDs: Set<UUID> = []
+            var archivedCandidatesByMatchKey: [String: [(archive: HolyArchivedSession, discovered: HolyDiscoveredTmuxSession)]] = [:]
+            for archived in archivedSnapshots {
+                let resolution = HolyTmuxIdentityResolver.resolve(
+                    launchSpec: archived.record.launchSpec,
+                    among: allDiscoveredSessions
+                )
+                guard case let .matched(discovered) = resolution else {
+                    if resolution == .ambiguous,
+                       allDiscoveredSessions.contains(where: {
+                           HolyTmuxIdentityResolver.couldRefer(
+                               launchSpec: archived.record.launchSpec,
+                               to: $0
+                           )
+                       }) {
+                        // Ambiguity blocks adoption, but it is still positive
+                        // evidence that this archive may reference a live
+                        // session. Keep it until identity becomes unique.
+                        protectedArchiveIDs.insert(archived.id)
+                    }
+                    continue
+                }
+
+                let hostKey = Self.convergeHostKey(
+                    destination: archived.record.launchSpec.transport.isRemote
+                        ? discovered.hostDestination
+                        : "local",
+                    socketName: discovered.tmuxSocketName
+                )
+                let matchKey = Self.convergeMatchKey(
+                    hostKey: hostKey,
+                    sessionName: discovered.sessionName
+                )
+                protectedArchiveIDs.insert(archived.id)
+                guard !activeMatchKeys.contains(matchKey) else { continue }
+                archivedCandidatesByMatchKey[matchKey, default: []].append((archived, discovered))
+            }
+
+            var archivedSessionIDByMatchKey: [String: UUID] = [:]
+            for (matchKey, candidates) in archivedCandidatesByMatchKey {
+                guard candidates.count == 1, let candidate = candidates.first else { continue }
+                let conflictsWithUnresolvedRoster = unresolvedRosterSnapshots.contains {
+                    HolyTmuxIdentityResolver.couldRefer(
+                        launchSpec: $0.launchSpec,
+                        to: candidate.discovered
+                    )
+                }
+                guard !conflictsWithUnresolvedRoster else { continue }
+                archivedSessionIDByMatchKey[matchKey] = candidate.archive.id
+            }
+            let uncoveredArchiveIDs = Set(archivedSnapshots.compactMap { archived -> UUID? in
+                Self.archiveDiscoveryCovered(archived, reachableHostKeys: reachable)
+                    ? nil
+                    : archived.id
+            })
+
             let actions = HolyConvergePlanner.plan(
                 roster: rosterEntries,
                 discovered: discoveredEntries,
-                reachableHostKeys: reachable
+                reachableHostKeys: reachable,
+                adoptableMatchKeys: Set(archivedSessionIDByMatchKey.keys)
             )
 
             await MainActor.run {
                 guard let self else { return }
-                self.applyConvergeActions(actions, discoveredByMatchKey: discoveredByMatchKey)
+                self.publishConvergeDiscoveries(
+                    discoveredByMatchKey,
+                    localDiscoverySucceeded: localDiscoverySucceeded,
+                    successfulRemoteHostIDs: successfulRemoteHostIDs
+                )
+                var identityChanged = false
+                for (sessionID, discovered) in reconciledIdentityBySessionID {
+                    if let session = self.sessions.first(where: { $0.id == sessionID }) {
+                        identityChanged = session.applyDiscoveredTmuxIdentity(discovered) || identityChanged
+                        let discoveredSpec: HolySessionLaunchSpec
+                        if session.record.launchSpec.transport.isRemote,
+                           let host = discoveredByMatchKey.values.first(where: {
+                               $0.session.id == discovered.id
+                           })?.host {
+                            discoveredSpec = self.remoteTmuxLaunchSpec(for: discovered, on: host)
+                        } else {
+                            discoveredSpec = self.localTmuxLaunchSpec(for: discovered)
+                        }
+                        identityChanged = session.applyDiscoveredLaunchMetadata(
+                            from: discoveredSpec,
+                            refreshGitSnapshot: false
+                        ) || identityChanged
+                    }
+                }
+                self.applyConvergeActions(
+                    actions,
+                    discoveredByMatchKey: discoveredByMatchKey,
+                    archivedSessionIDByMatchKey: archivedSessionIDByMatchKey
+                )
+                let retentionChanged = self.applyArchiveRetention(
+                    protectedArchiveIDs: protectedArchiveIDs.union(uncoveredArchiveIDs)
+                )
+                if identityChanged || retentionChanged {
+                    self.persist()
+                }
                 self.isConverging = false
             }
         }
@@ -816,22 +947,36 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private func applyConvergeActions(
         _ actions: [HolyConvergeAction],
-        discoveredByMatchKey: [String: (session: HolyDiscoveredTmuxSession, host: HolyRemoteHostRecord?)]
+        discoveredByMatchKey: [String: (session: HolyDiscoveredTmuxSession, host: HolyRemoteHostRecord?)],
+        archivedSessionIDByMatchKey: [String: UUID]
     ) {
         for action in actions {
             switch action {
-            case let .attachNew(matchKey):
-                // Discovery already filters hidden sessions, and the roster
-                // snapshot drops the hostKey of any session discovery could hide
-                // (generated bare shells, symbol-only shell titles, and
-                // generic-workspace shells) while keeping its matchKey, so a
-                // planner .attachNew is always a genuinely new session here.
-                guard let found = discoveredByMatchKey[matchKey] else { break }
-                if let host = found.host {
-                    launchRemoteTmuxSessions([found.session], on: host, keepHostsOpen: true)
-                } else {
-                    launchLocalTmuxSessions([found.session], keepHostsOpen: true)
+            case let .adoptArchived(matchKey):
+                guard let found = discoveredByMatchKey[matchKey],
+                      let archivedSessionID = archivedSessionIDByMatchKey[matchKey],
+                      let archivedSession = archivedSessions.first(where: { $0.id == archivedSessionID }) else {
+                    break
                 }
+
+                let launchSpec = reconciledArchivedLaunchSpec(
+                    archivedSession,
+                    discovered: found.session,
+                    host: found.host
+                )
+                if let result = sessionSupervisor.readoptArchivedSession(
+                    archivedSession,
+                    with: launchSpec,
+                    in: currentSessionStoreState
+                ) {
+                    applySessionStoreState(result.state)
+                    persist(pendingEvents: result.pendingEvents)
+                }
+            case .surfaceOrphan:
+                // Unknown live sessions remain discovery-only. Hosts now shows
+                // them with its existing explicit Attach and confirmed Kill
+                // controls; converge never creates a pane or reaps them itself.
+                break
             case let .repair(sessionID):
                 if let session = sessions.first(where: { $0.id == sessionID }),
                    canReattachSession(session) {
@@ -849,16 +994,89 @@ final class HolyWorkspaceStore: ObservableObject {
         updatePowerAssertion()
     }
 
+    private func publishConvergeDiscoveries(
+        _ discoveredByMatchKey: [String: (session: HolyDiscoveredTmuxSession, host: HolyRemoteHostRecord?)],
+        localDiscoverySucceeded: Bool,
+        successfulRemoteHostIDs: Set<UUID>
+    ) {
+        let discoveries = Array(discoveredByMatchKey.values)
+        if localDiscoverySucceeded {
+            discoveredLocalTmuxSessions = discoveries
+                .filter { $0.host == nil }
+                .map(\.session)
+                .sorted { $0.displayTitle.localizedCaseInsensitiveCompare($1.displayTitle) == .orderedAscending }
+            localTmuxDiscoveryError = nil
+        }
+
+        for hostID in successfulRemoteHostIDs {
+            discoveredRemoteSessionsByHostID[hostID] = discoveries
+                .filter { $0.host?.id == hostID }
+                .map(\.session)
+                .sorted { $0.displayTitle.localizedCaseInsensitiveCompare($1.displayTitle) == .orderedAscending }
+            remoteDiscoveryErrorsByHostID.removeValue(forKey: hostID)
+        }
+    }
+
+    @discardableResult
+    private func applyArchiveRetention(
+        protectedArchiveIDs: Set<UUID>
+    ) -> Bool {
+        let retained = HolyWorkspaceRetentionPolicy.retainedArchivedSessions(
+            archivedSessions,
+            activeSessionIDs: Set(sessions.map(\.id)),
+            protectedArchiveIDs: protectedArchiveIDs
+        )
+        guard retained.map(\.id) != archivedSessions.map(\.id) else {
+            return false
+        }
+
+        archivedSessions = retained
+        if let selectedArchivedSessionID,
+           !retained.contains(where: { $0.id == selectedArchivedSessionID }) {
+            self.selectedArchivedSessionID = retained.first?.id
+        }
+        return true
+    }
+
+    private func reconciledArchivedLaunchSpec(
+        _ archivedSession: HolyArchivedSession,
+        discovered: HolyDiscoveredTmuxSession,
+        host: HolyRemoteHostRecord?
+    ) -> HolySessionLaunchSpec {
+        let discoveredSpec = if let host {
+            remoteTmuxLaunchSpec(for: discovered, on: host)
+        } else {
+            localTmuxLaunchSpec(for: discovered)
+        }
+
+        var launchSpec = archivedSession.record.launchSpec
+        launchSpec.transport = discoveredSpec.transport
+        launchSpec.tmux = discoveredSpec.tmux
+        if launchSpec.runtime == .shell, discoveredSpec.runtime != .shell {
+            launchSpec.runtime = discoveredSpec.runtime
+        }
+        if launchSpec.workingDirectory?.nilIfBlank == nil {
+            launchSpec.workingDirectory = discoveredSpec.workingDirectory
+        }
+        if launchSpec.objective?.nilIfBlank == nil {
+            launchSpec.objective = discoveredSpec.objective
+        }
+        if launchSpec.command?.nilIfBlank == nil {
+            launchSpec.command = discoveredSpec.command
+        }
+        return launchSpec
+    }
+
     // MARK: - Converge key construction (single source of truth)
     //
     // Both the roster snapshot and the discovery loop build identity keys here
     // so a session is keyed identically on both sides. The identity socket is
     // always the SESSION's own socket, normalized the same way everywhere:
-    // blank -> nil -> "auto", lowercased.
+    // blank -> nil -> "auto", with named socket case preserved.
 
     nonisolated private static func convergeHostKey(destination: String, socketName: String?) -> String {
         let scheme = destination == "local" ? "local" : "ssh"
-        let normalizedSocket = socketName?.nilIfBlank?.lowercased() ?? "auto"
+        let normalizedSocket = socketName?.nilIfBlank ?? "auto"
         return [scheme, destination.lowercased(), normalizedSocket].joined(separator: "|")
     }
 
@@ -893,20 +1111,158 @@ final class HolyWorkspaceStore: ObservableObject {
         )
     }
 
+    /// Fallback used only when discovery could not resolve a roster snapshot.
+    /// A nil socket is treated as incomplete legacy identity and therefore has
+    /// no hostKey: it may prevent a duplicate default-socket attach by matchKey,
+    /// but it can never authorize archival as "missing".
+    nonisolated private static func storedConvergeRosterEntry(
+        _ snapshot: HolyConvergeRosterSnapshot
+    ) -> HolyConvergeRosterEntry {
+        let spec = snapshot.launchSpec
+        guard let tmux = spec.tmux?.normalized,
+              let sessionName = tmux.sessionName?.nilIfBlank else {
+            return .init(
+                sessionID: snapshot.sessionID,
+                matchKey: nil,
+                hostKey: nil,
+                localProcessExited: snapshot.localProcessExited
+            )
+        }
+
+        let destination: String
+        if spec.transport.isRemote {
+            guard let sshDestination = spec.transport.normalized.sshDestination?.nilIfBlank else {
+                return .init(
+                    sessionID: snapshot.sessionID,
+                    matchKey: nil,
+                    hostKey: nil,
+                    localProcessExited: snapshot.localProcessExited
+                )
+            }
+            destination = sshDestination
+        } else {
+            destination = "local"
+        }
+
+        let socketName = tmux.socketName?.nilIfBlank
+        let couldBeHidden = socketName == nil || HolyDiscoveredTmuxSession.rosterEntryCouldBeHiddenFromDiscovery(
+            sessionName: sessionName,
+            title: snapshot.title,
+            workingDirectory: spec.workingDirectory,
+            runtime: spec.runtime
+        )
+        return convergeRosterEntry(
+            sessionID: snapshot.sessionID,
+            destination: destination,
+            socketName: socketName,
+            sessionName: sessionName,
+            couldBeHidden: couldBeHidden,
+            localProcessExited: snapshot.localProcessExited
+        )
+    }
+
+    /// Whether converge positively inspected every socket namespace an archive
+    /// could refer to. Uncovered archives are protected from retention, while
+    /// covered hosts still compact even when an unrelated host is offline.
+    nonisolated private static func archiveDiscoveryCovered(
+        _ archivedSession: HolyArchivedSession,
+        reachableHostKeys: Set<String>
+    ) -> Bool {
+        let launchSpec = archivedSession.record.launchSpec
+        guard let tmux = launchSpec.tmux?.normalized else { return true }
+
+        let destination: String
+        if launchSpec.transport.isRemote {
+            guard let sshDestination = launchSpec.transport.normalized.sshDestination?.nilIfBlank else {
+                return true
+            }
+            destination = sshDestination
+        } else {
+            destination = "local"
+        }
+
+        if let socketName = tmux.socketName?.nilIfBlank {
+            return reachableHostKeys.contains(
+                convergeHostKey(destination: destination, socketName: socketName)
+            )
+        }
+
+        // Nil is an incomplete legacy socket, not permission to assume the
+        // default server. The standard unconstrained probe inspects both.
+        return [nil, HolySessionTmuxSpec.defaultSocketName].allSatisfy { socketName in
+            reachableHostKeys.contains(
+                convergeHostKey(destination: destination, socketName: socketName)
+            )
+        }
+    }
+
     func canKillTmuxSession(_ session: HolySession) -> Bool {
-        HolyTmuxSessionTerminationCommand.command(for: session.record.launchSpec) != nil
+        let launchSpec = session.record.launchSpec
+        guard launchSpec.tmux != nil else { return false }
+        return !launchSpec.transport.isRemote
+            || launchSpec.transport.sshDestination?.holyTerminatorTrimmed.nilIfEmpty != nil
     }
 
     func killTmuxSession(_ session: HolySession) {
-        guard let command = HolyTmuxSessionTerminationCommand.command(for: session.record.launchSpec) else {
-            return
-        }
-
         let sessionID = session.id
         let sessionTitle = session.displayTitle
+        let launchSpec = session.record.launchSpec
         tmuxSessionTerminationError = nil
 
-        Task {
+        Task { [weak self] in
+            guard let self else { return }
+
+            let discoveredSessions: [HolyDiscoveredTmuxSession]
+            do {
+                discoveredSessions = try await self.discoverLiveTmuxSessions(for: launchSpec)
+            } catch {
+                self.tmuxSessionTerminationError = "Holy Ghostty left \(sessionTitle) in the roster because it could not inspect the tmux server. \(error.localizedDescription)"
+                return
+            }
+
+            let discoveredSession: HolyDiscoveredTmuxSession
+            switch HolyTmuxIdentityResolver.resolve(
+                launchSpec: launchSpec,
+                among: discoveredSessions
+            ) {
+            case let .matched(match):
+                discoveredSession = match
+            case .notFound:
+                self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because no live tmux session could be matched safely. Refresh Hosts and attach or kill the exact discovered session there."
+                return
+            case .ambiguous:
+                self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because more than one live tmux session matched its saved metadata. Use Hosts to choose the exact session."
+                return
+            }
+
+            let activeMatches = HolyTmuxIdentityResolver.resolveOneToOne(
+                launchSpecsByID: Dictionary(
+                    uniqueKeysWithValues: self.sessions.compactMap { activeSession in
+                        guard activeSession.record.launchSpec.tmux != nil else { return nil }
+                        return (activeSession.id, activeSession.record.launchSpec)
+                    }
+                ),
+                among: discoveredSessions
+            )
+            guard activeMatches[sessionID] == discoveredSession else {
+                self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because another roster record resolves to the same live tmux session. Resolve the duplicate in Hosts before killing it."
+                return
+            }
+
+            guard let identity = HolyTmuxLiveIdentity(
+                transport: launchSpec.transport,
+                discoveredSession: discoveredSession
+            ) else {
+                self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because the discovered tmux identity did not match its transport."
+                return
+            }
+
+            if let currentSession = self.sessions.first(where: { $0.id == sessionID }),
+               currentSession.applyDiscoveredTmuxIdentity(discoveredSession) {
+                self.persist()
+            }
+
+            let command = HolyTmuxSessionTerminationCommand.command(for: identity)
             let result = await Task.detached(priority: .utility) {
                 command.run()
             }.value
@@ -916,17 +1272,54 @@ final class HolyWorkspaceStore: ObservableObject {
                     AppDelegate.logger.error(
                         "Holy Ghostty failed to kill tmux session \(sessionTitle, privacy: .public): \(failure.message, privacy: .public)"
                     )
-                    tmuxSessionTerminationError = "Holy Ghostty left \(sessionTitle) in the roster because tmux did not confirm it was killed. \(failure.message)"
+                    self.tmuxSessionTerminationError = "Holy Ghostty left \(sessionTitle) in the roster because tmux still reported it after the kill attempt. \(failure.message)"
                 }
                 return
             }
 
-            guard let currentSession = sessions.first(where: { $0.id == sessionID }) else {
+            guard let currentSession = self.sessions.first(where: { $0.id == sessionID }) else {
                 return
             }
 
-            archive(currentSession)
+            self.archive(currentSession)
         }
+    }
+
+    private func discoverLiveTmuxSessions(
+        for launchSpec: HolySessionLaunchSpec
+    ) async throws -> [HolyDiscoveredTmuxSession] {
+        if launchSpec.transport.isRemote {
+            let transport = launchSpec.transport.normalized
+            guard let destination = transport.sshDestination?.holyTerminatorTrimmed.nilIfEmpty else {
+                return []
+            }
+
+            let savedHost = remoteHosts.first {
+                $0.sshDestination.holyTerminatorTrimmed.caseInsensitiveCompare(destination) == .orderedSame
+            }
+            let host = HolyRemoteHostRecord(
+                id: savedHost?.id ?? UUID(),
+                label: savedHost?.displayTitle ?? transport.hostLabel ?? destination,
+                sshDestination: destination,
+                // A missing stored socket is exactly what this probe must
+                // recover, so leave it unconstrained and inspect both default
+                // and holy. Never inherit a saved host's preferred socket here.
+                tmuxSocketName: launchSpec.tmux?.normalized.socketName
+            )
+            return try await HolyRemoteTmuxDiscoveryService.shared.discoverSessionsThrowing(
+                for: host,
+                timeout: Self.convergeDiscoveryTimeoutSeconds,
+                includeHiddenSessions: true
+            )
+        }
+
+        return try await HolyRemoteTmuxDiscoveryService.shared.discoverLocalSessionsThrowing(
+            hostID: HolyLocalMachineIdentity.localHostID,
+            hostLabel: HolyLocalMachineIdentity.current.displayName,
+            tmuxSocketName: launchSpec.tmux?.normalized.socketName,
+            timeout: Self.convergeDiscoveryTimeoutSeconds,
+            includeHiddenSessions: true
+        )
     }
 
     func killDiscoveredLocalTmuxSession(_ session: HolyDiscoveredTmuxSession) {
@@ -947,9 +1340,16 @@ final class HolyWorkspaceStore: ObservableObject {
         launchSpec: HolySessionLaunchSpec,
         onCompletion: @escaping @MainActor () -> Void
     ) {
-        guard let command = HolyTmuxSessionTerminationCommand.command(for: launchSpec) else {
+        guard let tmux = launchSpec.tmux?.normalized,
+              let sessionName = tmux.sessionName?.holyTerminatorTrimmed.nilIfEmpty else {
             return
         }
+        guard let identity = HolyTmuxLiveIdentity(
+            transport: launchSpec.transport.normalized,
+            socketName: tmux.socketName?.holyTerminatorTrimmed.nilIfEmpty,
+            sessionName: sessionName
+        ) else { return }
+        let command = HolyTmuxSessionTerminationCommand.command(for: identity)
 
         tmuxSessionTerminationError = nil
 
@@ -965,7 +1365,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 AppDelegate.logger.error(
                     "Holy Ghostty failed to kill discovered tmux session: \(failure.message, privacy: .public)"
                 )
-                tmuxSessionTerminationError = "Holy Ghostty left the tmux session running because tmux did not confirm it was killed. \(failure.message)"
+                tmuxSessionTerminationError = "Holy Ghostty left the tmux session running because tmux still reported it after the kill attempt. \(failure.message)"
             }
         }
     }
@@ -2015,7 +2415,7 @@ final class HolyWorkspaceStore: ObservableObject {
         activeTmuxMetadataRefreshCancellable = Timer.publish(every: 300, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                self?.refreshActiveTmuxSessionMetadata()
+                self?.convergeRoster(reason: .periodic)
             }
     }
 
@@ -2054,34 +2454,23 @@ final class HolyWorkspaceStore: ObservableObject {
         var seenKeys: Set<String> = []
 
         for session in sessions {
-            let launchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(session.record.launchSpec)
+            let launchSpec = session.record.launchSpec
             guard launchSpec.transport.kind == .ssh,
                   let destination = launchSpec.transport.sshDestination?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
-                  let tmux = launchSpec.tmux?.normalized,
-                  tmux.sessionName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank != nil else {
+                  let tmux = launchSpec.tmux?.normalized else {
                 continue
             }
 
             let socketName = tmux.socketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
-            let matchingHost = remoteHosts.first { host in
-                let normalizedHost = host.normalized()
-                guard normalizedHost.sshDestination.caseInsensitiveCompare(destination) == .orderedSame else {
-                    return false
-                }
-
-                let hostSocketName = normalizedHost.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
-                return hostSocketName == socketName || hostSocketName == nil
-            }
-
-            let host = matchingHost ?? HolyRemoteHostRecord(
-                label: launchSpec.transport.hostLabel ?? destination,
-                sshDestination: destination,
-                tmuxSocketName: socketName
+            let host = remoteDiscoveryHost(
+                destination: destination,
+                label: launchSpec.transport.hostLabel,
+                socketName: socketName
             )
             let normalizedHost = host.normalized()
             let key = [
                 normalizedHost.sshDestination.lowercased(),
-                normalizedHost.tmuxSocketName?.lowercased() ?? "auto",
+                normalizedHost.tmuxSocketName ?? "auto",
             ].joined(separator: "|")
 
             guard seenKeys.insert(key).inserted else { continue }
@@ -2089,6 +2478,46 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         return hosts
+    }
+
+    private func remoteDiscoveryHost(
+        destination: String,
+        label: String?,
+        socketName: String?
+    ) -> HolyRemoteHostRecord {
+        if let exact = remoteHosts.first(where: { host in
+            let normalized = host.normalized()
+            return normalized.sshDestination.caseInsensitiveCompare(destination) == .orderedSame
+                && normalized.tmuxSocketName == socketName
+        }) {
+            return exact
+        }
+
+        // A saved "automatic" host is useful for its stable ID/label, but an
+        // exact record socket must still drive probe coverage. Copy rather than
+        // returning the auto host, or a custom-socket record would be marked
+        // covered after probing only default+holy.
+        if let automatic = remoteHosts.first(where: { host in
+            let normalized = host.normalized()
+            return normalized.sshDestination.caseInsensitiveCompare(destination) == .orderedSame
+                && normalized.tmuxSocketName == nil
+        }) {
+            return HolyRemoteHostRecord(
+                id: automatic.id,
+                label: automatic.displayTitle,
+                sshDestination: destination,
+                tmuxSocketName: socketName,
+                createdAt: automatic.createdAt,
+                updatedAt: automatic.updatedAt,
+                lastDiscoveredAt: automatic.lastDiscoveredAt
+            )
+        }
+
+        return HolyRemoteHostRecord(
+            label: label ?? destination,
+            sshDestination: destination,
+            tmuxSocketName: socketName
+        )
     }
 
     private func localTmuxLaunchSpec(for session: HolyDiscoveredTmuxSession) -> HolySessionLaunchSpec {
@@ -2143,15 +2572,15 @@ final class HolyWorkspaceStore: ObservableObject {
     private func applyDiscoveredLocalSessionMetadata(_ discoveredSessions: [HolyDiscoveredTmuxSession]) -> Bool {
         var changed = false
 
-        for discoveredSession in discoveredSessions {
-            let launchSpec = localTmuxLaunchSpec(for: discoveredSession)
-            guard let discoveredKey = HolyLocalTmuxSessionKey(launchSpec: launchSpec) else {
-                continue
-            }
+        for session in sessions where session.record.launchSpec.transport.kind == .local {
+            guard case let .matched(discoveredSession) = HolyTmuxIdentityResolver.resolve(
+                launchSpec: session.record.launchSpec,
+                among: discoveredSessions
+            ) else { continue }
 
-            for session in sessions where HolyLocalTmuxSessionKey(launchSpec: session.record.launchSpec) == discoveredKey {
-                changed = session.applyDiscoveredLaunchMetadata(from: launchSpec, refreshGitSnapshot: false) || changed
-            }
+            let launchSpec = localTmuxLaunchSpec(for: discoveredSession)
+            changed = session.applyDiscoveredTmuxIdentity(discoveredSession) || changed
+            changed = session.applyDiscoveredLaunchMetadata(from: launchSpec, refreshGitSnapshot: false) || changed
         }
 
         return changed
@@ -2163,15 +2592,15 @@ final class HolyWorkspaceStore: ObservableObject {
     ) -> Bool {
         var changed = false
 
-        for discoveredSession in discoveredSessions {
-            let launchSpec = remoteTmuxLaunchSpec(for: discoveredSession, on: host)
-            guard let discoveredKey = HolyRemoteTmuxSessionKey(launchSpec: launchSpec) else {
-                continue
-            }
+        for session in sessions where session.record.launchSpec.transport.kind == .ssh {
+            guard case let .matched(discoveredSession) = HolyTmuxIdentityResolver.resolve(
+                launchSpec: session.record.launchSpec,
+                among: discoveredSessions
+            ) else { continue }
 
-            for session in sessions where HolyRemoteTmuxSessionKey(launchSpec: session.record.launchSpec) == discoveredKey {
-                changed = session.applyDiscoveredLaunchMetadata(from: launchSpec) || changed
-            }
+            let launchSpec = remoteTmuxLaunchSpec(for: discoveredSession, on: host)
+            changed = session.applyDiscoveredTmuxIdentity(discoveredSession) || changed
+            changed = session.applyDiscoveredLaunchMetadata(from: launchSpec) || changed
         }
 
         return changed
@@ -3061,13 +3490,13 @@ private struct HolyLocalTmuxSessionKey: Equatable {
     let tmuxSessionName: String
 
     init?(launchSpec: HolySessionLaunchSpec) {
-        let realizedLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
-        guard realizedLaunchSpec.transport.kind == .local,
-              let tmuxSessionName = realizedLaunchSpec.tmux?.normalized.sessionName?.nilIfBlank else {
+        guard launchSpec.transport.normalized.kind == .local,
+              let tmux = launchSpec.tmux?.normalized,
+              let tmuxSessionName = tmux.sessionName?.nilIfBlank else {
             return nil
         }
 
-        self.tmuxSocketName = realizedLaunchSpec.tmux?.normalized.socketName?.nilIfBlank
+        self.tmuxSocketName = tmux.socketName?.nilIfBlank
         self.tmuxSessionName = tmuxSessionName
     }
 }
@@ -3078,15 +3507,16 @@ private struct HolyRemoteTmuxSessionKey: Equatable {
     let tmuxSessionName: String
 
     init?(launchSpec: HolySessionLaunchSpec) {
-        let realizedLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
-        guard realizedLaunchSpec.transport.kind == .ssh,
-              let sshDestination = realizedLaunchSpec.transport.sshDestination?.nilIfBlank,
-              let tmuxSessionName = realizedLaunchSpec.tmux?.normalized.sessionName?.nilIfBlank else {
+        let transport = launchSpec.transport.normalized
+        guard transport.kind == .ssh,
+              let sshDestination = transport.sshDestination?.nilIfBlank,
+              let tmux = launchSpec.tmux?.normalized,
+              let tmuxSessionName = tmux.sessionName?.nilIfBlank else {
             return nil
         }
 
         self.sshDestination = sshDestination
-        self.tmuxSocketName = realizedLaunchSpec.tmux?.normalized.socketName?.nilIfBlank
+        self.tmuxSocketName = tmux.socketName?.nilIfBlank
         self.tmuxSessionName = tmuxSessionName
     }
 }
@@ -3240,33 +3670,34 @@ private struct HolyTmuxSessionTerminationCommand: Sendable {
     let executableURL: URL
     let arguments: [String]
 
-    static func command(for launchSpec: HolySessionLaunchSpec) -> Self? {
-        let realizedLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
-        guard let tmux = realizedLaunchSpec.tmux?.normalized,
-              let sessionName = tmux.sessionName?.holyTerminatorTrimmed.nilIfEmpty else {
-            return nil
-        }
-
+    static func command(for identity: HolyTmuxLiveIdentity) -> Self {
         var tmuxArguments = ["tmux"]
-        if let socketName = tmux.socketName?.holyTerminatorTrimmed.nilIfEmpty {
+        if let socketName = identity.socketName?.holyTerminatorTrimmed.nilIfEmpty {
             tmuxArguments += ["-L", socketName]
         }
-        tmuxArguments += ["kill-session", "-t", sessionName]
+        let exactTarget = "=\(identity.sessionName)"
+        let killCommand = shellCommand(tmuxArguments + ["kill-session", "-t", exactTarget])
+        let probeCommand = shellCommand(tmuxArguments + ["has-session", "-t", exactTarget])
+        let script = verificationScript(killCommand: killCommand, probeCommand: probeCommand)
 
-        if realizedLaunchSpec.transport.isRemote {
-            guard let destination = realizedLaunchSpec.transport.sshDestination?.holyTerminatorTrimmed.nilIfEmpty else {
-                return nil
-            }
+        if identity.transport.isRemote {
+            let destination = identity.transport.sshDestination?.holyTerminatorTrimmed.nilIfEmpty ?? ""
 
             return Self(
                 executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-                arguments: ["ssh", destination, "zsh", "-lc", shellCommand(tmuxArguments)]
+                arguments: [
+                    "ssh",
+                    "-o", "BatchMode=yes",
+                    "-o", "ConnectTimeout=5",
+                    destination,
+                    "zsh", "-lc", posixQuote(script),
+                ]
             )
         }
 
         return Self(
             executableURL: URL(fileURLWithPath: "/bin/zsh"),
-            arguments: ["-lc", shellCommand(tmuxArguments)]
+            arguments: ["-lc", script]
         )
     }
 
@@ -3278,10 +3709,20 @@ private struct HolyTmuxSessionTerminationCommand: Sendable {
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
+        process.environment = Self.scrubbedTmuxEnvironment(ProcessInfo.processInfo.environment)
+        let terminated = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in terminated.signal() }
 
         do {
             try process.run()
-            process.waitUntilExit()
+            guard terminated.wait(timeout: .now() + 12) == .success else {
+                process.terminate()
+                if terminated.wait(timeout: .now() + 1) == .timedOut {
+                    Darwin.kill(process.processIdentifier, SIGKILL)
+                    _ = terminated.wait(timeout: .now() + 1)
+                }
+                return .failure(.init(message: "tmux termination timed out after 12 seconds."))
+            }
             guard process.terminationStatus == 0 else {
                 let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
                 let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
@@ -3296,8 +3737,38 @@ private struct HolyTmuxSessionTerminationCommand: Sendable {
         }
     }
 
+    fileprivate static func scrubbedTmuxEnvironment(_ environment: [String: String]) -> [String: String] {
+        var environment = environment
+        environment.removeValue(forKey: "TMUX")
+        environment.removeValue(forKey: "TMUX_PANE")
+        environment.removeValue(forKey: "TMUX_TMPDIR")
+        return environment
+    }
+
     private static func shellCommand(_ arguments: [String]) -> String {
         arguments.map(posixQuote).joined(separator: " ")
+    }
+
+    private static func verificationScript(killCommand: String, probeCommand: String) -> String {
+        """
+        kill_output=$(\(killCommand) 2>&1)
+        kill_status=$?
+        if (( kill_status != 0 )); then
+          if [[ -n "$kill_output" ]]; then printf '%s\n' "$kill_output" >&2; fi
+          exit "$kill_status"
+        fi
+        attempt=0
+        while \(probeCommand) >/dev/null 2>&1; do
+          attempt=$((attempt + 1))
+          if (( attempt >= 20 )); then
+            if [[ -n "$kill_output" ]]; then printf '%s\n' "$kill_output" >&2; fi
+            printf '%s\n' 'tmux still reports the session after kill verification.' >&2
+            exit 1
+          fi
+          sleep 0.1
+        done
+        exit 0
+        """
     }
 
     private static func posixQuote(_ value: String) -> String {
@@ -3462,10 +3933,39 @@ extension HolyWorkspaceStore {
     static func terminationCommandForTesting(
         launchSpec: HolySessionLaunchSpec
     ) -> (executablePath: String, arguments: [String])? {
-        guard let command = HolyTmuxSessionTerminationCommand.command(for: launchSpec) else {
+        let transport = launchSpec.transport.normalized
+        guard let tmux = launchSpec.tmux?.normalized,
+              let socketName = tmux.socketName?.holyTerminatorTrimmed.nilIfEmpty,
+              let sessionName = tmux.sessionName?.holyTerminatorTrimmed.nilIfEmpty,
+              let identity = HolyTmuxLiveIdentity(
+                transport: transport,
+                socketName: socketName,
+                sessionName: sessionName
+              ) else {
             return nil
         }
+        let command = HolyTmuxSessionTerminationCommand.command(for: identity)
         return (command.executableURL.path, command.arguments)
+    }
+
+    static func discoveredTerminationCommandForTesting(
+        transport: HolySessionTransportSpec,
+        socketName: String?,
+        sessionName: String
+    ) -> (executablePath: String, arguments: [String])? {
+        guard let identity = HolyTmuxLiveIdentity(
+            transport: transport,
+            socketName: socketName,
+            sessionName: sessionName
+        ) else { return nil }
+        let command = HolyTmuxSessionTerminationCommand.command(for: identity)
+        return (command.executableURL.path, command.arguments)
+    }
+
+    static func scrubbedTerminationEnvironmentForTesting(
+        _ environment: [String: String]
+    ) -> [String: String] {
+        HolyTmuxSessionTerminationCommand.scrubbedTmuxEnvironment(environment)
     }
 
     static func canReattachLaunchSpecForTesting(_ launchSpec: HolySessionLaunchSpec) -> Bool {
@@ -3503,6 +4003,13 @@ extension HolyWorkspaceStore {
             ),
             localProcessExited: localProcessExited
         )
+    }
+
+    static func archiveDiscoveryCoveredForTesting(
+        _ archivedSession: HolyArchivedSession,
+        reachableHostKeys: Set<String>
+    ) -> Bool {
+        archiveDiscoveryCovered(archivedSession, reachableHostKeys: reachableHostKeys)
     }
 }
 #endif
