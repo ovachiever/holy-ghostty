@@ -107,7 +107,7 @@ enum HolyBudgetIntelligenceRepository {
         }
     }
 
-    private static func loadSessionIntelligence(
+    static func loadSessionIntelligence(
         sessionID: UUID,
         runtime: HolySessionRuntime,
         budget: HolySessionBudget,
@@ -188,11 +188,15 @@ enum HolyBudgetIntelligenceRepository {
         in database: HolyDatabase
     ) throws -> [HolyBudgetSample] {
         let sql = """
-        SELECT id, session_id, captured_at, runtime, source_task_id, total_tokens,
-               estimated_cost_usd, budget_status, token_limit, cost_limit_usd
+        SELECT budget_samples.id, budget_samples.session_id, budget_samples.captured_at,
+               budget_samples.runtime, budget_samples.source_task_id, budget_samples.total_tokens,
+               budget_samples.estimated_cost_usd, budget_samples.budget_status,
+               budget_samples.token_limit, budget_samples.cost_limit_usd
         FROM budget_samples
-        WHERE session_id = ?
-        ORDER BY captured_at DESC, id DESC
+        INNER JOIN sessions ON sessions.id = budget_samples.session_id
+        WHERE budget_samples.session_id = ?
+          AND sessions.purge_pending_at IS NULL
+        ORDER BY budget_samples.captured_at DESC, budget_samples.id DESC
         LIMIT ?;
         """
 
@@ -209,10 +213,13 @@ enum HolyBudgetIntelligenceRepository {
     ) throws -> HolyBudgetRuntimeRollup? {
         let sql = """
         WITH latest_per_session AS (
-            SELECT runtime, session_id, MAX(captured_at) AS captured_at
+            SELECT budget_samples.runtime, budget_samples.session_id,
+                   MAX(budget_samples.captured_at) AS captured_at
             FROM budget_samples
-            WHERE runtime = ?
-            GROUP BY runtime, session_id
+            INNER JOIN sessions ON sessions.id = budget_samples.session_id
+            WHERE budget_samples.runtime = ?
+              AND sessions.purge_pending_at IS NULL
+            GROUP BY budget_samples.runtime, budget_samples.session_id
         )
         SELECT
             COUNT(*) AS session_count,

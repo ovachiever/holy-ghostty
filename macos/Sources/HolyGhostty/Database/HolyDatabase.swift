@@ -69,6 +69,11 @@ final class HolyDatabase {
         let url = HolyDatabasePaths.databaseURL
         try HolyDatabasePaths.ensureContainerDirectory()
 
+        return try open(at: url, readOnly: readOnly)
+    }
+
+    static func open(at url: URL, readOnly: Bool = false) throws -> HolyDatabase {
+
         var handle: OpaquePointer?
         let flags: Int32
         if readOnly {
@@ -118,6 +123,10 @@ final class HolyDatabase {
     }
 
     func scalarInt32(_ sql: String) throws -> Int32 {
+        Int32(try scalarInt64(sql))
+    }
+
+    func scalarInt64(_ sql: String) throws -> Int64 {
         var statement: OpaquePointer?
         let prepareResult = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
         guard prepareResult == SQLITE_OK, let statement else {
@@ -134,7 +143,20 @@ final class HolyDatabase {
             throw HolyDatabaseError.stepFailed(sql: sql, code: stepResult, message: errorMessage())
         }
 
-        return sqlite3_column_int(statement, 0)
+        return sqlite3_column_int64(statement, 0)
+    }
+
+    func scalarText(_ sql: String) throws -> String {
+        var value: String?
+        try query(sql) { statement in
+            guard value == nil, let bytes = sqlite3_column_text(statement, 0) else { return }
+            value = String(cString: bytes)
+        }
+
+        guard let value else {
+            throw HolyDatabaseError.missingScalar(sql: sql)
+        }
+        return value
     }
 
     func query(
@@ -196,6 +218,10 @@ final class HolyDatabase {
 
     var lastInsertedRowID: Int64 {
         sqlite3_last_insert_rowid(handle)
+    }
+
+    var changedRowCount: Int32 {
+        sqlite3_changes(handle)
     }
 
     private func prepare(_ sql: String) throws -> OpaquePointer {

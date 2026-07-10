@@ -2,11 +2,11 @@ import Foundation
 
 enum HolyDatabaseSchema {
     static let filename = "holy-ghostty.sqlite3"
-    static let currentUserVersion: Int32 = 7
+    static let currentUserVersion: Int32 = 8
     static let busyTimeoutMilliseconds: Int32 = 5_000
 }
 
-enum HolyDatabaseTable: String, CaseIterable {
+enum HolyDatabaseTable: String, CaseIterable, Hashable {
     case appState = "app_state"
     case sessions = "sessions"
     case sessionEvents = "session_events"

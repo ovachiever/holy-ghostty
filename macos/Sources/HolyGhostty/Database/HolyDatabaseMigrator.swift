@@ -58,6 +58,11 @@ enum HolyDatabaseMigrator {
             label: "Launch profiles",
             statements: schemaV7
         ),
+        .init(
+            version: 8,
+            label: "Bounded persistence retention",
+            statements: schemaV8
+        ),
     ]
 
     private static let schemaV1: [String] = [
@@ -378,6 +383,93 @@ enum HolyDatabaseMigrator {
         """
         CREATE INDEX IF NOT EXISTS launch_profiles_updated_at_idx
         ON launch_profiles(updated_at, created_at);
+        """,
+    ]
+
+    // Adding a nullable column without a default is a metadata-only ALTER in
+    // SQLite. In particular, this migration does not rewrite git_snapshots --
+    // that legacy table may already contain tens of millions of rows.
+    private static let schemaV8: [String] = [
+        """
+        ALTER TABLE sessions
+        ADD COLUMN purge_pending_at TEXT;
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS sessions_purge_pending_at_idx
+        ON sessions(purge_pending_at);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS sessions_latest_git_snapshot_id_idx
+        ON sessions(latest_git_snapshot_id);
+        """,
+        "DROP VIEW IF EXISTS agent_sessions_sessions_v1;",
+        """
+        CREATE VIEW agent_sessions_sessions_v1 AS
+        SELECT
+            sessions.id AS id,
+            sessions.runtime AS harness,
+            sessions.title AS title,
+            COALESCE(sessions.worktree_path, sessions.working_directory, sessions.repository_root) AS project_path,
+            NULL AS project_name,
+            sessions.repository_root AS repository_root,
+            sessions.worktree_path AS worktree_path,
+            sessions.created_at AS created_at,
+            sessions.updated_at AS updated_at,
+            sessions.archived_at AS archived_at,
+            sessions.latest_phase AS phase,
+            sessions.latest_attention AS attention,
+            sessions.latest_preview_text AS preview_text,
+            NULL AS content_hash,
+            sessions.launch_spec_json AS extra_json
+        FROM sessions
+        WHERE sessions.purge_pending_at IS NULL;
+        """,
+        "DROP VIEW IF EXISTS agent_sessions_resume_targets_v1;",
+        """
+        CREATE VIEW agent_sessions_resume_targets_v1 AS
+        SELECT
+            sessions.id AS session_id,
+            sessions.runtime AS runtime,
+            sessions.working_directory AS working_directory,
+            sessions.repository_root AS repository_root,
+            COALESCE(sessions.resume_metadata_json, '{}') AS resume_payload_json,
+            sessions.preferred_command AS preferred_command,
+            CASE
+                WHEN sessions.archived_at IS NULL THEN 'active_session'
+                ELSE 'archived_session'
+            END AS resume_kind
+        FROM sessions
+        WHERE sessions.purge_pending_at IS NULL;
+        """,
+        "DROP VIEW IF EXISTS agent_sessions_events_v1;",
+        """
+        CREATE VIEW agent_sessions_events_v1 AS
+        SELECT
+            session_events.id AS event_id,
+            session_events.session_id AS session_id,
+            session_events.sequence AS sequence,
+            session_events.occurred_at AS occurred_at,
+            session_events.event_type AS event_type,
+            session_events.phase AS phase,
+            session_events.attention AS attention,
+            session_events.payload_json AS payload_json
+        FROM session_events
+        INNER JOIN sessions ON sessions.id = session_events.session_id
+        WHERE sessions.purge_pending_at IS NULL;
+        """,
+        "DROP VIEW IF EXISTS agent_sessions_annotations_v1;",
+        """
+        CREATE VIEW agent_sessions_annotations_v1 AS
+        SELECT
+            annotations.id AS id,
+            annotations.session_id AS session_id,
+            annotations.created_at AS created_at,
+            annotations.annotation_type AS annotation_type,
+            annotations.value AS value,
+            annotations.source AS source
+        FROM annotations
+        INNER JOIN sessions ON sessions.id = annotations.session_id
+        WHERE sessions.purge_pending_at IS NULL;
         """,
     ]
 }

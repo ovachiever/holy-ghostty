@@ -7,6 +7,16 @@ enum HolyWorkspaceDatabasePersistence {
         subsystem: Bundle.main.bundleIdentifier ?? "com.mitchellh.ghostty",
         category: "HolyWorkspaceDatabasePersistence"
     )
+    private static let retentionQueue = DispatchQueue(
+        label: "com.mitchellh.ghostty.holy-retention",
+        qos: .utility
+    )
+    private static let retentionScheduleLock = NSLock()
+    private static var isRetentionScheduled = false
+    // Release the writer lock after every 1,000-row transaction, then yield
+    // briefly. This keeps foreground saves responsive while draining a
+    // 31.5M-row legacy table in hours rather than days.
+    private static let retentionContinuationDelay: TimeInterval = 0.25
 
     private static let workspaceInitializedKey = "workspace_initialized"
     private static let selectedSessionIDKey = "selected_session_id"
@@ -68,6 +78,8 @@ enum HolyWorkspaceDatabasePersistence {
                 pendingEvents: pendingEvents,
                 in: database
             )
+
+            scheduleRetentionMaintenance()
         } catch {
             logger.error("Failed to save Holy workspace state to database: \(error.localizedDescription, privacy: .public)")
         }
@@ -89,7 +101,49 @@ enum HolyWorkspaceDatabasePersistence {
         }
     }
 
-    private static func load(from database: HolyDatabase) throws -> HolyWorkspaceSnapshot? {
+    private static func scheduleRetentionMaintenance() {
+        retentionScheduleLock.lock()
+        guard !isRetentionScheduled else {
+            retentionScheduleLock.unlock()
+            return
+        }
+        isRetentionScheduled = true
+        retentionScheduleLock.unlock()
+
+        retentionQueue.async {
+            var shouldContinueDraining = false
+
+            do {
+                let database = try HolyDatabase.openAppDatabase()
+                let result = try HolyWorkspaceRetentionMaintenance.prune(in: database)
+                shouldContinueDraining = result.deletedGitSnapshots
+                    == HolyWorkspaceRetentionMaintenance.defaultGitSnapshotBatchSize
+                    || result.deletedSessions
+                    == HolyWorkspaceRetentionMaintenance.defaultSessionBatchSize
+                if result.didDeleteRows {
+                    logger.notice(
+                        "Holy database retention removed \(result.deletedGitSnapshots, privacy: .public) stale git snapshots and \(result.deletedSessions, privacy: .public) retired sessions"
+                    )
+                }
+            } catch {
+                // The workspace transaction already committed. Retention is
+                // deliberately best-effort and will retry on the next save.
+                logger.warning("Holy database retention pass failed: \(error.localizedDescription, privacy: .public)")
+            }
+
+            retentionScheduleLock.lock()
+            isRetentionScheduled = false
+            retentionScheduleLock.unlock()
+
+            if shouldContinueDraining {
+                retentionQueue.asyncAfter(deadline: .now() + retentionContinuationDelay) {
+                    scheduleRetentionMaintenance()
+                }
+            }
+        }
+    }
+
+    static func load(from database: HolyDatabase) throws -> HolyWorkspaceSnapshot? {
         guard try isWorkspaceInitialized(in: database) else {
             return nil
         }
@@ -120,7 +174,7 @@ enum HolyWorkspaceDatabasePersistence {
     }
 
     @MainActor
-    private static func save(
+    static func save(
         _ snapshot: HolyWorkspaceSnapshot,
         activeSessions: [HolySession],
         attentionBySessionID: [UUID: HolySessionAttention],
@@ -128,7 +182,13 @@ enum HolyWorkspaceDatabasePersistence {
         in database: HolyDatabase
     ) throws {
         let activeSessionIndex = Dictionary(uniqueKeysWithValues: activeSessions.map { ($0.id, $0) })
-        let desiredSessionIDs = Set(snapshot.sessions.map(\.id) + snapshot.archivedSessions.map(\.sourceSessionID))
+        let activeSessionIDs = Set(snapshot.sessions.map(\.id))
+        // An active record is the live source of truth if stale persisted input
+        // happens to contain an archive for the same source session.
+        let archivedSessions = snapshot.archivedSessions.filter {
+            !activeSessionIDs.contains($0.sourceSessionID)
+        }
+        let desiredSessionIDs = activeSessionIDs.union(archivedSessions.map(\.sourceSessionID))
 
         try database.withTransaction {
             for record in snapshot.sessions {
@@ -141,11 +201,11 @@ enum HolyWorkspaceDatabasePersistence {
                 )
             }
 
-            for archivedSession in snapshot.archivedSessions {
+            for archivedSession in archivedSessions {
                 try upsertArchivedSession(archivedSession, in: database)
             }
 
-            try deleteMissingSessions(keeping: desiredSessionIDs, in: database)
+            try markMissingSessionsForPruning(keeping: desiredSessionIDs, in: database)
 
             try database.execute("DELETE FROM templates;")
             for template in snapshot.templates {
@@ -156,12 +216,12 @@ enum HolyWorkspaceDatabasePersistence {
             try upsertOptionalAppStateValue(snapshot.selectedSessionID, forKey: selectedSessionIDKey, in: database)
             try upsertAppStateValue(snapshot.paneLayout, forKey: paneLayoutKey, in: database)
             try upsertAppStateValue(snapshot.sessions.map(\.id), forKey: activeSessionOrderKey, in: database)
-            try upsertAppStateValue(snapshot.archivedSessions.map(\.id), forKey: archivedSessionOrderKey, in: database)
+            try upsertAppStateValue(archivedSessions.map(\.id), forKey: archivedSessionOrderKey, in: database)
             try upsertAppStateValue(snapshot.templates.map(\.id), forKey: templateOrderKey, in: database)
             try upsertAppStateValue(snapshot.attentionMetadata, forKey: attentionMetadataKey, in: database)
             try HolyBudgetIntelligenceRepository.appendSamples(
                 activeSessions: activeSessions,
-                archivedSessions: snapshot.archivedSessions,
+                archivedSessions: archivedSessions,
                 in: database
             )
             try HolySessionEventRepository.append(pendingEvents, in: database)
@@ -178,6 +238,7 @@ enum HolyWorkspaceDatabasePersistence {
         SELECT id, launch_spec_json, created_at, updated_at
         FROM sessions
         WHERE archived_at IS NULL
+          AND purge_pending_at IS NULL
         ORDER BY created_at ASC;
         """
 
@@ -235,6 +296,7 @@ enum HolyWorkspaceDatabasePersistence {
         FROM sessions
         LEFT JOIN git_snapshots ON git_snapshots.id = sessions.latest_git_snapshot_id
         WHERE sessions.archived_at IS NOT NULL
+          AND sessions.purge_pending_at IS NULL
         ORDER BY sessions.archived_at DESC;
         """
 
@@ -377,7 +439,7 @@ enum HolyWorkspaceDatabasePersistence {
         )
 
         if let gitSnapshot = liveSession?.gitSnapshot {
-            let gitSnapshotID = try insertGitSnapshot(gitSnapshot, sessionID: record.id, in: database)
+            let gitSnapshotID = try storeLatestGitSnapshot(gitSnapshot, sessionID: record.id, in: database)
             try updateLatestGitSnapshotID(gitSnapshotID, sessionID: record.id, in: database)
         } else {
             try updateLatestGitSnapshotID(nil, sessionID: record.id, in: database)
@@ -425,7 +487,11 @@ enum HolyWorkspaceDatabasePersistence {
         )
 
         if let gitSnapshot = archivedSession.gitSnapshot {
-            let gitSnapshotID = try insertGitSnapshot(gitSnapshot, sessionID: archivedSession.sourceSessionID, in: database)
+            let gitSnapshotID = try storeLatestGitSnapshot(
+                gitSnapshot,
+                sessionID: archivedSession.sourceSessionID,
+                in: database
+            )
             try updateLatestGitSnapshotID(gitSnapshotID, sessionID: archivedSession.sourceSessionID, in: database)
         } else {
             try updateLatestGitSnapshotID(nil, sessionID: archivedSession.sourceSessionID, in: database)
@@ -483,7 +549,7 @@ enum HolyWorkspaceDatabasePersistence {
             latest_budget_json = excluded.latest_budget_json,
             latest_command_telemetry_json = excluded.latest_command_telemetry_json,
             latest_runtime_telemetry_json = excluded.latest_runtime_telemetry_json,
-            latest_git_snapshot_id = excluded.latest_git_snapshot_id;
+            purge_pending_at = NULL;
         """
 
         try database.execute(sql, bindings: [
@@ -511,6 +577,53 @@ enum HolyWorkspaceDatabasePersistence {
             binding(for: projection.latestRuntimeTelemetryJSON),
             .null,
         ])
+    }
+
+    private static func storeLatestGitSnapshot(
+        _ snapshot: HolyGitSnapshot,
+        sessionID: UUID,
+        in database: HolyDatabase
+    ) throws -> Int64 {
+        if let latest = try latestGitSnapshot(sessionID: sessionID, in: database),
+           latest.snapshot == snapshot {
+            return latest.id
+        }
+
+        return try insertGitSnapshot(snapshot, sessionID: sessionID, in: database)
+    }
+
+    private static func latestGitSnapshot(
+        sessionID: UUID,
+        in database: HolyDatabase
+    ) throws -> (id: Int64, snapshot: HolyGitSnapshot)? {
+        let sql = """
+        SELECT
+            git_snapshots.id,
+            git_snapshots.repository_root,
+            git_snapshots.worktree_path,
+            git_snapshots.common_git_directory,
+            git_snapshots.branch,
+            git_snapshots.upstream_branch,
+            git_snapshots.is_detached_head,
+            git_snapshots.ahead_count,
+            git_snapshots.behind_count,
+            git_snapshots.staged_count,
+            git_snapshots.unstaged_count,
+            git_snapshots.untracked_count,
+            git_snapshots.conflicted_count,
+            git_snapshots.changed_files_json
+        FROM sessions
+        INNER JOIN git_snapshots ON git_snapshots.id = sessions.latest_git_snapshot_id
+        WHERE sessions.id = ?
+        LIMIT 1;
+        """
+
+        var latest: (id: Int64, snapshot: HolyGitSnapshot)?
+        try database.query(sql, bindings: [.text(sessionID.uuidString)]) { statement in
+            guard let snapshot = try decodeGitSnapshot(from: statement, startingAt: 1) else { return }
+            latest = (sqlite3_column_int64(statement, 0), snapshot)
+        }
+        return latest
     }
 
     private static func insertGitSnapshot(
@@ -564,18 +677,26 @@ enum HolyWorkspaceDatabasePersistence {
         ])
     }
 
-    private static func deleteMissingSessions(
+    private static func markMissingSessionsForPruning(
         keeping sessionIDs: Set<UUID>,
         in database: HolyDatabase
     ) throws {
+        let markedAt = HolyPersistenceCoders.string(from: .now)
         guard !sessionIDs.isEmpty else {
-            try database.execute("DELETE FROM sessions;")
+            try database.execute(
+                "UPDATE sessions SET purge_pending_at = COALESCE(purge_pending_at, ?);",
+                bindings: [.text(markedAt)]
+            )
             return
         }
 
         let placeholders = Array(repeating: "?", count: sessionIDs.count).joined(separator: ", ")
-        let sql = "DELETE FROM sessions WHERE id NOT IN (\(placeholders));"
-        let bindings = sessionIDs
+        let sql = """
+        UPDATE sessions
+        SET purge_pending_at = COALESCE(purge_pending_at, ?)
+        WHERE id NOT IN (\(placeholders));
+        """
+        let bindings = [.text(markedAt)] + sessionIDs
             .sorted { $0.uuidString < $1.uuidString }
             .map { HolyDatabaseBinding.text($0.uuidString) }
         try database.execute(sql, bindings: bindings)
