@@ -28,6 +28,7 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuCheckForUpdates: NSMenuItem?
     @IBOutlet private var menuOpenConfig: NSMenuItem?
     @IBOutlet private var menuReloadConfig: NSMenuItem?
+    @IBOutlet private var menuClaudeModelIndicator: NSMenuItem?
     @IBOutlet private var menuSecureInput: NSMenuItem?
     @IBOutlet private var menuQuit: NSMenuItem?
 
@@ -219,6 +220,7 @@ class AppDelegate: NSObject,
         // workspace store. Gated — a no-op unless the file carries real dead
         // weight and the volume can hold the transient rewrite.
         HolyDatabaseCompactor.maintainAppDatabaseIfNeeded()
+        refreshClaudeModelIndicatorMenu()
 
         // System settings overrides
         UserDefaults.ghostty.register(defaults: [
@@ -1120,6 +1122,56 @@ class AppDelegate: NSObject,
 
     @IBAction func reloadConfig(_ sender: Any?) {
         ghostty.reloadConfig()
+    }
+
+    @IBAction func toggleClaudeModelIndicator(_ sender: Any?) {
+        switch HolyClaudeModelBridge.currentUserInstallationState() {
+        case .notInstalled:
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Enable Claude model indicator?"
+            alert.informativeText = "Holy will add a Claude Code status-line command to ~/.claude/settings.json. It reports the live model to Holy's green tmux bar. Existing custom status lines are never replaced."
+            alert.addButton(withTitle: "Enable")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            _ = HolyClaudeModelBridge.installForCurrentUser()
+
+        case .installed:
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Disable Claude model indicator?"
+            alert.informativeText = "Holy will remove only its own Claude status-line command and generated helper. Your other Claude settings stay unchanged."
+            alert.addButton(withTitle: "Disable")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            _ = HolyClaudeModelBridge.removeForCurrentUser()
+
+        case .blockedByExistingStatusLine:
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Claude already has a custom status line"
+            alert.informativeText = "Holy left it unchanged. Remove or combine that status line yourself before enabling Holy's model indicator."
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+
+        refreshClaudeModelIndicatorMenu()
+    }
+
+    private func refreshClaudeModelIndicatorMenu() {
+        guard Self.isHolyGhosttyBundle else {
+            menuClaudeModelIndicator?.isHidden = true
+            return
+        }
+        menuClaudeModelIndicator?.isHidden = false
+        switch HolyClaudeModelBridge.currentUserInstallationState() {
+        case .notInstalled:
+            menuClaudeModelIndicator?.title = "Enable Claude Model Indicator…"
+        case .installed:
+            menuClaudeModelIndicator?.title = "Disable Claude Model Indicator…"
+        case .blockedByExistingStatusLine:
+            menuClaudeModelIndicator?.title = "Claude Model Indicator Unavailable…"
+        }
     }
 
     @IBAction func checkForUpdates(_ sender: Any?) {

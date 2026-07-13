@@ -3,6 +3,152 @@ import Combine
 import Foundation
 import GhosttyKit
 
+struct HolySessionModelSelection: Equatable, Sendable {
+    enum Source: Equatable, Sendable {
+        case codexFooter
+        case openCodePrompt
+    }
+
+    let runtime: HolySessionRuntime
+    let modelName: String
+    let provider: String?
+    let qualifier: String?
+    let source: Source
+
+    var statusLabel: String {
+        [modelName, qualifier]
+            .compactMap { value in
+                guard let value else { return nil }
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            .joined(separator: " · ")
+    }
+}
+
+enum HolySessionModelSelectionParser {
+    private static let codexFooterPattern = try? NSRegularExpression(
+        pattern: #"(?i)^\s*((?:gpt-[a-z0-9][a-z0-9._-]*|o[1-9](?:-[a-z0-9._-]+)?|codex-[a-z0-9][a-z0-9._-]*))\s+(?:fast\s+)?(none|minimal|low|medium|high|xhigh|ultra)(?:\s+fast)?(?:\s+·\s+.+)?\s*$"#
+    )
+    private static let openCodePromptPattern = try? NSRegularExpression(
+        pattern: #"(?i)^\s*(?:build|plan)\s*(?:-|·)\s*(.{1,56}?)\s+(anthropic|openai|google|xai|deepseek|mistral|openrouter)\s*(?:-|·)\s*([a-z0-9][a-z0-9._-]{0,31})\s*$"#
+    )
+    static func selection(
+        from visibleContents: String,
+        expectedRuntime: HolySessionRuntime? = nil
+    ) -> HolySessionModelSelection? {
+        // These are persistent live UI rows, not transcript evidence. Codex's
+        // footer is the final row. OpenCode can render a prompt plus two
+        // metadata rows, so it gets a slightly wider live-chrome window.
+        // Looking farther back allows pasted examples and exited-TUI remnants
+        // to masquerade as the selected model.
+        let liveChromeLineCount = expectedRuntime == .opencode ? 4 : 2
+        let candidateLines = visibleContents
+            .components(separatedBy: .newlines)
+            .suffix(liveChromeLineCount)
+
+        for rawLine in candidateLines.reversed() {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+
+            if let selection = match(line, regex: codexFooterPattern).map({ captures in
+                HolySessionModelSelection(
+                    runtime: .codex,
+                    modelName: captures[1],
+                    provider: "OpenAI",
+                    qualifier: captures[2].lowercased(),
+                    source: .codexFooter
+                )
+            }), expectedRuntime == nil || selection.runtime == expectedRuntime {
+                return selection
+            }
+            if let selection = match(line, regex: openCodePromptPattern).map({ captures in
+                HolySessionModelSelection(
+                    runtime: .opencode,
+                    modelName: captures[1],
+                    provider: captures[2],
+                    qualifier: captures[3].lowercased(),
+                    source: .openCodePrompt
+                )
+            }), expectedRuntime == nil || selection.runtime == expectedRuntime {
+                return selection
+            }
+        }
+
+        return nil
+    }
+
+    static func containsCodexFooter(in visibleContents: String) -> Bool {
+        visibleContents
+            .components(separatedBy: .newlines)
+            .contains { match($0.trimmingCharacters(in: .whitespacesAndNewlines), regex: codexFooterPattern) != nil }
+    }
+
+    private static func match(
+        _ line: String,
+        regex: NSRegularExpression?
+    ) -> [String]? {
+        guard let regex else { return nil }
+        let range = NSRange(line.startIndex..<line.endIndex, in: line)
+        guard let result = regex.firstMatch(in: line, range: range) else { return nil }
+
+        return (0..<result.numberOfRanges).map { index in
+            let captureRange = result.range(at: index)
+            guard captureRange.location != NSNotFound,
+                  let swiftRange = Range(captureRange, in: line) else {
+                return ""
+            }
+            return String(line[swiftRange])
+        }
+    }
+}
+
+struct HolyTmuxModelLabelDeliveryState {
+    struct Attempt: Equatable, Sendable {
+        let label: String?
+    }
+
+    private(set) var desired: Attempt?
+    private(set) var delivered: Attempt?
+    private(set) var inFlight: Attempt?
+    private(set) var retryAttempt = 0
+    private(set) var retryNotBefore: Date = .distantPast
+
+    mutating func request(_ label: String?) {
+        desired = .init(label: label)
+    }
+
+    mutating func beginAttempt(now: Date = .init()) -> Attempt? {
+        guard inFlight == nil,
+              let desired,
+              desired != delivered,
+              now >= retryNotBefore else {
+            return nil
+        }
+        inFlight = desired
+        return desired
+    }
+
+    mutating func complete(
+        _ attempt: Attempt,
+        succeeded: Bool,
+        now: Date = .init()
+    ) {
+        guard inFlight == attempt else { return }
+        inFlight = nil
+        if succeeded {
+            delivered = attempt
+            retryAttempt = 0
+            retryNotBefore = .distantPast
+        } else {
+            retryAttempt = min(retryAttempt + 1, 5)
+            retryNotBefore = now.addingTimeInterval(
+                pow(2, Double(retryAttempt - 1))
+            )
+        }
+    }
+}
+
 @MainActor
 final class HolySession: ObservableObject, Identifiable {
     let id: UUID
@@ -18,6 +164,7 @@ final class HolySession: ObservableObject, Identifiable {
     @Published private(set) var gitSnapshot: HolyGitSnapshot?
     @Published private(set) var activityAt: Date
     @Published private(set) var inferredRuntime: HolySessionRuntime?
+    @Published private(set) var modelSelection: HolySessionModelSelection?
 
     private var cancellables: Set<AnyCancellable> = []
     private var gitRefreshTask: Task<Void, Never>?
@@ -31,12 +178,16 @@ final class HolySession: ObservableObject, Identifiable {
     private var isPresentedInWorkspace = false
     private var surfaceOcclusionVisible: Bool?
     private var lastDerivedStateRefreshAt: Date = .distantPast
+    private var tmuxModelLabelSyncTask: Task<Void, Never>?
+    private var tmuxModelLabelDelivery = HolyTmuxModelLabelDeliveryState()
+    private var lastModelEvidenceAt: Date?
 
     private static let visibleDerivedStateRefreshInterval: TimeInterval = 1.25
     private static let backgroundDerivedStateRefreshInterval: TimeInterval = 15
     private static let activeProgressActivityRefreshInterval: TimeInterval = 10
     private static let visibleGitRefreshInterval: TimeInterval = 10
     private static let backgroundGitRefreshInterval: TimeInterval = 120
+    private static let minimumModelEvidenceGraceInterval: TimeInterval = 10
 
     init(
         record: HolySessionRecord,
@@ -544,11 +695,13 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     func refreshDerivedState(forceGitRefresh: Bool = false) {
-        lastDerivedStateRefreshAt = Date()
+        let now = Date()
+        lastDerivedStateRefreshAt = now
         let previousPreview = preview
         let previousPhase = phase
         let previousInferredRuntime = inferredRuntime
-        let nextPreview = Self.previewText(from: surfaceView.cachedVisibleContents.get())
+        let visibleContents = surfaceView.cachedVisibleContents.get()
+        let nextPreview = Self.previewText(from: visibleContents)
         if let nextInferredRuntime = Self.inferredRuntime(
             launchRuntime: runtime,
             surfaceTitle: surfaceView.title,
@@ -565,6 +718,55 @@ final class HolySession: ObservableObject, Identifiable {
         }
 
         let effectiveRuntime = inferredRuntime ?? runtime
+        var modelSelectionChanged = false
+        if effectiveRuntime == .claude {
+            // Claude's explicit status-line integration writes its structured
+            // model JSON directly to the tmux pane. Never re-read terminal
+            // text here: ordinary shell output could impersonate that row.
+            if modelSelection != nil {
+                modelSelection = nil
+                modelSelectionChanged = true
+            }
+            lastModelEvidenceAt = nil
+            // Clear stale app-owned state once, then yield this pane to the
+            // Claude helper. Delivery deduplication prevents repeated clears.
+            requestTmuxModelLabel(nil)
+        } else {
+            let nextModelSelection = HolySessionModelSelectionParser.selection(
+                from: visibleContents,
+                expectedRuntime: effectiveRuntime
+            )
+            if let nextModelSelection,
+               nextModelSelection == modelSelection {
+                lastModelEvidenceAt = now
+                // Poll delivery even when the model itself is stable.
+                // Successful writes deduplicate in the delivery state; failed
+                // writes become eligible again after its bounded backoff.
+                requestTmuxModelLabel(nextModelSelection.statusLabel)
+            } else if let nextModelSelection {
+                lastModelEvidenceAt = now
+                modelSelection = nextModelSelection
+                requestTmuxModelLabel(nextModelSelection.statusLabel)
+                modelSelectionChanged = true
+            } else {
+                let graceInterval = max(
+                    Self.minimumModelEvidenceGraceInterval,
+                    derivedStateRefreshInterval * 2.5
+                )
+                if modelSelection != nil,
+                   let lastModelEvidenceAt,
+                   now.timeIntervalSince(lastModelEvidenceAt) >= graceInterval {
+                    modelSelection = nil
+                    self.lastModelEvidenceAt = nil
+                    modelSelectionChanged = true
+                }
+
+                if modelSelection == nil {
+                    requestTmuxModelLabel(effectiveRuntime == .shell ? nil : "Model unknown")
+                }
+            }
+        }
+
         let previewChangedRecently = updateVisibleActivity(for: nextPreview, surfaceTitle: surfaceView.title)
         var nextSignals = Self.detectSignals(
             runtime: effectiveRuntime,
@@ -626,6 +828,7 @@ final class HolySession: ObservableObject, Identifiable {
         if previousPreview != nextPreview
             || previousPhase != nextPhase
             || previousInferredRuntime != inferredRuntime
+            || modelSelectionChanged
             || budgetTelemetryChanged
             || runtimeTelemetryChanged
             || shouldRefreshProgressActivity {
@@ -633,6 +836,45 @@ final class HolySession: ObservableObject, Identifiable {
         }
 
         refreshGitSnapshotIfNeeded(force: forceGitRefresh)
+    }
+
+    private func requestTmuxModelLabel(_ label: String?) {
+        let trimmedLabel = label?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedLabel = trimmedLabel?.isEmpty == false ? trimmedLabel : nil
+        // Fail closed before entering the retry loop. Incomplete stored tmux
+        // identity must never be realized or aimed at the default server.
+        guard HolyTmuxModelLabelUpdateCommand.command(
+            for: record.launchSpec,
+            label: normalizedLabel
+        ) != nil else {
+            return
+        }
+
+        tmuxModelLabelDelivery.request(normalizedLabel)
+        startTmuxModelLabelSyncIfNeeded()
+    }
+
+    private func startTmuxModelLabelSyncIfNeeded() {
+        guard tmuxModelLabelSyncTask == nil,
+              let attempt = tmuxModelLabelDelivery.beginAttempt() else { return }
+        guard let command = HolyTmuxModelLabelUpdateCommand.command(
+            for: record.launchSpec,
+            label: attempt.label
+        ) else {
+            tmuxModelLabelDelivery.complete(attempt, succeeded: false)
+            return
+        }
+
+        let work = Task.detached(priority: .utility) {
+            command.run()
+        }
+        tmuxModelLabelSyncTask = Task { [weak self] in
+            let succeeded = await work.value
+            guard let self else { return }
+            self.tmuxModelLabelSyncTask = nil
+            self.tmuxModelLabelDelivery.complete(attempt, succeeded: succeeded)
+            self.startTmuxModelLabelSyncIfNeeded()
+        }
     }
 
     private func notifyIfRemotePaneDied(previousPhase: HolySessionPhase, nextPhase: HolySessionPhase) {
@@ -1757,10 +1999,7 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     private static func containsCodexStatusFooter(_ evidence: String) -> Bool {
-        evidence.range(
-            of: #"\bgpt-[0-9a-z][0-9a-z.\-]*\s+(fast\s+)?(low|medium|high|xhigh)\b"#,
-            options: .regularExpression
-        ) != nil
+        HolySessionModelSelectionParser.containsCodexFooter(in: evidence)
     }
 
     private static func containsClaudeScreenMarker(_ evidence: String) -> Bool {

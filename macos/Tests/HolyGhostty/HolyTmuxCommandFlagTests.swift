@@ -18,6 +18,26 @@ private let holyTmuxAvailableForLifecycleTests: Bool = {
 }()
 
 struct HolyTmuxCommandFlagTests {
+    @Test func managedClaudeBootstrapClearsOwnedModelBeforeReturningToShell() throws {
+        var launchSpec = HolySessionLaunchSpec.interactiveTmuxShell()
+        launchSpec.runtime = .claude
+        launchSpec.command = "claude"
+        launchSpec.tmux = .init(
+            socketName: "holy",
+            sessionName: "claude-cleanup",
+            createIfMissing: true
+        )
+
+        let script = try #require(HolyTmuxCommandBuilder.command(for: launchSpec))
+
+        #expect(script.contains("claude"))
+        #expect(script.contains("tmux if-shell -F"))
+        #expect(script.contains("#{==:#{@holy_model_source},claude}"))
+        #expect(script.contains("@holy_model_label"))
+        #expect(script.contains("@holy_model_source"))
+        #expect(script.contains("exec ${SHELL:-/bin/zsh} -l"))
+    }
+
     // The long-lived attach ssh needs keepalives so post-sleep zombie panes
     // are detected in ~60s instead of never, and a bounded connect timeout
     // so reattach attempts fail fast instead of hanging on kernel TCP.
