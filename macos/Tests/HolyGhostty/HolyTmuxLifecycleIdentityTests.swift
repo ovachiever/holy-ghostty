@@ -77,6 +77,19 @@ struct HolyTmuxLifecycleIdentityTests {
         #expect(HolyTmuxIdentityResolver.resolve(launchSpec: spec, among: [live]) == .matched(live))
     }
 
+    @Test func missingNameNormalizesInventoryControlBytesBeforeMatching() {
+        var spec = HolySessionLaunchSpec.interactiveTmuxShell(title: "Versova")
+        spec.objective = "first line\nsecond\rpart\u{1F}final"
+        spec.tmux?.sessionName = nil
+        let live = discovered(
+            sessionName: "holy-versova-shell-12345678",
+            title: "Versova",
+            objective: "first line second part final"
+        )
+
+        #expect(HolyTmuxIdentityResolver.resolve(launchSpec: spec, among: [live]) == .matched(live))
+    }
+
     @Test func titleOnlyEvidenceCannotAuthorizeDestructiveTarget() {
         var spec = HolySessionLaunchSpec.interactiveTmuxShell(title: "Versova")
         spec.tmux?.sessionName = nil

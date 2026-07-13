@@ -56,6 +56,10 @@ final class HolyWorkspaceStore: ObservableObject {
     /// Applied only at the converge call sites so the Hosts panel and metadata
     /// refresh keep answering slow-but-alive hosts uncapped.
     private static let convergeDiscoveryTimeoutSeconds: TimeInterval = 5
+    /// Kill preflight uses a constant-time identity inventory rather than rich
+    /// discovery. Keep it bounded independently from converge so a wedged local
+    /// server or SSH hop fails closed without inheriting converge-only policy.
+    private static let terminationDiscoveryTimeoutSeconds: TimeInterval = 10
     @Published var paneLayout: HolyPaneLayout = .single {
         didSet {
             refreshSessionPresentationState()
@@ -1216,6 +1220,9 @@ final class HolyWorkspaceStore: ObservableObject {
             do {
                 discoveredSessions = try await self.discoverLiveTmuxSessions(for: launchSpec)
             } catch {
+                AppDelegate.logger.error(
+                    "Holy Ghostty could not inspect tmux before killing \(sessionTitle, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
                 self.tmuxSessionTerminationError = "Holy Ghostty left \(sessionTitle) in the roster because it could not inspect the tmux server. \(error.localizedDescription)"
                 return
             }
@@ -1306,18 +1313,18 @@ final class HolyWorkspaceStore: ObservableObject {
                 // and holy. Never inherit a saved host's preferred socket here.
                 tmuxSocketName: launchSpec.tmux?.normalized.socketName
             )
-            return try await HolyRemoteTmuxDiscoveryService.shared.discoverSessionsThrowing(
+            return try await HolyRemoteTmuxDiscoveryService.shared.discoverIdentitySessionsThrowing(
                 for: host,
-                timeout: Self.convergeDiscoveryTimeoutSeconds,
+                timeout: Self.terminationDiscoveryTimeoutSeconds,
                 includeHiddenSessions: true
             )
         }
 
-        return try await HolyRemoteTmuxDiscoveryService.shared.discoverLocalSessionsThrowing(
+        return try await HolyRemoteTmuxDiscoveryService.shared.discoverLocalIdentitySessionsThrowing(
             hostID: HolyLocalMachineIdentity.localHostID,
             hostLabel: HolyLocalMachineIdentity.current.displayName,
             tmuxSocketName: launchSpec.tmux?.normalized.socketName,
-            timeout: Self.convergeDiscoveryTimeoutSeconds,
+            timeout: Self.terminationDiscoveryTimeoutSeconds,
             includeHiddenSessions: true
         )
     }
@@ -3751,6 +3758,7 @@ private struct HolyTmuxSessionTerminationCommand: Sendable {
 
     private static func verificationScript(killCommand: String, probeCommand: String) -> String {
         """
+        unset TMUX TMUX_PANE
         kill_output=$(\(killCommand) 2>&1)
         kill_status=$?
         if (( kill_status != 0 )); then

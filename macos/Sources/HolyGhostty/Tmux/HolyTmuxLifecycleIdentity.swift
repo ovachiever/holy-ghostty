@@ -276,12 +276,25 @@ enum HolyTmuxIdentityResolver {
     }
 
     private static func normalized(_ value: String?) -> String? {
-        value?.holyLifecycleTrimmed.nilIfEmpty?.lowercased()
+        discoverySafeValue(value)?.lowercased()
     }
 
     private static func normalizedPath(_ value: String?) -> String? {
-        guard let value = value?.holyLifecycleTrimmed.nilIfEmpty else { return nil }
+        guard let value = discoverySafeValue(value) else { return nil }
         return URL(fileURLWithPath: value).standardizedFileURL.path
+    }
+
+    /// Lifecycle inventory is line- and field-delimited, so its one-query
+    /// format flattens these control bytes to spaces. Apply the exact same
+    /// normalization to saved metadata before comparing incomplete legacy
+    /// identities; complete named identities do not depend on metadata.
+    private static func discoverySafeValue(_ value: String?) -> String? {
+        value?
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\u{1F}", with: " ")
+            .holyLifecycleTrimmed
+            .nilIfEmpty
     }
 }
 

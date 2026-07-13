@@ -59,18 +59,67 @@ actor HolyRemoteTmuxDiscoveryService {
         }
     }
 
+    /// Returns only the stable identity fields required to authorize a
+    /// lifecycle operation. Unlike the full Hosts/converge discovery, this is
+    /// one `tmux list-sessions` call per socket: it never walks pane process
+    /// trees or reads git state, so a busy server cannot make a kill preflight
+    /// scale linearly with every session's descendants.
+    func discoverIdentitySessionsThrowing(
+        for host: HolyRemoteHostRecord,
+        timeout: TimeInterval,
+        includeHiddenSessions: Bool = true
+    ) async throws -> [HolyDiscoveredTmuxSession] {
+        let normalizedHost = host.normalized()
+        guard !normalizedHost.sshDestination.isEmpty else { return [] }
+
+        return try await discoverSessionsThrowing(
+            for: normalizedHost,
+            includeHiddenSessions: includeHiddenSessions
+        ) { host, socketName in
+            let script = self.identityDiscoveryScript(socketName: socketName)
+            return await self.runRemoteDiscovery(
+                for: host,
+                script: script,
+                timeout: timeout
+            )
+        }
+    }
+
+    func discoverLocalIdentitySessionsThrowing(
+        hostID: UUID,
+        hostLabel: String,
+        tmuxSocketName: String? = nil,
+        timeout: TimeInterval,
+        includeHiddenSessions: Bool = true
+    ) async throws -> [HolyDiscoveredTmuxSession] {
+        let localHost = HolyRemoteHostRecord(
+            id: hostID,
+            label: hostLabel,
+            sshDestination: "localhost",
+            tmuxSocketName: tmuxSocketName
+        )
+
+        return try await discoverSessionsThrowing(
+            for: localHost,
+            includeHiddenSessions: includeHiddenSessions
+        ) { _, socketName in
+            let script = self.identityDiscoveryScript(socketName: socketName)
+            return await self.runLocalDiscovery(script: script, timeout: timeout)
+        }
+    }
+
     private func discoverSessionsThrowing(
         for normalizedHost: HolyRemoteHostRecord,
         includeHiddenSessions: Bool,
-        using runDiscovery: (HolyRemoteHostRecord, String?) async -> HolyRemoteCommandResult?
+        using runDiscovery: (HolyRemoteHostRecord, String?) async -> HolyProcessRunOutcome
     ) async throws -> [HolyDiscoveredTmuxSession] {
         var discoveredSessions: [HolyDiscoveredTmuxSession] = []
         var discoveredSessionIDs: Set<String> = []
 
         for probeTarget in probeTargets(for: normalizedHost) {
-            guard let result = await runDiscovery(normalizedHost, probeTarget.socketName) else {
-                throw CocoaError(.executableNotLoadable)
-            }
+            let result = try commandResult(
+                from: await runDiscovery(normalizedHost, probeTarget.socketName)
+            )
 
             guard result.exitCode == 0 else {
                 throw friendlyDiscoveryError(for: normalizedHost, result: result)
@@ -107,8 +156,16 @@ actor HolyRemoteTmuxDiscoveryService {
         for host: HolyRemoteHostRecord,
         socketName: String?,
         timeout: TimeInterval?
-    ) async -> HolyRemoteCommandResult? {
+    ) async -> HolyProcessRunOutcome {
         let script = remoteDiscoveryScript(socketName: socketName, includeGitMetadata: true)
+        return await runRemoteDiscovery(for: host, script: script, timeout: timeout)
+    }
+
+    private func runRemoteDiscovery(
+        for host: HolyRemoteHostRecord,
+        script: String,
+        timeout: TimeInterval?
+    ) async -> HolyProcessRunOutcome {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         process.arguments = [
@@ -127,10 +184,23 @@ actor HolyRemoteTmuxDiscoveryService {
         return await run(process: process, context: host.sshDestination, timeout: timeout)
     }
 
-    private func runLocalDiscovery(socketName: String?, timeout: TimeInterval?) async -> HolyRemoteCommandResult? {
+    private func runLocalDiscovery(
+        socketName: String?,
+        timeout: TimeInterval?
+    ) async -> HolyProcessRunOutcome {
+        await runLocalDiscovery(
+            script: remoteDiscoveryScript(socketName: socketName, includeGitMetadata: false),
+            timeout: timeout
+        )
+    }
+
+    private func runLocalDiscovery(
+        script: String,
+        timeout: TimeInterval?
+    ) async -> HolyProcessRunOutcome {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", remoteDiscoveryScript(socketName: socketName, includeGitMetadata: false)]
+        process.arguments = ["-lc", script]
 
         // Scrub the inherited tmux context. If Holy was launched from a shell
         // running inside tmux, $TMUX makes a default-socket probe (no -L)
@@ -150,10 +220,14 @@ actor HolyRemoteTmuxDiscoveryService {
     /// is gone: termination is bridged into async/await via the process
     /// termination handler, so N concurrent sweep children never pin N executor
     /// threads. When `timeout` is set, a process that outlives the cap is
-    /// terminated and reported as unreachable (nil) - the async result is
-    /// bounded regardless of whether the process honors SIGTERM, so the converge
-    /// sweep can never wedge on a runaway child.
-    private func run(process: Process, context: String, timeout: TimeInterval?) async -> HolyRemoteCommandResult? {
+    /// terminated and reported as a typed timeout - the async result is bounded
+    /// regardless of whether the process honors SIGTERM, so the converge sweep
+    /// can never wedge on a runaway child.
+    private func run(
+        process: Process,
+        context: String,
+        timeout: TimeInterval?
+    ) async -> HolyProcessRunOutcome {
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
@@ -161,40 +235,66 @@ actor HolyRemoteTmuxDiscoveryService {
 
         let resumeBox = HolyProcessRunResumeBox()
 
-        return await withCheckedContinuation { (continuation: CheckedContinuation<HolyRemoteCommandResult?, Never>) in
+        return await withCheckedContinuation { (continuation: CheckedContinuation<HolyProcessRunOutcome, Never>) in
             resumeBox.store(continuation)
 
             process.terminationHandler = { finishedProcess in
                 let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
                 let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
-                resumeBox.resume(returning: HolyRemoteCommandResult(
+                resumeBox.resume(returning: .completed(HolyRemoteCommandResult(
                     stdout: String(bytes: stdoutData, encoding: .utf8) ?? "",
                     stderr: String(bytes: stderrData, encoding: .utf8) ?? "",
                     exitCode: finishedProcess.terminationStatus
-                ))
+                )))
             }
 
             do {
                 try process.run()
             } catch {
                 logger.error("Failed to run tmux discovery for \(context, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                resumeBox.resume(returning: nil)
+                resumeBox.resume(returning: .launchFailed(
+                    context: context,
+                    description: error.localizedDescription
+                ))
                 return
             }
 
             guard let timeout else { return }
 
             // Hard wall-clock cap. A wedged login profile, a hung ssh, or a
-            // stalled tmux server is SIGTERM'd and reported unreachable so the
-            // sweep stays bounded. Best-effort terminate; the nil resume below
-            // bounds the async result even if the process ignores the signal.
+            // stalled tmux server is SIGTERM'd and reported as a timeout so the
+            // sweep stays bounded. Resume first so the termination handler can
+            // never misreport our SIGTERM as a normal command failure.
             Task.detached {
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                resumeBox.resume(returning: .timedOut(
+                    context: context,
+                    seconds: timeout
+                ))
                 if process.isRunning {
                     process.terminate()
                 }
-                resumeBox.resume(returning: nil)
             }
+        }
+    }
+
+    private func commandResult(from outcome: HolyProcessRunOutcome) throws -> HolyRemoteCommandResult {
+        switch outcome {
+        case let .completed(result):
+            return result
+        case let .launchFailed(context, description):
+            throw HolyTmuxDiscoveryExecutionError.launchFailed(
+                context: context,
+                description: description
+            )
+        case let .timedOut(context, seconds):
+            logger.error(
+                "Tmux discovery for \(context, privacy: .public) timed out after \(seconds, privacy: .public) seconds"
+            )
+            throw HolyTmuxDiscoveryExecutionError.timedOut(
+                context: context,
+                seconds: seconds
+            )
         }
     }
 
@@ -279,6 +379,7 @@ actor HolyRemoteTmuxDiscoveryService {
 
         return """
         setopt pipefail
+        unset TMUX TMUX_PANE
         socket_name=\(socketBinding)
         include_git_metadata=\(includeGitMetadataFlag)
         sep=$'\\x1f'
@@ -634,6 +735,51 @@ actor HolyRemoteTmuxDiscoveryService {
         """
     }
 
+    /// A single-query live inventory for destructive lifecycle decisions. The
+    /// parser consumes the same first ten fields as rich discovery, while the
+    /// working directory falls back to the live pane path for older sessions
+    /// that predate `@holy_working_directory`.
+    private func identityDiscoveryScript(socketName: String?) -> String {
+        let socketBinding = socketName?.holyTrimmed.nilIfEmpty.map(posixQuote) ?? "''"
+
+        return """
+        setopt pipefail
+        unset TMUX TMUX_PANE
+        socket_name=\(socketBinding)
+        sep=$'\\x1f'
+        clean_format_prefix=$'#{s|[\\n\\r\\x1f]| |:'
+        clean_format_suffix='}'
+        tmux_cmd=(tmux)
+        if [[ -n "$socket_name" ]]; then
+          tmux_cmd+=(-L "$socket_name")
+        fi
+
+        # tmux options may contain literal newlines or our field separator.
+        # Sanitize inside tmux's format engine so list-sessions remains the only
+        # process and every session is exactly one ten-field row.
+        format="${clean_format_prefix}#{session_name}${clean_format_suffix}${sep}#{session_attached}${sep}#{session_windows}${sep}"
+        format+="${clean_format_prefix}#{@holy_title}${clean_format_suffix}${sep}"
+        format+="${clean_format_prefix}#{@holy_runtime}${clean_format_suffix}${sep}"
+        format+="${clean_format_prefix}#{@holy_objective}${clean_format_suffix}${sep}"
+        format+="${clean_format_prefix}#{?#{@holy_working_directory},#{@holy_working_directory},#{pane_current_path}}${clean_format_suffix}${sep}"
+        format+="${clean_format_prefix}#{@holy_command}${clean_format_suffix}${sep}"
+        format+="${clean_format_prefix}#{@holy_task_title}${clean_format_suffix}${sep}"
+        format+="${clean_format_prefix}#{@holy_task_source}${clean_format_suffix}"
+        sessions=$("${tmux_cmd[@]}" list-sessions -F "$format" 2>&1)
+        exit_status=$?
+        if (( exit_status != 0 )); then
+          lowered="${sessions:l}"
+          if [[ "$lowered" == *"no server running"* || "$lowered" == *"failed to connect to server"* || "$lowered" == *"error connecting to"* ]]; then
+            exit 0
+          fi
+          printf '%s' "$sessions" >&2
+          exit "$exit_status"
+        fi
+
+        printf '%s\\n' "$sessions"
+        """
+    }
+
     private func posixQuote(_ value: String) -> String {
         if value.isEmpty {
             return "''"
@@ -736,6 +882,29 @@ private struct HolyRemoteCommandResult {
     let exitCode: Int32
 }
 
+private enum HolyProcessRunOutcome {
+    case completed(HolyRemoteCommandResult)
+    case launchFailed(context: String, description: String)
+    case timedOut(context: String, seconds: TimeInterval)
+}
+
+private enum HolyTmuxDiscoveryExecutionError: LocalizedError {
+    case launchFailed(context: String, description: String)
+    case timedOut(context: String, seconds: TimeInterval)
+
+    var errorDescription: String? {
+        switch self {
+        case let .launchFailed(context, description):
+            return "Could not start tmux inspection for \(context). \(description)"
+        case let .timedOut(context, seconds):
+            let secondsDescription = seconds.rounded() == seconds
+                ? String(Int(seconds))
+                : String(format: "%.1f", seconds)
+            return "Tmux inspection for \(context) timed out after \(secondsDescription) seconds. The session was left untouched."
+        }
+    }
+}
+
 /// Resumes a discovery continuation exactly once. The termination handler
 /// (arbitrary Process queue) and the timeout task race to resolve the same
 /// process run; whichever wins, the loser is a no-op. `store` always runs
@@ -743,16 +912,16 @@ private struct HolyRemoteCommandResult {
 /// so there is no store-after-resume race to guard.
 private final class HolyProcessRunResumeBox: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<HolyRemoteCommandResult?, Never>?
+    private var continuation: CheckedContinuation<HolyProcessRunOutcome, Never>?
     private var didResume = false
 
-    func store(_ continuation: CheckedContinuation<HolyRemoteCommandResult?, Never>) {
+    func store(_ continuation: CheckedContinuation<HolyProcessRunOutcome, Never>) {
         lock.lock()
         defer { lock.unlock() }
         self.continuation = continuation
     }
 
-    func resume(returning value: HolyRemoteCommandResult?) {
+    func resume(returning value: HolyProcessRunOutcome) {
         lock.lock()
         guard !didResume, let continuation = self.continuation else {
             lock.unlock()
@@ -782,18 +951,51 @@ private extension String {
 
 #if DEBUG
 extension HolyRemoteTmuxDiscoveryService {
-    /// Runs `/bin/sleep <sleepSeconds>` under the wall-clock cap and reports
-    /// whether the cap fired (result nil). Exercises the converge timeout end
-    /// to end - no SSH, roster, or dependency-injection scaffolding required.
+    /// Runs `/bin/sleep <sleepSeconds>` under the wall-clock cap and returns a
+    /// user-facing error when the cap fires. Exercises the timeout end to end -
+    /// no SSH, roster, or dependency-injection scaffolding required.
     static func runProcessWithTimeoutForTesting(
         sleepSeconds: Int,
         timeoutSeconds: TimeInterval
-    ) async -> Bool {
+    ) async -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sleep")
         process.arguments = [String(sleepSeconds)]
-        let result = await shared.run(process: process, context: "timeout-test", timeout: timeoutSeconds)
-        return result == nil
+        return await runProcessErrorForTesting(process, timeoutSeconds: timeoutSeconds)
+    }
+
+    /// The shell exits immediately while its child keeps stdout/stderr open.
+    /// The timeout must still resume even though `process.isRunning` is false
+    /// and the termination handler is blocked draining inherited pipes.
+    static func runExitedParentWithInheritedPipeForTesting(
+        childSleepSeconds: Int,
+        timeoutSeconds: TimeInterval
+    ) async -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "sleep \(childSleepSeconds) &"]
+        return await runProcessErrorForTesting(process, timeoutSeconds: timeoutSeconds)
+    }
+
+    private static func runProcessErrorForTesting(
+        _ process: Process,
+        timeoutSeconds: TimeInterval
+    ) async -> String? {
+        let outcome = await shared.run(
+            process: process,
+            context: "timeout-test",
+            timeout: timeoutSeconds
+        )
+        do {
+            _ = try await shared.commandResult(from: outcome)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    static func identityDiscoveryScriptForTesting(socketName: String?) async -> String {
+        await shared.identityDiscoveryScript(socketName: socketName)
     }
 }
 #endif

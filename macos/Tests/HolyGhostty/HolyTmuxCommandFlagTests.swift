@@ -112,6 +112,26 @@ struct HolyTmuxCommandFlagTests {
     }
 
     @MainActor
+    @Test func remoteTerminationCannotInheritAmbientTmuxTarget() {
+        let command = HolyWorkspaceStore.discoveredTerminationCommandForTesting(
+            transport: .init(
+                kind: .ssh,
+                hostLabel: "Remote",
+                sshDestination: "remote.example"
+            ),
+            socketName: nil,
+            sessionName: "demo"
+        )
+        let remoteScript = command?.arguments.last ?? ""
+
+        #expect(command?.executablePath == "/usr/bin/env")
+        #expect(remoteScript.contains("unset TMUX TMUX_PANE"))
+        #expect(!remoteScript.contains("unset TMUX TMUX_PANE TMUX_TMPDIR"))
+        #expect(remoteScript.contains("kill-session"))
+        #expect(remoteScript.contains("=demo"))
+    }
+
+    @MainActor
     @Test func terminationScrubsInheritedTmuxContext() {
         let environment = HolyWorkspaceStore.scrubbedTerminationEnvironmentForTesting([
             "PATH": "/usr/bin",
