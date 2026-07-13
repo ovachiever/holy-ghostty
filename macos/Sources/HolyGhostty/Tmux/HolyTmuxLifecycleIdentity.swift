@@ -46,6 +46,24 @@ struct HolyTmuxLiveIdentity: Equatable {
             sessionName: sessionName
         )
     }
+
+    /// Returns the exact persisted identity only when both tmux coordinates
+    /// are present. A complete socket + session name is already the precise
+    /// target tmux accepts; lifecycle commands must not make that operation
+    /// depend on a broader server inventory scan.
+    init?(exactLaunchSpec launchSpec: HolySessionLaunchSpec) {
+        guard let tmux = launchSpec.tmux?.normalized,
+              let socketName = tmux.socketName?.holyLifecycleTrimmed.nilIfEmpty,
+              let sessionName = tmux.sessionName?.holyLifecycleTrimmed.nilIfEmpty else {
+            return nil
+        }
+
+        self.init(
+            transport: launchSpec.transport,
+            socketName: socketName,
+            sessionName: sessionName
+        )
+    }
 }
 
 enum HolyTmuxIdentityResolution: Equatable {

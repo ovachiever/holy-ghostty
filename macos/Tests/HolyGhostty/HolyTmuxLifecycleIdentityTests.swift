@@ -42,6 +42,31 @@ struct HolyTmuxLifecycleIdentityTests {
         #expect(HolyTmuxCommandBuilder.realizedLaunchSpec(realized) == realized)
     }
 
+    @Test func completePersistedIdentityAuthorizesExactLifecycleTargetWithoutDiscovery() throws {
+        var spec = HolySessionLaunchSpec.interactiveTmuxShell(title: "Versova")
+        spec.tmux = .init(
+            socketName: " holy ",
+            sessionName: " holy-shell-35-shell-CDF0B8FC ",
+            createIfMissing: true
+        )
+
+        let identity = try #require(HolyTmuxLiveIdentity(exactLaunchSpec: spec))
+
+        #expect(identity.transport == spec.transport.normalized)
+        #expect(identity.socketName == "holy")
+        #expect(identity.sessionName == "holy-shell-35-shell-CDF0B8FC")
+    }
+
+    @Test func incompletePersistedIdentityStillRequiresLiveDiscovery() {
+        var missingName = HolySessionLaunchSpec.interactiveTmuxShell(title: "Versova")
+        missingName.tmux = .init(socketName: "holy", sessionName: nil, createIfMissing: true)
+        var missingSocket = missingName
+        missingSocket.tmux = .init(socketName: nil, sessionName: "known-name", createIfMissing: true)
+
+        #expect(HolyTmuxLiveIdentity(exactLaunchSpec: missingName) == nil)
+        #expect(HolyTmuxLiveIdentity(exactLaunchSpec: missingSocket) == nil)
+    }
+
     @Test func missingSocketIsRecoveredFromUniqueNamedLiveSession() {
         var spec = HolySessionLaunchSpec.interactiveTmuxShell(title: "Codex")
         spec.tmux = .init(socketName: nil, sessionName: "holy-codex-12345678", createIfMissing: true)

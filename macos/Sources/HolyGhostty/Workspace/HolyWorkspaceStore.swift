@@ -1216,57 +1216,63 @@ final class HolyWorkspaceStore: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
 
-            let discoveredSessions: [HolyDiscoveredTmuxSession]
-            do {
-                discoveredSessions = try await self.discoverLiveTmuxSessions(for: launchSpec)
-            } catch {
-                AppDelegate.logger.error(
-                    "Holy Ghostty could not inspect tmux before killing \(sessionTitle, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            let identity: HolyTmuxLiveIdentity
+            if let exactIdentity = HolyTmuxLiveIdentity(exactLaunchSpec: launchSpec) {
+                identity = exactIdentity
+            } else {
+                let discoveredSessions: [HolyDiscoveredTmuxSession]
+                do {
+                    discoveredSessions = try await self.discoverLiveTmuxSessions(for: launchSpec)
+                } catch {
+                    AppDelegate.logger.error(
+                        "Holy Ghostty could not inspect tmux before killing \(sessionTitle, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                    )
+                    self.tmuxSessionTerminationError = "Holy Ghostty left \(sessionTitle) in the roster because its saved tmux identity is incomplete and the app could not inspect the server. \(error.localizedDescription)"
+                    return
+                }
+
+                let discoveredSession: HolyDiscoveredTmuxSession
+                switch HolyTmuxIdentityResolver.resolve(
+                    launchSpec: launchSpec,
+                    among: discoveredSessions
+                ) {
+                case let .matched(match):
+                    discoveredSession = match
+                case .notFound:
+                    self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because no live tmux session could be matched safely. Refresh Hosts and attach or kill the exact discovered session there."
+                    return
+                case .ambiguous:
+                    self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because more than one live tmux session matched its saved metadata. Use Hosts to choose the exact session."
+                    return
+                }
+
+                let activeMatches = HolyTmuxIdentityResolver.resolveOneToOne(
+                    launchSpecsByID: Dictionary(
+                        uniqueKeysWithValues: self.sessions.compactMap { activeSession in
+                            guard activeSession.record.launchSpec.tmux != nil else { return nil }
+                            return (activeSession.id, activeSession.record.launchSpec)
+                        }
+                    ),
+                    among: discoveredSessions
                 )
-                self.tmuxSessionTerminationError = "Holy Ghostty left \(sessionTitle) in the roster because it could not inspect the tmux server. \(error.localizedDescription)"
-                return
-            }
+                guard activeMatches[sessionID] == discoveredSession else {
+                    self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because another roster record resolves to the same live tmux session. Resolve the duplicate in Hosts before killing it."
+                    return
+                }
 
-            let discoveredSession: HolyDiscoveredTmuxSession
-            switch HolyTmuxIdentityResolver.resolve(
-                launchSpec: launchSpec,
-                among: discoveredSessions
-            ) {
-            case let .matched(match):
-                discoveredSession = match
-            case .notFound:
-                self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because no live tmux session could be matched safely. Refresh Hosts and attach or kill the exact discovered session there."
-                return
-            case .ambiguous:
-                self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because more than one live tmux session matched its saved metadata. Use Hosts to choose the exact session."
-                return
-            }
+                guard let discoveredIdentity = HolyTmuxLiveIdentity(
+                    transport: launchSpec.transport,
+                    discoveredSession: discoveredSession
+                ) else {
+                    self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because the discovered tmux identity did not match its transport."
+                    return
+                }
+                identity = discoveredIdentity
 
-            let activeMatches = HolyTmuxIdentityResolver.resolveOneToOne(
-                launchSpecsByID: Dictionary(
-                    uniqueKeysWithValues: self.sessions.compactMap { activeSession in
-                        guard activeSession.record.launchSpec.tmux != nil else { return nil }
-                        return (activeSession.id, activeSession.record.launchSpec)
-                    }
-                ),
-                among: discoveredSessions
-            )
-            guard activeMatches[sessionID] == discoveredSession else {
-                self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because another roster record resolves to the same live tmux session. Resolve the duplicate in Hosts before killing it."
-                return
-            }
-
-            guard let identity = HolyTmuxLiveIdentity(
-                transport: launchSpec.transport,
-                discoveredSession: discoveredSession
-            ) else {
-                self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because the discovered tmux identity did not match its transport."
-                return
-            }
-
-            if let currentSession = self.sessions.first(where: { $0.id == sessionID }),
-               currentSession.applyDiscoveredTmuxIdentity(discoveredSession) {
-                self.persist()
+                if let currentSession = self.sessions.first(where: { $0.id == sessionID }),
+                   currentSession.applyDiscoveredTmuxIdentity(discoveredSession) {
+                    self.persist()
+                }
             }
 
             let command = HolyTmuxSessionTerminationCommand.command(for: identity)
