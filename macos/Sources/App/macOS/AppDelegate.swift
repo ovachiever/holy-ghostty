@@ -214,6 +214,11 @@ class AppDelegate: NSObject,
     func applicationDidFinishLaunching(_ notification: Notification) {
         HolyDatabase.bootstrapIfNeeded()
         HolyMigrationService.importLegacyWorkspaceIfNeeded()
+        // Reclaim on-disk footprint at the one moment the database is provably
+        // quiesced: after bootstrap/migration, before any window opens the
+        // workspace store. Gated — a no-op unless the file carries real dead
+        // weight and the volume can hold the transient rewrite.
+        HolyDatabaseCompactor.maintainAppDatabaseIfNeeded()
 
         // System settings overrides
         UserDefaults.ghostty.register(defaults: [
@@ -326,6 +331,12 @@ class AppDelegate: NSObject,
         // Setup our menu
         setupMenuImages()
 
+        // Holy: offer an on-demand database compaction command alongside the
+        // gated automatic pass that runs at launch.
+        if Self.isHolyGhosttyBundle {
+            installHolyDatabaseMaintenanceMenuItem()
+        }
+
         // Setup signal handlers
         setupSignals()
 
@@ -359,6 +370,77 @@ class AppDelegate: NSObject,
                 self.handleHolyAutomationURL(url)
             }
         }
+    }
+
+    /// Adds a "Compact Database Now" command to the application menu. This is the
+    /// manual counterpart to the gated automatic compaction that runs at launch;
+    /// it lets the user reclaim disk space on demand without waiting for the
+    /// next relaunch.
+    private func installHolyDatabaseMaintenanceMenuItem() {
+        guard let appMenu = NSApp.mainMenu?.item(at: 0)?.submenu else { return }
+
+        let title = "Compact Database Now"
+        // Guard against a second insertion if the delegate ever re-runs launch.
+        guard appMenu.item(withTitle: title) == nil else { return }
+
+        let item = NSMenuItem(
+            title: title,
+            action: #selector(holyCompactDatabase(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+
+        // Sit just above Services so the command groups with the app-level
+        // actions rather than the window controls below it.
+        let servicesIndex = appMenu.indexOfItem(withTitle: "Services")
+        if servicesIndex > 0 {
+            appMenu.insertItem(item, at: servicesIndex)
+            appMenu.insertItem(.separator(), at: servicesIndex)
+        } else {
+            appMenu.addItem(.separator())
+            appMenu.addItem(item)
+        }
+    }
+
+    @objc
+    private func holyCompactDatabase(_ sender: Any?) {
+        // Force past the bloat gate — the user asked for it explicitly — while
+        // still honoring the disk-space gate. The rewrite runs off the main
+        // thread so a large reclaim never spins the UI.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let decision = HolyDatabaseCompactor.maintainAppDatabaseIfNeeded(force: true)
+            DispatchQueue.main.async {
+                self.presentHolyCompactionResult(decision)
+            }
+        }
+    }
+
+    private func presentHolyCompactionResult(_ decision: HolyDatabaseCompactor.Decision?) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+
+        switch decision {
+        case let .compacted(before, after):
+            let reclaimed = ByteCountFormatter.string(
+                fromByteCount: max(0, before.totalBytes - after.totalBytes),
+                countStyle: .file
+            )
+            alert.messageText = "Database Compacted"
+            alert.informativeText = "Reclaimed \(reclaimed) of disk space."
+        case .skippedNotBloated:
+            alert.messageText = "Database Already Compact"
+            alert.informativeText = "There was no meaningful space to reclaim."
+        case let .skippedInsufficientDisk(assessment, availableBytes):
+            let needed = ByteCountFormatter.string(fromByteCount: assessment.totalBytes, countStyle: .file)
+            let available = ByteCountFormatter.string(fromByteCount: availableBytes, countStyle: .file)
+            alert.messageText = "Not Enough Free Disk"
+            alert.informativeText = "Compaction needs about \(needed) of temporary free space; only \(available) is available."
+        case nil:
+            alert.messageText = "Couldn’t Compact the Database"
+            alert.informativeText = "The database may be busy. Try again in a moment."
+        }
+
+        alert.runModal()
     }
 
     @objc
