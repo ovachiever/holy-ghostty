@@ -112,4 +112,28 @@ struct HolySessionLiveStatusTests {
     @Test func churnedResidueLineIsNotBusy() {
         #expect(!HolySession.isAgentBusyStatusLineForTesting("✻ Churned for 3m 16s"))
     }
+
+    // The waiting signal must not echo the user's draft: its text flows into
+    // telemetry detail, where words like "confirmed" read as an approval
+    // request and raise the hand.
+    @Test func waitingEvidenceDoesNotEchoPromptDraft() {
+        let evidence = HolySession.agentWaitingEvidenceForTesting(lines: [
+            "✻ Cooked for 14m 19s",
+            "❯ blue dot confirmed, all states look right now",
+            "Model · Fable 5 · xhigh",
+        ])
+        #expect(evidence != nil)
+        #expect(evidence?.lowercased().contains("confirm") == false)
+    }
+
+    // Draft questions ("how should I…?") must not read as the agent asking
+    // planning questions.
+    @Test func promptDraftIsNotPlanningQuestionEvidence() {
+        let evidence = HolySession.agentPlanningQuestionEvidenceForTesting(lines: [
+            "✻ Churned for 3m 16s",
+            "❯ how should we structure the roster refactor?",
+            "Model · Fable 5 · xhigh",
+        ])
+        #expect(evidence == nil)
+    }
 }

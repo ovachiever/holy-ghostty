@@ -1494,14 +1494,20 @@ final class HolySession: ObservableObject, Identifiable {
 
     private static func agentWaitingEvidence(runtime: HolySessionRuntime, lines: [String]) -> String? {
         guard isAgentRuntime(runtime) else { return nil }
+        guard lines.suffix(8).contains(where: isAgentPromptLine) else { return nil }
 
-        return lines.suffix(8).reversed().first(where: isAgentPromptLine)
+        // Never echo the prompt line itself: it carries the user's draft, and
+        // that text flows into telemetry detail where words like "confirmed"
+        // or "allow" masquerade as the agent requesting approval.
+        return "Prompt is ready for your next message"
     }
 
     private static func agentPlanningQuestionEvidence(runtime: HolySessionRuntime, lines: [String]) -> String? {
         guard isAgentRuntime(runtime) else { return nil }
 
-        let recent = Array(lines.suffix(16))
+        // Drop prompt lines so a draft like "how should we…?" can't read as
+        // the agent asking planning questions.
+        let recent = Array(lines.suffix(16)).filter { !isAgentPromptLine($0) }
         let joined = recent.joined(separator: "\n")
         let lower = joined.lowercased()
         guard lower.contains("planning:")
@@ -2023,6 +2029,14 @@ final class HolySession: ObservableObject, Identifiable {
 
     static func isAgentPromptLineForTesting(_ line: String) -> Bool {
         isAgentPromptLine(line)
+    }
+
+    static func agentWaitingEvidenceForTesting(lines: [String]) -> String? {
+        agentWaitingEvidence(runtime: .claude, lines: lines)
+    }
+
+    static func agentPlanningQuestionEvidenceForTesting(lines: [String]) -> String? {
+        agentPlanningQuestionEvidence(runtime: .claude, lines: lines)
     }
 #endif
 
