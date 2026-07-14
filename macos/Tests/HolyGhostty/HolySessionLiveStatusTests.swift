@@ -79,4 +79,37 @@ struct HolySessionLiveStatusTests {
         let pickerRow = "○ code-review  Workflow-backed code review — one finder per correctness angle"
         #expect(!HolySession.isLiveAgentSwarmLineForTesting(pickerRow))
     }
+
+    // Claude Code freezes the last spinner frame into the terminal title when
+    // a turn ends ("✳ Fix missing activity"), so a glyph-prefixed title alone
+    // is not evidence of live work — only a working verb in the title is.
+    @Test func frozenSpinnerTitleIsNotBusy() {
+        #expect(!HolySession.isBusyAgentTitleForTesting("✳ Fix missing activity spinner"))
+        #expect(HolySession.isBusyAgentTitleForTesting("✳ Running the build"))
+    }
+
+    // Transcript prose QUOTING footer phrases must not read as live activity —
+    // an agent explaining this detector poisons its own session otherwise.
+    @Test func proseQuotingAgentCountsIsNotSwarmLine() {
+        let prose = #"a background workflow ("Waiting for N dynamic workflow to finish" / "2/5 agents done") should show the gold multi-agent spinner"#
+        #expect(!HolySession.isLiveAgentSwarmLineForTesting(prose))
+    }
+
+    @Test func proseQuotingTokenCounterIsNotLiveStatus() {
+        let prose = "the ticker 2/5 agents done · 7m 12s · ↓ 598.5k tokens still renders"
+        #expect(!HolySession.isLiveAgentStatusLineForTesting(prose))
+    }
+
+    // Claude Code's REPL prompt is "❯" (U+276F); draft text typed there must
+    // classify as a prompt line so it stays out of the marker scans.
+    @Test func heavyPromptGlyphIsPromptLine() {
+        #expect(HolySession.isAgentPromptLineForTesting("❯"))
+        #expect(HolySession.isAgentPromptLineForTesting("❯ the session shows the swarm spinner now, fix confirmed"))
+        #expect(!HolySession.isAgentPromptLineForTesting("✻ Churned for 3m 16s"))
+    }
+
+    // The post-turn residue line is past tense — never busy.
+    @Test func churnedResidueLineIsNotBusy() {
+        #expect(!HolySession.isAgentBusyStatusLineForTesting("✻ Churned for 3m 16s"))
+    }
 }

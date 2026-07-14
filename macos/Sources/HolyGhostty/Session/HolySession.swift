@@ -1160,7 +1160,11 @@ final class HolySession: ObservableObject, Identifiable {
     ) -> [HolySessionSignal] {
         let adapter = HolySessionAdapterRegistry.adapter(for: runtime)
         let evidence = lastMeaningfulLine(from: preview) ?? preview
-        let activePreview = recentMeaningfulLines(from: preview, maxCount: 3).joined(separator: "\n")
+        // Prompt lines carry the user's draft text; a draft containing
+        // "confirm" or "failed" is not the agent asking or reporting anything.
+        let activePreview = recentMeaningfulLines(from: preview, maxCount: 3)
+            .filter { !isAgentPromptLine($0) }
+            .joined(separator: "\n")
         let lowerActivePreview = activePreview.lowercased()
         let evidenceLooksReady = isReadyLine(evidence)
         let meaningfulLines = recentMeaningfulLines(from: preview, maxCount: 14)
@@ -1392,11 +1396,29 @@ final class HolySession: ObservableObject, Identifiable {
 
     private static let agentScreenActivityFreshnessInterval: TimeInterval = 4
 
+    // Title-only spinner prefixes. Claude Code's flower frames (✢✳✶✻✽) are
+    // deliberately absent: it freezes the last frame into the title when a
+    // turn ends, so a flower-prefixed title is not evidence of live work.
     private static let agentSpinnerTitlePrefixes: Set<Character> = [
         "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-        "◐", "◓", "◑", "◒",
-        "✢", "✳", "✶", "✻", "✽", "✺"
+        "◐", "◓", "◑", "◒"
     ]
+
+    // Glyphs that open a live status/ticker line at the bottom of an agent
+    // TUI. Rules keyed to these prefixes can't be poisoned by transcript
+    // prose that merely quotes footer phrases mid-sentence.
+    private static let agentLiveStatusGlyphPrefixes: Set<Character> = [
+        "·", "✢", "✳", "✶", "✻", "✽",
+        "○", "◔", "◐", "◓", "◑", "◕", "◒", "●", "⏺",
+        "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"
+    ]
+
+    private static func hasAgentStatusGlyphPrefix(_ line: String) -> Bool {
+        guard let first = line.trimmingCharacters(in: .whitespacesAndNewlines).first else {
+            return false
+        }
+        return agentLiveStatusGlyphPrefixes.contains(first)
+    }
 
     private static func isAgentRuntime(_ runtime: HolySessionRuntime) -> Bool {
         switch runtime {
@@ -1452,8 +1474,10 @@ final class HolySession: ObservableObject, Identifiable {
         return lower.contains("teammates running")
             || lower.contains("show teammates")
             || lower.range(of: #"\b[2-9][0-9]*\s+teammates?\b"#, options: .regularExpression) != nil
-            // Workflow fan-out ticker: "2/5 agents done · 7m 12s · ↓ 598.5k tokens".
-            || lower.range(of: #"\b[0-9]+/[0-9]+\s+agents?\b"#, options: .regularExpression) != nil
+            // Workflow fan-out ticker: "○ … 2/5 agents done · 7m 12s · ↓ 598.5k
+            // tokens". Glyph-anchored so prose quoting the count can't match.
+            || (hasAgentStatusGlyphPrefix(line)
+                && lower.range(of: #"\b[0-9]+/[0-9]+\s+agents?\b"#, options: .regularExpression) != nil)
     }
 
     private static func isAgentSwarmLine(_ line: String) -> Bool {
@@ -1548,8 +1572,9 @@ final class HolySession: ObservableObject, Identifiable {
 
         // A Claude Code REPL parked on a background workflow renders only this
         // wait line at the prompt — "waiting" here means agents are running,
-        // not that the user owes a reply.
-        if lower.range(
+        // not that the user owes a reply. Glyph-anchored so transcript prose
+        // quoting the phrase can't match.
+        if hasAgentStatusGlyphPrefix(trimmed), lower.range(
             of: #"\bwaiting for [0-9]+ .*workflows? to finish\b"#,
             options: .regularExpression
         ) != nil {
@@ -1559,8 +1584,8 @@ final class HolySession: ObservableObject, Identifiable {
         // A live elapsed-time + token counter ("1m 45s · ↓ 4.3k tokens") only
         // renders mid-turn. The workflow ticker draws it without the
         // parentheses the verb rule below requires, and spinner-line variants
-        // omit the verb entirely.
-        if lower.range(
+        // omit the verb entirely. Glyph-anchored for the same reason as above.
+        if hasAgentStatusGlyphPrefix(trimmed), lower.range(
             of: #"\b[0-9]+(?:h\s*[0-9]+m|m\s*[0-9]+s|[hms])\s*·\s*[↑↓]\s*[0-9][0-9.,]*[kmb]?\s*tokens\b"#,
             options: .regularExpression
         ) != nil {
@@ -1607,7 +1632,7 @@ final class HolySession: ObservableObject, Identifiable {
     private static func agentStatusBody(from line: String) -> String {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let first = trimmed.first,
-              "•·✻✢⏺●○◐◓◑◒".contains(first) || agentSpinnerTitlePrefixes.contains(first) else {
+              "•·✻✢✳✶✽⏺●○◐◓◑◒".contains(first) || agentSpinnerTitlePrefixes.contains(first) else {
             return trimmed
         }
 
@@ -1635,6 +1660,10 @@ final class HolySession: ObservableObject, Identifiable {
         }
 
         if trimmed == "›" || trimmed.hasPrefix("› ") {
+            return true
+        }
+
+        if trimmed == "❯" || trimmed.hasPrefix("❯ ") {
             return true
         }
 
@@ -1986,6 +2015,14 @@ final class HolySession: ObservableObject, Identifiable {
 
     static func isLiveAgentSwarmLineForTesting(_ line: String) -> Bool {
         isLiveAgentSwarmLine(line)
+    }
+
+    static func isBusyAgentTitleForTesting(_ title: String) -> Bool {
+        isBusyAgentTitle(title)
+    }
+
+    static func isAgentPromptLineForTesting(_ line: String) -> Bool {
+        isAgentPromptLine(line)
     }
 #endif
 
