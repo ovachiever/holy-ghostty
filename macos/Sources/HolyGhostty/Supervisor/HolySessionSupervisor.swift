@@ -670,9 +670,16 @@ final class HolySessionSupervisor {
         launchSpec: HolySessionLaunchSpec,
         updatedAt: Date
     ) -> HolySessionRecord {
-        HolySessionRecord(
+        var restoredLaunchSpec = launchSpec
+        // Notes and focus pins are user-owned roster metadata. Discovery can
+        // refresh how Holy reaches a tmux session, but it must never erase the
+        // user's annotations when that stable session identity is re-adopted.
+        restoredLaunchSpec.note = archivedSession.record.launchSpec.note
+        restoredLaunchSpec.isFocused = archivedSession.record.launchSpec.isFocused
+
+        return HolySessionRecord(
             id: archivedSession.sourceSessionID,
-            launchSpec: launchSpec,
+            launchSpec: restoredLaunchSpec,
             createdAt: archivedSession.record.createdAt,
             updatedAt: updatedAt
         )

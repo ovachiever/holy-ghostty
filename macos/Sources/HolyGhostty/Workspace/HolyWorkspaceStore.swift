@@ -1053,6 +1053,16 @@ final class HolyWorkspaceStore: ObservableObject {
             localTmuxLaunchSpec(for: discovered)
         }
 
+        return reconciledArchivedLaunchSpec(
+            archivedSession,
+            discoveredLaunchSpec: discoveredSpec
+        )
+    }
+
+    private func reconciledArchivedLaunchSpec(
+        _ archivedSession: HolyArchivedSession,
+        discoveredLaunchSpec discoveredSpec: HolySessionLaunchSpec
+    ) -> HolySessionLaunchSpec {
         var launchSpec = archivedSession.record.launchSpec
         launchSpec.transport = discoveredSpec.transport
         launchSpec.tmux = discoveredSpec.tmux
@@ -1777,7 +1787,7 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func launchLocalTmuxSession(_ session: HolyDiscoveredTmuxSession, keepHostsOpen: Bool = false) {
-        _ = createSession(with: localTmuxLaunchSpec(for: session), origin: .directLaunch)
+        _ = attachDiscoveredTmuxSession(with: localTmuxLaunchSpec(for: session))
         if !keepHostsOpen {
             remoteHostsPresented = false
         }
@@ -1787,7 +1797,7 @@ final class HolyWorkspaceStore: ObservableObject {
         guard !sessions.isEmpty else { return }
 
         for session in sessions {
-            _ = createSession(with: localTmuxLaunchSpec(for: session), origin: .directLaunch)
+            _ = attachDiscoveredTmuxSession(with: localTmuxLaunchSpec(for: session))
         }
 
         if !keepHostsOpen {
@@ -1798,7 +1808,7 @@ final class HolyWorkspaceStore: ObservableObject {
     func launchRemoteTmuxSession(_ session: HolyDiscoveredTmuxSession, on host: HolyRemoteHostRecord, keepHostsOpen: Bool = false) {
         let launchSpec = remoteTmuxLaunchSpec(for: session, on: host)
 
-        _ = createSession(with: launchSpec, origin: .directLaunch)
+        _ = attachDiscoveredTmuxSession(with: launchSpec)
         if !keepHostsOpen {
             remoteHostsPresented = false
         }
@@ -1810,7 +1820,7 @@ final class HolyWorkspaceStore: ObservableObject {
         for session in sessions {
             let launchSpec = remoteTmuxLaunchSpec(for: session, on: host)
 
-            _ = createSession(with: launchSpec, origin: .directLaunch)
+            _ = attachDiscoveredTmuxSession(with: launchSpec)
         }
 
         if !keepHostsOpen {
@@ -2420,6 +2430,58 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         return nil
+    }
+
+    /// Hosts attach actions reconnect to an existing tmux identity. Reuse the
+    /// current roster record when present, or re-adopt its archive after Clear,
+    /// so user-owned metadata (notes, focus pins, task context) follows the
+    /// session instead of being replaced by a blank discovery-built record.
+    @discardableResult
+    private func attachDiscoveredTmuxSession(
+        with launchSpec: HolySessionLaunchSpec
+    ) -> HolySession? {
+        guard let launchKey = HolyTmuxSessionKey(launchSpec: launchSpec),
+              launchSpec.tmux?.normalized.createIfMissing == false else {
+            return createSession(with: launchSpec, origin: .directLaunch)
+        }
+
+        if let existingSession = sessions.first(where: {
+            HolyTmuxSessionKey(launchSpec: $0.record.launchSpec) == launchKey
+        }) {
+            existingSession.applyDiscoveredLaunchMetadata(from: launchSpec)
+            selectedSessionID = existingSession.id
+            persist()
+            return existingSession
+        }
+
+        guard let archivedSession = archivedSessions.first(where: {
+            HolyTmuxSessionKey(launchSpec: $0.record.launchSpec) == launchKey
+        }) else {
+            return createSession(with: launchSpec, origin: .directLaunch)
+        }
+
+        let reconciledLaunchSpec = reconciledArchivedLaunchSpec(
+            archivedSession,
+            discoveredLaunchSpec: launchSpec
+        )
+        let previousSelectedSessionID = selectedSessionID
+        guard let result = sessionSupervisor.readoptArchivedSession(
+            archivedSession,
+            with: reconciledLaunchSpec,
+            in: currentSessionStoreState
+        ) else {
+            return nil
+        }
+
+        applySessionStoreState(result.state)
+        selectedSessionID = result.sessionID
+        var pendingEvents = result.pendingEvents
+        pendingEvents.append(contentsOf: selectionEvents(
+            from: previousSelectedSessionID,
+            to: selectedSessionID
+        ))
+        persist(pendingEvents: pendingEvents)
+        return sessions.first(where: { $0.id == result.sessionID })
     }
 
     private func startActiveTmuxMetadataRefresh() {
@@ -3531,6 +3593,21 @@ private struct HolyRemoteTmuxSessionKey: Equatable {
         self.sshDestination = sshDestination
         self.tmuxSocketName = tmux.socketName?.nilIfBlank
         self.tmuxSessionName = tmuxSessionName
+    }
+}
+
+private enum HolyTmuxSessionKey: Equatable {
+    case local(HolyLocalTmuxSessionKey)
+    case remote(HolyRemoteTmuxSessionKey)
+
+    init?(launchSpec: HolySessionLaunchSpec) {
+        if let remoteKey = HolyRemoteTmuxSessionKey(launchSpec: launchSpec) {
+            self = .remote(remoteKey)
+        } else if let localKey = HolyLocalTmuxSessionKey(launchSpec: launchSpec) {
+            self = .local(localKey)
+        } else {
+            return nil
+        }
     }
 }
 

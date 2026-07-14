@@ -365,11 +365,13 @@ struct HolyTmuxLifecycleIdentityTests {
         #expect(archivedMissingSocket.record.createdAt == missingSocketCreatedAt)
     }
 
-    @Test func archivedReadoptionPreservesOriginalSessionIdentity() {
+    @Test func archivedReadoptionPreservesIdentityAndUserMetadata() {
         let sourceID = UUID()
         let createdAt = Date(timeIntervalSince1970: 100)
         let updatedAt = Date(timeIntervalSince1970: 200)
         var archivedSpec = HolySessionLaunchSpec.interactiveTmuxShell(title: "Versova")
+        archivedSpec.note = "Check the remote deployment before merging"
+        archivedSpec.isFocused = true
         archivedSpec.tmux = .init(socketName: "holy", sessionName: nil, createIfMissing: true)
         let record = HolySessionRecord(
             id: sourceID,
@@ -392,6 +394,8 @@ struct HolyTmuxLifecycleIdentityTests {
             archivedAt: createdAt
         )
         var liveSpec = archivedSpec
+        liveSpec.note = nil
+        liveSpec.isFocused = nil
         liveSpec.tmux = .init(socketName: "holy", sessionName: "holy-versova-12345678", createIfMissing: false)
 
         let readopted = HolySessionSupervisor.readoptedRecordForTesting(
@@ -403,6 +407,8 @@ struct HolyTmuxLifecycleIdentityTests {
         #expect(readopted.id == sourceID)
         #expect(readopted.createdAt == createdAt)
         #expect(readopted.updatedAt == updatedAt)
-        #expect(readopted.launchSpec == liveSpec)
+        #expect(readopted.launchSpec.tmux == liveSpec.tmux)
+        #expect(readopted.launchSpec.note == archivedSpec.note)
+        #expect(readopted.launchSpec.isFocused == true)
     }
 }
