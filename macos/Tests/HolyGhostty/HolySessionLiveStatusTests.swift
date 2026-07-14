@@ -136,4 +136,36 @@ struct HolySessionLiveStatusTests {
         ])
         #expect(evidence == nil)
     }
+
+    // Claude Code renders the live spinner ABOVE the todo checklist; a tall
+    // checklist must not push the only proof-of-work line out of scan range.
+    @Test func workingEvidenceSurvivesTodoChecklistBelowSpinner() {
+        let lines = [
+            "✻ Attacking speed_dist earned attribution… (4m 26s · ↓ 12.2k tokens · thinking with xhigh effort)",
+            "■ Attack speed_dist earned attribution (τ·ṙ closure + se-rate-artifact)",
+            "□ Attack hash-bound attestation (flip bin + migration 0005)",
+            "□ Verify census stratum fix (jerk_x plant) and regressions caption",
+            "□ Live gates: full test suite + census/attribution recount",
+            "□ Render verdict + append ledger section",
+            "… +1 completed",
+            "❯",
+            "Model · Fable 5 · xhigh",
+            "⏵⏵ auto mode on · 1 shell · ← for agents",
+        ]
+        #expect(HolySession.agentWorkingEvidenceForTesting(lines: lines) != nil)
+    }
+
+    // The detection window must be deeper than the 8-line display preview —
+    // otherwise every suffix() in the matchers scans a truncated pane and the
+    // spinner above a checklist is simply never seen.
+    @Test func detectionTextRetainsSpinnerAboveTallChecklist() {
+        let checklist = (1...9).map { "□ Todo item number \($0)" }
+        let pane = (
+            ["older transcript prose"]
+            + ["✻ Frolicking… (2m 3s · ↓ 8.1k tokens)"]
+            + checklist
+            + ["❯", "Model · Fable 5 · xhigh", "⏵⏵ auto mode on · ← for agents"]
+        ).joined(separator: "\n")
+        #expect(HolySession.detectionTextForTesting(from: pane).contains("Frolicking"))
+    }
 }

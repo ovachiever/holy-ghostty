@@ -767,11 +767,12 @@ final class HolySession: ObservableObject, Identifiable {
             }
         }
 
-        let previewChangedRecently = updateVisibleActivity(for: nextPreview, surfaceTitle: surfaceView.title)
+        let detectionText = Self.detectionText(from: visibleContents)
+        let previewChangedRecently = updateVisibleActivity(for: detectionText, surfaceTitle: surfaceView.title)
         var nextSignals = Self.detectSignals(
             runtime: effectiveRuntime,
             surfaceView: surfaceView,
-            preview: nextPreview,
+            preview: detectionText,
             previewChangedRecently: previewChangedRecently
         )
         let previewStability = updatePreviewStability(for: nextPreview)
@@ -1104,6 +1105,19 @@ final class HolySession: ObservableObject, Identifiable {
         return trimmed.isEmpty ? "Interactive shell ready." : trimmed
     }
 
+    // Detection needs a deeper window than the 8-line display preview:
+    // Claude Code renders its live spinner ABOVE tool output and todo
+    // checklists, so an 8-line tail loses the only line proving the agent
+    // is working the moment a checklist grows.
+    private static func detectionText(from content: String) -> String {
+        content
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .suffix(40)
+            .joined(separator: "\n")
+    }
+
     private static func classifyPhase(
         surfaceView: Ghostty.SurfaceView,
         signals: [HolySessionSignal],
@@ -1167,7 +1181,9 @@ final class HolySession: ObservableObject, Identifiable {
             .joined(separator: "\n")
         let lowerActivePreview = activePreview.lowercased()
         let evidenceLooksReady = isReadyLine(evidence)
-        let meaningfulLines = recentMeaningfulLines(from: preview, maxCount: 14)
+        // Deep enough that a spinner sitting above a todo checklist plus the
+        // prompt and footer chrome still lands inside the busy scans.
+        let meaningfulLines = recentMeaningfulLines(from: preview, maxCount: 24)
         let swarmEvidence = agentSwarmEvidence(
             runtime: runtime,
             lines: meaningfulLines,
@@ -2037,6 +2053,19 @@ final class HolySession: ObservableObject, Identifiable {
 
     static func agentPlanningQuestionEvidenceForTesting(lines: [String]) -> String? {
         agentPlanningQuestionEvidence(runtime: .claude, lines: lines)
+    }
+
+    static func agentWorkingEvidenceForTesting(lines: [String]) -> String? {
+        agentWorkingEvidence(
+            runtime: .claude,
+            surfaceTitle: "",
+            lines: lines,
+            previewChangedRecently: true
+        )
+    }
+
+    static func detectionTextForTesting(from content: String) -> String {
+        detectionText(from: content)
     }
 #endif
 
