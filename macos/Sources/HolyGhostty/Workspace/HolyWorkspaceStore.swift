@@ -113,6 +113,7 @@ final class HolyWorkspaceStore: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private var repairBackoff = HolyRepairBackoff()
     private var activeTmuxMetadataRefreshCancellable: AnyCancellable?
+    private var localTmuxMetadataRefreshCancellable: AnyCancellable?
     private var attentionClockCancellable: AnyCancellable?
     private var draftLaunchGuardrailTask: Task<Void, Never>?
     private var selectedSessionReadTask: Task<Void, Never>?
@@ -1737,7 +1738,10 @@ final class HolyWorkspaceStore: ObservableObject {
                 )
                 await MainActor.run {
                     guard let self else { return }
-                    self.discoveredLocalTmuxSessions = sessions
+                    // Runs every 15s now — skip the publish when nothing moved.
+                    if self.discoveredLocalTmuxSessions != sessions {
+                        self.discoveredLocalTmuxSessions = sessions
+                    }
                     if self.applyDiscoveredLocalSessionMetadata(sessions) {
                         self.persist()
                     }
@@ -2491,6 +2495,17 @@ final class HolyWorkspaceStore: ObservableObject {
             .autoconnect()
             .sink { [weak self] _ in
                 self?.convergeRoster(reason: .periodic)
+            }
+
+        // A resumed-but-idle agent pane emits no OSC 7 until its next turn,
+        // so tmux pane_current_path is the only prompt source for the
+        // cwd-derived sidebar name. Local discovery is one cheap subprocess;
+        // don't make the name wait on the 300s converge.
+        localTmuxMetadataRefreshCancellable = Timer.publish(every: 15, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self, self.hasActiveLocalTmuxSessions else { return }
+                self.refreshLocalTmuxSessions()
             }
     }
 
