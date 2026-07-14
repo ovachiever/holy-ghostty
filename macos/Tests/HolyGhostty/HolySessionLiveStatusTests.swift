@@ -182,6 +182,31 @@ struct HolySessionLiveStatusTests {
         #expect(evidence == "✻ Churned for 3m 16s")
     }
 
+    // Claude Code's background-shell wait footer is past tense with no
+    // parenthesized timer or token counter — it must still read as working.
+    @Test func backgroundShellWaitFooterIsLiveStatus() {
+        #expect(HolySession.isLiveAgentStatusLineForTesting("✻ Sautéed for 1m 34s · 1 shell still running"))
+        #expect(HolySession.isLiveAgentStatusLineForTesting("✽ Simmering for 12s · 2 shells still running"))
+        // The auto-mode footer mentions "1 shell" without "still running".
+        #expect(!HolySession.isLiveAgentStatusLineForTesting("⏵⏵ auto mode on · 1 shell · ← for agents"))
+        // Unanchored prose quoting the phrase must not match.
+        #expect(!HolySession.isLiveAgentStatusLineForTesting("the footer said 1 shell still running earlier"))
+    }
+
+    // Next-step hints must derive from an actual approval signal, never be
+    // harvested from arbitrary transcript prose — streamed text containing
+    // "confirm" otherwise becomes "Review the prompt and confirm approval"
+    // and raises the hand while the agent is mid-reply.
+    @Test func nextStepHintRequiresApprovalSignal() {
+        let prose = "Password, credential, permission, and destructive confirmation prompts remain human-only by default."
+        #expect(HolySessionRuntimeTelemetryParser.nextStepHintForTesting(
+            evidence: prose, hasApprovalSignal: false
+        ) == nil)
+        #expect(HolySessionRuntimeTelemetryParser.nextStepHintForTesting(
+            evidence: "Allow this tool call? (y/n)", hasApprovalSignal: true
+        ) != nil)
+    }
+
     // The freshness signature must watch at least as deep as the busy scans:
     // a spinner animating at scan depth but outside the signature window
     // would flap the freshness gate and read as idle.

@@ -1607,6 +1607,15 @@ final class HolySession: ObservableObject, Identifiable {
             return true
         }
 
+        // Background-shell waits render past tense with no timer parens or
+        // token counter: "✻ Sautéed for 1m 34s · 1 shell still running".
+        if hasAgentStatusGlyphPrefix(trimmed), lower.range(
+            of: #"\b[0-9]+\s+(shell|task|agent)s?\s+still\s+running\b"#,
+            options: .regularExpression
+        ) != nil {
+            return true
+        }
+
         // A live elapsed-time + token counter ("1m 45s · ↓ 4.3k tokens") only
         // renders mid-turn. The workflow ticker draws it without the
         // parentheses the verb rule below requires, and spinner-line variants

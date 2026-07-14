@@ -38,7 +38,7 @@ enum HolySessionRuntimeTelemetryParser {
         let progressPercent = activeProgressReport?.progress.flatMap(Int.init)
         let command = extractCommand(from: evidence)
         let filePath = extractFilePath(from: evidence)
-        let nextStepHint = extractNextStepHint(from: evidence)
+        let nextStepHint = nextStepHint(evidence: evidence, primarySignal: primarySignal)
         let artifact = extractArtifact(from: evidence)
         let stallKind = inferredStallKind(
             phase: source.phase,
@@ -343,6 +343,19 @@ enum HolySessionRuntimeTelemetryParser {
         ) != nil
     }
 
+    // Next-step hints exist to explain a pending approval. Harvesting them
+    // from arbitrary transcript text turns streamed prose containing
+    // "confirm" into an approval cue that raises the hand mid-reply — hints
+    // are only derived when an approval signal is actually present, and from
+    // that signal's own detail line.
+    private static func nextStepHint(
+        evidence: String,
+        primarySignal: HolySessionSignal?
+    ) -> String? {
+        guard let primarySignal, primarySignal.kind == .approval else { return nil }
+        return extractNextStepHint(from: primarySignal.detail.isEmpty ? evidence : primarySignal.detail)
+    }
+
     private static func extractNextStepHint(from text: String) -> String? {
         let lowerText = text.lowercased()
 
@@ -475,6 +488,15 @@ extension HolySessionRuntimeTelemetryParser {
 
     static func evidenceLineForTesting(from preview: String) -> String? {
         lastMeaningfulLine(from: preview)
+    }
+
+    static func nextStepHintForTesting(evidence: String, hasApprovalSignal: Bool) -> String? {
+        nextStepHint(
+            evidence: evidence,
+            primarySignal: hasApprovalSignal
+                ? .init(kind: .approval, headline: "Approval needed", detail: evidence)
+                : nil
+        )
     }
 }
 #endif
