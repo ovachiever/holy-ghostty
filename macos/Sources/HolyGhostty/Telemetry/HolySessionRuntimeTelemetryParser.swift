@@ -407,7 +407,29 @@ enum HolySessionRuntimeTelemetryParser {
         preview
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .last(where: { !$0.isEmpty && !isTerminalChromeLine($0) })
+            .last(where: { !$0.isEmpty && !isTerminalChromeLine($0) && !isPromptLine($0) })
+    }
+
+    // Mirrors HolySession.isAgentPromptLine. The prompt line carries the
+    // user's draft; extracting hints or commands from it turns typed words
+    // like "confirm" into next-step telemetry that raises the approval hand.
+    private static func isPromptLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+
+        if lower.hasPrefix("? for shortcuts") || lower.contains("new task?") {
+            return true
+        }
+
+        for glyph in ["›", "❯", ">"] where trimmed == glyph || trimmed.hasPrefix("\(glyph) ") {
+            return true
+        }
+
+        if trimmed.contains("│ >") {
+            return true
+        }
+
+        return lower.contains("type a message") || lower.contains("send a message")
     }
 
     private static func isTerminalChromeLine(_ line: String) -> Bool {
@@ -449,6 +471,10 @@ enum HolySessionRuntimeTelemetryParser {
 extension HolySessionRuntimeTelemetryParser {
     static func extractCommandForTesting(from text: String) -> String? {
         extractCommand(from: text)
+    }
+
+    static func evidenceLineForTesting(from preview: String) -> String? {
+        lastMeaningfulLine(from: preview)
     }
 }
 #endif

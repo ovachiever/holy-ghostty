@@ -168,4 +168,33 @@ struct HolySessionLiveStatusTests {
         ).joined(separator: "\n")
         #expect(HolySession.detectionTextForTesting(from: pane).contains("Frolicking"))
     }
+
+    // The telemetry parser picks its evidence line independently of the
+    // signal pipeline; a prompt draft ending the pane must not become
+    // evidence, or extractNextStepHint turns "…confirm…" into "Review the
+    // prompt and confirm approval" and the hand rises through telemetry.
+    @Test func telemetryEvidenceSkipsPromptDraft() {
+        let preview = """
+        ✻ Churned for 3m 16s
+        ❯ please confirm the approval flow works
+        """
+        let evidence = HolySessionRuntimeTelemetryParser.evidenceLineForTesting(from: preview)
+        #expect(evidence == "✻ Churned for 3m 16s")
+    }
+
+    // The freshness signature must watch at least as deep as the busy scans:
+    // a spinner animating at scan depth but outside the signature window
+    // would flap the freshness gate and read as idle.
+    @Test func freshnessSignatureCoversBusyScanDepth() {
+        func pane(spinner: String) -> String {
+            (
+                [spinner]
+                + (1...20).map { "□ Todo item number \($0)" }
+                + ["❯", "Model · Fable 5 · xhigh", "⏵⏵ auto mode on · ← for agents"]
+            ).joined(separator: "\n")
+        }
+        let before = HolySession.visibleActivitySignatureForTesting(preview: pane(spinner: "✻ Frolicking… (2m 3s · ↓ 8.1k tokens)"))
+        let after = HolySession.visibleActivitySignatureForTesting(preview: pane(spinner: "✽ Frolicking… (2m 4s · ↓ 8.2k tokens)"))
+        #expect(before != after)
+    }
 }

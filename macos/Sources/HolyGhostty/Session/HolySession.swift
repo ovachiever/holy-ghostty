@@ -1183,7 +1183,7 @@ final class HolySession: ObservableObject, Identifiable {
         let evidenceLooksReady = isReadyLine(evidence)
         // Deep enough that a spinner sitting above a todo checklist plus the
         // prompt and footer chrome still lands inside the busy scans.
-        let meaningfulLines = recentMeaningfulLines(from: preview, maxCount: 24)
+        let meaningfulLines = recentMeaningfulLines(from: preview, maxCount: agentDetectionScanDepth)
         let swarmEvidence = agentSwarmEvidence(
             runtime: runtime,
             lines: meaningfulLines,
@@ -1411,6 +1411,10 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     private static let agentScreenActivityFreshnessInterval: TimeInterval = 4
+
+    // Shared depth for busy scans AND the freshness signature — these must
+    // never drift apart (see normalizedVisibleActivitySignature).
+    private static let agentDetectionScanDepth = 24
 
     // Title-only spinner prefixes. Claude Code's flower frames (✢✳✶✻✽) are
     // deliberately absent: it freezes the last frame into the title when a
@@ -1704,7 +1708,11 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     private static func normalizedVisibleActivitySignature(from preview: String, surfaceTitle: String) -> String? {
-        var lines = recentMeaningfulLines(from: preview, maxCount: 16)
+        // Must watch at least as many lines as the busy scans read: a spinner
+        // animating at scan depth but outside the signature window would flap
+        // the freshness gate and read as idle (or stay stale-busy while the
+        // user types below it).
+        var lines = recentMeaningfulLines(from: preview, maxCount: agentDetectionScanDepth)
         if let title = normalizedTerminalTitle(surfaceTitle) {
             lines.append("title: \(title)")
         }
@@ -2066,6 +2074,10 @@ final class HolySession: ObservableObject, Identifiable {
 
     static func detectionTextForTesting(from content: String) -> String {
         detectionText(from: content)
+    }
+
+    static func visibleActivitySignatureForTesting(preview: String, surfaceTitle: String = "") -> String? {
+        normalizedVisibleActivitySignature(from: preview, surfaceTitle: surfaceTitle)
     }
 #endif
 
