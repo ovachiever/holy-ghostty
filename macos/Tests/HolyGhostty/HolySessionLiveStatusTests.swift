@@ -182,15 +182,16 @@ struct HolySessionLiveStatusTests {
         #expect(evidence == "✻ Churned for 3m 16s")
     }
 
-    // Claude Code's background-shell wait footer is past tense with no
-    // parenthesized timer or token counter — it must still read as working.
-    @Test func backgroundShellWaitFooterIsLiveStatus() {
-        #expect(HolySession.isLiveAgentStatusLineForTesting("✻ Sautéed for 1m 34s · 1 shell still running"))
-        #expect(HolySession.isLiveAgentStatusLineForTesting("✽ Simmering for 12s · 2 shells still running"))
-        // The auto-mode footer mentions "1 shell" without "still running".
+    // "N shells still running" is NOT working evidence: background shells
+    // outlive turns, so the IDLE residue line carries the same suffix
+    // ("✻ Churned for 7m 12s · 1 shell still running") indefinitely — a rule
+    // matching it makes any session with a persistent shell throb forever
+    // and never earn a recent-reply dot. The mid-turn variant is identical
+    // per-sample; only a temporal check can split them (oracle redesign).
+    @Test func shellStillRunningResidueIsNotLiveStatus() {
+        #expect(!HolySession.isLiveAgentStatusLineForTesting("✻ Churned for 7m 12s · 1 shell still running"))
+        #expect(!HolySession.isLiveAgentStatusLineForTesting("✻ Sautéed for 1m 34s · 1 shell still running"))
         #expect(!HolySession.isLiveAgentStatusLineForTesting("⏵⏵ auto mode on · 1 shell · ← for agents"))
-        // Unanchored prose quoting the phrase must not match.
-        #expect(!HolySession.isLiveAgentStatusLineForTesting("the footer said 1 shell still running earlier"))
     }
 
     // Next-step hints must derive from an actual approval signal, never be
