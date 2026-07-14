@@ -1,7 +1,9 @@
+import AppKit
 import Combine
 import Darwin
 import Foundation
 import SwiftUI
+import UserNotifications
 
 enum HolySessionCycleDirection {
     case next
@@ -46,6 +48,10 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var remoteHostImportMessage: String?
     @Published private(set) var coordinationBySessionID: [UUID: HolySessionCoordination] = [:]
     @Published private(set) var attentionMetadataBySessionID: [UUID: HolySessionAttentionMetadata] = [:]
+    /// A delivery problem never clears the authoritative in-app indicator.
+    /// Keeping the explanation here surfaces the pending macOS notification
+    /// without inventing a seventh roster glyph.
+    @Published private(set) var notificationIssuesBySessionID: [UUID: String] = [:]
     @Published private(set) var draftLaunchGuardrail: HolyLaunchGuardrail = .clear
     @Published private(set) var draftOwnershipPreview: HolySessionOwnership?
     @Published private(set) var draftLaunchGuardrailRefreshing: Bool = false
@@ -106,6 +112,8 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     private let sessionSupervisor: HolySessionSupervisor
+    private let agentStateMonitor = HolyTmuxAgentStateMonitor()
+    private let workspaceStartedAt = Date()
     private let powerAssertionManager = HolyPowerAssertionManager()
     private var refreshCoordinator: HolySessionRefreshCoordinator?
     private var paneLayoutMemo: (key: PaneLayoutMemoKey, layout: HolyPaneLayout, labels: [UUID: String])?
@@ -115,15 +123,18 @@ final class HolyWorkspaceStore: ObservableObject {
     private var activeTmuxMetadataRefreshCancellable: AnyCancellable?
     private var localTmuxMetadataRefreshCancellable: AnyCancellable?
     private var attentionClockCancellable: AnyCancellable?
+    private var monitoredAgentStateEndpoints: Set<HolyTmuxAgentStateEndpoint> = []
+    private var agentStateMonitorConfigurationGeneration: UInt64 = 0
     private var draftLaunchGuardrailTask: Task<Void, Never>?
     private var selectedSessionReadTask: Task<Void, Never>?
     private var selectedSessionReadTaskKey: String?
+    private var pendingAgentNotificationEventIDs: [UUID: String] = [:]
+    private var agentNotificationRetryEventIDs: [UUID: String] = [:]
+    private var agentNotificationRetryAttempts: [UUID: Int] = [:]
+    private var agentNotificationRetryNotBefore: [UUID: Date] = [:]
+    private var agentNotificationRetryTasks: [UUID: Task<Void, Never>] = [:]
     private var suppressAutomaticSelectionPersistence = false
-    private static let selectedSessionReadDelay: TimeInterval = 3
     private static let keepAwakeDefaultsKey = "HolyKeepAwakeWhileRemoteAttached"
-    private static let freshReplyInterval: TimeInterval = 10 * 60
-    private static let overdueReplyInterval: TimeInterval = 2 * 60 * 60
-    private static let staleReplyInterval: TimeInterval = 24 * 60 * 60
 
     init(ghostty: Ghostty.App, seedDefaultSession: Bool = true) {
         self.sessionSupervisor = HolySessionSupervisor(
@@ -141,6 +152,18 @@ final class HolyWorkspaceStore: ObservableObject {
             .compactMap { $0.userInfo?["sessionID"] as? UUID }
             .sink { [weak self] sessionID in
                 self?.scheduleRepair(sessionID: sessionID)
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    // Re-evaluate the strict focus gate even when AppKit kept
+                    // the same first responder while the app was backgrounded.
+                    self.scheduleSelectedSessionSeenMark()
+                    self.retryPendingAgentNotificationsAfterActivation()
+                }
             }
             .store(in: &cancellables)
     }
@@ -306,6 +329,12 @@ final class HolyWorkspaceStore: ObservableObject {
            let slot = normalizedPaneLayout.slot(for: sessionID) {
             focusedPaneSlot = slot
         }
+    }
+
+    /// Selection is navigation state, not proof that the user saw new output.
+    /// The focused surface reports this only after AppKit has actually focused
+    /// it in an active, visible key window.
+    func sessionSurfaceDidReceiveUserFocus(_ sessionID: UUID) {
         clearUnreadAttentionIfNeeded(for: sessionID)
     }
 
@@ -2068,23 +2097,85 @@ final class HolyWorkspaceStore: ObservableObject {
 
     @discardableResult
     private func markSessionSeenIfNeeded(_ sessionID: UUID, at date: Date = .init()) -> Bool {
-        guard let session = session(withID: sessionID) else {
+        guard let session = session(withID: sessionID),
+              NSApp.isActive,
+              let window = session.surfaceView.window,
+              window.isKeyWindow,
+              !window.isMiniaturized,
+              session.surfaceView.focused else {
             return false
         }
 
-        return updateAttentionMetadata(
+        let didMarkSeen = updateAttentionMetadata(
             for: session,
             markSeen: true,
             existing: &attentionMetadataBySessionID,
             at: date
         )
+
+        // Actual focused visibility is stronger evidence than a desktop
+        // banner. Treat it as handled so a previously denied/transient request
+        // cannot appear after the user has already looked at the session.
+        var handledEvents: [(eventID: String, occurredAtMilliseconds: Int64)] = []
+        if let envelope = session.agentStateEnvelope,
+           envelope.lifecycle == .finished
+            || envelope.lifecycle == .needsUser
+            || envelope.lifecycle == .failed {
+            handledEvents.append((
+                envelope.eventIdentity,
+                HolyAgentNotificationPolicy.committedAtMilliseconds(
+                    envelope: envelope,
+                    observedAt: session.agentStateObservedAt ?? date
+                )
+            ))
+        }
+        if let metadata = attentionMetadataBySessionID[sessionID],
+           let finishedEventID = metadata.lastAuthoritativeFinishedEventID,
+           let finishedAt = metadata.lastAgentFinishedAt {
+            handledEvents.append((
+                finishedEventID,
+                HolyAgentNotificationPolicy.timestampMilliseconds(for: finishedAt)
+            ))
+        }
+
+        var didAcknowledgeNotification = false
+        if let newestHandledEvent = handledEvents.max(by: { lhs, rhs in
+            if lhs.occurredAtMilliseconds != rhs.occurredAtMilliseconds {
+                return lhs.occurredAtMilliseconds < rhs.occurredAtMilliseconds
+            }
+            return lhs.eventID < rhs.eventID
+        }), var metadata = attentionMetadataBySessionID[sessionID] {
+            didAcknowledgeNotification = metadata.acknowledgeAuthoritativeNotification(
+                eventID: newestHandledEvent.eventID,
+                occurredAtMilliseconds: newestHandledEvent.occurredAtMilliseconds,
+                at: date
+            )
+            attentionMetadataBySessionID[sessionID] = metadata
+        }
+
+        // Remove both pending and delivered forms. The second removal in the
+        // completion path closes the race where `add` finishes after focus.
+        let notificationIdentifiers = handledEvents.map { event in
+            HolyAgentNotificationPolicy.requestIdentifier(
+                sessionID: sessionID,
+                eventID: event.eventID
+            )
+        }
+        if !notificationIdentifiers.isEmpty {
+            let center = UNUserNotificationCenter.current()
+            center.removePendingNotificationRequests(withIdentifiers: notificationIdentifiers)
+            center.removeDeliveredNotifications(withIdentifiers: notificationIdentifiers)
+        }
+        notificationIssuesBySessionID.removeValue(forKey: sessionID)
+        pendingAgentNotificationEventIDs.removeValue(forKey: sessionID)
+        clearAgentNotificationRetryState(for: sessionID)
+        return didMarkSeen || didAcknowledgeNotification
     }
 
     private func scheduleSelectedSessionSeenMark() {
-        // No-op: the "new reply" (blue) state is now purely a function of how
-        // long ago the agent reply arrived, so viewing a session no longer needs
-        // to mark it seen. Kept as a stub so existing call sites stay simple.
         cancelSelectedSessionSeenMark()
+        guard markSelectedSessionSeenIfNeeded() else { return }
+        persist()
     }
 
     private func cancelSelectedSessionSeenMark() {
@@ -2105,7 +2196,13 @@ final class HolyWorkspaceStore: ObservableObject {
         for session in sessions {
             let shouldMarkSeen = (markSelectedSeen && session.id == selectedSessionID)
                 || (seedMissingAsSeen && next[session.id] == nil)
-            if updateAttentionMetadata(for: session, markSeen: shouldMarkSeen, existing: &next, at: date) {
+            if updateAttentionMetadata(
+                for: session,
+                markSeen: shouldMarkSeen,
+                baselineLegacySeenTracking: seedMissingAsSeen,
+                existing: &next,
+                at: date
+            ) {
                 changed = true
             }
         }
@@ -2119,21 +2216,33 @@ final class HolyWorkspaceStore: ObservableObject {
     private func updateAttentionMetadata(
         for session: HolySession,
         markSeen: Bool,
+        baselineLegacySeenTracking: Bool = false,
         existing: inout [UUID: HolySessionAttentionMetadata],
         at date: Date = .init()
     ) -> Bool {
-        let isActiveWork = session.phase == .working || session.runtimeTelemetry.activityKind.isActiveWork
+        let hadExistingMetadata = existing[session.id] != nil
         var metadata = existing[session.id] ?? HolySessionAttentionMetadata(sessionID: session.id)
         var changed = false
 
-        if metadata.lastAttentionWasActiveWork == true && !isActiveWork {
-            metadata.lastAgentFinishedAt = date
-            changed = true
+        // Seen tracking was intentionally disabled in an earlier release.
+        // Baseline every legacy row once during restore, and baseline a newly
+        // created session before its first event, so historical replies cannot
+        // all become unread during rollout.
+        if metadata.seenTrackingVersion != HolySessionAttentionMetadata.currentSeenTrackingVersion,
+           baselineLegacySeenTracking || !hadExistingMetadata {
+            changed = metadata.baselineLegacySeenTracking(at: date) || changed
+        }
+        if baselineLegacySeenTracking || !hadExistingMetadata {
+            changed = metadata.baselineNotificationTracking(at: date) || changed
         }
 
-        if metadata.lastAttentionWasActiveWork != isActiveWork {
-            metadata.lastAttentionWasActiveWork = isActiveWork
-            changed = true
+        if let envelope = session.agentStateEnvelope {
+            let observedAt = session.agentStateObservedAt ?? date
+            changed = metadata.record(envelope: envelope, observedAt: observedAt) || changed
+        }
+
+        if markSeen {
+            changed = metadata.markSeen(at: date) || changed
         }
 
         if changed {
@@ -2147,198 +2256,107 @@ final class HolyWorkspaceStore: ObservableObject {
         return changed
     }
 
-    /// Whether persisted attention metadata says this session's last reply had
-    /// already been seen before the previous quit. Used to decide which restored
-    /// sessions get their seen verdict carried across relaunch.
-    private func isWaitingAttention(_ session: HolySession) -> Bool {
-        session.phase == .waitingInput || session.runtimeTelemetry.activityKind == .approval
-    }
-
-    private func normalizedAttentionText(_ text: String?) -> String? {
-        guard let text else { return nil }
-        let collapsed = text
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
-        return collapsed.isEmpty ? nil : collapsed
-    }
-
     private func attentionPresentation(
         for session: HolySession,
-        coordination: HolySessionCoordination
+        coordination _: HolySessionCoordination
     ) -> HolySessionAttentionPresentation {
         let metadata = attentionMetadataBySessionID[session.id]
         let finishedAt = metadata?.lastAgentFinishedAt
-        let becameAvailableAt = finishedAt ?? session.activityAt
-        let detail = attentionDetail(for: session)
-
-        if session.phase == .failed || session.runtimeTelemetry.activityKind == .failure {
-            return .init(
-                kind: .failed,
-                symbolName: "xmark.octagon.fill",
-                title: "Issue",
-                detail: detail,
-                isProminent: true,
-                becameAvailableAt: becameAvailableAt
-            )
+        let observedAt = session.agentStateObservedAt
+        let envelope = session.agentStateEnvelope
+        let sourceDetail = envelope.map { envelope in
+            [envelope.source, envelope.reasonCode]
+                .compactMap { value -> String? in
+                    guard let value else { return nil }
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return trimmed.isEmpty ? nil : trimmed
+                }
+                .joined(separator: " · ")
         }
+        let finishedSourceDetail = [metadata?.lastAgentFinishedSource, metadata?.lastAgentFinishedReasonCode]
+            .compactMap { value -> String? in
+                guard let value else { return nil }
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            .joined(separator: " · ")
+        let deliveryIssueDetail = notificationIssuesBySessionID[session.id]
+        let currentDetail = [sourceDetail?.nilIfEmpty, deliveryIssueDetail]
+            .compactMap(\.self)
+            .joined(separator: " · ")
+            .nilIfEmpty
+        let completedDetail = [finishedSourceDetail.nilIfEmpty, deliveryIssueDetail]
+            .compactMap(\.self)
+            .joined(separator: " · ")
+            .nilIfEmpty
+        let eventOccurredAt = envelope.map { min($0.occurredAt, observedAt ?? .now) }
+        let lastUsedAt = metadata?.lastUsedAt ?? session.record.createdAt
+        let kind = HolySessionIndicatorPolicy.kind(for: .init(
+            lifecycle: envelope?.lifecycle,
+            lifecycleOccurredAt: eventOccurredAt,
+            processExited: session.surfaceView.processExited,
+            lastAgentFinishedAt: finishedAt,
+            lastSeenAt: metadata?.lastSeenAt,
+            lastUsedAt: lastUsedAt,
+            now: attentionClock
+        ))
 
-        if session.runtimeTelemetry.activityKind == .planningQuestion {
-            return .init(
-                kind: .planningQuestion,
-                symbolName: "questionmark.bubble.fill",
-                title: "Planning questions",
-                detail: detail,
-                isProminent: true,
-                becameAvailableAt: becameAvailableAt
-            )
-        }
-
-        if approvalLooksExplicit(for: session) {
-            return .init(
-                kind: .approvalNeeded,
-                symbolName: "hand.raised.fill",
-                title: "Approval needed",
-                detail: detail,
-                isProminent: true,
-                becameAvailableAt: becameAvailableAt
-            )
-        }
-
-        if session.runtimeTelemetry.activityKind == .swarming {
-            return .init(
-                kind: .swarming,
-                symbolName: "sparkles",
-                title: "Swarming",
-                detail: detail,
-                isProminent: true,
-                becameAvailableAt: becameAvailableAt
-            )
-        }
-
-        if session.runtimeTelemetry.activityKind == .stalled || session.runtimeTelemetry.activityKind == .looping {
-            let isLooping = session.runtimeTelemetry.activityKind == .looping
-            return .init(
-                kind: .stalled,
-                symbolName: isLooping ? "arrow.triangle.2.circlepath" : "hourglass",
-                title: isLooping ? "Looping" : "Stalled",
-                detail: detail,
-                isProminent: true,
-                becameAvailableAt: becameAvailableAt
-            )
-        }
-
-        if session.phase == .working || session.runtimeTelemetry.activityKind.isActiveWork {
+        switch kind {
+        case .working:
             return .init(
                 kind: .working,
                 symbolName: "circle.dotted",
-                title: session.compactStatusText,
-                detail: detail,
+                title: "Working",
+                detail: currentDetail,
                 isProminent: true,
-                becameAvailableAt: becameAvailableAt
+                becameAvailableAt: observedAt
             )
-        }
-
-        if let finishedAt,
-           attentionClock.timeIntervalSince(finishedAt) < Self.freshReplyInterval {
+        case .needsUser:
             return .init(
-                kind: .newReply,
+                kind: .needsUser,
+                symbolName: "questionmark.bubble.fill",
+                title: envelope?.lifecycle == .failed ? "Needs you — agent failed" : "Needs you",
+                detail: currentDetail,
+                isProminent: true,
+                becameAvailableAt: observedAt
+            )
+        case .unread:
+            return .init(
+                kind: .unread,
                 symbolName: "circle.fill",
-                title: "Recent reply",
-                detail: detail,
+                title: "Unread agent update",
+                detail: completedDetail,
                 isProminent: true,
                 becameAvailableAt: finishedAt
             )
-        }
-
-        if session.phase == .waitingInput || session.runtimeTelemetry.activityKind == .approval {
-            let age = attentionClock.timeIntervalSince(becameAvailableAt)
-            if age >= Self.staleReplyInterval {
-                return .init(
-                    kind: .dormantReply,
-                    symbolName: "moon.fill",
-                    title: "Dormant",
-                    detail: detail,
-                    isProminent: false,
-                    becameAvailableAt: becameAvailableAt
-                )
-            }
-
-            if age >= Self.overdueReplyInterval {
-                return .init(
-                    kind: .sleepingReply,
-                    symbolName: "moon.zzz.fill",
-                    title: "Sleeping",
-                    detail: detail,
-                    isProminent: false,
-                    becameAvailableAt: becameAvailableAt
-                )
-            }
-
+        case .usedToday:
             return .init(
-                kind: .waitingQuiet,
-                symbolName: "circle",
-                title: "Waiting quietly",
-                detail: detail,
+                kind: .usedToday,
+                symbolName: "circle.fill",
+                title: "Used in the last 24 hours",
+                detail: nil,
                 isProminent: false,
-                becameAvailableAt: becameAvailableAt
+                becameAvailableAt: lastUsedAt
+            )
+        case .inactive:
+            return .init(
+                kind: .inactive,
+                symbolName: "circle.fill",
+                title: "Inactive for 24–48 hours",
+                detail: nil,
+                isProminent: false,
+                becameAvailableAt: lastUsedAt
+            )
+        case .sleeping:
+            return .init(
+                kind: .sleeping,
+                symbolName: "zzz",
+                title: "Sleeping for more than 48 hours",
+                detail: nil,
+                isProminent: false,
+                becameAvailableAt: lastUsedAt
             )
         }
-
-        if session.phase == .completed || session.runtimeTelemetry.activityKind == .completion {
-            return .init(
-                kind: .done,
-                symbolName: "checkmark.circle.fill",
-                title: "Complete",
-                detail: detail,
-                isProminent: false,
-                becameAvailableAt: becameAvailableAt
-            )
-        }
-
-        return .init(
-            kind: .quiet,
-            symbolName: "circle",
-            title: "Ready",
-            detail: detail,
-            isProminent: false,
-            becameAvailableAt: becameAvailableAt
-        )
-    }
-
-    private func approvalLooksExplicit(for session: HolySession) -> Bool {
-        guard session.runtimeTelemetry.activityKind == .approval else { return false }
-
-        let evidence = [
-            session.runtimeTelemetry.headline,
-            session.runtimeTelemetry.detail,
-            session.runtimeTelemetry.nextStepHint,
-        ]
-        .compactMap { $0?.lowercased() }
-        .joined(separator: "\n")
-
-        return [
-            "approval",
-            "approve",
-            "confirm",
-            "allow",
-            "permission",
-            "continue?",
-            "[y/n]",
-            "(y/n)",
-        ].contains { evidence.contains($0) }
-    }
-
-    private func attentionDetail(for session: HolySession) -> String? {
-        [
-            session.runtimeTelemetry.detail,
-            session.runtimeTelemetry.nextStepHint,
-            session.runtimeTelemetry.headline,
-            session.primarySignal?.detail,
-            session.primarySignal?.headline,
-        ]
-        .compactMap(normalizedAttentionText)
-        .first
     }
 
     private func applySessionStoreState(_ state: HolySessionStoreState) {
@@ -2486,6 +2504,177 @@ final class HolyWorkspaceStore: ObservableObject {
         ))
         persist(pendingEvents: pendingEvents)
         return sessions.first(where: { $0.id == result.sessionID })
+    }
+
+    /// Reconfigures the lightweight durable lifecycle reader only when the set
+    /// of exact tmux servers changes. One grouped query serves every session on
+    /// a host/socket; duplicate roster identities never receive an event.
+    private func refreshAgentStateMonitorIfNeeded() {
+        let endpoints = Set(sessions.compactMap { agentStateEndpoint(for: $0) })
+        guard endpoints != monitoredAgentStateEndpoints else { return }
+        monitoredAgentStateEndpoints = endpoints
+        agentStateMonitorConfigurationGeneration &+= 1
+        let configurationGeneration = agentStateMonitorConfigurationGeneration
+
+        let monitor = agentStateMonitor
+        Task { [weak self] in
+            await monitor.start(
+                endpoints: Array(endpoints),
+                requestedGeneration: configurationGeneration
+            ) { [weak self] snapshot in
+                self?.applyAgentStateSnapshot(snapshot)
+            }
+        }
+    }
+
+    private func agentStateEndpoint(for session: HolySession) -> HolyTmuxAgentStateEndpoint? {
+        let launchSpec = session.record.launchSpec
+        guard let tmux = launchSpec.tmux?.normalized,
+              tmux.sessionName?.holyTerminatorTrimmed.nilIfEmpty != nil else {
+            return nil
+        }
+
+        let socketName = tmux.socketName?.holyTerminatorTrimmed.nilIfEmpty
+        switch launchSpec.transport.normalized.kind {
+        case .local:
+            return .init(
+                hostID: HolyLocalMachineIdentity.localHostID,
+                hostLabel: "This Mac",
+                location: .local,
+                socketName: socketName
+            )
+        case .ssh:
+            guard let destination = launchSpec.transport.normalized.sshDestination?
+                .holyTerminatorTrimmed.nilIfEmpty else {
+                return nil
+            }
+            let host = remoteDiscoveryHost(
+                destination: destination,
+                label: launchSpec.transport.hostLabel,
+                socketName: socketName
+            )
+            return .init(
+                hostID: host.id,
+                hostLabel: host.displayTitle,
+                location: .remote(sshDestination: destination),
+                socketName: socketName
+            )
+        }
+    }
+
+    private func applyAgentStateSnapshot(_ snapshot: HolyTmuxAgentStateSnapshot) {
+        guard snapshot.failure == nil else { return }
+
+        for observation in snapshot.observations.values {
+            // Each register fails closed independently. Aggregate integrity is
+            // diagnostic; consume only whichever uniquely valid envelope the
+            // parser exposed.
+            guard observation.envelope != nil
+                    || observation.lastFinishedEnvelope != nil else { continue }
+
+            let matchingSessions = sessions.filter { session in
+                sessionMatches(
+                    session,
+                    endpoint: snapshot.endpoint,
+                    sessionName: observation.key.sessionName
+                )
+            }
+            guard matchingSessions.count == 1, let session = matchingSessions.first else {
+                // A duplicated or incomplete roster identity is not a license
+                // to guess which row owns a producer event.
+                continue
+            }
+            if let finishedEnvelope = observation.lastFinishedEnvelope {
+                recordDurableFinishedEnvelope(
+                    finishedEnvelope,
+                    for: session,
+                    observedAt: observation.observedAt,
+                    emitTimelineEvent: observation.envelope?.isDuplicate(of: finishedEnvelope) != true
+                )
+            }
+            if let envelope = observation.envelope {
+                _ = session.applyAgentStateEnvelope(envelope, observedAt: observation.observedAt)
+            }
+
+            // Notification retry is independent of whether metadata changed on
+            // this poll. That is what lets a failed offline-finish delivery be
+            // retried after the finish register has already been incorporated.
+            let notificationCandidate = [
+                observation.lastFinishedEnvelope,
+                observation.envelope,
+            ]
+                .compactMap(\.self)
+                .filter { envelope in
+                    envelope.lifecycle == .finished
+                        || envelope.lifecycle == .needsUser
+                        || envelope.lifecycle == .failed
+                }
+                .max { lhs, rhs in rhs.isNewer(than: lhs) }
+            if let notificationCandidate {
+                scheduleAuthoritativeAgentNotificationIfNeeded(
+                    for: session,
+                    envelope: notificationCandidate,
+                    observedAt: observation.observedAt
+                )
+            }
+        }
+    }
+
+    private func recordDurableFinishedEnvelope(
+        _ envelope: HolyAgentStateEnvelope,
+        for session: HolySession,
+        observedAt: Date,
+        emitTimelineEvent: Bool
+    ) {
+        var metadata = attentionMetadataBySessionID[session.id]
+            ?? HolySessionAttentionMetadata(sessionID: session.id)
+        if metadata.seenTrackingVersion != HolySessionAttentionMetadata.currentSeenTrackingVersion {
+            _ = metadata.baselineLegacySeenTracking(at: workspaceStartedAt)
+        }
+        _ = metadata.baselineNotificationTracking(at: workspaceStartedAt)
+        guard metadata.recordFinished(envelope: envelope, observedAt: observedAt) else { return }
+        attentionMetadataBySessionID[session.id] = metadata
+        if session.id == selectedSessionID {
+            scheduleSelectedSessionSeenMark()
+        }
+        let events: [HolySessionEventDraft]
+        if emitTimelineEvent {
+            events = [HolySessionEventDraft.agentStateChanged(
+                session: session,
+                envelope: envelope,
+                observedAt: observedAt,
+                attention: coordinationBySessionID[session.id]?.attention
+            )]
+        } else {
+            events = []
+        }
+        persist(pendingEvents: events)
+    }
+
+    private func sessionMatches(
+        _ session: HolySession,
+        endpoint: HolyTmuxAgentStateEndpoint,
+        sessionName: String
+    ) -> Bool {
+        let launchSpec = session.record.launchSpec
+        guard let tmux = launchSpec.tmux?.normalized,
+              tmux.sessionName?.holyTerminatorTrimmed.nilIfEmpty == sessionName,
+              tmux.socketName?.holyTerminatorTrimmed.nilIfEmpty == endpoint.socketName else {
+            return false
+        }
+
+        switch (launchSpec.transport.normalized.kind, endpoint.location) {
+        case (.local, .local):
+            return true
+        case let (.ssh, .remote(endpointDestination)):
+            guard let sessionDestination = launchSpec.transport.normalized.sshDestination?
+                .holyTerminatorTrimmed.nilIfEmpty else {
+                return false
+            }
+            return sessionDestination.caseInsensitiveCompare(endpointDestination) == .orderedSame
+        case (.local, .remote), (.ssh, .local):
+            return false
+        }
     }
 
     private func startActiveTmuxMetadataRefresh() {
@@ -2673,6 +2862,7 @@ final class HolyWorkspaceStore: ObservableObject {
             changed = session.applyDiscoveredLaunchMetadata(from: launchSpec, refreshGitSnapshot: false) || changed
         }
 
+        if changed { refreshAgentStateMonitorIfNeeded() }
         return changed
     }
 
@@ -2693,6 +2883,7 @@ final class HolyWorkspaceStore: ObservableObject {
             changed = session.applyDiscoveredLaunchMetadata(from: launchSpec) || changed
         }
 
+        if changed { refreshAgentStateMonitorIfNeeded() }
         return changed
     }
 
@@ -3278,12 +3469,14 @@ final class HolyWorkspaceStore: ObservableObject {
 
         recomputeCoordination()
         reconcileAttentionMetadata(markSelectedSeen: false, seedMissingAsSeen: seedMissingAsSeen)
+        refreshAgentStateMonitorIfNeeded()
         sessionSupervisor.sessionBindingsDidChange(for: currentSessionStoreState)
     }
 
     private func handleSessionMutation(for session: HolySession) {
-        recomputeCoordination()
         reconcileAttentionMetadata(markSelectedSeen: false)
+        scheduleAuthoritativeAgentNotificationIfNeeded(for: session)
+        recomputeCoordination()
         if session.id == selectedSessionID {
             scheduleSelectedSessionSeenMark()
         }
@@ -3292,6 +3485,214 @@ final class HolyWorkspaceStore: ObservableObject {
             in: currentSessionStoreState,
             attentionBySessionID: coordinationBySessionID.mapValues(\.attention)
         )
+    }
+
+    private func scheduleAuthoritativeAgentNotificationIfNeeded(
+        for session: HolySession,
+        envelope explicitEnvelope: HolyAgentStateEnvelope? = nil,
+        observedAt explicitObservedAt: Date? = nil
+    ) {
+        guard let envelope = explicitEnvelope ?? session.agentStateEnvelope,
+              envelope.lifecycle == .finished
+                || envelope.lifecycle == .needsUser
+                || envelope.lifecycle == .failed,
+              var metadata = attentionMetadataBySessionID[session.id] else {
+            return
+        }
+
+        let eventID = envelope.eventIdentity
+        let sessionID = session.id
+        guard pendingAgentNotificationEventIDs[sessionID] == nil else { return }
+
+        if agentNotificationRetryEventIDs[sessionID] != eventID {
+            agentNotificationRetryTasks.removeValue(forKey: sessionID)?.cancel()
+            agentNotificationRetryEventIDs[sessionID] = eventID
+            agentNotificationRetryAttempts[sessionID] = 0
+            agentNotificationRetryNotBefore[sessionID] = .distantPast
+        }
+        guard Date.now >= (agentNotificationRetryNotBefore[sessionID] ?? .distantPast) else {
+            return
+        }
+
+        if metadata.notificationTrackingVersion != HolySessionAttentionMetadata.currentNotificationTrackingVersion {
+            metadata.notificationTrackingVersion = HolySessionAttentionMetadata.currentNotificationTrackingVersion
+            metadata.notificationTrackingStartedAt = workspaceStartedAt
+        }
+
+        // On the first hook-aware launch, adopt pre-existing durable state
+        // without replaying a banner for every historical session. The cutoff
+        // persists, so an event committed while Holy is closed is still replayed
+        // exactly once on the next launch.
+        let notificationTrackingStartedAt = metadata.notificationTrackingStartedAt ?? workspaceStartedAt
+        let observedAt = explicitObservedAt ?? session.agentStateObservedAt ?? .now
+        guard HolyAgentNotificationPolicy.shouldNotify(for: .init(
+            envelope: envelope,
+            observedAt: observedAt,
+            trackingStartedAt: notificationTrackingStartedAt,
+            lastNotifiedEventID: metadata.lastNotifiedAuthoritativeEventID,
+            lastNotifiedOccurredAtMilliseconds: metadata.lastNotifiedEventAtMilliseconds,
+            processExited: session.surfaceView.processExited,
+            now: .now
+        )) else {
+            let committedAtMilliseconds = HolyAgentNotificationPolicy.committedAtMilliseconds(
+                envelope: envelope,
+                observedAt: observedAt
+            )
+            guard metadata.acknowledgeAuthoritativeNotification(
+                eventID: envelope.eventIdentity,
+                occurredAtMilliseconds: committedAtMilliseconds,
+                at: .now
+            ) else {
+                notificationIssuesBySessionID.removeValue(forKey: sessionID)
+                clearAgentNotificationRetryState(for: sessionID)
+                return
+            }
+            attentionMetadataBySessionID[session.id] = metadata
+            notificationIssuesBySessionID.removeValue(forKey: sessionID)
+            clearAgentNotificationRetryState(for: session.id)
+            persist()
+            return
+        }
+
+        let title: String
+        let requestAttention: Bool
+        switch envelope.lifecycle {
+        case .finished:
+            title = "Agent replied"
+            requestAttention = false
+        case .failed:
+            title = "Agent failed — needs you"
+            requestAttention = true
+        case .needsUser:
+            title = "Agent needs you"
+            requestAttention = true
+        case .working, .idle, .ended:
+            return
+        }
+
+        if requestAttention,
+           agentNotificationRetryAttempts[sessionID, default: 0] == 0 {
+            NSApp.requestUserAttention(.criticalRequest)
+        }
+        pendingAgentNotificationEventIDs[sessionID] = eventID
+        session.surfaceView.showUserNotification(
+            title: "\(title): \(session.title)",
+            body: [session.displayTitle, envelope.reasonCode]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty }
+                .joined(separator: " · "),
+            requireFocus: false,
+            identifier: HolyAgentNotificationPolicy.requestIdentifier(
+                sessionID: session.id,
+                envelope: envelope
+            ),
+            holySessionID: session.id
+        ) { [weak self] result in
+            self?.completeAuthoritativeAgentNotification(
+                result,
+                sessionID: sessionID,
+                envelope: envelope,
+                observedAt: observedAt
+            )
+        }
+    }
+
+    private func completeAuthoritativeAgentNotification(
+        _ result: Result<Void, GhosttyNotificationSchedulingError>,
+        sessionID: UUID,
+        envelope: HolyAgentStateEnvelope,
+        observedAt: Date
+    ) {
+        if pendingAgentNotificationEventIDs[sessionID] == envelope.eventIdentity {
+            pendingAgentNotificationEventIDs.removeValue(forKey: sessionID)
+        }
+        guard agentNotificationRetryEventIDs[sessionID] == envelope.eventIdentity else {
+            if case .success = result {
+                // Focus can acknowledge and remove a request while the system
+                // is still accepting it. Remove it again after that late add.
+                let identifier = HolyAgentNotificationPolicy.requestIdentifier(
+                    sessionID: sessionID,
+                    envelope: envelope
+                )
+                let center = UNUserNotificationCenter.current()
+                center.removePendingNotificationRequests(withIdentifiers: [identifier])
+                center.removeDeliveredNotifications(withIdentifiers: [identifier])
+            }
+            return
+        }
+
+        switch result {
+        case .success:
+            guard var metadata = attentionMetadataBySessionID[sessionID] else { return }
+            metadata.notificationTrackingVersion = HolySessionAttentionMetadata.currentNotificationTrackingVersion
+            _ = metadata.acknowledgeAuthoritativeNotification(
+                eventID: envelope.eventIdentity,
+                occurredAtMilliseconds: HolyAgentNotificationPolicy.committedAtMilliseconds(
+                    envelope: envelope,
+                    observedAt: observedAt
+                ),
+                at: .now
+            )
+            attentionMetadataBySessionID[sessionID] = metadata
+            notificationIssuesBySessionID.removeValue(forKey: sessionID)
+            clearAgentNotificationRetryState(for: sessionID)
+            persist()
+
+            // A newer actionable event may have arrived while this session's
+            // earlier request was in flight. Serialize delivery per session so
+            // an older callback can never overwrite the newer acknowledgement.
+            if let session = session(withID: sessionID),
+               let current = session.agentStateEnvelope,
+               current.eventIdentity != envelope.eventIdentity {
+                scheduleAuthoritativeAgentNotificationIfNeeded(for: session)
+            }
+
+        case let .failure(error):
+            notificationIssuesBySessionID[sessionID] =
+                "Desktop notification pending: \(error.localizedDescription)"
+
+            if error == .authorizationDenied {
+                // Do not spin while macOS permission is off. Returning to Holy
+                // rechecks permission; the durable roster state remains visible.
+                agentNotificationRetryNotBefore[sessionID] = .distantFuture
+                return
+            }
+
+            let attempt = min(agentNotificationRetryAttempts[sessionID, default: 0] + 1, 7)
+            agentNotificationRetryAttempts[sessionID] = attempt
+            let delay = min(pow(2, Double(attempt)), 60)
+            agentNotificationRetryNotBefore[sessionID] = .now.addingTimeInterval(delay)
+            agentNotificationRetryTasks.removeValue(forKey: sessionID)?.cancel()
+            agentNotificationRetryTasks[sessionID] = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: .seconds(delay))
+                } catch {
+                    return
+                }
+                guard let self,
+                      self.agentNotificationRetryEventIDs[sessionID] == envelope.eventIdentity,
+                      let session = self.session(withID: sessionID) else { return }
+                self.agentNotificationRetryTasks.removeValue(forKey: sessionID)
+                self.scheduleAuthoritativeAgentNotificationIfNeeded(
+                    for: session,
+                    envelope: envelope,
+                    observedAt: observedAt
+                )
+            }
+        }
+    }
+
+    private func clearAgentNotificationRetryState(for sessionID: UUID) {
+        agentNotificationRetryTasks.removeValue(forKey: sessionID)?.cancel()
+        agentNotificationRetryEventIDs.removeValue(forKey: sessionID)
+        agentNotificationRetryAttempts.removeValue(forKey: sessionID)
+        agentNotificationRetryNotBefore.removeValue(forKey: sessionID)
+    }
+
+    private func retryPendingAgentNotificationsAfterActivation() {
+        for session in sessions where notificationIssuesBySessionID[session.id] != nil {
+            agentNotificationRetryNotBefore[session.id] = .distantPast
+            scheduleAuthoritativeAgentNotificationIfNeeded(for: session)
+        }
     }
 
     /// Cheap fingerprint of every input `makeCoordination` reads. Terminal

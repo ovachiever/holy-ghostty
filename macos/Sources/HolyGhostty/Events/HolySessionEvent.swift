@@ -8,6 +8,7 @@ enum HolySessionEventType: String, Codable {
     case archived = "session_archived"
     case relaunched = "session_relaunched"
     case selected = "session_selected"
+    case agentStateChanged = "session_agent_state_changed"
     case runtimeUpdated = "session_runtime_updated"
     case artifactDetected = "session_artifact_detected"
 }
@@ -29,6 +30,8 @@ extension HolySessionEventType {
             return "Relaunched"
         case .selected:
             return "Selected"
+        case .agentStateChanged:
+            return "Agent State"
         case .runtimeUpdated:
             return "Runtime"
         case .artifactDetected:
@@ -74,6 +77,11 @@ struct HolySessionEventPayload: Codable, Equatable {
     var repeatedEvidenceCount: Int?
     var evidence: String?
     var recoveryReason: String?
+    var agentStateSource: String?
+    var agentLifecycle: HolyAgentLifecycleState?
+    var agentReasonCode: String?
+    var agentEventToken: String?
+    var agentObservedAt: Date?
 }
 
 struct HolySessionEventDraft: Equatable {
@@ -400,6 +408,68 @@ struct HolySessionEventDraft: Equatable {
     }
 
     @MainActor
+    static func agentStateChanged(
+        session: HolySession,
+        attention: HolySessionAttention?
+    ) -> Self? {
+        guard let envelope = session.agentStateEnvelope else { return nil }
+        let observedAt = session.agentStateObservedAt ?? .now
+        return agentStateChanged(
+            session: session,
+            envelope: envelope,
+            observedAt: observedAt,
+            attention: attention
+        )
+    }
+
+    @MainActor
+    static func agentStateChanged(
+        session: HolySession,
+        envelope: HolyAgentStateEnvelope,
+        observedAt: Date,
+        attention: HolySessionAttention?
+    ) -> Self {
+        return .init(
+            sessionID: session.id,
+            occurredAt: min(envelope.occurredAt, observedAt),
+            eventType: .agentStateChanged,
+            phase: nil,
+            attention: attention,
+            payload: .init(
+                origin: nil,
+                runtime: session.runtime,
+                title: nil,
+                mission: nil,
+                workingDirectory: nil,
+                repositoryRoot: nil,
+                worktreePath: nil,
+                branchName: nil,
+                previousSessionID: nil,
+                sourceArchiveID: nil,
+                sourceTemplateID: nil,
+                archivedSessionID: nil,
+                preview: nil,
+                archived: false,
+                activityKind: nil,
+                command: nil,
+                filePath: nil,
+                nextStepHint: nil,
+                artifactSummary: nil,
+                artifactPath: nil,
+                stagnantSeconds: nil,
+                repeatedEvidenceCount: nil,
+                evidence: nil,
+                recoveryReason: nil,
+                agentStateSource: envelope.source,
+                agentLifecycle: envelope.lifecycle,
+                agentReasonCode: envelope.reasonCode,
+                agentEventToken: envelope.eventToken,
+                agentObservedAt: observedAt
+            )
+        )
+    }
+
+    @MainActor
     static func runtimeUpdated(
         session: HolySession,
         attention: HolySessionAttention?
@@ -531,6 +601,9 @@ struct HolySessionTimelineEvent: Identifiable, Equatable {
             return "Relaunched archived session"
         case .selected:
             return "Selected session"
+        case .agentStateChanged:
+            return payload?.agentLifecycle.map { "Agent state: \($0.rawValue)" }
+                ?? "Agent state changed"
         case .runtimeUpdated:
             return payload?.artifactSummary?.nilIfBlank
                 ?? payload?.nextStepHint?.nilIfBlank
@@ -560,6 +633,11 @@ struct HolySessionTimelineEvent: Identifiable, Equatable {
                 return "Session became the active operator surface."
             }
             return "Previous selection: \(previousSessionID.uuidString.prefix(8))"
+        case .agentStateChanged:
+            return [payload?.agentStateSource, payload?.agentReasonCode]
+                .compactMap { $0?.nilIfBlank }
+                .joined(separator: " · ")
+                .nilIfBlank
         case .runtimeUpdated:
             return compacted(
                 payload?.evidence

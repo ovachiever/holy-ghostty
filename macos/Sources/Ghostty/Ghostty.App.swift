@@ -1395,6 +1395,20 @@ extension Ghostty {
             title: String,
             body: String,
             requireFocus: Bool = true) {
+            // Holy's agent adapters use OSC 777 as the low-latency half of a
+            // durable tmux event transport. Consume that reserved title as a
+            // structured application event; never show the wire payload as a
+            // user notification. The parser at the session boundary rejects
+            // malformed, oversized, or future-version envelopes.
+            if title == HolyAgentStateTransport.notificationTitle {
+                Foundation.NotificationCenter.default.post(
+                    name: .holyAgentStateEnvelopeDidArrive,
+                    object: surfaceView,
+                    userInfo: [Foundation.Notification.Name.HolyAgentStateWireValueKey: body]
+                )
+                return
+            }
+
             let center = UNUserNotificationCenter.current()
             center.requestAuthorization(options: [.alert, .sound]) { _, error in
                 if let error = error {
@@ -2233,7 +2247,8 @@ extension Ghostty {
         @MainActor
         func handleUserNotification(response: UNNotificationResponse) {
             let userInfo = response.notification.request.content.userInfo
-            guard let uuidString = userInfo["surface"] as? String,
+            let durableSessionID = userInfo["holySessionID"] as? String
+            guard let uuidString = durableSessionID ?? (userInfo["surface"] as? String),
                   let uuid = UUID(uuidString: uuidString),
                   let surface = delegate?.findSurface(forUUID: uuid) else { return }
 

@@ -29,6 +29,7 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuOpenConfig: NSMenuItem?
     @IBOutlet private var menuReloadConfig: NSMenuItem?
     @IBOutlet private var menuClaudeModelIndicator: NSMenuItem?
+    private var menuAgentStateIndicators: NSMenuItem?
     @IBOutlet private var menuSecureInput: NSMenuItem?
     @IBOutlet private var menuQuit: NSMenuItem?
 
@@ -563,10 +564,12 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // We have no notifications we want to persist after death,
-        // so remove them all now. In the future we may want to be
-        // more selective and only remove surface-targeted notifications.
-        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        if !Self.isHolyGhosttyBundle {
+            // Preserve upstream Ghostty behavior. Holy's authoritative agent
+            // alerts must survive a clean relaunch because their event
+            // watermark has already been persisted as delivered.
+            UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        }
     }
 
     /// This is called when the application is already open and someone double-clicks the icon
@@ -1056,25 +1059,27 @@ class AppDelegate: NSObject,
 
     // MARK: - UNUserNotificationCenterDelegate
 
-    @MainActor
-    func userNotificationCenter(
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive: UNNotificationResponse,
-        withCompletionHandler: () -> Void
+        withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        ghostty.handleUserNotification(response: didReceive)
-        withCompletionHandler()
+        Task { @MainActor [weak self] in
+            self?.ghostty.handleUserNotification(response: didReceive)
+            completionHandler()
+        }
     }
 
-    @MainActor
-    func userNotificationCenter(
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent: UNNotification,
-        withCompletionHandler: (UNNotificationPresentationOptions) -> Void
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        let shouldPresent = ghostty.shouldPresentNotification(notification: willPresent)
-        let options: UNNotificationPresentationOptions = shouldPresent ? [.banner, .sound] : []
-        withCompletionHandler(options)
+        Task { @MainActor [weak self] in
+            let shouldPresent = self?.ghostty.shouldPresentNotification(notification: willPresent) ?? false
+            let options: UNNotificationPresentationOptions = shouldPresent ? [.banner, .sound] : []
+            completionHandler(options)
+        }
     }
 
     // MARK: - GhosttyAppDelegate
@@ -1158,7 +1163,105 @@ class AppDelegate: NSObject,
         refreshClaudeModelIndicatorMenu()
     }
 
+    @objc
+    private func toggleAgentStateIndicators(_ sender: Any?) {
+        switch HolyAgentStateBridgeInstaller.currentUserInstallationState() {
+        case .notInstalled:
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Enable authoritative agent indicators?"
+            alert.informativeText = "Holy will add exact-owned lifecycle hooks for Claude Code and Codex, a Codex committed-turn notifier, and one exact-owned OpenCode plugin. They publish only state, source, time, and an opaque event token—never prompts or responses. Existing hooks and settings stay intact. A foreign Codex notifier is never overwritten."
+            alert.addButton(withTitle: "Enable")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+            guard HolyAgentStateBridgeInstaller.installForCurrentUser() != nil else {
+                presentAgentStateBridgeError()
+                return
+            }
+
+            let result = NSAlert()
+            result.alertStyle = .informational
+            result.messageText = "Authoritative agent indicators enabled"
+            result.informativeText = "Claude Code, Codex, and OpenCode will load their adapters in new sessions. Codex committed turns use its notifier; run /hooks once to approve Holy's additional lifecycle handlers."
+            result.addButton(withTitle: "OK")
+            result.runModal()
+
+        case .installed:
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Disable authoritative agent indicators?"
+            alert.informativeText = "Holy will remove only its own Claude/Codex hook handlers, Codex notifier, generated helper, and OpenCode plugin. Other configuration stays unchanged."
+            alert.addButton(withTitle: "Disable")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            guard HolyAgentStateBridgeInstaller.removeForCurrentUser() else {
+                presentAgentStateBridgeError()
+                return
+            }
+
+        case let .blocked(reason):
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Authoritative agent indicators need attention"
+            alert.informativeText = reason
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+
+        refreshAgentStateIndicatorMenu()
+    }
+
+    private func presentAgentStateBridgeError() {
+        let state = HolyAgentStateBridgeInstaller.currentUserInstallationState()
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could not update authoritative agent indicators"
+        if case let .blocked(reason) = state {
+            alert.informativeText = reason
+        } else {
+            alert.informativeText = "Holy left unrelated harness settings unchanged. Check the app log for the exact file error."
+        }
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func installAgentStateIndicatorMenuIfNeeded() {
+        guard Self.isHolyGhosttyBundle,
+              menuAgentStateIndicators == nil,
+              let modelItem = menuClaudeModelIndicator,
+              let menu = modelItem.menu else { return }
+
+        let item = NSMenuItem(
+            title: "Enable Authoritative Agent Indicators…",
+            action: #selector(toggleAgentStateIndicators(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        let modelIndex = menu.index(of: modelItem)
+        menu.insertItem(item, at: max(0, modelIndex))
+        menuAgentStateIndicators = item
+    }
+
+    private func refreshAgentStateIndicatorMenu() {
+        installAgentStateIndicatorMenuIfNeeded()
+        guard Self.isHolyGhosttyBundle else {
+            menuAgentStateIndicators?.isHidden = true
+            return
+        }
+        menuAgentStateIndicators?.isHidden = false
+        switch HolyAgentStateBridgeInstaller.currentUserInstallationState() {
+        case .notInstalled:
+            menuAgentStateIndicators?.title = "Enable Authoritative Agent Indicators…"
+        case .installed:
+            menuAgentStateIndicators?.title = "Disable Authoritative Agent Indicators…"
+        case .blocked:
+            menuAgentStateIndicators?.title = "Authoritative Agent Indicators Need Attention…"
+        }
+    }
+
     private func refreshClaudeModelIndicatorMenu() {
+        refreshAgentStateIndicatorMenu()
         guard Self.isHolyGhosttyBundle else {
             menuClaudeModelIndicator?.isHidden = true
             return

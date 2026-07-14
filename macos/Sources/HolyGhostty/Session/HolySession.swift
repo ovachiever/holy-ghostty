@@ -165,6 +165,10 @@ final class HolySession: ObservableObject, Identifiable {
     @Published private(set) var activityAt: Date
     @Published private(set) var inferredRuntime: HolySessionRuntime?
     @Published private(set) var modelSelection: HolySessionModelSelection?
+    /// Last valid state emitted by the harness running in this exact pane.
+    /// Screen-derived telemetry never writes this value.
+    @Published private(set) var agentStateEnvelope: HolyAgentStateEnvelope?
+    @Published private(set) var agentStateObservedAt: Date?
 
     private var cancellables: Set<AnyCancellable> = []
     private var gitRefreshTask: Task<Void, Never>?
@@ -934,10 +938,44 @@ final class HolySession: ObservableObject, Identifiable {
             }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: .holyAgentStateEnvelopeDidArrive, object: surfaceView)
+            .compactMap { notification in
+                notification.userInfo?[Notification.Name.HolyAgentStateWireValueKey] as? String
+            }
+            .compactMap { wireValue in
+                try? HolyAgentStateEnvelope(wireValue: wireValue)
+            }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] envelope in
+                self?.applyAgentStateEnvelope(envelope)
+            }
+            .store(in: &cancellables)
+
         // Derived-state polling is driven by HolySessionRefreshCoordinator, a single
         // shared cadence owned by the workspace store. Per-session Timers were removed
         // because N RunLoop timers each woke the main actor every 1.25s, which stalled
         // the main thread with large session rosters.
+    }
+
+    /// Ingests either the immediate OSC delivery or a durable tmux discovery
+    /// read. Duplicate and out-of-order observations are ignored, so polling a
+    /// pane option cannot recreate notifications or extend a stale spinner.
+    @discardableResult
+    func applyAgentStateEnvelope(
+        _ envelope: HolyAgentStateEnvelope,
+        observedAt: Date = .now
+    ) -> Bool {
+        if let current = agentStateEnvelope {
+            guard !envelope.isDuplicate(of: current), envelope.isNewer(than: current) else {
+                return false
+            }
+        }
+
+        agentStateEnvelope = envelope
+        agentStateObservedAt = observedAt
+        activityAt = max(activityAt, observedAt)
+        markUpdated()
+        return true
     }
 
     /// Minimum interval before this session is eligible for another derived-state poll,
@@ -2251,4 +2289,6 @@ final class HolySession: ObservableObject, Identifiable {
 
 extension Notification.Name {
     static let holyRemoteSessionPaneDied = Notification.Name("holyRemoteSessionPaneDied")
+    static let holyAgentStateEnvelopeDidArrive = Notification.Name("holyAgentStateEnvelopeDidArrive")
+    static let HolyAgentStateWireValueKey = "holyAgentStateWireValue"
 }

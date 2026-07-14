@@ -585,8 +585,8 @@ enum HolyRosterLayout: String, CaseIterable, Identifiable {
 
     var helpText: String {
         switch self {
-        case .classic: return "Grouped by agent, full status vocabulary"
-        case .calm:    return "Quieter indicators, less motion"
+        case .classic: return "Grouped by agent, canonical status vocabulary"
+        case .calm:    return "Same exact indicators with less surrounding detail"
         case .triage:  return "Lanes by status: what needs you floats up"
         case .focus:   return "Pinned Today sessions on top, the rest dimmed"
         }
@@ -597,17 +597,14 @@ private enum HolyRosterTriageLane: String, CaseIterable {
     case needsYou
     case working
     case idle
-    case done
 
     init(kind: HolySessionAttentionKind) {
         switch kind {
-        case .planningQuestion, .approvalNeeded, .newReply, .overdueReply, .staleReply, .conflict, .failed:
+        case .needsUser, .unread:
             self = .needsYou
-        case .working, .swarming:
+        case .working:
             self = .working
-        case .done:
-            self = .done
-        case .quiet, .waitingQuiet, .sleepingReply, .dormantReply, .stalled:
+        case .usedToday, .inactive, .sleeping:
             self = .idle
         }
     }
@@ -617,7 +614,6 @@ private enum HolyRosterTriageLane: String, CaseIterable {
         case .needsYou: return "Needs You"
         case .working:  return "Working"
         case .idle:     return "Idle"
-        case .done:     return "Done"
         }
     }
 
@@ -626,7 +622,6 @@ private enum HolyRosterTriageLane: String, CaseIterable {
         case .needsYou: return HolyAgentPalette.approvalNeeded
         case .working:  return HolyAgentPalette.workingBlue
         case .idle:     return HolyGhosttyTheme.textTertiary
-        case .done:     return HolyAgentPalette.done
         }
     }
 }
@@ -763,7 +758,6 @@ private struct HolyRosterRow: View {
         HStack(alignment: .center, spacing: 8) {
             HolyAgentStatusOrb(
                 state: displayActivityState,
-                newReplyBecameAvailableAt: displayActivityState == .newReply ? attention.becameAvailableAt : nil,
                 isAnimated: true
             )
             .frame(width: 18, height: 18)
@@ -1094,11 +1088,7 @@ private struct HolyRosterRow: View {
     }
 
     private var rowOutlineColor: Color {
-        if activityIndicatorState == .failed {
-            return HolyGhosttyTheme.danger
-        }
-
-        return activityColor
+        activityColor
     }
 
     // Pinned ("Today") sessions carry a quiet warm wash so they stand out
@@ -1141,58 +1131,8 @@ private struct HolyRosterRow: View {
         }
     }
 
-    private var activityIndicatorState: HolyRosterActivityState {
-        switch attention.kind {
-        case .working:
-            return .working
-        case .swarming:
-            return .swarming
-        case .planningQuestion:
-            return .planningQuestion
-        case .approvalNeeded:
-            return .approvalNeeded
-        case .newReply:
-            return .newReply
-        case .waitingQuiet:
-            return .waitingQuiet
-        case .sleepingReply:
-            return .sleepingReply
-        case .dormantReply:
-            return .dormantReply
-        case .overdueReply:
-            return .overdueReply
-        case .staleReply:
-            return .staleReply
-        case .stalled:
-            return .stalled
-        case .failed:
-            return .failed
-        case .done:
-            return .done
-        case .conflict:
-            return .conflict
-        case .quiet:
-            return .idle
-        }
-    }
-
-    // Calm layout collapses the full 15-state vocabulary into a quiet set:
-    // the working throbber survives, everything that needs you reads as one
-    // amber cue, and the rest settle into idle/done/problem dots.
-    private var displayActivityState: HolyRosterActivityState {
-        guard layout == .calm else { return activityIndicatorState }
-        switch activityIndicatorState {
-        case .working, .swarming:
-            return .working
-        case .planningQuestion, .approvalNeeded, .newReply, .overdueReply, .staleReply:
-            return .approvalNeeded
-        case .failed, .conflict:
-            return .failed
-        case .done:
-            return .done
-        case .stalled, .waitingQuiet, .sleepingReply, .dormantReply, .idle:
-            return .idle
-        }
+    private var displayActivityState: HolySessionAttentionKind {
+        attention.kind
     }
 
     private var riskState: HolyRosterRiskState {
@@ -1230,24 +1170,6 @@ private struct HolyRosterRow: View {
     }
 }
 
-private enum HolyRosterActivityState {
-    case idle
-    case working
-    case swarming
-    case planningQuestion
-    case approvalNeeded
-    case newReply
-    case waitingQuiet
-    case sleepingReply
-    case dormantReply
-    case overdueReply
-    case staleReply
-    case done
-    case stalled
-    case failed
-    case conflict
-}
-
 private enum HolyRosterRiskState {
     case none
     case sharedWorktree
@@ -1281,32 +1203,16 @@ enum HolyAgentPalette {
 extension HolySessionAttentionKind {
     var holyColor: Color {
         switch self {
-        case .quiet, .waitingQuiet:
-            return HolyGhosttyTheme.textTertiary
         case .working:
             return HolyAgentPalette.workingBlue
-        case .swarming:
-            return HolyAgentPalette.swarmGold
-        case .newReply:
-            return HolyAgentPalette.waitingReply
-        case .sleepingReply:
-            return HolyAgentPalette.sleepingReply
-        case .dormantReply:
-            return HolyAgentPalette.dormantReply
-        case .overdueReply:
-            return HolyAgentPalette.agingWait
-        case .staleReply:
-            return HolyAgentPalette.oldWait
-        case .planningQuestion:
-            return HolyAgentPalette.planningQuestion
-        case .approvalNeeded:
+        case .needsUser:
             return HolyAgentPalette.approvalNeeded
-        case .stalled:
-            return HolyAgentPalette.stalled
-        case .failed, .conflict:
-            return HolyGhosttyTheme.danger
-        case .done:
-            return HolyAgentPalette.done
+        case .unread:
+            return .white
+        case .usedToday:
+            return HolyAgentPalette.waitingReply
+        case .inactive, .sleeping:
+            return HolyGhosttyTheme.textTertiary
         }
     }
 }
@@ -1522,8 +1428,7 @@ private struct HolyRowActionContextMenuOverlay: NSViewRepresentable {
 }
 
 private struct HolyAgentStatusOrb: View {
-    let state: HolyRosterActivityState
-    var newReplyBecameAvailableAt: Date?
+    let state: HolySessionAttentionKind
     var isAnimated = true
 
     var body: some View {
@@ -1535,41 +1440,36 @@ private struct HolyAgentStatusOrb: View {
             } else {
                 HolyAgentStaticOrb(color: HolyAgentPalette.workingBlue, symbol: nil, opacity: 0.85)
             }
-        case .swarming:
-            if isAnimated {
-                HolyAgentSwarmSpinner(size: 16)
-                    .frame(width: 16, height: 16)
-            } else {
-                HolyAgentSymbolOrb(systemName: "sparkles", color: HolyAgentPalette.swarmGold)
-            }
-        case .planningQuestion:
+        case .needsUser:
             HolyAgentPlanningQuestionOrb()
                 .frame(width: 15, height: 15)
-        case .approvalNeeded:
-            HolyAgentSymbolOrb(systemName: "hand.raised.fill", color: HolyAgentPalette.approvalNeeded)
-        case .newReply:
+        case .unread:
+            HolyAgentStaticOrb(color: .white, symbol: nil, opacity: 1)
+        case .usedToday:
             HolyAgentStaticOrb(color: HolyAgentPalette.waitingReply, symbol: nil, opacity: 0.95)
-        case .waitingQuiet:
-            HolyAgentStaticOrb(color: HolyGhosttyTheme.textTertiary, symbol: nil, opacity: 0.40)
-        case .sleepingReply:
-            HolyAgentSymbolOrb(systemName: "moon.zzz.fill", color: HolyAgentPalette.sleepingReply)
-        case .dormantReply:
-            HolyAgentSymbolOrb(systemName: "moon.fill", color: HolyAgentPalette.dormantReply)
-        case .overdueReply:
-            HolyAgentSymbolOrb(systemName: "clock", color: HolyAgentPalette.agingWait)
-        case .staleReply:
-            HolyAgentSymbolOrb(systemName: "clock.fill", color: HolyAgentPalette.oldWait)
-        case .stalled:
-            HolyAgentSymbolOrb(systemName: "hourglass", color: HolyAgentPalette.stalled)
-        case .failed:
-            HolyAgentSymbolOrb(systemName: "xmark.octagon.fill", color: HolyGhosttyTheme.danger)
-        case .conflict:
-            HolyAgentSymbolOrb(systemName: "exclamationmark.triangle.fill", color: HolyGhosttyTheme.danger)
-        case .done:
-            HolyAgentSymbolOrb(systemName: "checkmark.circle.fill", color: HolyAgentPalette.done)
-        case .idle:
-            HolyAgentStaticOrb(color: HolyGhosttyTheme.textTertiary, symbol: nil, opacity: 0.55)
+        case .inactive:
+            HolyAgentStaticOrb(color: HolyGhosttyTheme.textTertiary, symbol: nil, opacity: 0.52)
+        case .sleeping:
+            HolyAgentSleepingOrb()
         }
+    }
+}
+
+private struct HolyAgentSleepingOrb: View {
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            HolyAgentStaticOrb(
+                color: HolyGhosttyTheme.textTertiary,
+                symbol: nil,
+                opacity: 0.38
+            )
+            Text("z")
+                .font(.system(size: 7, weight: .bold, design: .rounded))
+                .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                .offset(x: 3, y: -4)
+        }
+        .frame(width: 16, height: 16)
+        .accessibilityLabel("Sleeping")
     }
 }
 

@@ -6,6 +6,9 @@ struct HolyRemoteHostsSheet: View {
     @State private var editorHost: HolyRemoteHostRecord?
     @State private var selectedDiscoveredSessionIDs: Set<String> = []
     @State private var killConfirmation: HolyDiscoveredKillRequest?
+    @State private var agentBridgeStatuses: [UUID: HolyRemoteAgentBridgeHostStatus] = [:]
+    @State private var agentBridgeBusyHostIDs: Set<UUID> = []
+    @State private var agentBridgeConfirmation: HolyRemoteAgentBridgeConfirmation?
 
     var body: some View {
         ZStack {
@@ -43,6 +46,28 @@ struct HolyRemoteHostsSheet: View {
         .onChange(of: store.remoteHosts.map(\.id)) { _ in
             ensureSelection()
             reloadEditor()
+            let liveHostIDs = Set(store.remoteHosts.map(\.id))
+            agentBridgeStatuses = agentBridgeStatuses.filter { liveHostIDs.contains($0.key) }
+        }
+        .confirmationDialog(
+            agentBridgeConfirmation?.title ?? "",
+            isPresented: Binding(
+                get: { agentBridgeConfirmation != nil },
+                set: { if !$0 { agentBridgeConfirmation = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: agentBridgeConfirmation
+        ) { request in
+            Button(
+                request.actionTitle,
+                role: request.action == .remove ? .destructive : nil
+            ) {
+                performAgentBridgeAction(request)
+                agentBridgeConfirmation = nil
+            }
+            Button("Cancel", role: .cancel) { agentBridgeConfirmation = nil }
+        } message: { request in
+            Text(request.message)
         }
     }
 
@@ -197,6 +222,7 @@ struct HolyRemoteHostsSheet: View {
                     remoteActionBar(for: host)
                 }
                 editorSection
+                remoteAgentBridgeSection(for: host)
                 remoteSessionsSection(for: host)
             }
             .padding(14)
@@ -350,6 +376,83 @@ struct HolyRemoteHostsSheet: View {
             }
             .font(.system(size: 11, weight: .medium))
             .foregroundStyle(HolyGhosttyTheme.textSecondary)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(HolyGhosttyTheme.bgElevated)
+        )
+    }
+
+    private func remoteAgentBridgeSection(for host: HolyRemoteHostRecord) -> some View {
+        let entry = currentAgentBridgeStatus(for: host)
+        let isBusy = agentBridgeBusyHostIDs.contains(host.id)
+
+        return VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                sectionLabel("Authoritative Agent Indicators")
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(HolyGhosttyTheme.halo)
+                }
+                Spacer()
+
+                Button("Check") { refreshAgentBridgeStatus(for: host, force: true) }
+                    .buttonStyle(HolyGhosttyActionButtonStyle())
+                    .disabled(isBusy)
+
+                if let result = entry?.result {
+                    switch result.state {
+                    case .notInstalled:
+                        Button("Set Up…") {
+                            requestAgentBridgeAction(.install, on: host)
+                        }
+                        .buttonStyle(HolyGhosttyActionButtonStyle())
+                        .disabled(isBusy)
+                    case .partial:
+                        Button("Finish Setup…") {
+                            requestAgentBridgeAction(.install, on: host)
+                        }
+                        .buttonStyle(HolyGhosttyActionButtonStyle())
+                        .disabled(isBusy)
+                    case .installed:
+                        Button("Remove…") {
+                            requestAgentBridgeAction(.remove, on: host)
+                        }
+                        .buttonStyle(HolyGhosttyActionButtonStyle())
+                        .disabled(isBusy)
+                    case .blocked:
+                        EmptyView()
+                    }
+                }
+            }
+
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: agentBridgeStatusSymbol(entry: entry, isBusy: isBusy))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(agentBridgeStatusColor(entry: entry, isBusy: isBusy))
+                    .frame(width: 14)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(agentBridgeStatusText(entry: entry, isBusy: isBusy))
+                        .font(.system(size: 11))
+                        .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("Claude Code, Codex, OpenCode, and future adapters publish the same state-only protocol. Remote settings stay on this host; Holy never downloads their contents.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if entry?.result?.manualTrustHarnesses.contains("codex") == true {
+                        Text("Codex still requires you to run /hooks once in a Codex session on this host and approve Holy’s exact handlers.")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(HolyGhosttyTheme.halo.opacity(0.86))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
         }
         .padding(12)
         .background(
@@ -569,7 +672,6 @@ struct HolyRemoteHostsSheet: View {
         killConfirmation = HolyDiscoveredKillRequest(sessions: sessions, onKill: onKill)
     }
 
-
     private func labeledField(_ label: String, text: Binding<String>, placeholder: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label)
@@ -690,6 +792,7 @@ struct HolyRemoteHostsSheet: View {
             }
 
             store.refreshRemoteSessions(for: selectedRemoteHost)
+            refreshAgentBridgeStatus(for: selectedRemoteHost)
         }
     }
 
@@ -704,13 +807,164 @@ struct HolyRemoteHostsSheet: View {
     private func selectRemoteHost(_ host: HolyRemoteHostRecord) {
         store.selectedRemoteHostID = host.id
         selectedConnection = .remote(host.id)
+        refreshAgentBridgeStatus(for: host)
     }
 
     private func saveEditor() {
         guard let editorHost else { return }
         store.upsertRemoteHost(editorHost)
         selectedConnection = .remote(editorHost.id)
+        agentBridgeStatuses.removeValue(forKey: editorHost.id)
+        refreshAgentBridgeStatus(for: editorHost, force: true)
         reloadEditor()
+    }
+
+    private func currentAgentBridgeStatus(
+        for host: HolyRemoteHostRecord
+    ) -> HolyRemoteAgentBridgeHostStatus? {
+        guard let entry = agentBridgeStatuses[host.id],
+              entry.sshDestination == host.normalized().sshDestination else {
+            return nil
+        }
+        return entry
+    }
+
+    private func refreshAgentBridgeStatus(
+        for host: HolyRemoteHostRecord,
+        force: Bool = false
+    ) {
+        let normalized = host.normalized()
+        guard !normalized.sshDestination.isEmpty,
+              !agentBridgeBusyHostIDs.contains(host.id) else { return }
+        if !force, currentAgentBridgeStatus(for: normalized) != nil { return }
+
+        agentBridgeBusyHostIDs.insert(host.id)
+        Task {
+            do {
+                let result = try await HolyRemoteAgentStateBridgeService.shared.inspect(normalized)
+                await MainActor.run {
+                    agentBridgeBusyHostIDs.remove(host.id)
+                    guard store.remoteHosts.first(where: { $0.id == host.id })?
+                        .normalized().sshDestination == normalized.sshDestination else { return }
+                    agentBridgeStatuses[host.id] = .init(
+                        sshDestination: normalized.sshDestination,
+                        result: result,
+                        errorMessage: nil
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    agentBridgeBusyHostIDs.remove(host.id)
+                    guard store.remoteHosts.first(where: { $0.id == host.id })?
+                        .normalized().sshDestination == normalized.sshDestination else { return }
+                    agentBridgeStatuses[host.id] = .init(
+                        sshDestination: normalized.sshDestination,
+                        result: nil,
+                        errorMessage: error.localizedDescription
+                    )
+                }
+            }
+        }
+    }
+
+    private func requestAgentBridgeAction(
+        _ action: HolyRemoteAgentStateBridgeService.Action,
+        on host: HolyRemoteHostRecord
+    ) {
+        guard action == .install || action == .remove else { return }
+        agentBridgeConfirmation = .init(action: action, host: host.normalized())
+    }
+
+    private func performAgentBridgeAction(_ request: HolyRemoteAgentBridgeConfirmation) {
+        let host = request.host
+        guard !agentBridgeBusyHostIDs.contains(host.id) else { return }
+        agentBridgeBusyHostIDs.insert(host.id)
+
+        Task {
+            do {
+                let result: HolyRemoteAgentStateBridgeResult
+                switch request.action {
+                case .install:
+                    result = try await HolyRemoteAgentStateBridgeService.shared.install(on: host)
+                case .remove:
+                    result = try await HolyRemoteAgentStateBridgeService.shared.remove(from: host)
+                case .inspect:
+                    return
+                }
+                await MainActor.run {
+                    agentBridgeBusyHostIDs.remove(host.id)
+                    guard store.remoteHosts.first(where: { $0.id == host.id })?
+                        .normalized().sshDestination == host.sshDestination else { return }
+                    agentBridgeStatuses[host.id] = .init(
+                        sshDestination: host.sshDestination,
+                        result: result,
+                        errorMessage: nil
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    agentBridgeBusyHostIDs.remove(host.id)
+                    guard store.remoteHosts.first(where: { $0.id == host.id })?
+                        .normalized().sshDestination == host.sshDestination else { return }
+                    agentBridgeStatuses[host.id] = .init(
+                        sshDestination: host.sshDestination,
+                        result: nil,
+                        errorMessage: error.localizedDescription
+                    )
+                }
+            }
+        }
+    }
+
+    private func agentBridgeStatusText(
+        entry: HolyRemoteAgentBridgeHostStatus?,
+        isBusy: Bool
+    ) -> String {
+        if isBusy { return "Checking this host without copying its configuration…" }
+        if let error = entry?.errorMessage?.nilIfBlank { return error }
+        guard let result = entry?.result else {
+            return "Not checked on this host yet."
+        }
+        switch result.state {
+        case .notInstalled:
+            return "Not set up on this host."
+        case .partial:
+            return "A partial Holy-owned setup was found. Finish Setup will safely reconcile it."
+        case .installed:
+            return "Installed on this host for the current adapter manifest."
+        case let .blocked(reason):
+            return "Blocked without changing files: \(reason)"
+        }
+    }
+
+    private func agentBridgeStatusSymbol(
+        entry: HolyRemoteAgentBridgeHostStatus?,
+        isBusy: Bool
+    ) -> String {
+        if isBusy { return "arrow.trianglehead.2.clockwise.rotate.90" }
+        if entry?.errorMessage != nil { return "exclamationmark.triangle" }
+        guard let state = entry?.result?.state else { return "questionmark.circle" }
+        switch state {
+        case .notInstalled: return "circle"
+        case .partial: return "circle.lefthalf.filled"
+        case .installed: return "checkmark.circle.fill"
+        case .blocked: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func agentBridgeStatusColor(
+        entry: HolyRemoteAgentBridgeHostStatus?,
+        isBusy: Bool
+    ) -> Color {
+        if isBusy { return HolyGhosttyTheme.halo }
+        if entry?.errorMessage != nil { return HolyGhosttyTheme.danger }
+        guard let state = entry?.result?.state else { return HolyGhosttyTheme.textTertiary }
+        switch state {
+        case .installed: return HolyGhosttyTheme.success
+        case .partial: return HolyGhosttyTheme.warning
+        case .blocked: return HolyGhosttyTheme.danger
+        case .notInstalled: return HolyGhosttyTheme.textTertiary
+        }
     }
 
     private var selectedRemoteHost: HolyRemoteHostRecord? {
@@ -867,6 +1121,51 @@ struct HolyRemoteHostsSheet: View {
 private enum HolyConnectionSelection: Equatable {
     case local
     case remote(UUID)
+}
+
+private struct HolyRemoteAgentBridgeHostStatus {
+    let sshDestination: String
+    let result: HolyRemoteAgentStateBridgeResult?
+    let errorMessage: String?
+}
+
+private struct HolyRemoteAgentBridgeConfirmation: Identifiable {
+    let action: HolyRemoteAgentStateBridgeService.Action
+    let host: HolyRemoteHostRecord
+
+    var id: String {
+        "\(host.id.uuidString):\(action.rawValue)"
+    }
+
+    var title: String {
+        switch action {
+        case .install:
+            "Set up authoritative indicators on \(host.displayTitle)?"
+        case .remove:
+            "Remove authoritative indicators from \(host.displayTitle)?"
+        case .inspect:
+            "Inspect authoritative indicators on \(host.displayTitle)?"
+        }
+    }
+
+    var actionTitle: String {
+        switch action {
+        case .install: "Set Up on This Host"
+        case .remove: "Remove from This Host"
+        case .inspect: "Inspect This Host"
+        }
+    }
+
+    var message: String {
+        switch action {
+        case .install:
+            "Holy will connect to \(host.sshDestination), merge its exact-owned Claude and Codex lifecycle hooks, configure the Codex committed-turn notifier, and install one Holy-owned helper and OpenCode plugin. Existing settings stay on the remote host and unrelated values are preserved; a foreign Codex notifier blocks setup instead of being overwritten. Codex hook trust still requires /hooks on that host."
+        case .remove:
+            "Holy will connect to \(host.sshDestination) and remove only its exact-owned handlers, Codex notifier, helper, and OpenCode plugin. Other remote configuration is preserved."
+        case .inspect:
+            "Holy will read status codes from \(host.sshDestination) without returning its configuration contents."
+        }
+    }
 }
 
 private struct HolyConnectionHeroContent {

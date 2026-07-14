@@ -5,6 +5,23 @@ import CoreText
 import UserNotifications
 import GhosttyKit
 
+enum GhosttyNotificationSchedulingError: Error, Equatable, LocalizedError, Sendable {
+    case authorizationDenied
+    case authorizationUnavailable
+    case schedulingFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .authorizationDenied:
+            "macOS notification permission is disabled for Holy Ghostty"
+        case .authorizationUnavailable:
+            "macOS did not provide a usable notification authorization state"
+        case let .schedulingFailed(message):
+            "macOS could not schedule the notification: \(message)"
+        }
+    }
+}
+
 extension Ghostty {
     /// The NSView implementation for a terminal surface.
     class SurfaceView: OSView, ObservableObject, Codable, Identifiable {
@@ -430,8 +447,12 @@ extension Ghostty {
             // Remove ourselves from secure input if we have to
             SecureInput.shared.removeScoped(ObjectIdentifier(self))
 
-            // Remove any notifications associated with this surface
-            let identifiers = Array(self.notificationIdentifiers)
+            // Keep authoritative Holy alerts across ordinary surface teardown.
+            // Their persisted event watermark means deleting them here would
+            // lose an unseen alert without allowing a restart replay.
+            let identifiers = Array(self.notificationIdentifiers.filter {
+                !$0.hasPrefix(HolyAgentNotificationPolicy.requestIdentifierPrefix)
+            })
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: identifiers)
 
             // Cancel progress report timer
@@ -1762,47 +1783,100 @@ extension Ghostty {
         }
 
         /// Show a user notification and associate it with this surface
-        func showUserNotification(title: String, body: String, requireFocus: Bool = true) {
-            let content = UNMutableNotificationContent()
-            content.title = title
-            content.subtitle = self.title
-            content.body = body
-            content.sound = UNNotificationSound.default
-            content.categoryIdentifier = Ghostty.userNotificationCategory
-            content.userInfo = [
-                "surface": self.id.uuidString,
-                "requireFocus": requireFocus,
-            ]
-
-            let uuid = UUID().uuidString
-            let request = UNNotificationRequest(
-                identifier: uuid,
-                content: content,
-                trigger: nil
-            )
-
-            // Note the callback may be executed on a background thread as documented
-            // so we need @MainActor since we're reading/writing view state.
-            UNUserNotificationCenter.current().add(request) { @MainActor error in
-                if let error = error {
-                    AppDelegate.logger.error("Error scheduling user notification: \(error)")
+        func showUserNotification(
+            title: String,
+            body: String,
+            requireFocus: Bool = true,
+            identifier: String? = nil,
+            holySessionID: UUID? = nil,
+            completion: (@MainActor @Sendable (Result<Void, GhosttyNotificationSchedulingError>) -> Void)? = nil
+        ) {
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    completion?(.failure(.authorizationUnavailable))
                     return
                 }
 
-                // We need to keep track of this notification so we can remove it
-                // under certain circumstances
-                self.notificationIdentifiers.insert(uuid)
+                let content = UNMutableNotificationContent()
+                content.title = title
+                content.subtitle = self.title
+                content.body = body
+                content.sound = UNNotificationSound.default
+                content.categoryIdentifier = Ghostty.userNotificationCategory
+                var userInfo: [String: Any] = [
+                    "surface": self.id.uuidString,
+                    "requireFocus": requireFocus,
+                ]
+                if let holySessionID {
+                    // Unlike a generic terminal surface UUID, the Holy session
+                    // ID survives app relaunch and resolves a delivered banner.
+                    userInfo["holySessionID"] = holySessionID.uuidString
+                }
+                content.userInfo = userInfo
 
-                // If we're focused then we schedule to remove the notification
-                // after a few seconds. If we gain focus we automatically remove it
-                // in focusDidChange.
-                if self.focused {
-                    Task { @MainActor [weak self] in
-                        try await Task.sleep(for: .seconds(3))
-                        self?.notificationIdentifiers.remove(uuid)
-                        UNUserNotificationCenter.current()
-                            .removeDeliveredNotifications(withIdentifiers: [uuid])
+                let uuid = identifier ?? UUID().uuidString
+                let request = UNNotificationRequest(
+                    identifier: uuid,
+                    content: content,
+                    trigger: nil
+                )
+                let center = UNUserNotificationCenter.current()
+
+                let settings = await center.notificationSettings()
+                switch settings.authorizationStatus {
+                case .authorized, .provisional:
+                    break
+                case .notDetermined:
+                    do {
+                        guard try await center.requestAuthorization(options: [.alert, .sound]) else {
+                            completion?(.failure(.authorizationDenied))
+                            return
+                        }
+                    } catch {
+                        completion?(.failure(.schedulingFailed(error.localizedDescription)))
+                        return
                     }
+                case .denied:
+                    completion?(.failure(.authorizationDenied))
+                    return
+                @unknown default:
+                    completion?(.failure(.authorizationUnavailable))
+                    return
+                }
+
+                await self.scheduleUserNotification(
+                    request,
+                    identifier: uuid,
+                    center: center,
+                    completion: completion
+                )
+            }
+        }
+
+        private func scheduleUserNotification(
+            _ request: UNNotificationRequest,
+            identifier: String,
+            center: UNUserNotificationCenter,
+            completion: (@MainActor @Sendable (Result<Void, GhosttyNotificationSchedulingError>) -> Void)?
+        ) async {
+            do {
+                try await center.add(request)
+            } catch {
+                AppDelegate.logger.error("Error scheduling user notification: \(error)")
+                completion?(.failure(.schedulingFailed(error.localizedDescription)))
+                return
+            }
+
+            // A producer event is acknowledged only after the system confirms
+            // that this request was accepted.
+            notificationIdentifiers.insert(identifier)
+            completion?(.success(()))
+
+            if focused {
+                Task { @MainActor [weak self] in
+                    try await Task.sleep(for: .seconds(3))
+                    self?.notificationIdentifiers.remove(identifier)
+                    center.removeDeliveredNotifications(withIdentifiers: [identifier])
                 }
             }
         }
@@ -1810,7 +1884,10 @@ extension Ghostty {
         /// Handle a user notification click
         func handleUserNotification(notification: UNNotification, focus: Bool) {
             let id = notification.request.identifier
-            guard self.notificationIdentifiers.remove(id) != nil else { return }
+            // The in-memory set is cleanup bookkeeping, not authorization.
+            // It is intentionally empty after relaunch while delivered macOS
+            // notifications remain clickable.
+            notificationIdentifiers.remove(id)
             if focus {
                 self.window?.makeKeyAndOrderFront(self)
                 Ghostty.moveFocus(to: self)

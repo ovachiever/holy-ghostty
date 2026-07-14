@@ -1013,7 +1013,16 @@ final class HolySessionSupervisor {
 
         var events: [HolySessionEventDraft] = []
 
-        if session.runtimeTelemetry.isMeaningful {
+        if current.agentStateEventID != previous.agentStateEventID,
+           let event = HolySessionEventDraft.agentStateChanged(
+               session: session,
+               attention: attention
+           ) {
+            events.append(event)
+        }
+
+        if session.runtimeTelemetry.isMeaningful,
+           current.phase != previous.phase || current.runtimeTelemetry != previous.runtimeTelemetry {
             events.append(.runtimeUpdated(session: session, attention: attention))
         }
 
@@ -1028,7 +1037,8 @@ final class HolySessionSupervisor {
     private func observedRuntimeState(for session: HolySession) -> HolyObservedRuntimeState {
         .init(
             phase: session.phase,
-            runtimeTelemetry: session.runtimeTelemetry
+            runtimeTelemetry: session.runtimeTelemetry,
+            agentStateEventID: session.agentStateEnvelope?.eventIdentity
         )
     }
 }
@@ -1106,6 +1116,7 @@ private struct HolyActiveRecoveryResult {
 private struct HolyObservedRuntimeState: Equatable {
     let phase: HolySessionPhase
     let runtimeTelemetry: HolySessionRuntimeTelemetry
+    let agentStateEventID: String?
 
     var artifactSignature: String? {
         let summary = runtimeTelemetry.artifactSummary?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1354,11 +1365,9 @@ private final class HolySessionAlertCoordinator {
                 (
                     session.id,
                     HolySessionAlertState(
-                        phase: session.phase,
                         hasBlockingConflict: coordinationBySessionID[session.id]?.hasBlockingConflict == true,
                         hasBranchOwnershipDrift: session.hasBranchOwnershipDrift,
-                        budgetStatus: session.budgetStatus,
-                        runtimeActivityKind: session.runtimeTelemetry.activityKind
+                        budgetStatus: session.budgetStatus
                     )
                 )
             }
@@ -1412,27 +1421,6 @@ private final class HolySessionAlertCoordinator {
                 body: coordination.summary,
                 requestAttention: true
             )
-            return
-        }
-
-        if previous.phase != .failed && current.phase == .failed {
-            deliver(
-                for: session,
-                title: "Agent failed",
-                body: session.primarySignalDetail,
-                requestAttention: true
-            )
-            return
-        }
-
-        if previous.phase != .waitingInput && current.phase == .waitingInput {
-            deliver(
-                for: session,
-                title: "Agent needs input",
-                body: session.primarySignalDetail,
-                requestAttention: true
-            )
-            return
         }
 
         if !previous.hasBranchOwnershipDrift && current.hasBranchOwnershipDrift {
@@ -1442,27 +1430,6 @@ private final class HolySessionAlertCoordinator {
                 body: session.ownershipStatusText,
                 requestAttention: true
             )
-            return
-        }
-
-        if previous.runtimeActivityKind != .stalled && current.runtimeActivityKind == .stalled {
-            deliver(
-                for: session,
-                title: "Agent may be stalled",
-                body: session.runtimeTelemetrySummaryText ?? session.primarySignalDetail,
-                requestAttention: true
-            )
-            return
-        }
-
-        if previous.runtimeActivityKind != .looping && current.runtimeActivityKind == .looping {
-            deliver(
-                for: session,
-                title: "Agent may be looping",
-                body: session.runtimeTelemetrySummaryText ?? session.primarySignalDetail,
-                requestAttention: true
-            )
-            return
         }
 
         if previous.budgetStatus != .warning && current.budgetStatus == .warning {
@@ -1472,7 +1439,6 @@ private final class HolySessionAlertCoordinator {
                 body: session.budgetRemainingText,
                 requestAttention: false
             )
-            return
         }
 
         if previous.budgetStatus != .exceeded && current.budgetStatus == .exceeded {
@@ -1482,17 +1448,10 @@ private final class HolySessionAlertCoordinator {
                 body: session.budgetSummaryText,
                 requestAttention: true
             )
-            return
         }
 
-        if previous.phase != .completed && current.phase == .completed {
-            deliver(
-                for: session,
-                title: "Agent completed",
-                body: session.primarySignalDetail,
-                requestAttention: false
-            )
-        }
+        // Screen-derived phase/activity transitions are diagnostics only. They
+        // must never create an agent notification.
     }
 
     private func deliver(
@@ -1505,31 +1464,24 @@ private final class HolySessionAlertCoordinator {
             NSApplication.shared.requestUserAttention(.criticalRequest)
         }
 
-        let content = UNMutableNotificationContent()
-        content.title = "\(title): \(session.title)"
-        content.body = body
-        content.sound = .default
-
-        let request = UNNotificationRequest(
+        // Route through SurfaceView so foreground presentation, click-to-focus,
+        // dismissal, and delivered-notification cleanup all use Ghostty's
+        // registered surface contract. A bare UN request is silently suppressed
+        // while the app is foreground and cannot focus a session when clicked.
+        session.surfaceView.showUserNotification(
+            title: "\(title): \(session.title)",
+            body: body,
+            requireFocus: false,
             identifier: "holy-alert-\(session.id.uuidString)-\(UUID().uuidString)",
-            content: content,
-            trigger: nil
+            holySessionID: session.id
         )
-
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error {
-                AppDelegate.logger.error("Holy Ghostty notification delivery failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
     }
 }
 
 private struct HolySessionAlertState: Equatable {
-    let phase: HolySessionPhase
     let hasBlockingConflict: Bool
     let hasBranchOwnershipDrift: Bool
     let budgetStatus: HolySessionBudgetStatus
-    let runtimeActivityKind: HolySessionActivityKind
 }
 
 private extension String {

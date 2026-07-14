@@ -1,5 +1,13 @@
 # Unseen-Reply Indicator — Design Spec (2026-07-14)
 
+> **Status: superseded in rendering, retained as design history.** The
+> first-principles indicator brief later made unread one of exactly six
+> mutually exclusive states, so the white unread dot now *replaces* the blue
+> recency dot instead of overlaying it as a seventh pip. Its core timestamp
+> rule survives as `HolySessionAttentionMetadata.hasUnreadAgentReply`. The
+> implementation also corrected a stale premise below: seen tracking had been
+> disabled and required a versioned one-time baseline before rollout.
+
 ## Goal
 
 A session whose agent finished something the user hasn't looked at yet gets a small, unmistakable visual mark in the roster. The existing blue dot stays purely time-based (recency); the new mark is purely seen-based. Two independent axes.

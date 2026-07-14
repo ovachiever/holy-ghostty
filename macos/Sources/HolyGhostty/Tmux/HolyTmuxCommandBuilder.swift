@@ -68,6 +68,9 @@ enum HolyTmuxCommandBuilder {
             tmux: tmux,
             sessionName: sessionName
         )
+        let ownershipStampCommand = HolyAgentStateBridge
+            .tmuxOwnershipStampArguments(forTarget: sessionName)
+            .map { shellCommand(tmuxPrefix + $0) }
 
         var lines: [String] = []
         if tmux.createIfMissing {
@@ -87,11 +90,15 @@ enum HolyTmuxCommandBuilder {
             if metadataCommands.isEmpty {
                 lines.append(ensureSessionCommand)
             } else {
-                let metadataScript = metadataCommands.joined(separator: "; ")
+                let metadataScript = (metadataCommands + [ownershipStampCommand].compactMap(\.self))
+                    .joined(separator: "; ")
                 lines.append("if \(ensureSessionCommand); then \(metadataScript); else exit 1; fi")
             }
         } else {
             lines.append("\(shellCommand(tmuxPrefix + ["has-session", "-t", sessionName])) >/dev/null")
+            if let ownershipStampCommand {
+                lines.append(ownershipStampCommand)
+            }
         }
 
         lines.append("exec \(shellCommand(tmuxPrefix + ["attach", "-t", sessionName]))")

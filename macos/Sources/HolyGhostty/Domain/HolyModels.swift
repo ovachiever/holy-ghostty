@@ -92,25 +92,24 @@ enum HolySessionAttention: String, CaseIterable {
     }
 }
 
-enum HolySessionAttentionKind: String, Codable, Equatable {
-    case quiet
+/// The complete, user-visible session indicator vocabulary.
+///
+/// Rich runtime telemetry deliberately does not leak into this enum. Every
+/// case answers one question only: active work, human attention, unread work,
+/// or age. Adding another glyph requires changing this contract and its tests.
+enum HolySessionAttentionKind: String, Codable, Equatable, Hashable, CaseIterable {
     case working
-    case swarming
-    case newReply
-    case waitingQuiet
-    case sleepingReply
-    case dormantReply
-    case overdueReply
-    case staleReply
-    case planningQuestion
-    case approvalNeeded
-    case stalled
-    case failed
-    case done
-    case conflict
+    case needsUser
+    case unread
+    case usedToday
+    case inactive
+    case sleeping
 }
 
 struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
+    static let currentSeenTrackingVersion = 1
+    static let currentNotificationTrackingVersion = 1
+
     let sessionID: UUID
     var lastSeenAt: Date?
     var seenEvidenceSignature: String?
@@ -118,7 +117,35 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
     var lastAttentionBecameAvailableAt: Date?
     var lastAttentionWasWaiting: Bool?
     var lastAgentFinishedAt: Date?
+    var lastAgentFinishedSource: String?
+    var lastAgentFinishedReasonCode: String?
     var lastAttentionWasActiveWork: Bool?
+    /// Nil identifies rows written while seen tracking was disabled. Restore
+    /// baselines those rows once so the hook rollout cannot badge-storm every
+    /// historical session.
+    var seenTrackingVersion: Int?
+    /// The last hook event incorporated into attention metadata. The token is
+    /// opaque and contains no prompt or response text.
+    var lastAuthoritativeEventID: String?
+    var lastAuthoritativeFinishedEventID: String?
+    /// Producer and receipt clocks stay separate. Operational leases use the
+    /// producer occurrence (clamped against future clock skew); diagnostics
+    /// can still explain when Holy actually observed the event.
+    var lastAuthoritativeEventOccurredAt: Date?
+    var lastAuthoritativeEventObservedAt: Date?
+    /// Recency is advanced only by an operator seeing the session or by a
+    /// structured harness event. Terminal redraws and screen prose cannot
+    /// make an old session look newly used.
+    var lastUsedAt: Date?
+    /// Persists which actionable producer event has already scheduled an OS
+    /// notification, preventing both restart duplicates and offline-event loss.
+    var notificationTrackingVersion: Int?
+    var notificationTrackingStartedAt: Date?
+    var lastNotifiedAuthoritativeEventID: String?
+    /// Monotonic producer-order watermark paired with the event ID above.
+    /// This prevents an older durable finish register from replaying after a
+    /// newer question or failure has already been handled.
+    var lastNotifiedEventAtMilliseconds: Int64?
     var updatedAt: Date
 
     var id: UUID { sessionID }
@@ -131,7 +158,19 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
         lastAttentionBecameAvailableAt: Date? = nil,
         lastAttentionWasWaiting: Bool? = nil,
         lastAgentFinishedAt: Date? = nil,
+        lastAgentFinishedSource: String? = nil,
+        lastAgentFinishedReasonCode: String? = nil,
         lastAttentionWasActiveWork: Bool? = nil,
+        seenTrackingVersion: Int? = nil,
+        lastAuthoritativeEventID: String? = nil,
+        lastAuthoritativeFinishedEventID: String? = nil,
+        lastAuthoritativeEventOccurredAt: Date? = nil,
+        lastAuthoritativeEventObservedAt: Date? = nil,
+        lastUsedAt: Date? = nil,
+        notificationTrackingVersion: Int? = nil,
+        notificationTrackingStartedAt: Date? = nil,
+        lastNotifiedAuthoritativeEventID: String? = nil,
+        lastNotifiedEventAtMilliseconds: Int64? = nil,
         updatedAt: Date = .init()
     ) {
         self.sessionID = sessionID
@@ -141,8 +180,142 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
         self.lastAttentionBecameAvailableAt = lastAttentionBecameAvailableAt
         self.lastAttentionWasWaiting = lastAttentionWasWaiting
         self.lastAgentFinishedAt = lastAgentFinishedAt
+        self.lastAgentFinishedSource = lastAgentFinishedSource
+        self.lastAgentFinishedReasonCode = lastAgentFinishedReasonCode
         self.lastAttentionWasActiveWork = lastAttentionWasActiveWork
+        self.seenTrackingVersion = seenTrackingVersion
+        self.lastAuthoritativeEventID = lastAuthoritativeEventID
+        self.lastAuthoritativeFinishedEventID = lastAuthoritativeFinishedEventID
+        self.lastAuthoritativeEventOccurredAt = lastAuthoritativeEventOccurredAt
+        self.lastAuthoritativeEventObservedAt = lastAuthoritativeEventObservedAt
+        self.lastUsedAt = lastUsedAt
+        self.notificationTrackingVersion = notificationTrackingVersion
+        self.notificationTrackingStartedAt = notificationTrackingStartedAt
+        self.lastNotifiedAuthoritativeEventID = lastNotifiedAuthoritativeEventID
+        self.lastNotifiedEventAtMilliseconds = lastNotifiedEventAtMilliseconds
         self.updatedAt = updatedAt
+    }
+}
+
+extension HolySessionAttentionMetadata {
+    @discardableResult
+    mutating func baselineLegacySeenTracking(at date: Date) -> Bool {
+        guard seenTrackingVersion != Self.currentSeenTrackingVersion else { return false }
+        seenTrackingVersion = Self.currentSeenTrackingVersion
+        lastSeenAt = date
+        lastUsedAt = max(lastUsedAt ?? .distantPast, date)
+        updatedAt = date
+        return true
+    }
+
+    @discardableResult
+    mutating func baselineNotificationTracking(at date: Date) -> Bool {
+        guard notificationTrackingVersion != Self.currentNotificationTrackingVersion else { return false }
+        notificationTrackingVersion = Self.currentNotificationTrackingVersion
+        notificationTrackingStartedAt = date
+        updatedAt = date
+        return true
+    }
+
+    @discardableResult
+    mutating func record(
+        envelope: HolyAgentStateEnvelope,
+        observedAt: Date
+    ) -> Bool {
+        guard lastAuthoritativeEventID != envelope.eventIdentity else { return false }
+        let occurredAt = min(envelope.occurredAt, observedAt)
+        lastAuthoritativeEventID = envelope.eventIdentity
+        lastAuthoritativeEventOccurredAt = occurredAt
+        lastAuthoritativeEventObservedAt = observedAt
+        lastUsedAt = max(lastUsedAt ?? .distantPast, occurredAt)
+        lastAttentionWasActiveWork = envelope.lifecycle == .working
+        switch envelope.lifecycle {
+        case .finished:
+            lastAuthoritativeFinishedEventID = envelope.eventIdentity
+            lastAgentFinishedAt = occurredAt
+            lastAgentFinishedSource = envelope.source
+            lastAgentFinishedReasonCode = envelope.reasonCode
+        case .working, .needsUser, .failed, .idle, .ended:
+            // A question or failure is actionable, but it is not a completed
+            // reply. When its operational lease expires it must degrade to
+            // recency, never masquerade as the white unread-finish dot.
+            break
+        }
+        updatedAt = observedAt
+        return true
+    }
+
+    /// Incorporates the independent durable completion register without
+    /// replacing the latest lifecycle register (which may already be `ended`).
+    @discardableResult
+    mutating func recordFinished(
+        envelope: HolyAgentStateEnvelope,
+        observedAt: Date
+    ) -> Bool {
+        guard envelope.lifecycle == .finished else {
+            return false
+        }
+        let occurredAt = min(envelope.occurredAt, observedAt)
+        if let lastAgentFinishedAt {
+            if occurredAt < lastAgentFinishedAt {
+                return false
+            }
+            if occurredAt == lastAgentFinishedAt,
+               envelope.eventIdentity <= (lastAuthoritativeFinishedEventID ?? "") {
+                return false
+            }
+        } else if lastAuthoritativeFinishedEventID == envelope.eventIdentity {
+            return false
+        }
+
+        lastAuthoritativeFinishedEventID = envelope.eventIdentity
+        lastAgentFinishedAt = occurredAt
+        lastAgentFinishedSource = envelope.source
+        lastAgentFinishedReasonCode = envelope.reasonCode
+        lastUsedAt = max(lastUsedAt ?? .distantPast, occurredAt)
+        updatedAt = observedAt
+        return true
+    }
+
+    @discardableResult
+    mutating func markSeen(at date: Date) -> Bool {
+        guard lastSeenAt.map({ $0 < date }) ?? true else { return false }
+        lastSeenAt = date
+        lastUsedAt = max(lastUsedAt ?? .distantPast, date)
+        updatedAt = date
+        return true
+    }
+
+    var hasUnreadAgentReply: Bool {
+        guard let lastAgentFinishedAt else { return false }
+        return lastAgentFinishedAt > (lastSeenAt ?? .distantPast)
+    }
+
+    /// Advances notification acknowledgement without ever moving backward.
+    /// Focused visibility and successful system scheduling both use this same
+    /// operation, so an older independent register cannot become a late alert.
+    @discardableResult
+    mutating func acknowledgeAuthoritativeNotification(
+        eventID: String,
+        occurredAtMilliseconds: Int64,
+        at date: Date
+    ) -> Bool {
+        if let previousMilliseconds = lastNotifiedEventAtMilliseconds {
+            if occurredAtMilliseconds < previousMilliseconds {
+                return false
+            }
+            if occurredAtMilliseconds == previousMilliseconds,
+               eventID <= (lastNotifiedAuthoritativeEventID ?? "") {
+                return false
+            }
+        } else if lastNotifiedAuthoritativeEventID == eventID {
+            return false
+        }
+
+        lastNotifiedAuthoritativeEventID = eventID
+        lastNotifiedEventAtMilliseconds = occurredAtMilliseconds
+        updatedAt = date
+        return true
     }
 }
 
@@ -157,6 +330,159 @@ struct HolySessionAttentionPresentation: Equatable {
     var helpText: String {
         guard let detail, !detail.isEmpty else { return title }
         return "\(title): \(detail)"
+    }
+}
+
+/// Pure evidence consumed by the six-state indicator policy. There is
+/// intentionally no preview, title, spinner glyph, or screen-text field here.
+struct HolySessionIndicatorEvidence: Equatable {
+    let lifecycle: HolyAgentLifecycleState?
+    let lifecycleOccurredAt: Date?
+    let processExited: Bool
+    let lastAgentFinishedAt: Date?
+    let lastSeenAt: Date?
+    let lastUsedAt: Date
+    let now: Date
+}
+
+enum HolySessionIndicatorPolicy {
+    static let workingLease: TimeInterval = 30 * 60
+    static let needsUserLease: TimeInterval = 30 * 60
+    static let usedTodayInterval: TimeInterval = 24 * 60 * 60
+    static let sleepingInterval: TimeInterval = 48 * 60 * 60
+
+    static func kind(
+        for evidence: HolySessionIndicatorEvidence,
+        workingLease: TimeInterval = workingLease,
+        needsUserLease: TimeInterval = needsUserLease,
+        usedTodayInterval: TimeInterval = usedTodayInterval,
+        sleepingInterval: TimeInterval = sleepingInterval
+    ) -> HolySessionAttentionKind {
+        if !evidence.processExited,
+           let lifecycle = evidence.lifecycle {
+            switch lifecycle {
+            case .needsUser, .failed:
+                if let occurredAt = evidence.lifecycleOccurredAt {
+                    let age = evidence.now.timeIntervalSince(occurredAt)
+                    if age >= 0, age < needsUserLease {
+                        return .needsUser
+                    }
+                }
+            case .working:
+                if let occurredAt = evidence.lifecycleOccurredAt {
+                    let age = evidence.now.timeIntervalSince(occurredAt)
+                    if age >= 0, age < workingLease {
+                        return .working
+                    }
+                }
+            case .finished, .idle, .ended:
+                break
+            }
+        }
+
+        if let finishedAt = evidence.lastAgentFinishedAt,
+           finishedAt > (evidence.lastSeenAt ?? .distantPast) {
+            return .unread
+        }
+
+        let age = max(0, evidence.now.timeIntervalSince(evidence.lastUsedAt))
+        if age < usedTodayInterval {
+            return .usedToday
+        }
+        if age < sleepingInterval {
+            return .inactive
+        }
+        return .sleeping
+    }
+}
+
+struct HolyAgentNotificationEvidence {
+    let envelope: HolyAgentStateEnvelope
+    let observedAt: Date
+    let trackingStartedAt: Date
+    let lastNotifiedEventID: String?
+    let lastNotifiedOccurredAtMilliseconds: Int64?
+    let processExited: Bool
+    let now: Date
+}
+
+/// Restart-stable notification gate. `trackingStartedAt` is persisted at the
+/// first hook-aware launch: older register contents are adopted silently,
+/// while events committed during a later app absence still notify once.
+enum HolyAgentNotificationPolicy {
+    static let requestIdentifierPrefix = "holy-agent|"
+
+    static func requestIdentifier(
+        sessionID: UUID,
+        envelope: HolyAgentStateEnvelope
+    ) -> String {
+        requestIdentifier(sessionID: sessionID, eventID: envelope.eventIdentity)
+    }
+
+    static func requestIdentifier(
+        sessionID: UUID,
+        eventID: String
+    ) -> String {
+        "\(requestIdentifierPrefix)\(sessionID.uuidString)|\(eventID)"
+    }
+
+    static func shouldNotify(for evidence: HolyAgentNotificationEvidence) -> Bool {
+        let committedAtMilliseconds = committedAtMilliseconds(
+            envelope: evidence.envelope,
+            observedAt: evidence.observedAt
+        )
+        let trackingStartedAtMilliseconds = timestampMilliseconds(for: evidence.trackingStartedAt)
+        guard committedAtMilliseconds >= trackingStartedAtMilliseconds,
+              isAfterAcknowledgement(
+                eventID: evidence.envelope.eventIdentity,
+                occurredAtMilliseconds: committedAtMilliseconds,
+                lastEventID: evidence.lastNotifiedEventID,
+                lastOccurredAtMilliseconds: evidence.lastNotifiedOccurredAtMilliseconds
+              ) else {
+            return false
+        }
+        switch evidence.envelope.lifecycle {
+        case .finished:
+            return true
+        case .needsUser, .failed:
+            guard !evidence.processExited else { return false }
+            let age = evidence.now.timeIntervalSince(
+                Date(timeIntervalSince1970: TimeInterval(committedAtMilliseconds) / 1_000)
+            )
+            return age >= 0 && age < HolySessionIndicatorPolicy.needsUserLease
+        case .working, .idle, .ended:
+            return false
+        }
+    }
+
+    static func committedAtMilliseconds(
+        envelope: HolyAgentStateEnvelope,
+        observedAt: Date
+    ) -> Int64 {
+        min(envelope.occurredAtMilliseconds, timestampMilliseconds(for: observedAt))
+    }
+
+    static func timestampMilliseconds(for date: Date) -> Int64 {
+        let value = date.timeIntervalSince1970 * 1_000
+        guard value.isFinite else { return value.sign == .minus ? Int64.min : Int64.max }
+        if value <= Double(Int64.min) { return Int64.min }
+        if value >= Double(Int64.max) { return Int64.max }
+        return Int64(value.rounded(.down))
+    }
+
+    private static func isAfterAcknowledgement(
+        eventID: String,
+        occurredAtMilliseconds: Int64,
+        lastEventID: String?,
+        lastOccurredAtMilliseconds: Int64?
+    ) -> Bool {
+        guard let lastOccurredAtMilliseconds else {
+            return eventID != lastEventID
+        }
+        if occurredAtMilliseconds != lastOccurredAtMilliseconds {
+            return occurredAtMilliseconds > lastOccurredAtMilliseconds
+        }
+        return eventID > (lastEventID ?? "")
     }
 }
 

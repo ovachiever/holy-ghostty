@@ -122,7 +122,7 @@ struct HolySessionTimelineSection: View {
         switch event.eventType {
         case .recovered, .archived:
             return HolyGhosttyTheme.warning
-        case .artifactDetected, .runtimeUpdated:
+        case .agentStateChanged, .artifactDetected, .runtimeUpdated:
             return HolyGhosttyTheme.accent
         case .created, .restored, .relaunched:
             return HolyGhosttyTheme.success

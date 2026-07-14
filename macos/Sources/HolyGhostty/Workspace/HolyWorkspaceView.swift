@@ -999,6 +999,7 @@ struct HolyWorkspaceRootView: View {
         if store.selectedSessionID != session.id {
             store.selectSession(session.id)
         }
+        store.sessionSurfaceDidReceiveUserFocus(session.id)
     }
 
     private func performCommandPaletteAction(_ action: String, on surfaceView: Ghostty.SurfaceView) {
@@ -1055,14 +1056,26 @@ struct HolyWorkspaceRootView: View {
         state: HolySessionAttentionPresentation
     ) -> String {
         switch state.kind {
-        case .approvalNeeded, .planningQuestion, .newReply, .waitingQuiet, .sleepingReply, .dormantReply, .overdueReply, .staleReply:
+        case .needsUser, .unread:
             return "\(state.title) \(elapsedText(since: state.becameAvailableAt ?? session.activityAt))"
-        default:
+        case .working, .usedToday, .inactive, .sleeping:
             return state.title
         }
     }
 
     private func statusRailDetail(for session: HolySession, stateTitle: String) -> String? {
+        let state = statusRailState(for: session)
+        if let detail = state.detail?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !detail.isEmpty {
+            return detail
+        }
+
+        // Once a pane has an authoritative producer, do not decorate its state
+        // with screen-derived prose that may contradict the hook event.
+        if session.agentStateEnvelope != nil {
+            return nil
+        }
+
         let telemetry = session.runtimeTelemetry
         let values: [String?]
 

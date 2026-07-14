@@ -18,6 +18,24 @@ private let holyTmuxAvailableForLifecycleTests: Bool = {
 }()
 
 struct HolyTmuxCommandFlagTests {
+    @Test func attachingAnExistingSessionStampsTheResolvedHolyPaneOwner() throws {
+        var launchSpec = HolySessionLaunchSpec.interactiveTmuxShell()
+        launchSpec.tmux = .init(
+            socketName: "holy",
+            sessionName: "adopted-session",
+            createIfMissing: false
+        )
+
+        let script = try #require(HolyTmuxCommandBuilder.command(for: launchSpec))
+
+        let ownerRange = try #require(script.range(of: "@holy_agent_state_owner_v1"))
+        let attachRange = try #require(script.range(of: "attach"))
+        #expect(script.contains("set-option"))
+        #expect(script.contains("holy"))
+        #expect(script.contains("adopted-session"))
+        #expect(ownerRange.upperBound <= attachRange.lowerBound)
+    }
+
     @Test func managedClaudeBootstrapClearsOwnedModelBeforeReturningToShell() throws {
         var launchSpec = HolySessionLaunchSpec.interactiveTmuxShell()
         launchSpec.runtime = .claude
