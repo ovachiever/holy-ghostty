@@ -1394,7 +1394,8 @@ final class HolySession: ObservableObject, Identifiable {
 
     private static let agentSpinnerTitlePrefixes: Set<Character> = [
         "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-        "◐", "◓", "◑", "◒"
+        "◐", "◓", "◑", "◒",
+        "✢", "✳", "✶", "✻", "✽", "✺"
     ]
 
     private static func isAgentRuntime(_ runtime: HolySessionRuntime) -> Bool {
@@ -1451,6 +1452,8 @@ final class HolySession: ObservableObject, Identifiable {
         return lower.contains("teammates running")
             || lower.contains("show teammates")
             || lower.range(of: #"\b[2-9][0-9]*\s+teammates?\b"#, options: .regularExpression) != nil
+            // Workflow fan-out ticker: "2/5 agents done · 7m 12s · ↓ 598.5k tokens".
+            || lower.range(of: #"\b[0-9]+/[0-9]+\s+agents?\b"#, options: .regularExpression) != nil
     }
 
     private static func isAgentSwarmLine(_ line: String) -> Bool {
@@ -1538,7 +1541,29 @@ final class HolySession: ObservableObject, Identifiable {
         if lower.contains("thinking with high effort")
             || lower.contains("thinking with medium effort")
             || lower.contains("thinking with low effort")
+            || lower.contains("thinking with xhigh effort")
             || lower.contains("almost done thinking") {
+            return true
+        }
+
+        // A Claude Code REPL parked on a background workflow renders only this
+        // wait line at the prompt — "waiting" here means agents are running,
+        // not that the user owes a reply.
+        if lower.range(
+            of: #"\bwaiting for [0-9]+ .*workflows? to finish\b"#,
+            options: .regularExpression
+        ) != nil {
+            return true
+        }
+
+        // A live elapsed-time + token counter ("1m 45s · ↓ 4.3k tokens") only
+        // renders mid-turn. The workflow ticker draws it without the
+        // parentheses the verb rule below requires, and spinner-line variants
+        // omit the verb entirely.
+        if lower.range(
+            of: #"\b[0-9]+(?:h\s*[0-9]+m|m\s*[0-9]+s|[hms])\s*·\s*[↑↓]\s*[0-9][0-9.,]*[kmb]?\s*tokens\b"#,
+            options: .regularExpression
+        ) != nil {
             return true
         }
 
@@ -1563,9 +1588,19 @@ final class HolySession: ObservableObject, Identifiable {
 
         let statusBody = agentStatusBody(from: trimmed)
 
-        return statusBody.range(
+        if statusBody.range(
             of: #"^\s*(working|thinking|reasoning|reading|searching|running|executing|editing|writing|applying|patching|doodling|tooling|scaffolding|implementing|installing|creating|fixing)\b"#,
             options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            return true
+        }
+
+        // Claude Code labels busy turns with invented gerunds ("Finagling…",
+        // "Moseying…") no fixed verb list can track. A spinner glyph followed
+        // by a gerund and ellipsis only renders while a turn is running.
+        return statusBody != trimmed && statusBody.range(
+            of: #"^[A-Z][a-zA-Z]*ing(…|\.\.\.)"#,
+            options: .regularExpression
         ) != nil
     }
 
@@ -1943,6 +1978,14 @@ final class HolySession: ObservableObject, Identifiable {
 
     static func isLiveAgentStatusLineForTesting(_ line: String) -> Bool {
         isLiveAgentStatusLine(line)
+    }
+
+    static func isAgentBusyStatusLineForTesting(_ line: String) -> Bool {
+        isAgentBusyStatusLine(line)
+    }
+
+    static func isLiveAgentSwarmLineForTesting(_ line: String) -> Bool {
+        isLiveAgentSwarmLine(line)
     }
 #endif
 
