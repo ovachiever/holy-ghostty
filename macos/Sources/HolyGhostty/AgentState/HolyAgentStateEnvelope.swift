@@ -119,9 +119,12 @@ struct HolyAgentStateEnvelope: Equatable, Sendable {
         reasonCode: String? = nil
     ) throws {
         let milliseconds = occurredAt.timeIntervalSince1970 * 1_000
+        // Strict less-than: Double(Int64.max) rounds UP to 2^63, which the
+        // Int64 initializer then traps on. `< 2^63` admits every convertible
+        // value and nothing else.
         guard milliseconds.isFinite,
               milliseconds >= 1,
-              milliseconds <= Double(Int64.max) else {
+              milliseconds < 0x1p63 else {
             throw HolyAgentStateEnvelopeError.invalidTimestamp
         }
         try self.init(

@@ -214,6 +214,9 @@ class AppDelegate: NSObject,
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if Self.isHolyGhosttyBundle {
+            Self.purgeStaleDeliveredNotifications()
+        }
         HolyDatabase.bootstrapIfNeeded()
         HolyMigrationService.importLegacyWorkspaceIfNeeded()
         // Reclaim on-disk footprint at the one moment the database is provably
@@ -567,8 +570,26 @@ class AppDelegate: NSObject,
         if !Self.isHolyGhosttyBundle {
             // Preserve upstream Ghostty behavior. Holy's authoritative agent
             // alerts must survive a clean relaunch because their event
-            // watermark has already been persisted as delivered.
+            // watermark has already been persisted as delivered — but only
+            // those; generic surface-bound banners are purged at next launch
+            // (purgeStaleDeliveredNotifications), since a scoped async removal
+            // cannot be trusted to complete during terminate.
             UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        }
+    }
+
+    /// Generic terminal banners (bell, command-finished) reference surface
+    /// UUIDs that do not survive relaunch; left in Notification Center they
+    /// are permanent dead clutter. Agent alerts (holy-agent| prefix) stay:
+    /// their persisted watermark marks them delivered and they replay safely.
+    private static func purgeStaleDeliveredNotifications() {
+        let center = UNUserNotificationCenter.current()
+        center.getDeliveredNotifications { delivered in
+            let stale = delivered
+                .map(\.request.identifier)
+                .filter { !$0.hasPrefix(HolyAgentNotificationPolicy.requestIdentifierPrefix) }
+            guard !stale.isEmpty else { return }
+            center.removeDeliveredNotifications(withIdentifiers: stale)
         }
     }
 

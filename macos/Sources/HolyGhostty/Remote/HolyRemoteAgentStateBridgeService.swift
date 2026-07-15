@@ -574,7 +574,12 @@ actor HolyRemoteAgentStateBridgeService {
         if line_index >= len(lines) or not lines[line_index].startswith(marker_prefix):
             return False
         suffix = lines[line_index][len(marker_prefix):]
-        return suffix.isdigit() and 0 < int(suffix) < generation
+        # ASCII digits only, matching the Swift guard: str.isdigit() accepts
+        # non-ASCII Unicode decimals, which would let a crafted foreign file
+        # pass as a prior Holy generation and be overwritten.
+        if not suffix or any(character not in "0123456789" for character in suffix):
+            return False
+        return 0 < int(suffix) < generation
 
     def canonical_json(value):
         return (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")

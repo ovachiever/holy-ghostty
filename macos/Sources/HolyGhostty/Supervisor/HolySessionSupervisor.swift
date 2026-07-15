@@ -1414,6 +1414,9 @@ private final class HolySessionAlertCoordinator {
         current: HolySessionAlertState,
         coordination: HolySessionCoordination
     ) {
+        // Priority chain: one alert per session per poll. Each branch returns
+        // so the first evaluation after a long gap doesn't stack banners and
+        // repeated critical dock bounces for one session.
         if !previous.hasBlockingConflict && current.hasBlockingConflict {
             deliver(
                 for: session,
@@ -1421,6 +1424,7 @@ private final class HolySessionAlertCoordinator {
                 body: coordination.summary,
                 requestAttention: true
             )
+            return
         }
 
         if !previous.hasBranchOwnershipDrift && current.hasBranchOwnershipDrift {
@@ -1430,15 +1434,7 @@ private final class HolySessionAlertCoordinator {
                 body: session.ownershipStatusText,
                 requestAttention: true
             )
-        }
-
-        if previous.budgetStatus != .warning && current.budgetStatus == .warning {
-            deliver(
-                for: session,
-                title: "Budget nearing limit",
-                body: session.budgetRemainingText,
-                requestAttention: false
-            )
+            return
         }
 
         if previous.budgetStatus != .exceeded && current.budgetStatus == .exceeded {
@@ -1448,6 +1444,17 @@ private final class HolySessionAlertCoordinator {
                 body: session.budgetSummaryText,
                 requestAttention: true
             )
+            return
+        }
+
+        if previous.budgetStatus != .warning && current.budgetStatus == .warning {
+            deliver(
+                for: session,
+                title: "Budget nearing limit",
+                body: session.budgetRemainingText,
+                requestAttention: false
+            )
+            return
         }
 
         // Screen-derived phase/activity transitions are diagnostics only. They

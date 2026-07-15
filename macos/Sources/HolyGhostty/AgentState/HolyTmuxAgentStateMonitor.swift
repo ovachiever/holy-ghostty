@@ -635,7 +635,14 @@ extension HolyTmuxAgentStateMonitor {
                     nanoseconds: UInt64(max(0.1, timeout) * 1_000_000_000)
                 )
                 if resumeBox.resume(returning: .timedOut), process.isRunning {
+                    // Escalate like HolyRemoteAgentStateBridgeService.run: this
+                    // spawns ssh every poll, and an ssh that shrugs off SIGTERM
+                    // during teardown would otherwise accumulate per tick.
                     process.terminate()
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    if process.isRunning {
+                        _ = Darwin.kill(process.processIdentifier, SIGKILL)
+                    }
                 }
             }
         }

@@ -26,7 +26,7 @@ enum HolyAgentStateBridge {
     /// Generation ownership is deliberately separate from the v1 wire
     /// protocol. Bumping it lets the installer replace an older Holy-owned
     /// helper/plugin without treating a modified current generation as ours.
-    static let generationVersion = 2
+    static let generationVersion = 3
     static let openCodePluginFileName = "holy-agent-state.ts"
     static let codexNotifyAdapterFileName = "holy-codex-turn-complete.py"
     static let helperOwnershipMarkerPrefix =
@@ -150,12 +150,16 @@ enum HolyAgentStateBridge {
             # Future notification types are not completion evidence.
             raise SystemExit(0)
 
+        # Codex's documented payload carries turn-id only; thread-id is
+        # accepted as optional enrichment if a future Codex adds it.
         thread_id = payload.get("thread-id")
         turn_id = payload.get("turn-id")
-        if not metadata(thread_id, 64) or not metadata(turn_id, 64):
+        if not metadata(turn_id, 64):
+            raise SystemExit(64)
+        if thread_id is not None and not metadata(thread_id, 64):
             raise SystemExit(64)
 
-        completion_id = thread_id + ":" + turn_id
+        completion_id = turn_id if thread_id is None else thread_id + ":" + turn_id
         if len(completion_id.encode("utf-8")) > 128:
             raise SystemExit(64)
 
@@ -191,9 +195,14 @@ enum HolyAgentStateBridge {
             && targetBytes.first == 37
             && targetBytes.dropFirst().allSatisfy { (48 ... 57).contains($0) }
         guard isPaneID || isMetadataIdentifier(target, maximumLength: 128) else { return nil }
+        // Pane IDs stamp the exact pane; session names must stamp SESSION
+        // scope — `-pq` against a session name resolves to only the active
+        // pane, so adopted agents in other panes would read no owner. The
+        // helper reads via `#{@option}` format expansion, which inherits
+        // pane→session, so session scope reaches every pane.
         return [
             "set-option",
-            "-pq",
+            isPaneID ? "-pq" : "-q",
             "-t",
             target,
             HolyAgentStateTransport.tmuxOwnershipOption,
@@ -670,7 +679,10 @@ enum HolyAgentStateBridge {
     ) -> Bool {
         let prefix = "\(shellQuote(helperURL.path)) \(source) "
         guard command.hasPrefix(prefix) else { return false }
-        let fields = command.dropFirst(prefix.count).split(separator: " ")
+        // Keep empty fields so irregular internal whitespace reads as foreign,
+        // matching the remote Python's `split(" ")` — Holy never generates
+        // doubled spaces, and local/remote must agree on ownership.
+        let fields = command.dropFirst(prefix.count).split(separator: " ", omittingEmptySubsequences: false)
         guard fields.count == 2,
               HolyAgentLifecycleState(rawValue: String(fields[0])) != nil else {
             return false

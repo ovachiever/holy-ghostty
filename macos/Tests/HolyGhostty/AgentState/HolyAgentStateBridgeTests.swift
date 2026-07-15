@@ -309,6 +309,50 @@ struct HolyAgentStateBridgeTests {
         #expect(!HolyAgentStateBridge.isOwnedCodexNotifyAdapter(adapter + "# modified\n", helperURL: helperURL))
     }
 
+    // Codex's documented agent-turn-complete payload carries turn-id (plus
+    // message text) but NO thread-id — the adapter must accept the real
+    // shape, or every Codex completion dies at validation (review finding #0).
+    @Test func codexNotifyAdapterAcceptsRealPayloadWithoutThreadId() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("holy-codex-notify-real-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let helperURL = root.appendingPathComponent("capture-helper.sh")
+        let adapterURL = root.appendingPathComponent(HolyAgentStateBridge.codexNotifyAdapterFileName)
+        let captureURL = root.appendingPathComponent("captured")
+        let helper = #"""
+        #!/bin/sh
+        printf '%s\n' "$@" > "$HOLY_CAPTURE"
+        """# + "\n"
+        try Data(helper.utf8).write(to: helperURL)
+        try Data(HolyAgentStateBridge.codexNotifyAdapter(helperURL: helperURL).utf8).write(to: adapterURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperURL.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: adapterURL.path)
+
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "type": "agent-turn-complete",
+            "turn-id": "turn-42",
+            "input-messages": ["TOP SECRET PROMPT"],
+            "last-assistant-message": "TOP SECRET RESPONSE",
+        ])
+        let process = Process()
+        process.executableURL = adapterURL
+        process.arguments = [try #require(String(data: payload, encoding: .utf8))]
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOLY_CAPTURE"] = captureURL.path
+        process.environment = environment
+        process.standardInput = Pipe()
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+
+        #expect(process.terminationStatus == 0)
+        let captured = try String(contentsOf: captureURL, encoding: .utf8)
+        #expect(captured == "codex\nfinished\nturn-finished\nturn-42\n")
+        #expect(!captured.contains("TOP SECRET"))
+    }
+
     @Test func malformedHookShapesFailClosedInsteadOfDiscardingConfiguration() {
         let helperURL = URL(fileURLWithPath: "/tmp/Holy/agent-state-hook.sh")
         do {
@@ -369,6 +413,22 @@ struct HolyAgentStateBridgeTests {
         #expect(HolyAgentStateBridge.tmuxOwnershipStampArguments(forTarget: "session:1.0") != nil)
         #expect(HolyAgentStateBridge.tmuxOwnershipStampArguments(forTarget: "%") == nil)
         #expect(HolyAgentStateBridge.tmuxOwnershipStampArguments(forTarget: "%1;run-shell") == nil)
+
+        // A session-name target must stamp SESSION scope: `-pq` against a
+        // session resolves to only the active pane, leaving adopted agents in
+        // other panes unmarked (review finding #1). Format expansion
+        // `#{@option}` inherits pane→session, so session scope reaches every
+        // pane's helper read.
+        #expect(
+            HolyAgentStateBridge.tmuxOwnershipStampArguments(forTarget: "holy-shell-30-shell-ABC") == [
+                "set-option",
+                "-q",
+                "-t",
+                "holy-shell-30-shell-ABC",
+                "@holy_agent_state_owner_v1",
+                "holy",
+            ]
+        )
     }
 
     @Test func remoteManifestIsCanonicalAndCarriesAllCurrentAdapters() throws {
