@@ -1189,6 +1189,11 @@ enum HolyAgentPalette {
     static let done = Color(red: 0.42, green: 0.47, blue: 0.52)
     static let stalled = Color(red: 1.0, green: 0.47, blue: 0.22)
     static let waitingReply = Color(red: 0.30, green: 0.76, blue: 1.0)
+    // Unread must be a live hue, never achromatic: white/grey is the aging
+    // family's vocabulary, and "new reply" is the freshest state on the board.
+    // Green is otherwise unclaimed in the roster (blue=recent, gold/orange=
+    // needs-you, red=danger, grey=old) and reads as "ready for you".
+    static let unreadGreen = Color(red: 0.20, green: 0.90, blue: 0.55)
     static let sleepingReply = Color(red: 0.44, green: 0.55, blue: 0.66)
     static let dormantReply = Color(red: 0.58, green: 0.54, blue: 0.48)
     static let approvalNeeded = Color(red: 1.0, green: 0.58, blue: 0.22)
@@ -1208,7 +1213,7 @@ extension HolySessionAttentionKind {
         case .needsUser:
             return HolyAgentPalette.approvalNeeded
         case .unread:
-            return .white
+            return HolyAgentPalette.unreadGreen
         case .usedToday:
             return HolyAgentPalette.waitingReply
         case .inactive, .sleeping:
@@ -1444,7 +1449,7 @@ private struct HolyAgentStatusOrb: View {
             HolyAgentPlanningQuestionOrb()
                 .frame(width: 15, height: 15)
         case .unread:
-            HolyAgentStaticOrb(color: .white, symbol: nil, opacity: 1)
+            HolyAgentStaticOrb(color: HolyAgentPalette.unreadGreen, symbol: nil, opacity: 1)
         case .usedToday:
             HolyAgentStaticOrb(color: HolyAgentPalette.waitingReply, symbol: nil, opacity: 0.95)
         case .inactive:
