@@ -1449,7 +1449,12 @@ private struct HolyAgentStatusOrb: View {
             HolyAgentPlanningQuestionOrb()
                 .frame(width: 15, height: 15)
         case .unread:
+            // Glow separates unread green from used-today blue at 9px: a
+            // tight bright halo plus a wider soft bloom, static (motion stays
+            // reserved for working states).
             HolyAgentStaticOrb(color: HolyAgentPalette.unreadGreen, symbol: nil, opacity: 1)
+                .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.85), radius: 2.5)
+                .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.45), radius: 6)
         case .usedToday:
             HolyAgentStaticOrb(color: HolyAgentPalette.waitingReply, symbol: nil, opacity: 0.95)
         case .inactive:
