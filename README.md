@@ -147,24 +147,47 @@ Zig minor versions are not interchangeable for this project.
 
 ## Build
 
-Build the Zig core and generated framework:
-
-```bash
-zig build -Demit-xcframework
-```
-
-Build the macOS app:
-
-```bash
-xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal SYMROOT=build build
-```
-
-Install and launch:
+Build, verify, install, and launch the supported app:
 
 ```bash
 scripts/install-holy-ghostty.sh
 open -a "Holy Ghostty"
 ```
+
+The installer builds the complete core payload (`GhosttyKit.xcframework` plus
+its generated resources) with Zig 0.15.2 and `ReleaseFast`, fingerprints its
+inputs and outputs, builds the Swift app with `ReleaseLocal`, and refuses to
+replace the installed app unless the finished executable reports that exact
+verified core. The prior app is staged as a rollback until the replacement is
+signed, registered, and reverified. It also checks the resolved ReleaseLocal
+settings (`-O`, whole-module compilation, and assertions off) before building.
+
+If Zig 0.15.2 cannot link against the installed macOS SDK, run the repository's
+**Build Holy macOS core** workflow or download its newest
+`HolyGhostty-Core-ReleaseFast-<commit>` artifact for the same core inputs. Then
+import the zip contained in that download and rerun the installer:
+
+```bash
+scripts/build-holy-ghostty-core.sh import /path/to/HolyGhostty-Core-ReleaseFast.zip
+scripts/install-holy-ghostty.sh
+```
+
+The artifact contains the framework, generated resources, and the same build
+receipt. Different Swift-only commits are safe, while an incomplete, Debug,
+wrong-source, or modified payload is rejected before the installed app is
+touched. Main is rebuilt monthly so the 90-day Actions artifact does not expire
+during normal repository operation.
+
+For a build without installation, build the verified core first and then the
+app:
+
+```bash
+scripts/build-holy-ghostty-core.sh build
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal SYMROOT=build build
+```
+
+Do not substitute a bare `zig build -Demit-xcframework`: Zig defaults that
+command to Debug, and an Xcode-only build does not rebuild the core.
 
 Installed app path:
 
@@ -175,7 +198,7 @@ Installed app path:
 Build only the shared Ghostty core:
 
 ```bash
-zig build -Demit-macos-app=false
+scripts/build-holy-ghostty-core.sh build
 ```
 
 ## Data Locations

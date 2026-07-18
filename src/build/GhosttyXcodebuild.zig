@@ -69,6 +69,9 @@ pub fn init(
             "Ghostty",
             "-configuration",
             xc_config,
+            // This Zig graph owns the framework and resource dependencies,
+            // so the standalone Xcode receipt gate must not second-guess it.
+            "HOLY_GHOSTTY_CORE_FROM_ZIG_GRAPH=1",
         });
 
         // If we have a specific architecture, we need to pass it
@@ -106,6 +109,7 @@ pub fn init(
             "Ghostty",
             "-skip-testing",
             "GhosttyUITests",
+            "HOLY_GHOSTTY_CORE_FROM_ZIG_GRAPH=1",
         });
         if (xc_arch) |arch| step.addArgs(&.{ "-arch", arch });
 

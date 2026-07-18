@@ -1003,7 +1003,7 @@ jobs:
       - name: Build Ghostty.app
         run: |
           cd macos
-          xcodebuild -target Ghostty \
+          xcodebuild -target Ghostty -configuration Debug \
             COMPILATION_CACHE_CAS_PATH=/Users/runner/Library/Developer/Xcode/DerivedData/CompilationCache.noindex \
             COMPILATION_CACHE_KEEP_CAS_DIRECTORY=YES
 

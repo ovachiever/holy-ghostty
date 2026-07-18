@@ -209,6 +209,7 @@ pub fn build(b: *std.Build) !void {
             b,
             &deps,
             config.xcframework_target,
+            config.xcframework_output,
         );
         if (config.emit_xcframework) {
             xcframework.install();
@@ -265,6 +266,7 @@ pub fn build(b: *std.Build) !void {
                 b,
                 &deps,
                 .native,
+                config.xcframework_output,
             );
             const macos_app_native_only = try buildpkg.GhosttyXcodebuild.init(
                 b,

@@ -20,6 +20,7 @@ const GitVersion = @import("GitVersion.zig");
 optimize: std.builtin.OptimizeMode,
 target: std.Build.ResolvedTarget,
 xcframework_target: XCFrameworkTarget = .universal,
+xcframework_output: []const u8 = "macos/GhosttyKit.xcframework",
 wasm_target: WasmTarget,
 
 /// Comptime interfaces
@@ -143,6 +144,23 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         "xcframework-target",
         "The target for the xcframework.",
     ) orelse .universal;
+    config.xcframework_output = if (b.option(
+        []const u8,
+        "holy-xcframework-stage",
+        "Holy-only staging directory name under .zig-cache.",
+    )) |stage| output: {
+        const prefix = "holy-ghostty-core-stage.";
+        if (stage.len <= prefix.len or
+            !std.mem.startsWith(u8, stage, prefix) or
+            std.mem.indexOfScalar(u8, stage, '/') != null)
+        {
+            return error.InvalidHolyXCFrameworkStage;
+        }
+        break :output b.fmt(
+            ".zig-cache/{s}/macos/GhosttyKit.xcframework",
+            .{stage},
+        );
+    } else "macos/GhosttyKit.xcframework";
 
     //---------------------------------------------------------------
     // Comptime Interfaces

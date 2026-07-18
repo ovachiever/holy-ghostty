@@ -1,0 +1,59 @@
+name: Holy build contract
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/holy-build-contract.yml"
+      - ".github/workflows/build-holy-macos.yml"
+      - ".github/workflows/test.yml"
+      - "CONTRIBUTING.md"
+      - "README.md"
+      - "VERSION"
+      - "build.zig"
+      - "build.zig.zon"
+      - "docs/holy-ghostty/README.md"
+      - "docs/holy-ghostty/engineering-spec.md"
+      - "scripts/build-holy-ghostty-core.sh"
+      - "scripts/install-holy-ghostty.sh"
+      - "scripts/test-holy-ghostty-build-contract.sh"
+      - "src/build/Config.zig"
+      - "src/build/GhosttyXCFramework.zig"
+      - "src/build/GhosttyXcodebuild.zig"
+      - "macos/Ghostty.xcodeproj/project.pbxproj"
+  push:
+    branches:
+      - main
+      - "wip/**"
+    paths:
+      - ".github/workflows/holy-build-contract.yml"
+      - ".github/workflows/build-holy-macos.yml"
+      - ".github/workflows/test.yml"
+      - "CONTRIBUTING.md"
+      - "README.md"
+      - "VERSION"
+      - "build.zig"
+      - "build.zig.zon"
+      - "docs/holy-ghostty/README.md"
+      - "docs/holy-ghostty/engineering-spec.md"
+      - "scripts/build-holy-ghostty-core.sh"
+      - "scripts/install-holy-ghostty.sh"
+      - "scripts/test-holy-ghostty-build-contract.sh"
+      - "src/build/Config.zig"
+      - "src/build/GhosttyXCFramework.zig"
+      - "src/build/GhosttyXcodebuild.zig"
+      - "macos/Ghostty.xcodeproj/project.pbxproj"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Verify fail-closed macOS build contract
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Run build contract tests
+        run: scripts/test-holy-ghostty-build-contract.sh

@@ -825,27 +825,41 @@ Important integration behavior:
 
 ## 25. Build And Install
 
-Upstream build:
+Verified Holy core build:
 
 ```bash
-zig build
+scripts/build-holy-ghostty-core.sh build
 ```
 
-Faster macOS-core-only build when app bundle emission is unnecessary:
+The wrapper invokes an isolated framework-only Zig build with `ReleaseFast`,
+exact Zig-version enforcement, source and payload fingerprints, generated
+resource validation, and no recursive macOS app build. It publishes the
+finished payload only after validation. Do not use a bare
+`zig build -Demit-xcframework`: Zig defaults to Debug and also enables the
+separate app-copy path.
 
-```bash
-zig build -Demit-macos-app=false
-```
+When local Zig cannot link the installed macOS SDK, the **Build Holy macOS core**
+workflow produces a 90-day, commit-named archive containing the framework,
+generated resources, and the same receipt. A monthly main build prevents normal
+artifact expiry. Import its contained zip with
+`scripts/build-holy-ghostty-core.sh import <archive>`; the local verifier accepts
+it only when its source fingerprint and every packaged payload hash match the
+current core inputs. Swift-only commit differences do not invalidate it.
 
-macOS app build:
+macOS app build after the verified core exists:
 
 ```bash
 xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal SYMROOT=build
 ```
 
-Install script:
+Canonical build, verification, and installation entrypoint:
 
 - `scripts/install-holy-ghostty.sh`
+
+Installation is transactional: the candidate is copied, signed, and verified
+before it is published; the old bundle remains available for rollback through
+LaunchServices registration and final verification. The running app is stopped
+only after those gates pass. There is no production skip-build path.
 
 Installed bundle path:
 

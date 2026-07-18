@@ -445,6 +445,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = A5B30540299BEAAB0047F10C /* Build configuration list for PBXNativeTarget "Ghostty" */;
 			buildPhases = (
+				3B39CAA62F6A000100000001 /* Verify GhosttyKit ReleaseFast */,
 				FC501E0B2F46B410007AE49D /* Run SwiftLint */,
 				A5B3052D299BEAAA0047F10C /* Sources */,
 				A5B3052E299BEAAA0047F10C /* Frameworks */,
@@ -596,6 +597,26 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		3B39CAA62F6A000100000001 /* Verify GhosttyKit ReleaseFast */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Verify GhosttyKit ReleaseFast";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ \"$CONFIGURATION\" = \"ReleaseLocal\" ] && [ \"${HOLY_GHOSTTY_CORE_FROM_ZIG_GRAPH:-0}\" != \"1\" ]; then\n  \"$SRCROOT/../scripts/build-holy-ghostty-core.sh\" verify\nelse\n  echo \"Skipping standalone Holy core gate for $CONFIGURATION\"\nfi\n";
+			showEnvVarsInLog = 0;
+		};
 		FC501E0B2F46B410007AE49D /* Run SwiftLint */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;

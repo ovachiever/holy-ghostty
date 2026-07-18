@@ -1,32 +1,64 @@
-name: Build Holy macOS (manual)
+name: Build Holy macOS core
 
 # Minimal Holy-specific build workflow that does NOT depend on the
-# Namespace.so runner profile or Nix. Uses GitHub-hosted macos-14 with
+# Namespace.so runner profile or Nix. Uses GitHub-hosted macOS with
 # mlugg/setup-zig (the same action upstream Ghostty pins) to install
-# Zig 0.15.2 directly, then builds libghostty (ReleaseFast) and the
-# macOS app, producing a downloadable .zip artifact.
+# Zig 0.15.2 directly, then builds a receipt-bound ReleaseFast
+# GhosttyKit.xcframework plus its generated resources as a downloadable
+# .zip artifact. A monthly run keeps a current-main artifact from expiring.
 #
-# Trigger from the Actions tab → "Build Holy macOS (manual)" → Run workflow,
-# or via `gh workflow run "Build Holy macOS (manual)" --ref <branch>`.
+# Trigger from the Actions tab → "Build Holy macOS core" → Run workflow,
+# or via `gh workflow run build-holy-macos.yml --ref <branch>`.
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 9 1 * *"
+  pull_request:
+    paths:
+      - ".github/workflows/build-holy-macos.yml"
+      - "VERSION"
+      - "build.zig"
+      - "build.zig.zon"
+      - "images/**"
+      - "include/**"
+      - "pkg/**"
+      - "po/**"
+      - "scripts/build-holy-ghostty-core.sh"
+      - "src/**"
+      - "vendor/**"
   push:
     branches:
+      - main
       - "wip/**"
+    paths:
+      - ".github/workflows/build-holy-macos.yml"
+      - "VERSION"
+      - "build.zig"
+      - "build.zig.zon"
+      - "images/**"
+      - "include/**"
+      - "pkg/**"
+      - "po/**"
+      - "scripts/build-holy-ghostty-core.sh"
+      - "src/**"
+      - "vendor/**"
+
+permissions:
+  contents: read
 
 concurrency:
-  group: build-holy-macos
+  group: build-holy-macos-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build Holy Ghostty.app
+    name: Build Holy Ghostty core
     runs-on: macos-15
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Zig 0.15.2
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -43,26 +75,31 @@ jobs:
       # Xcode accepts (Swift 6 strict-concurrency). We only need CI for the
       # one thing the local machine can't do: link the Zig engine (Zig 0.15.2
       # can't link against the macOS 26 SDK). So CI emits ONLY the ReleaseFast
-      # GhosttyKit.xcframework; the app is then built locally against it.
-      - name: Build GhosttyKit xcframework (ReleaseFast)
-        run: |
-          zig build \
-            -Doptimize=ReleaseFast \
-            -Demit-macos-app=false \
-            -Dversion-string=0.40.0
-          echo "--- emitted framework ---"
-          ls -la macos/GhosttyKit.xcframework
+      # complete core payload; the app is then built locally against it.
+      - name: Build complete Holy core payload (ReleaseFast)
+        run: scripts/build-holy-ghostty-core.sh build
 
-      - name: Package xcframework
+      - name: Verify GhosttyKit provenance
         run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            macos/GhosttyKit.xcframework \
-            GhosttyKit-ReleaseFast.xcframework.zip
-          ls -la GhosttyKit-ReleaseFast.xcframework.zip
+          scripts/build-holy-ghostty-core.sh verify
+          cat macos/GhosttyKit.xcframework/.holy-ghostty-core
+
+      - name: Package framework and generated resources
+        run: |
+          package_root="$(mktemp -d)"
+          mkdir -p "$package_root/macos" "$package_root/zig-out"
+          ditto macos/GhosttyKit.xcframework "$package_root/macos/GhosttyKit.xcframework"
+          ditto zig-out/share "$package_root/zig-out/share"
+          (cd "$package_root" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/HolyGhostty-Core-ReleaseFast.zip" macos zig-out)
+          ls -la HolyGhostty-Core-ReleaseFast.zip
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        id: upload
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: GhosttyKit-ReleaseFast
-          path: GhosttyKit-ReleaseFast.xcframework.zip
-          retention-days: 14
+          name: HolyGhostty-Core-ReleaseFast-${{ github.sha }}
+          path: HolyGhostty-Core-ReleaseFast.zip
+          retention-days: 90
+
+      - name: Show artifact digest
+        run: echo '${{ steps.upload.outputs.artifact-digest }}'

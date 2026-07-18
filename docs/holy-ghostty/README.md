@@ -256,11 +256,15 @@ Requirements:
 Commands:
 
 ```bash
-zig build -Demit-xcframework
-xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal SYMROOT=build build
 scripts/install-holy-ghostty.sh
 open -a "Holy Ghostty"
 ```
+
+The installer owns both halves of the product: a fingerprinted ReleaseFast
+Ghostty core (framework plus generated resources) and the ReleaseLocal Swift
+app. It fails before replacing the installed app if that payload is missing,
+stale, unverified, or built in another optimization mode, and it keeps the old
+bundle available for rollback until the replacement passes final validation.
 
 ## Public Status
 
