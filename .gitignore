@@ -38,5 +38,7 @@ vgcore.*
 GhosttyKit.xcframework.debug-backup/
 .claude/
 /.handoff/
-/.manna/
+# Manna board travels with the repo (issue data only); volatile session
+# state stays local.
+/.manna/sessions.jsonl
 /.superpowers/
