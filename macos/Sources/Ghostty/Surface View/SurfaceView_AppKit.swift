@@ -263,6 +263,7 @@ extension Ghostty {
         // The cached contents of the screen.
         private(set) var cachedScreenContents: CachedValue<String>
         private(set) var cachedVisibleContents: CachedValue<String>
+        private(set) var cachedActiveContents: CachedValue<String>
 
         /// Event monitor (see individual events for why)
         private var eventMonitor: Any?
@@ -286,6 +287,7 @@ extension Ghostty {
             // fix at some point.
             self.cachedScreenContents = .init(duration: .milliseconds(500)) { "" }
             self.cachedVisibleContents = self.cachedScreenContents
+            self.cachedActiveContents = self.cachedScreenContents
 
             // Initialize with some default frame size. The important thing is that this
             // is non-zero so that our layer bounds are non-zero so that our renderer
@@ -325,6 +327,30 @@ extension Ghostty {
                         y: 0),
                     bottom_right: ghostty_point_s(
                         tag: GHOSTTY_POINT_VIEWPORT,
+                        coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT,
+                        x: 0,
+                        y: 0),
+                    rectangle: false)
+                guard ghostty_surface_read_text(surface, sel, &text) else { return "" }
+                defer { ghostty_surface_free_text(surface, &text) }
+                return String(cString: text.text)
+            }
+            // Holy's agent-state detection must follow the live editable screen,
+            // not the viewport the user moves through scrollback. Besides avoiding
+            // false activity while browsing history, the active screen is bounded
+            // to the terminal height instead of the full scrollback buffer.
+            cachedActiveContents = .init(duration: .milliseconds(500)) { [weak self] in
+                guard let self else { return "" }
+                guard let surface = self.surface else { return "" }
+                var text = ghostty_text_s()
+                let sel = ghostty_selection_s(
+                    top_left: ghostty_point_s(
+                        tag: GHOSTTY_POINT_ACTIVE,
+                        coord: GHOSTTY_POINT_COORD_TOP_LEFT,
+                        x: 0,
+                        y: 0),
+                    bottom_right: ghostty_point_s(
+                        tag: GHOSTTY_POINT_ACTIVE,
                         coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT,
                         x: 0,
                         y: 0),

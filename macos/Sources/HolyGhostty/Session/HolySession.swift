@@ -704,8 +704,11 @@ final class HolySession: ObservableObject, Identifiable {
         let previousPreview = preview
         let previousPhase = phase
         let previousInferredRuntime = inferredRuntime
-        let visibleContents = surfaceView.cachedVisibleContents.get()
-        let nextPreview = Self.previewText(from: visibleContents)
+        // Derived agent state follows the live terminal screen. The user's
+        // scrollback viewport is presentation state and must not create fake
+        // activity, roster invalidations, or persistence while they browse it.
+        let activeContents = surfaceView.cachedActiveContents.get()
+        let nextPreview = Self.previewText(from: activeContents)
         if let nextInferredRuntime = Self.inferredRuntime(
             launchRuntime: runtime,
             surfaceTitle: surfaceView.title,
@@ -737,7 +740,7 @@ final class HolySession: ObservableObject, Identifiable {
             requestTmuxModelLabel(nil)
         } else {
             let nextModelSelection = HolySessionModelSelectionParser.selection(
-                from: visibleContents,
+                from: activeContents,
                 expectedRuntime: effectiveRuntime
             )
             if let nextModelSelection,
@@ -771,7 +774,7 @@ final class HolySession: ObservableObject, Identifiable {
             }
         }
 
-        let detectionText = Self.detectionText(from: visibleContents)
+        let detectionText = Self.detectionText(from: activeContents)
         let previewChangedRecently = updateVisibleActivity(for: detectionText, surfaceTitle: surfaceView.title)
         var nextSignals = Self.detectSignals(
             runtime: effectiveRuntime,

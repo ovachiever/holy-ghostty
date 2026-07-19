@@ -762,7 +762,7 @@ private struct HolyRosterRow: View {
         HStack(alignment: .center, spacing: 8) {
             HolyAgentStatusOrb(
                 state: displayActivityState,
-                isAnimated: true
+                isAnimated: isSelected
             )
             .frame(width: 18, height: 18)
             .help(attention.helpText)
@@ -1506,10 +1506,12 @@ private struct HolyAgentPlanningQuestionOrb: View {
 }
 
 private struct HolyAgentSwarmSpinner: View {
+    private static let refreshInterval: TimeInterval = 1.0 / 15.0
+
     let size: CGFloat
 
     var body: some View {
-        TimelineView(.animation) { context in
+        TimelineView(.periodic(from: .now, by: Self.refreshInterval)) { context in
             let cycle = context.date.timeIntervalSinceReferenceDate
                 .truncatingRemainder(dividingBy: 1.35) / 1.35
             let colors = [
@@ -1545,11 +1547,13 @@ private struct HolyAgentSwarmSpinner: View {
 }
 
 private struct HolyAgentWorkingSpinner: View {
+    private static let refreshInterval: TimeInterval = 1.0 / 15.0
+
     let size: CGFloat
     let lineWidth: CGFloat
 
     var body: some View {
-        TimelineView(.animation) { context in
+        TimelineView(.periodic(from: .now, by: Self.refreshInterval)) { context in
             let cycle = context.date.timeIntervalSinceReferenceDate
                 .truncatingRemainder(dividingBy: 1.15) / 1.15
 
@@ -1585,11 +1589,12 @@ private struct HolyAgentWorkingSpinner: View {
 
 private struct HolyAgentWaitingOrb: View {
     private static let freshnessDuration: TimeInterval = 10 * 60
+    private static let refreshInterval: TimeInterval = 1
 
     let becameAvailableAt: Date?
 
     var body: some View {
-        TimelineView(.animation) { context in
+        TimelineView(.periodic(from: .now, by: Self.refreshInterval)) { context in
             let remaining = freshnessRemaining(at: context.date)
 
             ZStack {
