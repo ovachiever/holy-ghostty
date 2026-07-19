@@ -307,6 +307,64 @@ struct HolySessionIndicatorPolicyTests {
         ))
     }
 
+    // Mark Unread (roster context menu): clearing the seen timestamp returns
+    // the session to unread; the next genuine visit re-marks seen as usual.
+    @Test func markUnreadClearsSeenAndRestoresUnreadState() {
+        var metadata = HolySessionAttentionMetadata(
+            sessionID: UUID(),
+            lastSeenAt: now,
+            lastAgentFinishedAt: now.addingTimeInterval(-60),
+            updatedAt: now
+        )
+        let later = now.addingTimeInterval(10)
+        let didMark = metadata.markUnread(at: later)
+        #expect(didMark)
+        #expect(metadata.lastSeenAt == nil)
+        #expect(metadata.hasUnreadAgentReply)
+        #expect(metadata.updatedAt == later)
+    }
+
+    // Without a finished reply there is nothing to be unread about.
+    @Test func markUnreadRequiresAFinishedReply() {
+        var metadata = HolySessionAttentionMetadata(
+            sessionID: UUID(),
+            lastSeenAt: now,
+            updatedAt: now
+        )
+        let didMark = metadata.markUnread(at: now.addingTimeInterval(1))
+        #expect(!didMark)
+        #expect(metadata.lastSeenAt == now)
+    }
+
+    // Already-unread is a no-op — no churn, no persist trigger.
+    @Test func markUnreadIsIdempotentWhenAlreadyUnread() {
+        var metadata = HolySessionAttentionMetadata(
+            sessionID: UUID(),
+            lastSeenAt: nil,
+            lastAgentFinishedAt: now,
+            updatedAt: now
+        )
+        let didMark = metadata.markUnread(at: now.addingTimeInterval(1))
+        #expect(!didMark)
+        #expect(metadata.updatedAt == now)
+    }
+
+    // Marking unread must not fabricate recency: lastUsedAt stays untouched,
+    // so the time-tier dot underneath remains honest.
+    @Test func markUnreadDoesNotBumpLastUsedAt() {
+        let used = now.addingTimeInterval(-3_600)
+        var metadata = HolySessionAttentionMetadata(
+            sessionID: UUID(),
+            lastSeenAt: now,
+            lastAgentFinishedAt: now.addingTimeInterval(-60),
+            lastUsedAt: used,
+            updatedAt: now
+        )
+        let didMark = metadata.markUnread(at: now.addingTimeInterval(5))
+        #expect(didMark)
+        #expect(metadata.lastUsedAt == used)
+    }
+
     private func shouldNotify(
         envelope: HolyAgentStateEnvelope,
         trackingStartedAt: Date,

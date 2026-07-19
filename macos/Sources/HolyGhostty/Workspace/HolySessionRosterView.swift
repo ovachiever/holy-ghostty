@@ -115,7 +115,9 @@ struct HolySessionRosterView: View {
             onKillTmux: { store.killTmuxSession(session) },
             onRename: { store.rename(session, to: $0) },
             onSetNote: { store.setNote(session, to: $0) },
-            onSetFocus: { store.setFocus(session, $0) }
+            onSetFocus: { store.setFocus(session, $0) },
+            canMarkUnread: store.canMarkSessionUnread(session.id),
+            onMarkUnread: { store.markSessionUnread(session.id) }
         )
     }
 
@@ -742,6 +744,8 @@ private struct HolyRosterRow: View {
     let onRename: (String) -> Void
     let onSetNote: (String?) -> Void
     let onSetFocus: (Bool) -> Void
+    var canMarkUnread: Bool = false
+    var onMarkUnread: () -> Void = {}
 
     @State private var isRenaming = false
     @State private var renameText = ""
@@ -839,6 +843,10 @@ private struct HolyRosterRow: View {
         actions.append(.item(session.isFocused ? "Unpin from Today" : "Pin to Today") {
             onSetFocus(!session.isFocused)
         })
+
+        if canMarkUnread {
+            actions.append(.item("Mark Unread") { onMarkUnread() })
+        }
 
         actions.append(.separator)
         actions.append(.item("Duplicate") { onDuplicate() })

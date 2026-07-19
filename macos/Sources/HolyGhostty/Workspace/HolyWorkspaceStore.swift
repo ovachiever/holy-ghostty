@@ -2083,6 +2083,20 @@ final class HolyWorkspaceStore: ObservableObject {
             .sorted { $0.sessionID.uuidString < $1.sessionID.uuidString }
     }
 
+    func canMarkSessionUnread(_ sessionID: UUID) -> Bool {
+        guard let metadata = attentionMetadataBySessionID[sessionID] else { return false }
+        return metadata.lastAgentFinishedAt != nil && !metadata.hasUnreadAgentReply
+    }
+
+    func markSessionUnread(_ sessionID: UUID, at date: Date = .init()) {
+        guard var metadata = attentionMetadataBySessionID[sessionID],
+              metadata.markUnread(at: date) else { return }
+        attentionMetadataBySessionID[sessionID] = metadata
+        // A pending selected-seen mark would immediately re-read the session.
+        cancelSelectedSessionSeenMark()
+        persist()
+    }
+
     private func clearUnreadAttentionIfNeeded(for sessionID: UUID) {
         guard markSessionSeenIfNeeded(sessionID) else { return }
         cancelSelectedSessionSeenMark()

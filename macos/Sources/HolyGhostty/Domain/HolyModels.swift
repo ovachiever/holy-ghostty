@@ -286,6 +286,18 @@ extension HolySessionAttentionMetadata {
         return true
     }
 
+    /// Operator-initiated "Mark Unread": clears the seen timestamp so the
+    /// finished reply reads as unread again. The next genuine visit re-marks
+    /// seen through the ordinary event-driven path. Never touches
+    /// `lastUsedAt` — marking unread is not using the session.
+    @discardableResult
+    mutating func markUnread(at date: Date) -> Bool {
+        guard lastAgentFinishedAt != nil, lastSeenAt != nil else { return false }
+        lastSeenAt = nil
+        updatedAt = date
+        return true
+    }
+
     var hasUnreadAgentReply: Bool {
         guard let lastAgentFinishedAt else { return false }
         return lastAgentFinishedAt > (lastSeenAt ?? .distantPast)
