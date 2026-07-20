@@ -128,6 +128,10 @@ final class HolyWorkspaceStore: ObservableObject {
     private var draftLaunchGuardrailTask: Task<Void, Never>?
     private var selectedSessionReadTask: Task<Void, Never>?
     private var selectedSessionReadTaskKey: String?
+    /// Set by Mark Unread; suppresses the seen/human-used paths for that
+    /// session until the user genuinely selects a different one, so menu
+    /// dismissal refocusing the pane cannot instantly re-read it.
+    private var unreadOverrideSessionID: UUID?
     private var pendingAgentNotificationEventIDs: [UUID: String] = [:]
     private var agentNotificationRetryEventIDs: [UUID: String] = [:]
     private var agentNotificationRetryAttempts: [UUID: Int] = [:]
@@ -330,6 +334,9 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func selectSession(_ sessionID: UUID) {
+        if let overrideID = unreadOverrideSessionID, overrideID != sessionID {
+            unreadOverrideSessionID = nil
+        }
         selectedSessionID = sessionID
         if soloSessionID == nil,
            let slot = normalizedPaneLayout.slot(for: sessionID) {
@@ -2134,7 +2141,11 @@ final class HolyWorkspaceStore: ObservableObject {
         guard var metadata = attentionMetadataBySessionID[sessionID],
               metadata.markUnread(at: date) else { return }
         attentionMetadataBySessionID[sessionID] = metadata
-        // A pending selected-seen mark would immediately re-read the session.
+        // A pending selected-seen mark would immediately re-read the session,
+        // and menu dismissal refocuses the pane which re-marks within the
+        // second (the "fades green to blue" race). Suppress every seen path
+        // for this session until the user genuinely moves to another one.
+        unreadOverrideSessionID = sessionID
         cancelSelectedSessionSeenMark()
         persist()
     }
@@ -2147,6 +2158,7 @@ final class HolyWorkspaceStore: ObservableObject {
 
     @discardableResult
     private func markSessionHumanUsedIfNeeded(_ sessionID: UUID, at date: Date = .init()) -> Bool {
+        guard unreadOverrideSessionID != sessionID else { return false }
         guard let session = session(withID: sessionID),
               NSApp.isActive,
               let window = session.surfaceView.window,

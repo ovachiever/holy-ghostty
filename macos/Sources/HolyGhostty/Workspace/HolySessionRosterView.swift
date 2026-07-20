@@ -1228,7 +1228,7 @@ extension HolySessionAttentionKind {
         case .usedToday:
             return HolyAgentPalette.waitingReply
         case .onAutomation:
-            return HolyAgentPalette.workingViolet
+            return HolyAgentPalette.waitingReply
         case .inactive, .sleeping:
             return HolyGhosttyTheme.textTertiary
         }
@@ -1496,11 +1496,13 @@ private struct HolyAgentStatusOrb: View {
         case .usedToday:
             HolyAgentStaticOrb(color: HolyAgentPalette.waitingReply, symbol: nil, opacity: 0.95)
         case .onAutomation:
-            HolyAgentStaticOrb(color: HolyAgentPalette.workingViolet, symbol: nil, opacity: 0.95)
-        case .inactive:
+            // Folded into blue per Erik's 2026-07-20 ruling; policy no longer
+            // returns this state, but the vocabulary case remains for wire
+            // compatibility.
+            HolyAgentStaticOrb(color: HolyAgentPalette.waitingReply, symbol: nil, opacity: 0.95)
+        case .inactive, .sleeping:
+            // One grey. "Everything should be grey unless used in 24h."
             HolyAgentStaticOrb(color: HolyGhosttyTheme.textTertiary, symbol: nil, opacity: 0.52)
-        case .sleeping:
-            HolyAgentSleepingOrb()
         }
     }
 }

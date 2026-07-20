@@ -56,7 +56,7 @@ struct HolySessionIndicatorPolicyTests {
             occurredAgo: 30 * 60,
             lastFinishedAt: metadata.lastAgentFinishedAt,
             lastAgentActiveAgo: 30 * 60
-        ) == .onAutomation)
+        ) == .usedToday)
     }
 
     @Test func unreadIsAnOverlayAndNeverReplacesTheRecencyTier() {
@@ -66,7 +66,7 @@ struct HolySessionIndicatorPolicyTests {
             lastSeenAt: finished.addingTimeInterval(-1),
             lastAgentActiveAt: finished
         )
-        #expect(unread.kind == .onAutomation)
+        #expect(unread.kind == .usedToday)
         #expect(unread.showsUnreadPip)
 
         let seen = decision(
@@ -74,14 +74,17 @@ struct HolySessionIndicatorPolicyTests {
             lastSeenAt: finished,
             lastAgentActiveAt: finished
         )
-        #expect(seen.kind == .onAutomation)
+        #expect(seen.kind == .usedToday)
         #expect(!seen.showsUnreadPip)
     }
 
-    @Test func recencySeparatesHumanBlueFromAutomationViolet() {
+    @Test func anyUseInsideTheWindowIsBlue() {
+        // Erik's 2026-07-20 ruling: grey unless used in 24h — human or agent.
+        // The clocks stay separate (tooltips), but violet no longer renders.
         #expect(kind(lastHumanUsedAgo: 60, lastAgentActiveAgo: 1) == .usedToday)
-        #expect(kind(lastAgentActiveAgo: 60) == .onAutomation)
-        #expect(kind(lastHumanUsedAgo: 24 * 60 * 60, lastAgentActiveAgo: 60) == .onAutomation)
+        #expect(kind(lastAgentActiveAgo: 60) == .usedToday)
+        #expect(kind(lastHumanUsedAgo: 24 * 60 * 60, lastAgentActiveAgo: 60) == .usedToday)
+        #expect(kind(lastHumanUsedAgo: 25 * 60 * 60, lastAgentActiveAgo: 25 * 60 * 60) == .inactive)
     }
 
     @Test func greyAndSleepingUseTheLaterOfBothClocks() {

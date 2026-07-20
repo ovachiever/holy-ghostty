@@ -520,13 +520,17 @@ enum HolySessionIndicatorPolicy {
         usedTodayInterval: TimeInterval = usedTodayInterval,
         sleepingInterval: TimeInterval = sleepingInterval
     ) -> HolySessionAttentionKind {
-        if let lastHumanUsedAt = evidence.lastHumanUsedAt,
-           max(0, evidence.now.timeIntervalSince(lastHumanUsedAt)) < usedTodayInterval {
+        // Erik, 2026-07-20 (final ruling after living with the split): "grey
+        // UNLESS the agent was used in the past 24 hours, green for unread —
+        // easy." Any use — human or agent — inside the window is blue. The
+        // human/agent clocks remain tracked separately underneath (tooltips
+        // still show both), but violet no longer renders as its own state.
+        let recentUse = [evidence.lastHumanUsedAt, evidence.lastAgentActiveAt]
+            .compactMap(\.self)
+            .max()
+        if let recentUse,
+           max(0, evidence.now.timeIntervalSince(recentUse)) < usedTodayInterval {
             return .usedToday
-        }
-        if let lastAgentActiveAt = evidence.lastAgentActiveAt,
-           max(0, evidence.now.timeIntervalSince(lastAgentActiveAt)) < usedTodayInterval {
-            return .onAutomation
         }
 
         let latestActivity = [evidence.lastHumanUsedAt, evidence.lastAgentActiveAt]
