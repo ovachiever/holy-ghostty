@@ -252,7 +252,13 @@ final class HolySessionSupervisor {
                 paneLayout: snapshot.paneLayout.normalized(
                     availableSessionIDs: restoredSessions.map(\.id),
                     selectedSessionID: selectedSessionID
-                )
+                ),
+                // Without this, restore silently discarded every persisted
+                // attention row: the store then fabricated fresh metadata and
+                // baseline-stamped the whole roster seen-at-boot each launch,
+                // destroying seen/unread/recency history and defeating every
+                // seen-tracking migration (they only ever saw fresh rows).
+                attentionMetadata: snapshot.attentionMetadata
             ),
             pendingEvents: recovery.pendingEvents + restoredSessions.map {
                 .restored(session: $0, attention: nil)

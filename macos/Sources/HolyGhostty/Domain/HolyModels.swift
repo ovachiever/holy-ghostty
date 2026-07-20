@@ -107,7 +107,7 @@ enum HolySessionAttentionKind: String, Codable, Equatable, Hashable, CaseIterabl
 }
 
 struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
-    static let currentSeenTrackingVersion = 4
+    static let currentSeenTrackingVersion = 5
     static let currentNotificationTrackingVersion = 1
 
     let sessionID: UUID
