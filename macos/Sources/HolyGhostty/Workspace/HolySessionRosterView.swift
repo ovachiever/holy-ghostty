@@ -41,7 +41,7 @@ struct HolySessionRosterView: View {
     // Triage — sessions regrouped into status lanes so what needs you floats up.
     private var triageSections: [HolyRosterSection] {
         let lanes = Dictionary(grouping: store.sessions) { session in
-            HolyRosterTriageLane(attention: store.attentionPresentation(for: session))
+            HolyRosterTriageLane(kind: store.attentionPresentation(for: session).kind)
         }
         return HolyRosterTriageLane.allCases.compactMap { lane in
             guard let sessions = lanes[lane], !sessions.isEmpty else { return nil }
@@ -600,17 +600,13 @@ private enum HolyRosterTriageLane: String, CaseIterable {
     case working
     case idle
 
-    init(attention: HolySessionAttentionPresentation) {
-        if attention.showsUnreadPip {
-            self = .needsYou
-            return
-        }
-        switch attention.kind {
-        case .needsUser:
+    init(kind: HolySessionAttentionKind) {
+        switch kind {
+        case .needsUser, .unread:
             self = .needsYou
         case .working:
             self = .working
-        case .usedToday, .onAutomation, .inactive, .sleeping:
+        case .usedToday, .inactive, .sleeping:
             self = .idle
         }
     }
@@ -766,7 +762,6 @@ private struct HolyRosterRow: View {
         HStack(alignment: .center, spacing: 8) {
             HolyAgentStatusOrb(
                 state: displayActivityState,
-                showsUnreadPip: attention.showsUnreadPip,
                 isAnimated: isSelected
             )
             .frame(width: 18, height: 18)
@@ -1225,9 +1220,9 @@ extension HolySessionAttentionKind {
             return HolyAgentPalette.workingBlue
         case .needsUser:
             return HolyAgentPalette.approvalNeeded
+        case .unread:
+            return HolyAgentPalette.unreadGreen
         case .usedToday:
-            return HolyAgentPalette.waitingReply
-        case .onAutomation:
             return HolyAgentPalette.waitingReply
         case .inactive, .sleeping:
             return HolyGhosttyTheme.textTertiary
@@ -1447,41 +1442,9 @@ private struct HolyRowActionContextMenuOverlay: NSViewRepresentable {
 
 private struct HolyAgentStatusOrb: View {
     let state: HolySessionAttentionKind
-    let showsUnreadPip: Bool
     var isAnimated = true
 
     var body: some View {
-        Group {
-            // Unread REPLACES the recency dot — one dot, green when green
-            // (Erik, 2026-07-20, after living with the corner-badge: the
-            // two-dot form "looks dumb"; the exclusive glowing green wins).
-            // Operational glyphs still outrank it: a spinner or question is
-            // more urgent than unread, and unread shows once they settle.
-            if showsUnreadPip, isRecencyTier {
-                HolyAgentStaticOrb(color: HolyAgentPalette.unreadGreen, symbol: nil, opacity: 1)
-                    // The approved unread treatment from 665e925b2: a tight
-                    // bright halo plus a wider soft bloom.
-                    .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.85), radius: 2.5)
-                    .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.45), radius: 6)
-                    .accessibilityLabel("Unread agent update")
-            } else {
-                baseOrb
-            }
-        }
-        .frame(width: 16, height: 16)
-    }
-
-    private var isRecencyTier: Bool {
-        switch state {
-        case .usedToday, .onAutomation, .inactive, .sleeping:
-            return true
-        case .working, .needsUser:
-            return false
-        }
-    }
-
-    @ViewBuilder
-    private var baseOrb: some View {
         switch state {
         case .working:
             if isAnimated {
@@ -1493,16 +1456,19 @@ private struct HolyAgentStatusOrb: View {
         case .needsUser:
             HolyAgentPlanningQuestionOrb()
                 .frame(width: 15, height: 15)
+        case .unread:
+            // Glow separates unread green from used-today blue at 9px: a
+            // tight bright halo plus a wider soft bloom, static (motion stays
+            // reserved for working states).
+            HolyAgentStaticOrb(color: HolyAgentPalette.unreadGreen, symbol: nil, opacity: 1)
+                .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.85), radius: 2.5)
+                .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.45), radius: 6)
         case .usedToday:
             HolyAgentStaticOrb(color: HolyAgentPalette.waitingReply, symbol: nil, opacity: 0.95)
-        case .onAutomation:
-            // Folded into blue per Erik's 2026-07-20 ruling; policy no longer
-            // returns this state, but the vocabulary case remains for wire
-            // compatibility.
-            HolyAgentStaticOrb(color: HolyAgentPalette.waitingReply, symbol: nil, opacity: 0.95)
-        case .inactive, .sleeping:
-            // One grey. "Everything should be grey unless used in 24h."
+        case .inactive:
             HolyAgentStaticOrb(color: HolyGhosttyTheme.textTertiary, symbol: nil, opacity: 0.52)
+        case .sleeping:
+            HolyAgentSleepingOrb()
         }
     }
 }

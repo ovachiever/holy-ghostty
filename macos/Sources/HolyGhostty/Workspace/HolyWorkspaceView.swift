@@ -990,11 +990,7 @@ struct HolyWorkspaceRootView: View {
     }
 
     private func handleFocusedSurfaceChange(_ surfaceView: Ghostty.SurfaceView?) {
-        guard let surfaceView else {
-            store.sessionSurfaceDidLoseUserFocus()
-            return
-        }
-        guard
+        guard let surfaceView,
               let session = store.sessions.first(where: { $0.surfaceView === surfaceView }) else {
             return
         }
@@ -1032,9 +1028,6 @@ struct HolyWorkspaceRootView: View {
         #endif
 
         Ghostty.moveFocus(to: session.surfaceView)
-        if eventType != nil {
-            store.sessionSurfaceDidReceiveUserFocus(session.id)
-        }
     }
 
     private func statusColor(for phase: HolySessionPhase) -> Color {
@@ -1062,10 +1055,12 @@ struct HolyWorkspaceRootView: View {
         for session: HolySession,
         state: HolySessionAttentionPresentation
     ) -> String {
-        if state.kind == .needsUser || state.showsUnreadPip {
+        switch state.kind {
+        case .needsUser, .unread:
             return "\(state.title) \(elapsedText(since: state.becameAvailableAt ?? session.activityAt))"
+        case .working, .usedToday, .inactive, .sleeping:
+            return state.title
         }
-        return state.title
     }
 
     private func statusRailDetail(for session: HolySession, stateTitle: String) -> String? {

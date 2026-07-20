@@ -9,8 +9,8 @@ struct HolySessionIndicatorPolicyTests {
         #expect(Set(HolySessionAttentionKind.allCases) == Set([
             .working,
             .needsUser,
+            .unread,
             .usedToday,
-            .onAutomation,
             .inactive,
             .sleeping,
         ]))
@@ -23,18 +23,18 @@ struct HolySessionIndicatorPolicyTests {
     }
 
     @Test func hardProcessExitInvalidatesOperationalClaim() {
-        #expect(kind(lifecycle: .working, occurredAgo: 1, processExited: true) == .sleeping)
-        #expect(kind(lifecycle: .needsUser, occurredAgo: 1, processExited: true) == .sleeping)
+        #expect(kind(lifecycle: .working, occurredAgo: 1, processExited: true) == .usedToday)
+        #expect(kind(lifecycle: .needsUser, occurredAgo: 1, processExited: true) == .usedToday)
     }
 
     @Test func workingLeaseExpiresFailClosed() {
         #expect(kind(lifecycle: .working, occurredAgo: 29 * 60) == .working)
-        #expect(kind(lifecycle: .working, occurredAgo: 30 * 60) == .sleeping)
+        #expect(kind(lifecycle: .working, occurredAgo: 30 * 60) == .usedToday)
     }
 
     @Test func needsUserLeaseAlsoExpiresFailClosed() {
         #expect(kind(lifecycle: .needsUser, occurredAgo: 29 * 60) == .needsUser)
-        #expect(kind(lifecycle: .needsUser, occurredAgo: 30 * 60) == .sleeping)
+        #expect(kind(lifecycle: .needsUser, occurredAgo: 30 * 60) == .usedToday)
     }
 
     @Test func expiredQuestionDoesNotBecomeAnUnreadReplyThroughMetadata() throws {
@@ -47,243 +47,40 @@ struct HolySessionIndicatorPolicyTests {
             reasonCode: "question"
         )
         var metadata = HolySessionAttentionMetadata(sessionID: UUID())
-        _ = metadata.migrateToCurrentSeenTracking(at: now)
+        _ = metadata.baselineLegacySeenTracking(at: eventTime.addingTimeInterval(-1))
         let didRecord = metadata.record(envelope: envelope, observedAt: now)
         #expect(didRecord)
         #expect(metadata.lastAgentFinishedAt == nil)
         #expect(kind(
             lifecycle: envelope.lifecycle,
             occurredAgo: 30 * 60,
-            lastFinishedAt: metadata.lastAgentFinishedAt,
-            lastAgentActiveAgo: 30 * 60
+            lastFinishedAt: metadata.lastAgentFinishedAt
         ) == .usedToday)
     }
 
-    @Test func unreadIsAnOverlayAndNeverReplacesTheRecencyTier() {
+    @Test func unreadPersistsUntilSeen() {
         let finished = now.addingTimeInterval(-60)
-        let unread = decision(
-            lastFinishedAt: finished,
-            lastSeenAt: finished.addingTimeInterval(-1),
-            lastAgentActiveAt: finished
-        )
-        #expect(unread.kind == .usedToday)
-        #expect(unread.showsUnreadPip)
-
-        let seen = decision(
-            lastFinishedAt: finished,
-            lastSeenAt: finished,
-            lastAgentActiveAt: finished
-        )
-        #expect(seen.kind == .usedToday)
-        #expect(!seen.showsUnreadPip)
+        #expect(kind(lastFinishedAt: finished, lastSeenAt: nil) == .unread)
+        #expect(kind(lastFinishedAt: finished, lastSeenAt: finished.addingTimeInterval(-1)) == .unread)
+        #expect(kind(lastFinishedAt: finished, lastSeenAt: finished) == .usedToday)
+        #expect(kind(lastFinishedAt: finished, lastSeenAt: finished.addingTimeInterval(1)) == .usedToday)
     }
 
-    @Test func anyUseInsideTheWindowIsBlue() {
-        // Erik's 2026-07-20 ruling: grey unless used in 24h — human or agent.
-        // The clocks stay separate (tooltips), but violet no longer renders.
-        #expect(kind(lastHumanUsedAgo: 60, lastAgentActiveAgo: 1) == .usedToday)
-        #expect(kind(lastAgentActiveAgo: 60) == .usedToday)
-        #expect(kind(lastHumanUsedAgo: 24 * 60 * 60, lastAgentActiveAgo: 60) == .usedToday)
-        #expect(kind(lastHumanUsedAgo: 25 * 60 * 60, lastAgentActiveAgo: 25 * 60 * 60) == .inactive)
+    @Test func recencyUsesRollingTwentyFourAndFortyEightHourWindows() {
+        #expect(kind(lastUsedAgo: (24 * 60 * 60) - 1) == .usedToday)
+        #expect(kind(lastUsedAgo: 24 * 60 * 60) == .inactive)
+        #expect(kind(lastUsedAgo: (48 * 60 * 60) - 1) == .inactive)
+        #expect(kind(lastUsedAgo: 48 * 60 * 60) == .sleeping)
     }
 
-    @Test func greyAndSleepingUseTheLaterOfBothClocks() {
-        #expect(kind(lastHumanUsedAgo: 25 * 60 * 60, lastAgentActiveAgo: 47 * 60 * 60) == .inactive)
-        #expect(kind(lastHumanUsedAgo: 47 * 60 * 60, lastAgentActiveAgo: 25 * 60 * 60) == .inactive)
-        #expect(kind(lastHumanUsedAgo: 48 * 60 * 60, lastAgentActiveAgo: 49 * 60 * 60) == .sleeping)
-        #expect(kind() == .sleeping)
-    }
-
-    @Test func recencyMigrationSeedsHumanFromSeenEvidenceAndAgentFromLastFinish() {
-        let seen = now.addingTimeInterval(-3_600)
-        let finished = now.addingTimeInterval(-7_200)
-        var metadata = HolySessionAttentionMetadata(
-            sessionID: UUID(),
-            lastSeenAt: seen,
-            lastAgentFinishedAt: finished,
-            seenTrackingVersion: 1,
-            updatedAt: now
-        )
-
-        let didMigrate = metadata.migrateToCurrentSeenTracking(at: now)
-        let didMigrateAgain = metadata.migrateToCurrentSeenTracking(at: now.addingTimeInterval(1))
-        #expect(didMigrate)
-        #expect(!didMigrateAgain)
-        #expect(metadata.lastSeenAt == seen)
-        #expect(metadata.lastHumanUsedAt == seen)
-        #expect(metadata.lastAgentActiveAt == finished)
-        #expect(metadata.seenTrackingVersion == HolySessionAttentionMetadata.currentSeenTrackingVersion)
-    }
-
-    @Test func recencyRepairPreservesExistingV2Clocks() {
-        let human = now.addingTimeInterval(-120)
-        let agent = now.addingTimeInterval(-60)
-        var metadata = HolySessionAttentionMetadata(
-            sessionID: UUID(),
-            lastSeenAt: now.addingTimeInterval(-3_600),
-            seenTrackingVersion: 2,
-            lastHumanUsedAt: human,
-            lastAgentActiveAt: agent,
-            updatedAt: now
-        )
-
-        let didMigrate = metadata.migrateToCurrentSeenTracking(at: now)
-        #expect(didMigrate)
-        #expect(metadata.lastHumanUsedAt == human)
-        #expect(metadata.lastAgentActiveAt == agent)
-    }
-
-    @Test func recencyRepairSeedsMissingV2HumanFromPreservedSeenEvidence() {
-        let seen = now.addingTimeInterval(-300)
-        var metadata = HolySessionAttentionMetadata(
-            sessionID: UUID(),
-            lastSeenAt: seen,
-            seenTrackingVersion: 2,
-            lastHumanUsedAt: nil,
-            lastAgentActiveAt: now.addingTimeInterval(-60),
-            updatedAt: now
-        )
-
-        let didMigrate = metadata.migrateToCurrentSeenTracking(at: now)
-        #expect(didMigrate)
-        #expect(metadata.lastHumanUsedAt == seen)
-    }
-
-    @Test func baselineSeenDoesNotFabricateEitherRecencyClock() {
+    @Test func metadataMigrationBaselinesOnceAndNextReplyBecomesUnread() throws {
         var metadata = HolySessionAttentionMetadata(sessionID: UUID())
-        let didBaseline = metadata.markSeenBaseline(at: now)
+        let baseline = now.addingTimeInterval(-10)
+        let didBaseline = metadata.baselineLegacySeenTracking(at: baseline)
+        let didBaselineAgain = metadata.baselineLegacySeenTracking(at: now)
         #expect(didBaseline)
-        #expect(metadata.lastSeenAt == now)
-        #expect(metadata.lastHumanUsedAt == nil)
-        #expect(metadata.lastAgentActiveAt == nil)
-    }
-
-    @Test func humanFocusDwellMarksSeenAndHumanUseOnly() {
-        var metadata = HolySessionAttentionMetadata(
-            sessionID: UUID(),
-            lastAgentActiveAt: now.addingTimeInterval(-60),
-            updatedAt: now.addingTimeInterval(-60)
-        )
-        let didMarkHumanUsed = metadata.markHumanUsed(at: now)
-        #expect(didMarkHumanUsed)
-        #expect(metadata.lastSeenAt == now)
-        #expect(metadata.lastHumanUsedAt == now)
-        #expect(metadata.lastAgentActiveAt == now.addingTimeInterval(-60))
-    }
-
-    @Test func focusDwellRequiresContinuousFocusAndPostRestoreQuiescence() {
-        let workspaceStartedAt = now
-        let launchFocusBeganAt = now.addingTimeInterval(0.25)
-        #expect(!HolySessionFocusDwellPolicy.canCommit(
-            focusBeganAt: launchFocusBeganAt,
-            workspaceStartedAt: workspaceStartedAt,
-            now: now.addingTimeInterval(60)
-        ))
-
-        let focusBeganAt = workspaceStartedAt.addingTimeInterval(
-            HolySessionFocusDwellPolicy.postRestoreQuiescence
-        )
-        #expect(!HolySessionFocusDwellPolicy.canCommit(
-            focusBeganAt: focusBeganAt,
-            workspaceStartedAt: workspaceStartedAt,
-            now: focusBeganAt.addingTimeInterval(HolySessionFocusDwellPolicy.minimumDwell - 0.01)
-        ))
-        #expect(HolySessionFocusDwellPolicy.canCommit(
-            focusBeganAt: focusBeganAt,
-            workspaceStartedAt: workspaceStartedAt,
-            now: focusBeganAt.addingTimeInterval(HolySessionFocusDwellPolicy.minimumDwell)
-        ))
-    }
-
-    @Test func userPromptAdvancesBothClocksWhileAgentEventsAdvanceOnlyAgentClock() throws {
-        var metadata = HolySessionAttentionMetadata(sessionID: UUID())
-        let userPrompt = try HolyAgentStateEnvelope(
-            source: HolyAgentStateSource.claude,
-            lifecycle: .working,
-            occurredAt: now.addingTimeInterval(-2),
-            eventToken: "prompt",
-            reasonCode: "user-prompt"
-        )
-        let didRecordPrompt = metadata.record(envelope: userPrompt, observedAt: now)
-        #expect(didRecordPrompt)
-        #expect(metadata.lastHumanUsedAt == userPrompt.occurredAt)
-        #expect(metadata.lastAgentActiveAt == userPrompt.occurredAt)
-
-        let toolEvent = try HolyAgentStateEnvelope(
-            source: HolyAgentStateSource.claude,
-            lifecycle: .working,
-            occurredAt: now,
-            eventToken: "tool",
-            reasonCode: "tool-complete"
-        )
-        let didRecordTool = metadata.record(envelope: toolEvent, observedAt: now)
-        #expect(didRecordTool)
-        #expect(metadata.lastHumanUsedAt == userPrompt.occurredAt)
-        #expect(metadata.lastAgentActiveAt == now)
-    }
-
-    @Test func attentionMetadataRoundTripPreservesBothRecencyClocks() throws {
-        let original = HolySessionAttentionMetadata(
-            sessionID: UUID(),
-            lastSeenAt: now.addingTimeInterval(-3),
-            seenTrackingVersion: HolySessionAttentionMetadata.currentSeenTrackingVersion,
-            lastHumanUsedAt: now.addingTimeInterval(-2),
-            lastAgentActiveAt: now.addingTimeInterval(-1),
-            updatedAt: now
-        )
-        let encoded = try JSONEncoder().encode(original)
-        let decoded = try JSONDecoder().decode(HolySessionAttentionMetadata.self, from: encoded)
-        #expect(decoded == original)
-    }
-
-    @Test func legacyLastUsedPayloadSeedsHumanFromNewestSeenTrackingEvidence() throws {
-        let seen = now.addingTimeInterval(-3_600)
-        let finished = now.addingTimeInterval(-7_200)
-        let legacyUsed = now.addingTimeInterval(-1_800)
-        let encoded = try JSONEncoder().encode(LegacyAttentionMetadata(
-            sessionID: UUID(),
-            lastSeenAt: seen,
-            lastAgentFinishedAt: finished,
-            seenTrackingVersion: 1,
-            lastUsedAt: legacyUsed,
-            updatedAt: now
-        ))
-        var decoded = try JSONDecoder().decode(HolySessionAttentionMetadata.self, from: encoded)
-
-        #expect(decoded.lastSeenAt == seen)
-        #expect(decoded.lastHumanUsedAt == nil)
-        #expect(decoded.lastAgentActiveAt == nil)
-        let didMigrate = decoded.migrateToCurrentSeenTracking(at: now)
-        #expect(didMigrate)
-        #expect(decoded.lastHumanUsedAt == legacyUsed)
-        #expect(decoded.lastAgentActiveAt == finished)
-        let migratedJSON = try #require(String(
-            bytes: try JSONEncoder().encode(decoded),
-            encoding: .utf8
-        ))
-        #expect(!migratedJSON.contains("\"lastUsedAt\""))
-    }
-
-    @Test func migrationTakesNewerLastSeenOverOlderLegacyUsedEvidence() {
-        let seen = now.addingTimeInterval(-600)
-        let legacyUsed = now.addingTimeInterval(-1_200)
-        var metadata = HolySessionAttentionMetadata(
-            sessionID: UUID(),
-            lastSeenAt: seen,
-            seenTrackingVersion: 1,
-            lastUsedAt: legacyUsed,
-            updatedAt: now
-        )
-
-        let didMigrate = metadata.migrateToCurrentSeenTracking(at: now)
-        #expect(didMigrate)
-        #expect(metadata.lastHumanUsedAt == seen)
-    }
-
-    @Test func nextReplyBecomesUnreadUntilHumanDwell() throws {
-        var metadata = HolySessionAttentionMetadata(sessionID: UUID())
-        _ = metadata.migrateToCurrentSeenTracking(at: now)
-        _ = metadata.markSeenBaseline(at: now.addingTimeInterval(-10))
+        #expect(!didBaselineAgain)
+        #expect(metadata.lastSeenAt == baseline)
 
         let envelope = try HolyAgentStateEnvelope(
             source: HolyAgentStateSource.claude,
@@ -296,7 +93,7 @@ struct HolySessionIndicatorPolicyTests {
         #expect(didRecord)
         #expect(!didRecordAgain)
         #expect(metadata.hasUnreadAgentReply)
-        let didMarkSeen = metadata.markHumanUsed(at: now.addingTimeInterval(1))
+        let didMarkSeen = metadata.markSeen(at: now.addingTimeInterval(1))
         #expect(didMarkSeen)
         #expect(!metadata.hasUnreadAgentReply)
     }
@@ -444,8 +241,7 @@ struct HolySessionIndicatorPolicyTests {
 
     @Test func independentFinishedRegisterSurvivesALaterEndedLifecycle() throws {
         var metadata = HolySessionAttentionMetadata(sessionID: UUID())
-        _ = metadata.migrateToCurrentSeenTracking(at: now)
-        _ = metadata.markSeenBaseline(at: now.addingTimeInterval(-120))
+        _ = metadata.baselineLegacySeenTracking(at: now.addingTimeInterval(-120))
         let finished = try HolyAgentStateEnvelope(
             source: HolyAgentStateSource.openCode,
             lifecycle: .finished,
@@ -498,37 +294,15 @@ struct HolySessionIndicatorPolicyTests {
         processExited: Bool = false,
         lastFinishedAt: Date? = nil,
         lastSeenAt: Date? = nil,
-        lastHumanUsedAgo: TimeInterval? = nil,
-        lastAgentActiveAgo: TimeInterval? = nil
+        lastUsedAgo: TimeInterval = 0
     ) -> HolySessionAttentionKind {
-        decision(
+        HolySessionIndicatorPolicy.kind(for: .init(
             lifecycle: lifecycle,
             lifecycleOccurredAt: occurredAgo.map { now.addingTimeInterval(-$0) },
             processExited: processExited,
-            lastFinishedAt: lastFinishedAt,
-            lastSeenAt: lastSeenAt,
-            lastHumanUsedAt: lastHumanUsedAgo.map { now.addingTimeInterval(-$0) },
-            lastAgentActiveAt: lastAgentActiveAgo.map { now.addingTimeInterval(-$0) }
-        ).kind
-    }
-
-    private func decision(
-        lifecycle: HolyAgentLifecycleState? = nil,
-        lifecycleOccurredAt: Date? = nil,
-        processExited: Bool = false,
-        lastFinishedAt: Date? = nil,
-        lastSeenAt: Date? = nil,
-        lastHumanUsedAt: Date? = nil,
-        lastAgentActiveAt: Date? = nil
-    ) -> HolySessionIndicatorDecision {
-        HolySessionIndicatorPolicy.decision(for: .init(
-            lifecycle: lifecycle,
-            lifecycleOccurredAt: lifecycleOccurredAt,
-            processExited: processExited,
             lastAgentFinishedAt: lastFinishedAt,
             lastSeenAt: lastSeenAt,
-            lastHumanUsedAt: lastHumanUsedAt,
-            lastAgentActiveAt: lastAgentActiveAt,
+            lastUsedAt: now.addingTimeInterval(-lastUsedAgo),
             now: now
         ))
     }
@@ -575,23 +349,20 @@ struct HolySessionIndicatorPolicyTests {
         #expect(metadata.updatedAt == now)
     }
 
-    // Marking unread must not fabricate either recency clock, so the tier dot
-    // underneath the green pip remains honest.
-    @Test func markUnreadDoesNotBumpRecencyClocks() {
-        let humanUsed = now.addingTimeInterval(-3_600)
-        let agentActive = now.addingTimeInterval(-1_800)
+    // Marking unread must not fabricate recency: lastUsedAt stays untouched,
+    // so the time-tier dot underneath remains honest.
+    @Test func markUnreadDoesNotBumpLastUsedAt() {
+        let used = now.addingTimeInterval(-3_600)
         var metadata = HolySessionAttentionMetadata(
             sessionID: UUID(),
             lastSeenAt: now,
             lastAgentFinishedAt: now.addingTimeInterval(-60),
-            lastHumanUsedAt: humanUsed,
-            lastAgentActiveAt: agentActive,
+            lastUsedAt: used,
             updatedAt: now
         )
         let didMark = metadata.markUnread(at: now.addingTimeInterval(5))
         #expect(didMark)
-        #expect(metadata.lastHumanUsedAt == humanUsed)
-        #expect(metadata.lastAgentActiveAt == agentActive)
+        #expect(metadata.lastUsedAt == used)
     }
 
     private func shouldNotify(
@@ -610,14 +381,5 @@ struct HolySessionIndicatorPolicyTests {
             processExited: processExited,
             now: now
         ))
-    }
-
-    private struct LegacyAttentionMetadata: Encodable {
-        let sessionID: UUID
-        let lastSeenAt: Date?
-        let lastAgentFinishedAt: Date?
-        let seenTrackingVersion: Int?
-        let lastUsedAt: Date?
-        let updatedAt: Date
     }
 }

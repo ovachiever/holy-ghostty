@@ -92,22 +92,22 @@ enum HolySessionAttention: String, CaseIterable {
     }
 }
 
-/// The complete, user-visible base session indicator vocabulary.
+/// The complete, user-visible session indicator vocabulary.
 ///
 /// Rich runtime telemetry deliberately does not leak into this enum. Every
-/// case answers one question only: active work, human attention, automation,
-/// or age. Unread is an independent green pip over this base state.
+/// case answers one question only: active work, human attention, unread work,
+/// or age. Adding another glyph requires changing this contract and its tests.
 enum HolySessionAttentionKind: String, Codable, Equatable, Hashable, CaseIterable {
     case working
     case needsUser
+    case unread
     case usedToday
-    case onAutomation
     case inactive
     case sleeping
 }
 
 struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
-    static let currentSeenTrackingVersion = 5
+    static let currentSeenTrackingVersion = 1
     static let currentNotificationTrackingVersion = 1
 
     let sessionID: UUID
@@ -133,17 +133,10 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
     /// can still explain when Holy actually observed the event.
     var lastAuthoritativeEventOccurredAt: Date?
     var lastAuthoritativeEventObservedAt: Date?
-    /// Migration-only v1 evidence. The old recency model advanced this when
-    /// the session was seen or used. Keep decoding the legacy key through the
-    /// v3 repair, then clear it so new persistence never writes it again.
+    /// Recency is advanced only by an operator seeing the session or by a
+    /// structured harness event. Terminal redraws and screen prose cannot
+    /// make an old session look newly used.
     var lastUsedAt: Date?
-    /// Human recency advances only from a committed `user-prompt` envelope or
-    /// a genuine focused-surface dwell. Restore, attach, and watcher activity
-    /// cannot fabricate it.
-    var lastHumanUsedAt: Date?
-    /// Agent recency advances on every committed harness envelope. It is kept
-    /// separate so autonomous work reads violet rather than human-used blue.
-    var lastAgentActiveAt: Date?
     /// Persists which actionable producer event has already scheduled an OS
     /// notification, preventing both restart duplicates and offline-event loss.
     var notificationTrackingVersion: Int?
@@ -174,8 +167,6 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
         lastAuthoritativeEventOccurredAt: Date? = nil,
         lastAuthoritativeEventObservedAt: Date? = nil,
         lastUsedAt: Date? = nil,
-        lastHumanUsedAt: Date? = nil,
-        lastAgentActiveAt: Date? = nil,
         notificationTrackingVersion: Int? = nil,
         notificationTrackingStartedAt: Date? = nil,
         lastNotifiedAuthoritativeEventID: String? = nil,
@@ -198,8 +189,6 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
         self.lastAuthoritativeEventOccurredAt = lastAuthoritativeEventOccurredAt
         self.lastAuthoritativeEventObservedAt = lastAuthoritativeEventObservedAt
         self.lastUsedAt = lastUsedAt
-        self.lastHumanUsedAt = lastHumanUsedAt
-        self.lastAgentActiveAt = lastAgentActiveAt
         self.notificationTrackingVersion = notificationTrackingVersion
         self.notificationTrackingStartedAt = notificationTrackingStartedAt
         self.lastNotifiedAuthoritativeEventID = lastNotifiedAuthoritativeEventID
@@ -210,35 +199,11 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
 
 extension HolySessionAttentionMetadata {
     @discardableResult
-    mutating func migrateToCurrentSeenTracking(at date: Date) -> Bool {
+    mutating func baselineLegacySeenTracking(at date: Date) -> Bool {
         guard seenTrackingVersion != Self.currentSeenTrackingVersion else { return false }
         seenTrackingVersion = Self.currentSeenTrackingVersion
-        // v4: the v3 rollout was destroyed in the field by a launch-time
-        // metadata wipe (empty-roster reconcile dropped every row, then the
-        // missing-row baseline stamped the whole roster seen-at-boot), so v3's
-        // seeding sources were gone before it ran. v4 re-seeds from whatever
-        // watermark survived — for wiped rows that is the boot baseline, which
-        // deliberately errs toward blue-today (the familiar pre-split look)
-        // rather than a violet flood. A migration approximation only: once
-        // upgraded, blue advances exclusively through prompts or genuine
-        // focus dwell, so the roster self-corrects within one 24h window.
-        lastHumanUsedAt = [lastHumanUsedAt, lastSeenAt, lastUsedAt]
-            .compactMap(\.self)
-            .max()
-        lastAgentActiveAt = [lastAgentActiveAt, lastAgentFinishedAt]
-            .compactMap(\.self)
-            .max()
-        lastUsedAt = nil
-        updatedAt = date
-        return true
-    }
-
-    /// Rollout/adoption baseline for unread tracking only. This must never
-    /// make a session blue or violet.
-    @discardableResult
-    mutating func markSeenBaseline(at date: Date) -> Bool {
-        guard lastSeenAt.map({ $0 < date }) ?? true else { return false }
         lastSeenAt = date
+        lastUsedAt = max(lastUsedAt ?? .distantPast, date)
         updatedAt = date
         return true
     }
@@ -262,10 +227,7 @@ extension HolySessionAttentionMetadata {
         lastAuthoritativeEventID = envelope.eventIdentity
         lastAuthoritativeEventOccurredAt = occurredAt
         lastAuthoritativeEventObservedAt = observedAt
-        lastAgentActiveAt = max(lastAgentActiveAt ?? .distantPast, occurredAt)
-        if envelope.reasonCode == "user-prompt" {
-            lastHumanUsedAt = max(lastHumanUsedAt ?? .distantPast, occurredAt)
-        }
+        lastUsedAt = max(lastUsedAt ?? .distantPast, occurredAt)
         lastAttentionWasActiveWork = envelope.lifecycle == .working
         switch envelope.lifecycle {
         case .finished:
@@ -310,23 +272,16 @@ extension HolySessionAttentionMetadata {
         lastAgentFinishedAt = occurredAt
         lastAgentFinishedSource = envelope.source
         lastAgentFinishedReasonCode = envelope.reasonCode
-        lastAgentActiveAt = max(lastAgentActiveAt ?? .distantPast, occurredAt)
+        lastUsedAt = max(lastUsedAt ?? .distantPast, occurredAt)
         updatedAt = observedAt
         return true
     }
 
     @discardableResult
-    mutating func markHumanUsed(at date: Date) -> Bool {
-        var changed = false
-        if lastSeenAt.map({ $0 < date }) ?? true {
-            lastSeenAt = date
-            changed = true
-        }
-        if lastHumanUsedAt.map({ $0 < date }) ?? true {
-            lastHumanUsedAt = date
-            changed = true
-        }
-        guard changed else { return false }
+    mutating func markSeen(at date: Date) -> Bool {
+        guard lastSeenAt.map({ $0 < date }) ?? true else { return false }
+        lastSeenAt = date
+        lastUsedAt = max(lastUsedAt ?? .distantPast, date)
         updatedAt = date
         return true
     }
@@ -334,7 +289,7 @@ extension HolySessionAttentionMetadata {
     /// Operator-initiated "Mark Unread": clears the seen timestamp so the
     /// finished reply reads as unread again. The next genuine visit re-marks
     /// seen through the ordinary event-driven path. Never touches
-    /// either recency clock — marking unread is not using the session.
+    /// `lastUsedAt` — marking unread is not using the session.
     @discardableResult
     mutating func markUnread(at date: Date) -> Bool {
         guard lastAgentFinishedAt != nil, lastSeenAt != nil else { return false }
@@ -378,61 +333,19 @@ extension HolySessionAttentionMetadata {
 
 struct HolySessionAttentionPresentation: Equatable {
     let kind: HolySessionAttentionKind
-    let showsUnreadPip: Bool
     let symbolName: String
     let title: String
     let detail: String?
     let isProminent: Bool
     let becameAvailableAt: Date?
-    /// One-line evidence trail: why the policy chose this state. Rendered in
-    /// the row tooltip so a surprising dot is self-explaining on hover.
-    var evidenceSummary: String? = nil
 
     var helpText: String {
-        let base = if let detail, !detail.isEmpty {
-            "\(title): \(detail)"
-        } else {
-            title
-        }
-        let withPip = showsUnreadPip ? "Unread agent update · \(base)" : base
-        guard let evidenceSummary else { return withPip }
-        return "\(withPip)\nWhy: \(evidenceSummary)"
+        guard let detail, !detail.isEmpty else { return title }
+        return "\(title): \(detail)"
     }
 }
 
-enum HolySessionIndicatorEvidenceSummary {
-    static func text(for evidence: HolySessionIndicatorEvidence) -> String {
-        var parts: [String] = []
-        if let lifecycle = evidence.lifecycle, let at = evidence.lifecycleOccurredAt {
-            let age = max(0, evidence.now.timeIntervalSince(at))
-            parts.append("hook: \(lifecycle.rawValue) \(brief(age)) ago")
-        } else {
-            parts.append("hook: none")
-        }
-        if evidence.processExited {
-            parts.append("process: exited")
-        }
-        if let human = evidence.lastHumanUsedAt {
-            parts.append("you: \(brief(max(0, evidence.now.timeIntervalSince(human)))) ago")
-        } else {
-            parts.append("you: never")
-        }
-        if let agent = evidence.lastAgentActiveAt {
-            parts.append("agent: \(brief(max(0, evidence.now.timeIntervalSince(agent)))) ago")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    private static func brief(_ interval: TimeInterval) -> String {
-        let seconds = Int(interval)
-        if seconds < 60 { return "\(seconds)s" }
-        if seconds < 3_600 { return "\(seconds / 60)m" }
-        if seconds < 172_800 { return "\(seconds / 3_600)h" }
-        return "\(seconds / 86_400)d"
-    }
-}
-
-/// Pure evidence consumed by the six-state base indicator policy. There is
+/// Pure evidence consumed by the six-state indicator policy. There is
 /// intentionally no preview, title, spinner glyph, or screen-text field here.
 struct HolySessionIndicatorEvidence: Equatable {
     let lifecycle: HolyAgentLifecycleState?
@@ -440,14 +353,8 @@ struct HolySessionIndicatorEvidence: Equatable {
     let processExited: Bool
     let lastAgentFinishedAt: Date?
     let lastSeenAt: Date?
-    let lastHumanUsedAt: Date?
-    let lastAgentActiveAt: Date?
+    let lastUsedAt: Date
     let now: Date
-}
-
-struct HolySessionIndicatorDecision: Equatable {
-    let kind: HolySessionAttentionKind
-    let showsUnreadPip: Bool
 }
 
 enum HolySessionIndicatorPolicy {
@@ -456,49 +363,6 @@ enum HolySessionIndicatorPolicy {
     static let usedTodayInterval: TimeInterval = 24 * 60 * 60
     static let sleepingInterval: TimeInterval = 48 * 60 * 60
 
-    static func decision(
-        for evidence: HolySessionIndicatorEvidence,
-        workingLease: TimeInterval = workingLease,
-        needsUserLease: TimeInterval = needsUserLease,
-        usedTodayInterval: TimeInterval = usedTodayInterval,
-        sleepingInterval: TimeInterval = sleepingInterval
-    ) -> HolySessionIndicatorDecision {
-        let unread = evidence.lastAgentFinishedAt.map {
-            $0 > (evidence.lastSeenAt ?? .distantPast)
-        } ?? false
-
-        if !evidence.processExited,
-           let lifecycle = evidence.lifecycle {
-            switch lifecycle {
-            case .needsUser, .failed:
-                if let occurredAt = evidence.lifecycleOccurredAt {
-                    let age = evidence.now.timeIntervalSince(occurredAt)
-                    if age >= 0, age < needsUserLease {
-                        return .init(kind: .needsUser, showsUnreadPip: unread)
-                    }
-                }
-            case .working:
-                if let occurredAt = evidence.lifecycleOccurredAt {
-                    let age = evidence.now.timeIntervalSince(occurredAt)
-                    if age >= 0, age < workingLease {
-                        return .init(kind: .working, showsUnreadPip: unread)
-                    }
-                }
-            case .finished, .idle, .ended:
-                break
-            }
-        }
-
-        return .init(
-            kind: recencyKind(
-                for: evidence,
-                usedTodayInterval: usedTodayInterval,
-                sleepingInterval: sleepingInterval
-            ),
-            showsUnreadPip: unread
-        )
-    }
-
     static func kind(
         for evidence: HolySessionIndicatorEvidence,
         workingLease: TimeInterval = workingLease,
@@ -506,61 +370,41 @@ enum HolySessionIndicatorPolicy {
         usedTodayInterval: TimeInterval = usedTodayInterval,
         sleepingInterval: TimeInterval = sleepingInterval
     ) -> HolySessionAttentionKind {
-        decision(
-            for: evidence,
-            workingLease: workingLease,
-            needsUserLease: needsUserLease,
-            usedTodayInterval: usedTodayInterval,
-            sleepingInterval: sleepingInterval
-        ).kind
-    }
-
-    static func recencyKind(
-        for evidence: HolySessionIndicatorEvidence,
-        usedTodayInterval: TimeInterval = usedTodayInterval,
-        sleepingInterval: TimeInterval = sleepingInterval
-    ) -> HolySessionAttentionKind {
-        // Erik, 2026-07-20 (final ruling after living with the split): "grey
-        // UNLESS the agent was used in the past 24 hours, green for unread —
-        // easy." Any use — human or agent — inside the window is blue. The
-        // human/agent clocks remain tracked separately underneath (tooltips
-        // still show both), but violet no longer renders as its own state.
-        let recentUse = [evidence.lastHumanUsedAt, evidence.lastAgentActiveAt]
-            .compactMap(\.self)
-            .max()
-        if let recentUse,
-           max(0, evidence.now.timeIntervalSince(recentUse)) < usedTodayInterval {
-            return .usedToday
+        if !evidence.processExited,
+           let lifecycle = evidence.lifecycle {
+            switch lifecycle {
+            case .needsUser, .failed:
+                if let occurredAt = evidence.lifecycleOccurredAt {
+                    let age = evidence.now.timeIntervalSince(occurredAt)
+                    if age >= 0, age < needsUserLease {
+                        return .needsUser
+                    }
+                }
+            case .working:
+                if let occurredAt = evidence.lifecycleOccurredAt {
+                    let age = evidence.now.timeIntervalSince(occurredAt)
+                    if age >= 0, age < workingLease {
+                        return .working
+                    }
+                }
+            case .finished, .idle, .ended:
+                break
+            }
         }
 
-        let latestActivity = [evidence.lastHumanUsedAt, evidence.lastAgentActiveAt]
-            .compactMap(\.self)
-            .max()
-        guard let latestActivity else { return .sleeping }
-        let age = max(0, evidence.now.timeIntervalSince(latestActivity))
+        if let finishedAt = evidence.lastAgentFinishedAt,
+           finishedAt > (evidence.lastSeenAt ?? .distantPast) {
+            return .unread
+        }
+
+        let age = max(0, evidence.now.timeIntervalSince(evidence.lastUsedAt))
+        if age < usedTodayInterval {
+            return .usedToday
+        }
         if age < sleepingInterval {
             return .inactive
         }
         return .sleeping
-    }
-}
-
-enum HolySessionFocusDwellPolicy {
-    static let minimumDwell: TimeInterval = 1.5
-    static let postRestoreQuiescence: TimeInterval = 2
-
-    static func commitAt(focusBeganAt: Date) -> Date {
-        focusBeganAt.addingTimeInterval(minimumDwell)
-    }
-
-    static func canCommit(
-        focusBeganAt: Date,
-        workspaceStartedAt: Date,
-        now: Date
-    ) -> Bool {
-        let restoreSettledAt = workspaceStartedAt.addingTimeInterval(postRestoreQuiescence)
-        return focusBeganAt >= restoreSettledAt
-            && now >= commitAt(focusBeganAt: focusBeganAt)
     }
 }
 

@@ -79,7 +79,7 @@ final class HolyWorkspaceStore: ObservableObject {
             guard !suppressAutomaticSelectionPersistence,
                   oldValue != selectedSessionID else { return }
             refreshSessionPresentationState()
-            cancelSelectedSessionSeenMark()
+            scheduleSelectedSessionSeenMark()
             persist(pendingEvents: selectionEvents(from: oldValue, to: selectedSessionID))
         }
     }
@@ -128,10 +128,6 @@ final class HolyWorkspaceStore: ObservableObject {
     private var draftLaunchGuardrailTask: Task<Void, Never>?
     private var selectedSessionReadTask: Task<Void, Never>?
     private var selectedSessionReadTaskKey: String?
-    /// Set by Mark Unread; suppresses the seen/human-used paths for that
-    /// session until the user genuinely selects a different one, so menu
-    /// dismissal refocusing the pane cannot instantly re-read it.
-    private var unreadOverrideSessionID: UUID?
     private var pendingAgentNotificationEventIDs: [UUID: String] = [:]
     private var agentNotificationRetryEventIDs: [UUID: String] = [:]
     private var agentNotificationRetryAttempts: [UUID: Int] = [:]
@@ -165,15 +161,9 @@ final class HolyWorkspaceStore: ObservableObject {
                     guard let self else { return }
                     // Re-evaluate the strict focus gate even when AppKit kept
                     // the same first responder while the app was backgrounded.
-                    self.armSelectedSessionHumanDwell()
+                    self.scheduleSelectedSessionSeenMark()
                     self.retryPendingAgentNotificationsAfterActivation()
                 }
-            }
-            .store(in: &cancellables)
-
-        NotificationCenter.default.publisher(for: NSApplication.willResignActiveNotification)
-            .sink { [weak self] _ in
-                self?.cancelSelectedSessionSeenMark()
             }
             .store(in: &cancellables)
     }
@@ -334,9 +324,6 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func selectSession(_ sessionID: UUID) {
-        if let overrideID = unreadOverrideSessionID, overrideID != sessionID {
-            unreadOverrideSessionID = nil
-        }
         selectedSessionID = sessionID
         if soloSessionID == nil,
            let slot = normalizedPaneLayout.slot(for: sessionID) {
@@ -348,12 +335,7 @@ final class HolyWorkspaceStore: ObservableObject {
     /// The focused surface reports this only after AppKit has actually focused
     /// it in an active, visible key window.
     func sessionSurfaceDidReceiveUserFocus(_ sessionID: UUID) {
-        guard sessionID == selectedSessionID else { return }
-        armSelectedSessionHumanDwell()
-    }
-
-    func sessionSurfaceDidLoseUserFocus() {
-        cancelSelectedSessionSeenMark()
+        clearUnreadAttentionIfNeeded(for: sessionID)
     }
 
     func handleRosterSelect(_ sessionID: UUID) {
@@ -370,16 +352,6 @@ final class HolyWorkspaceStore: ObservableObject {
             soloSessionID = nil
             focusedPaneSlot = nil
             paneLayout = HolyPaneLayout(kind: .single, sessionIDs: [sessionID])
-        }
-
-        // A roster click or keyboard cycle is explicit human intent, but blue
-        // is committed only after AppKit has moved focus to the terminal and
-        // the dwell gate has held it there. Yield once so the root view's
-        // selection observer can install the real first responder first.
-        Task { @MainActor [weak self] in
-            await Task.yield()
-            guard let self, self.selectedSessionID == sessionID else { return }
-            self.sessionSurfaceDidReceiveUserFocus(sessionID)
         }
     }
 
@@ -471,6 +443,7 @@ final class HolyWorkspaceStore: ObservableObject {
             )
         soloSessionID = nil
         focusedPaneSlot = slot
+        clearUnreadAttentionIfNeeded(for: sessionID)
     }
 
     func removeFromLinkage(_ sessionID: UUID) {
@@ -510,6 +483,7 @@ final class HolyWorkspaceStore: ObservableObject {
         selectedSessionID = sessionID
         soloSessionID = sessionID
         focusedPaneSlot = nil
+        clearUnreadAttentionIfNeeded(for: sessionID)
     }
 
     func togglePaneZoom(_ sessionID: UUID) {
@@ -530,6 +504,7 @@ final class HolyWorkspaceStore: ObservableObject {
            let focusedSessionID = normalizedPaneLayout.sessionID(atSlot: focusedSlot) {
             selectedSessionID = focusedSessionID
             self.focusedPaneSlot = focusedSlot
+            clearUnreadAttentionIfNeeded(for: focusedSessionID)
         } else if let selectedSessionID,
                   let slot = normalizedPaneLayout.slot(for: selectedSessionID) {
             self.focusedPaneSlot = slot
@@ -537,6 +512,7 @@ final class HolyWorkspaceStore: ObservableObject {
                   let slot = normalizedPaneLayout.slot(for: firstSessionID) {
             selectedSessionID = firstSessionID
             self.focusedPaneSlot = slot
+            clearUnreadAttentionIfNeeded(for: firstSessionID)
         }
     }
 
@@ -2141,24 +2117,25 @@ final class HolyWorkspaceStore: ObservableObject {
         guard var metadata = attentionMetadataBySessionID[sessionID],
               metadata.markUnread(at: date) else { return }
         attentionMetadataBySessionID[sessionID] = metadata
-        // A pending selected-seen mark would immediately re-read the session,
-        // and menu dismissal refocuses the pane which re-marks within the
-        // second (the "fades green to blue" race). Suppress every seen path
-        // for this session until the user genuinely moves to another one.
-        unreadOverrideSessionID = sessionID
+        // A pending selected-seen mark would immediately re-read the session.
+        cancelSelectedSessionSeenMark()
+        persist()
+    }
+
+    private func clearUnreadAttentionIfNeeded(for sessionID: UUID) {
+        guard markSessionSeenIfNeeded(sessionID) else { return }
         cancelSelectedSessionSeenMark()
         persist()
     }
 
     @discardableResult
-    private func markSelectedSessionHumanUsedIfNeeded(at date: Date = .init()) -> Bool {
+    private func markSelectedSessionSeenIfNeeded(at date: Date = .init()) -> Bool {
         guard let selectedSessionID else { return false }
-        return markSessionHumanUsedIfNeeded(selectedSessionID, at: date)
+        return markSessionSeenIfNeeded(selectedSessionID, at: date)
     }
 
     @discardableResult
-    private func markSessionHumanUsedIfNeeded(_ sessionID: UUID, at date: Date = .init()) -> Bool {
-        guard unreadOverrideSessionID != sessionID else { return false }
+    private func markSessionSeenIfNeeded(_ sessionID: UUID, at date: Date = .init()) -> Bool {
         guard let session = session(withID: sessionID),
               NSApp.isActive,
               let window = session.surfaceView.window,
@@ -2170,7 +2147,7 @@ final class HolyWorkspaceStore: ObservableObject {
 
         let didMarkSeen = updateAttentionMetadata(
             for: session,
-            markHumanUsed: true,
+            markSeen: true,
             existing: &attentionMetadataBySessionID,
             at: date
         )
@@ -2234,54 +2211,10 @@ final class HolyWorkspaceStore: ObservableObject {
         return didMarkSeen || didAcknowledgeNotification
     }
 
-    /// Arms only from a real AppKit focus/activation signal. Selection,
-    /// restore, attach, watcher mutations, and layout churn may cancel or be
-    /// observed by the final gate, but they can never start this dwell.
-    private func armSelectedSessionHumanDwell() {
-        guard let selectedSessionID,
-              let session = session(withID: selectedSessionID),
-              NSApp.isActive,
-              let window = session.surfaceView.window,
-              window.isKeyWindow,
-              !window.isMiniaturized,
-              session.surfaceView.focused else {
-            cancelSelectedSessionSeenMark()
-            return
-        }
-
-        let focusKey = selectedSessionID.uuidString
-        guard selectedSessionReadTaskKey != focusKey else { return }
+    private func scheduleSelectedSessionSeenMark() {
         cancelSelectedSessionSeenMark()
-
-        let focusBeganAt = Date()
-        guard HolySessionFocusDwellPolicy.canCommit(
-            focusBeganAt: focusBeganAt,
-            workspaceStartedAt: workspaceStartedAt,
-            now: focusBeganAt.addingTimeInterval(HolySessionFocusDwellPolicy.minimumDwell)
-        ) else {
-            return
-        }
-
-        selectedSessionReadTaskKey = focusKey
-        selectedSessionReadTask = Task { @MainActor [weak self] in
-            let nanoseconds = UInt64(HolySessionFocusDwellPolicy.minimumDwell * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: nanoseconds)
-            guard !Task.isCancelled,
-                  let self,
-                  self.selectedSessionReadTaskKey == focusKey else { return }
-
-            self.selectedSessionReadTask = nil
-            self.selectedSessionReadTaskKey = nil
-            let committedAt = Date()
-            guard HolySessionFocusDwellPolicy.canCommit(
-                focusBeganAt: focusBeganAt,
-                workspaceStartedAt: self.workspaceStartedAt,
-                now: committedAt
-            ), self.markSelectedSessionHumanUsedIfNeeded(at: committedAt) else {
-                return
-            }
-            self.persist()
-        }
+        guard markSelectedSessionSeenIfNeeded() else { return }
+        persist()
     }
 
     private func cancelSelectedSessionSeenMark() {
@@ -2291,25 +2224,21 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     private func reconcileAttentionMetadata(
+        markSelectedSeen: Bool,
         seedMissingAsSeen: Bool = false,
         at date: Date = .init()
     ) {
-        // A transient empty roster (mid-restore, mid-reload) must never wipe
-        // the attention map: dropping every row makes each session "missing",
-        // and the subsequent baseline sweep stamps the whole roster seen-now —
-        // observed live 2026-07-20 (37 rows stamped in the same minute),
-        // destroying human-recency history and every unread pip.
-        guard !sessions.isEmpty || attentionMetadataBySessionID.isEmpty else { return }
         let activeIDs = Set(sessions.map(\.id))
         var next = attentionMetadataBySessionID.filter { activeIDs.contains($0.key) }
         var changed = next.count != attentionMetadataBySessionID.count
 
         for session in sessions {
-            let shouldBaselineSeen = seedMissingAsSeen && next[session.id] == nil
+            let shouldMarkSeen = (markSelectedSeen && session.id == selectedSessionID)
+                || (seedMissingAsSeen && next[session.id] == nil)
             if updateAttentionMetadata(
                 for: session,
-                markHumanUsed: false,
-                baselineSeen: shouldBaselineSeen,
+                markSeen: shouldMarkSeen,
+                baselineLegacySeenTracking: seedMissingAsSeen,
                 existing: &next,
                 at: date
             ) {
@@ -2325,8 +2254,8 @@ final class HolyWorkspaceStore: ObservableObject {
     @discardableResult
     private func updateAttentionMetadata(
         for session: HolySession,
-        markHumanUsed: Bool,
-        baselineSeen: Bool = false,
+        markSeen: Bool,
+        baselineLegacySeenTracking: Bool = false,
         existing: inout [UUID: HolySessionAttentionMetadata],
         at date: Date = .init()
     ) -> Bool {
@@ -2334,16 +2263,15 @@ final class HolyWorkspaceStore: ObservableObject {
         var metadata = existing[session.id] ?? HolySessionAttentionMetadata(sessionID: session.id)
         var changed = false
 
-        // v3 repairs the v2 nil-human cold start from preserved seen history.
-        // After that one-time bridge, blue is earned only by a prompt or a
-        // post-restore focus dwell.
-        if metadata.seenTrackingVersion != HolySessionAttentionMetadata.currentSeenTrackingVersion {
-            changed = metadata.migrateToCurrentSeenTracking(at: date) || changed
+        // Seen tracking was intentionally disabled in an earlier release.
+        // Baseline every legacy row once during restore, and baseline a newly
+        // created session before its first event, so historical replies cannot
+        // all become unread during rollout.
+        if metadata.seenTrackingVersion != HolySessionAttentionMetadata.currentSeenTrackingVersion,
+           baselineLegacySeenTracking || !hadExistingMetadata {
+            changed = metadata.baselineLegacySeenTracking(at: date) || changed
         }
-        if baselineSeen || !hadExistingMetadata {
-            changed = metadata.markSeenBaseline(at: date) || changed
-        }
-        if baselineSeen || !hadExistingMetadata {
+        if baselineLegacySeenTracking || !hadExistingMetadata {
             changed = metadata.baselineNotificationTracking(at: date) || changed
         }
 
@@ -2352,8 +2280,8 @@ final class HolyWorkspaceStore: ObservableObject {
             changed = metadata.record(envelope: envelope, observedAt: observedAt) || changed
         }
 
-        if markHumanUsed {
-            changed = metadata.markHumanUsed(at: date) || changed
+        if markSeen {
+            changed = metadata.markSeen(at: date) || changed
         }
 
         if changed {
@@ -2401,28 +2329,21 @@ final class HolyWorkspaceStore: ObservableObject {
             .joined(separator: " · ")
             .nilIfEmpty
         let eventOccurredAt = envelope.map { min($0.occurredAt, observedAt ?? .now) }
-        let lastHumanUsedAt = metadata?.lastHumanUsedAt
-        let lastAgentActiveAt = metadata?.lastAgentActiveAt
-        let latestActivityAt = [lastHumanUsedAt, lastAgentActiveAt].compactMap(\.self).max()
-        let indicatorEvidence = HolySessionIndicatorEvidence(
+        let lastUsedAt = metadata?.lastUsedAt ?? session.record.createdAt
+        let kind = HolySessionIndicatorPolicy.kind(for: .init(
             lifecycle: envelope?.lifecycle,
             lifecycleOccurredAt: eventOccurredAt,
             processExited: session.surfaceView.processProvablyExited,
             lastAgentFinishedAt: finishedAt,
             lastSeenAt: metadata?.lastSeenAt,
-            lastHumanUsedAt: lastHumanUsedAt,
-            lastAgentActiveAt: lastAgentActiveAt,
+            lastUsedAt: lastUsedAt,
             now: attentionClock
-        )
-        let decision = HolySessionIndicatorPolicy.decision(for: indicatorEvidence)
-        let unreadDetail = decision.showsUnreadPip ? completedDetail : nil
+        ))
 
-        let base: HolySessionAttentionPresentation = {
-        switch decision.kind {
+        switch kind {
         case .working:
             return .init(
                 kind: .working,
-                showsUnreadPip: decision.showsUnreadPip,
                 symbolName: "circle.dotted",
                 title: "Working",
                 detail: currentDetail,
@@ -2432,59 +2353,49 @@ final class HolyWorkspaceStore: ObservableObject {
         case .needsUser:
             return .init(
                 kind: .needsUser,
-                showsUnreadPip: decision.showsUnreadPip,
                 symbolName: "questionmark.bubble.fill",
                 title: envelope?.lifecycle == .failed ? "Needs you — agent failed" : "Needs you",
                 detail: currentDetail,
                 isProminent: true,
                 becameAvailableAt: observedAt
             )
+        case .unread:
+            return .init(
+                kind: .unread,
+                symbolName: "circle.fill",
+                title: "Unread agent update",
+                detail: completedDetail,
+                isProminent: true,
+                becameAvailableAt: finishedAt
+            )
         case .usedToday:
             return .init(
                 kind: .usedToday,
-                showsUnreadPip: decision.showsUnreadPip,
                 symbolName: "circle.fill",
-                title: "Used by you in the last 24 hours",
-                detail: unreadDetail,
-                isProminent: decision.showsUnreadPip,
-                becameAvailableAt: lastHumanUsedAt
-            )
-        case .onAutomation:
-            return .init(
-                kind: .onAutomation,
-                showsUnreadPip: decision.showsUnreadPip,
-                symbolName: "circle.fill",
-                title: "On automation — agent active in the last 24 hours",
-                detail: unreadDetail,
-                isProminent: decision.showsUnreadPip,
-                becameAvailableAt: lastAgentActiveAt
+                title: "Used in the last 24 hours",
+                detail: nil,
+                isProminent: false,
+                becameAvailableAt: lastUsedAt
             )
         case .inactive:
             return .init(
                 kind: .inactive,
-                showsUnreadPip: decision.showsUnreadPip,
                 symbolName: "circle.fill",
                 title: "Inactive for 24–48 hours",
-                detail: unreadDetail,
-                isProminent: decision.showsUnreadPip,
-                becameAvailableAt: latestActivityAt
+                detail: nil,
+                isProminent: false,
+                becameAvailableAt: lastUsedAt
             )
         case .sleeping:
             return .init(
                 kind: .sleeping,
-                showsUnreadPip: decision.showsUnreadPip,
                 symbolName: "zzz",
                 title: "Sleeping for more than 48 hours",
-                detail: unreadDetail,
-                isProminent: decision.showsUnreadPip,
-                becameAvailableAt: latestActivityAt
+                detail: nil,
+                isProminent: false,
+                becameAvailableAt: lastUsedAt
             )
         }
-        }()
-
-        var presentation = base
-        presentation.evidenceSummary = HolySessionIndicatorEvidenceSummary.text(for: indicatorEvidence)
-        return presentation
     }
 
     private func applySessionStoreState(_ state: HolySessionStoreState) {
@@ -2505,6 +2416,7 @@ final class HolyWorkspaceStore: ObservableObject {
         refreshSessionPresentationState()
         bindSessions(seedMissingAsSeen: true)
         reconcileExternalTasks()
+        scheduleSelectedSessionSeenMark()
         updatePowerAssertion()
     }
 
@@ -2764,18 +2676,17 @@ final class HolyWorkspaceStore: ObservableObject {
         observedAt: Date,
         emitTimelineEvent: Bool
     ) {
-        let hadExistingMetadata = attentionMetadataBySessionID[session.id] != nil
         var metadata = attentionMetadataBySessionID[session.id]
             ?? HolySessionAttentionMetadata(sessionID: session.id)
         if metadata.seenTrackingVersion != HolySessionAttentionMetadata.currentSeenTrackingVersion {
-            _ = metadata.migrateToCurrentSeenTracking(at: observedAt)
-        }
-        if !hadExistingMetadata {
-            _ = metadata.markSeenBaseline(at: workspaceStartedAt)
+            _ = metadata.baselineLegacySeenTracking(at: workspaceStartedAt)
         }
         _ = metadata.baselineNotificationTracking(at: workspaceStartedAt)
         guard metadata.recordFinished(envelope: envelope, observedAt: observedAt) else { return }
         attentionMetadataBySessionID[session.id] = metadata
+        if session.id == selectedSessionID {
+            scheduleSelectedSessionSeenMark()
+        }
         let events: [HolySessionEventDraft]
         if emitTimelineEvent {
             events = [HolySessionEventDraft.agentStateChanged(
@@ -3678,15 +3589,18 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         recomputeCoordination()
-        reconcileAttentionMetadata(seedMissingAsSeen: seedMissingAsSeen)
+        reconcileAttentionMetadata(markSelectedSeen: false, seedMissingAsSeen: seedMissingAsSeen)
         refreshAgentStateMonitorIfNeeded()
         sessionSupervisor.sessionBindingsDidChange(for: currentSessionStoreState)
     }
 
     private func handleSessionMutation(for session: HolySession) {
-        reconcileAttentionMetadata()
+        reconcileAttentionMetadata(markSelectedSeen: false)
         scheduleAuthoritativeAgentNotificationIfNeeded(for: session)
         recomputeCoordination()
+        if session.id == selectedSessionID {
+            scheduleSelectedSessionSeenMark()
+        }
         sessionSupervisor.sessionDidMutate(
             session,
             in: currentSessionStoreState,
