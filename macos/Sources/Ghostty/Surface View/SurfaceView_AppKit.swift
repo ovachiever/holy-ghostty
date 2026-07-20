@@ -199,6 +199,16 @@ extension Ghostty {
             return ghostty_surface_process_exited(surface)
         }
 
+        /// True only when the underlying surface exists AND its process has
+        /// exited. Surfaces realize lazily on first presentation, so an
+        /// unrealized surface is UNKNOWN — treating it as exited invalidated
+        /// authoritative working claims for every never-focused session
+        /// (rows showed recency blue until first click).
+        var processProvablyExited: Bool {
+            guard let surface = self.surface else { return false }
+            return ghostty_surface_process_exited(surface)
+        }
+
         // Returns the inspector instance for this surface, or nil if the
         // surface has been closed or no inspector is active.
         var inspector: Ghostty.Inspector? {

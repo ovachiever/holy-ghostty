@@ -2379,7 +2379,7 @@ final class HolyWorkspaceStore: ObservableObject {
         let decision = HolySessionIndicatorPolicy.decision(for: .init(
             lifecycle: envelope?.lifecycle,
             lifecycleOccurredAt: eventOccurredAt,
-            processExited: session.surfaceView.processExited,
+            processExited: session.surfaceView.processProvablyExited,
             lastAgentFinishedAt: finishedAt,
             lastSeenAt: metadata?.lastSeenAt,
             lastHumanUsedAt: lastHumanUsedAt,
@@ -3703,7 +3703,7 @@ final class HolyWorkspaceStore: ObservableObject {
             trackingStartedAt: notificationTrackingStartedAt,
             lastNotifiedEventID: metadata.lastNotifiedAuthoritativeEventID,
             lastNotifiedOccurredAtMilliseconds: metadata.lastNotifiedEventAtMilliseconds,
-            processExited: session.surfaceView.processExited,
+            processExited: session.surfaceView.processProvablyExited,
             now: .now
         )) else {
             let committedAtMilliseconds = HolyAgentNotificationPolicy.committedAtMilliseconds(
