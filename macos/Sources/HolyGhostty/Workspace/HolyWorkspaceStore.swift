@@ -2734,6 +2734,11 @@ final class HolyWorkspaceStore: ObservableObject {
             .autoconnect()
             .sink { [weak self] _ in
                 self?.convergeRoster(reason: .periodic)
+                // Converge reconciles identity; it does NOT re-read attached
+                // sessions' synced metadata. Without this call the remote-ward
+                // direction of note/pin sync only ever ran from manual Hosts
+                // refresh (observed live during mn-2b3a11 acceptance).
+                self?.refreshActiveTmuxSessionMetadata()
             }
 
         // A resumed-but-idle agent pane emits no OSC 7 until its next turn,
