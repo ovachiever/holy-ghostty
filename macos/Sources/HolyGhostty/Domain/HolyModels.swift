@@ -1288,9 +1288,15 @@ struct HolySessionLaunchSpec: Codable, Equatable {
     var title: String
     var objective: String?
     var note: String?
+    /// Millisecond epoch for the last local or merged note edit. A non-nil
+    /// stamp with a nil note is the deletion tombstone used by tmux sync.
+    var noteUpdatedAtMilliseconds: Int64?
     /// User-pinned "focus / today" flag. Optional so existing persisted
     /// launch-spec JSON (without this key) still decodes; nil == not focused.
     var isFocused: Bool? = nil
+    /// Millisecond epoch for the last Today-pin edit. The flag may be nil while
+    /// this stamp remains present, which represents an authoritative unpin.
+    var todayPinUpdatedAtMilliseconds: Int64?
     var task: HolyExternalTaskReference?
     var budget: HolySessionBudget?
     var transport: HolySessionTransportSpec
@@ -1350,6 +1356,9 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         title: String,
         objective: String? = nil,
         note: String? = nil,
+        noteUpdatedAtMilliseconds: Int64? = nil,
+        isFocused: Bool? = nil,
+        todayPinUpdatedAtMilliseconds: Int64? = nil,
         task: HolyExternalTaskReference? = nil,
         budget: HolySessionBudget? = nil,
         transport: HolySessionTransportSpec = .local,
@@ -1365,6 +1374,9 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         self.title = title
         self.objective = objective
         self.note = note
+        self.noteUpdatedAtMilliseconds = noteUpdatedAtMilliseconds
+        self.isFocused = isFocused
+        self.todayPinUpdatedAtMilliseconds = todayPinUpdatedAtMilliseconds
         self.task = task
         self.budget = budget
         self.transport = transport
@@ -1382,6 +1394,9 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         self.title = fallbackTitle
         self.objective = nil
         self.note = nil
+        self.noteUpdatedAtMilliseconds = nil
+        self.isFocused = nil
+        self.todayPinUpdatedAtMilliseconds = nil
         self.task = nil
         self.budget = nil
         self.transport = .local
@@ -1410,7 +1425,9 @@ struct HolySessionLaunchSpec: Codable, Equatable {
     var normalizedForTemplate: Self {
         var copy = self
         copy.note = nil
+        copy.noteUpdatedAtMilliseconds = nil
         copy.isFocused = nil
+        copy.todayPinUpdatedAtMilliseconds = nil
         copy.task = nil
         copy.workingDirectory = nil
         copy.tmux = copy.tmux?.normalized

@@ -74,6 +74,7 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
     let taskTitle: String?
     let taskSource: String?
     let gitSummary: HolyRemoteGitSummary?
+    var synchronizedMetadata: HolyTmuxSessionMetadataSnapshot = .empty
     let attachedClientCount: Int
     let windowCount: Int
     let discoveredAt: Date

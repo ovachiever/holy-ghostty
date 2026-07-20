@@ -328,6 +328,7 @@ actor HolyRemoteTmuxDiscoveryService {
                     taskTitle: fields[8].holyTrimmed.nilIfEmpty,
                     taskSource: fields[9].holyTrimmed.nilIfEmpty,
                     gitSummary: Self.makeGitSummary(from: fields),
+                    synchronizedMetadata: Self.makeSynchronizedMetadata(from: fields),
                     attachedClientCount: Int(fields[1]) ?? 0,
                     windowCount: Int(fields[2]) ?? 0,
                     discoveredAt: discoveredAt
@@ -717,9 +718,13 @@ actor HolyRemoteTmuxDiscoveryService {
           fi
           task_title=$(option_value "$session_name" @holy_task_title)
           task_source=$(option_value "$session_name" @holy_task_source)
+          note_v1=$(option_value "$session_name" @holy_note_v1)
+          note_updated_at_v1=$(option_value "$session_name" @holy_note_updated_at_v1)
+          today_pin_v1=$(option_value "$session_name" @holy_today_pin_v1)
+          today_pin_updated_at_v1=$(option_value "$session_name" @holy_today_pin_updated_at_v1)
           git_fields=$(git_metadata "$working_directory")
 
-          printf '%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\\n' \
+          printf '%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s' \
             "$(sanitize "$session_name")" "$sep" \
             "$(sanitize "$attached")" "$sep" \
             "$(sanitize "$windows")" "$sep" \
@@ -731,6 +736,11 @@ actor HolyRemoteTmuxDiscoveryService {
             "$(sanitize "$task_title")" "$sep" \
             "$(sanitize "$task_source")" "$sep" \
             "$git_fields"
+          printf '%s%s%s%s%s%s%s%s\\n' \
+            "$sep" "$(sanitize "$note_v1")" \
+            "$sep" "$(sanitize "$note_updated_at_v1")" \
+            "$sep" "$(sanitize "$today_pin_v1")" \
+            "$sep" "$(sanitize "$today_pin_updated_at_v1")"
         done < <("${tmux_cmd[@]}" list-sessions -F $'#{session_name}\\t#{session_attached}\\t#{session_windows}' 2>/dev/null || true)
         """
     }
@@ -847,6 +857,16 @@ actor HolyRemoteTmuxDiscoveryService {
 }
 
 private extension HolyRemoteTmuxDiscoveryService {
+    static func makeSynchronizedMetadata(from fields: [String]) -> HolyTmuxSessionMetadataSnapshot {
+        guard fields.count >= 23 else { return .empty }
+        return HolyTmuxSessionMetadataCodec.decodeSnapshot(
+            encodedNote: fields[19],
+            noteUpdatedAt: fields[20],
+            todayPin: fields[21],
+            todayPinUpdatedAt: fields[22]
+        )
+    }
+
     static func makeGitSummary(from fields: [String]) -> HolyRemoteGitSummary? {
         guard fields.count >= 19,
               let repositoryRoot = fields[10].holyTrimmed.nilIfEmpty else {

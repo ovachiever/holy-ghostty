@@ -184,6 +184,9 @@ final class HolySession: ObservableObject, Identifiable {
     private var lastDerivedStateRefreshAt: Date = .distantPast
     private var tmuxModelLabelSyncTask: Task<Void, Never>?
     private var tmuxModelLabelDelivery = HolyTmuxModelLabelDeliveryState()
+    private var tmuxSessionMetadataSyncTask: Task<Void, Never>?
+    private var tmuxSessionMetadataRetryTask: Task<Void, Never>?
+    private var tmuxSessionMetadataDelivery = HolyTmuxSessionMetadataDeliveryState()
     private var lastModelEvidenceAt: Date?
 
     private static let visibleDerivedStateRefreshInterval: TimeInterval = 1.25
@@ -547,16 +550,37 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     func setNote(_ note: String?) {
-        record.launchSpec.note = Self.normalizedMetadataString(note)
-        markUpdated()
+        let normalizedNote = Self.normalizedMetadataString(note)
+        guard record.launchSpec.note != normalizedNote
+                || record.launchSpec.noteUpdatedAtMilliseconds == nil else {
+            return
+        }
+        let now = Date()
+        record.launchSpec.note = normalizedNote
+        record.launchSpec.noteUpdatedAtMilliseconds = HolyTmuxSessionMetadataClock.next(
+            after: record.launchSpec.noteUpdatedAtMilliseconds,
+            now: now
+        )
+        markUpdated(at: now)
         objectWillChange.send()
+        requestTmuxSessionMetadataSync(includeNote: true)
     }
 
     func setFocused(_ focused: Bool) {
+        guard isFocused != focused
+                || record.launchSpec.todayPinUpdatedAtMilliseconds == nil else {
+            return
+        }
+        let now = Date()
         // Store nil when unfocused so launch specs stay clean / template-safe.
         record.launchSpec.isFocused = focused ? true : nil
-        markUpdated()
+        record.launchSpec.todayPinUpdatedAtMilliseconds = HolyTmuxSessionMetadataClock.next(
+            after: record.launchSpec.todayPinUpdatedAtMilliseconds,
+            now: now
+        )
+        markUpdated(at: now)
         objectWillChange.send()
+        requestTmuxSessionMetadataSync(includeTodayPin: true)
     }
 
     /// Repairs incomplete legacy tmux identity only from a session that was
@@ -603,10 +627,12 @@ final class HolySession: ObservableObject, Identifiable {
     @discardableResult
     func applyDiscoveredLaunchMetadata(
         from launchSpec: HolySessionLaunchSpec,
+        synchronizedMetadata: HolyTmuxSessionMetadataSnapshot? = nil,
         refreshGitSnapshot: Bool = true
     ) -> Bool {
         let discoveredLaunchSpec = HolyTmuxCommandBuilder.realizedLaunchSpec(launchSpec)
         var changed = false
+        var synchronizedMetadataToPublish = (note: false, todayPin: false)
 
         if record.launchSpec.runtime == .shell,
            discoveredLaunchSpec.runtime != .shell {
@@ -638,14 +664,83 @@ final class HolySession: ObservableObject, Identifiable {
             changed = true
         }
 
-        guard changed else { return false }
+        if let synchronizedMetadata {
+            let synchronizedMerge = applyDiscoveredSynchronizedMetadata(synchronizedMetadata)
+            changed = synchronizedMerge.changed || changed
+            synchronizedMetadataToPublish = synchronizedMerge.fieldsToPublish
+        }
+
+        guard changed else {
+            if synchronizedMetadataToPublish.note || synchronizedMetadataToPublish.todayPin {
+                requestTmuxSessionMetadataSync(
+                    includeNote: synchronizedMetadataToPublish.note,
+                    includeTodayPin: synchronizedMetadataToPublish.todayPin
+                )
+            }
+            return false
+        }
 
         markUpdated()
         if refreshGitSnapshot {
             refreshGitSnapshotIfNeeded(force: true)
         }
         objectWillChange.send()
+        if synchronizedMetadataToPublish.note || synchronizedMetadataToPublish.todayPin {
+            requestTmuxSessionMetadataSync(
+                includeNote: synchronizedMetadataToPublish.note,
+                includeTodayPin: synchronizedMetadataToPublish.todayPin
+            )
+        }
         return true
+    }
+
+    private func applyDiscoveredSynchronizedMetadata(
+        _ metadata: HolyTmuxSessionMetadataSnapshot
+    ) -> (changed: Bool, fieldsToPublish: (note: Bool, todayPin: Bool)) {
+        var changed = false
+        var fieldsToPublish = (note: false, todayPin: false)
+
+        let localNote = HolyTmuxSessionMetadataField<String?>(
+            value: note,
+            updatedAtMilliseconds: record.launchSpec.noteUpdatedAtMilliseconds,
+            isPresent: note != nil || record.launchSpec.noteUpdatedAtMilliseconds != nil
+        )
+        switch HolyTmuxSessionMetadataMerge.action(local: localNote, remote: metadata.note) {
+        case .keepLocal:
+            break
+        case let .applyRemote(value, updatedAtMilliseconds):
+            record.launchSpec.note = Self.normalizedMetadataString(value)
+            record.launchSpec.noteUpdatedAtMilliseconds = updatedAtMilliseconds
+            changed = true
+        case .publishLocal:
+            if record.launchSpec.noteUpdatedAtMilliseconds == nil {
+                record.launchSpec.noteUpdatedAtMilliseconds = HolyTmuxSessionMetadataClock.next(after: nil)
+                changed = true
+            }
+            fieldsToPublish.note = true
+        }
+
+        let localTodayPin = HolyTmuxSessionMetadataField(
+            value: isFocused,
+            updatedAtMilliseconds: record.launchSpec.todayPinUpdatedAtMilliseconds,
+            isPresent: isFocused || record.launchSpec.todayPinUpdatedAtMilliseconds != nil
+        )
+        switch HolyTmuxSessionMetadataMerge.action(local: localTodayPin, remote: metadata.todayPin) {
+        case .keepLocal:
+            break
+        case let .applyRemote(value, updatedAtMilliseconds):
+            record.launchSpec.isFocused = value ? true : nil
+            record.launchSpec.todayPinUpdatedAtMilliseconds = updatedAtMilliseconds
+            changed = true
+        case .publishLocal:
+            if record.launchSpec.todayPinUpdatedAtMilliseconds == nil {
+                record.launchSpec.todayPinUpdatedAtMilliseconds = HolyTmuxSessionMetadataClock.next(after: nil)
+                changed = true
+            }
+            fieldsToPublish.todayPin = true
+        }
+
+        return (changed, fieldsToPublish)
     }
 
     private func shouldApplyDiscoveredTitle(_ discoveredTitle: String) -> Bool {
@@ -882,6 +977,75 @@ final class HolySession: ObservableObject, Identifiable {
             self.tmuxModelLabelSyncTask = nil
             self.tmuxModelLabelDelivery.complete(attempt, succeeded: succeeded)
             self.startTmuxModelLabelSyncIfNeeded()
+        }
+    }
+
+    private func requestTmuxSessionMetadataSync(
+        includeNote: Bool = false,
+        includeTodayPin: Bool = false
+    ) {
+        // Invalid or over-cap notes produce no note payload, and incomplete
+        // identity produces no command. Both fail closed without redirecting
+        // user metadata to an inferred/default tmux server.
+        guard let payload = HolyTmuxSessionMetadataPayload(
+                  launchSpec: record.launchSpec,
+                  includeNote: includeNote,
+                  includeTodayPin: includeTodayPin
+              ),
+              HolyTmuxSessionMetadataUpdateCommand.command(
+                  for: record.launchSpec,
+                  payload: payload
+              ) != nil else {
+            return
+        }
+
+        tmuxSessionMetadataDelivery.request(payload)
+        startTmuxSessionMetadataSyncIfNeeded()
+    }
+
+    private func startTmuxSessionMetadataSyncIfNeeded() {
+        guard tmuxSessionMetadataSyncTask == nil else { return }
+        guard let attempt = tmuxSessionMetadataDelivery.beginAttempt() else {
+            scheduleTmuxSessionMetadataRetryIfNeeded()
+            return
+        }
+        guard let command = HolyTmuxSessionMetadataUpdateCommand.command(
+            for: record.launchSpec,
+            payload: attempt.payload
+        ) else {
+            tmuxSessionMetadataDelivery.complete(attempt, succeeded: false)
+            scheduleTmuxSessionMetadataRetryIfNeeded()
+            return
+        }
+
+        tmuxSessionMetadataRetryTask?.cancel()
+        tmuxSessionMetadataRetryTask = nil
+        let work = Task.detached(priority: .utility) {
+            command.run()
+        }
+        tmuxSessionMetadataSyncTask = Task { [weak self] in
+            let succeeded = await work.value
+            guard let self else { return }
+            self.tmuxSessionMetadataSyncTask = nil
+            self.tmuxSessionMetadataDelivery.complete(attempt, succeeded: succeeded)
+            if succeeded {
+                self.startTmuxSessionMetadataSyncIfNeeded()
+            } else {
+                self.scheduleTmuxSessionMetadataRetryIfNeeded()
+            }
+        }
+    }
+
+    private func scheduleTmuxSessionMetadataRetryIfNeeded() {
+        guard tmuxSessionMetadataRetryTask == nil,
+              let delay = tmuxSessionMetadataDelivery.retryDelay() else {
+            return
+        }
+        tmuxSessionMetadataRetryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.tmuxSessionMetadataRetryTask = nil
+            self.startTmuxSessionMetadataSyncIfNeeded()
         }
     }
 

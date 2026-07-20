@@ -959,6 +959,7 @@ final class HolyWorkspaceStore: ObservableObject {
                         }
                         identityChanged = session.applyDiscoveredLaunchMetadata(
                             from: discoveredSpec,
+                            synchronizedMetadata: discovered.synchronizedMetadata,
                             refreshGitSnapshot: false
                         ) || identityChanged
                     }
@@ -1004,6 +1005,12 @@ final class HolyWorkspaceStore: ObservableObject {
                     in: currentSessionStoreState
                 ) {
                     applySessionStoreState(result.state)
+                    sessions.first(where: { $0.id == result.sessionID })?
+                        .applyDiscoveredLaunchMetadata(
+                            from: launchSpec,
+                            synchronizedMetadata: found.session.synchronizedMetadata,
+                            refreshGitSnapshot: false
+                        )
                     persist(pendingEvents: result.pendingEvents)
                 }
             case .surfaceOrphan:
@@ -1085,13 +1092,15 @@ final class HolyWorkspaceStore: ObservableObject {
 
         return reconciledArchivedLaunchSpec(
             archivedSession,
-            discoveredLaunchSpec: discoveredSpec
+            discoveredLaunchSpec: discoveredSpec,
+            synchronizedMetadata: discovered.synchronizedMetadata
         )
     }
 
     private func reconciledArchivedLaunchSpec(
         _ archivedSession: HolyArchivedSession,
-        discoveredLaunchSpec discoveredSpec: HolySessionLaunchSpec
+        discoveredLaunchSpec discoveredSpec: HolySessionLaunchSpec,
+        synchronizedMetadata: HolyTmuxSessionMetadataSnapshot
     ) -> HolySessionLaunchSpec {
         var launchSpec = archivedSession.record.launchSpec
         launchSpec.transport = discoveredSpec.transport
@@ -1108,6 +1117,10 @@ final class HolyWorkspaceStore: ObservableObject {
         if launchSpec.command?.nilIfBlank == nil {
             launchSpec.command = discoveredSpec.command
         }
+        launchSpec = mergingSynchronizedMetadata(
+            into: launchSpec,
+            from: synchronizedMetadata
+        )
         return launchSpec
     }
 
@@ -1820,7 +1833,10 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func launchLocalTmuxSession(_ session: HolyDiscoveredTmuxSession, keepHostsOpen: Bool = false) {
-        _ = attachDiscoveredTmuxSession(with: localTmuxLaunchSpec(for: session))
+        _ = attachDiscoveredTmuxSession(
+            with: localTmuxLaunchSpec(for: session),
+            synchronizedMetadata: session.synchronizedMetadata
+        )
         if !keepHostsOpen {
             remoteHostsPresented = false
         }
@@ -1830,7 +1846,10 @@ final class HolyWorkspaceStore: ObservableObject {
         guard !sessions.isEmpty else { return }
 
         for session in sessions {
-            _ = attachDiscoveredTmuxSession(with: localTmuxLaunchSpec(for: session))
+            _ = attachDiscoveredTmuxSession(
+                with: localTmuxLaunchSpec(for: session),
+                synchronizedMetadata: session.synchronizedMetadata
+            )
         }
 
         if !keepHostsOpen {
@@ -1841,7 +1860,10 @@ final class HolyWorkspaceStore: ObservableObject {
     func launchRemoteTmuxSession(_ session: HolyDiscoveredTmuxSession, on host: HolyRemoteHostRecord, keepHostsOpen: Bool = false) {
         let launchSpec = remoteTmuxLaunchSpec(for: session, on: host)
 
-        _ = attachDiscoveredTmuxSession(with: launchSpec)
+        _ = attachDiscoveredTmuxSession(
+            with: launchSpec,
+            synchronizedMetadata: session.synchronizedMetadata
+        )
         if !keepHostsOpen {
             remoteHostsPresented = false
         }
@@ -1853,7 +1875,10 @@ final class HolyWorkspaceStore: ObservableObject {
         for session in sessions {
             let launchSpec = remoteTmuxLaunchSpec(for: session, on: host)
 
-            _ = attachDiscoveredTmuxSession(with: launchSpec)
+            _ = attachDiscoveredTmuxSession(
+                with: launchSpec,
+                synchronizedMetadata: session.synchronizedMetadata
+            )
         }
 
         if !keepHostsOpen {
@@ -2474,7 +2499,8 @@ final class HolyWorkspaceStore: ObservableObject {
     /// session instead of being replaced by a blank discovery-built record.
     @discardableResult
     private func attachDiscoveredTmuxSession(
-        with launchSpec: HolySessionLaunchSpec
+        with launchSpec: HolySessionLaunchSpec,
+        synchronizedMetadata: HolyTmuxSessionMetadataSnapshot
     ) -> HolySession? {
         guard let launchKey = HolyTmuxSessionKey(launchSpec: launchSpec),
               launchSpec.tmux?.normalized.createIfMissing == false else {
@@ -2484,7 +2510,10 @@ final class HolyWorkspaceStore: ObservableObject {
         if let existingSession = sessions.first(where: {
             HolyTmuxSessionKey(launchSpec: $0.record.launchSpec) == launchKey
         }) {
-            existingSession.applyDiscoveredLaunchMetadata(from: launchSpec)
+            existingSession.applyDiscoveredLaunchMetadata(
+                from: launchSpec,
+                synchronizedMetadata: synchronizedMetadata
+            )
             selectedSessionID = existingSession.id
             persist()
             return existingSession
@@ -2498,7 +2527,8 @@ final class HolyWorkspaceStore: ObservableObject {
 
         let reconciledLaunchSpec = reconciledArchivedLaunchSpec(
             archivedSession,
-            discoveredLaunchSpec: launchSpec
+            discoveredLaunchSpec: launchSpec,
+            synchronizedMetadata: synchronizedMetadata
         )
         let previousSelectedSessionID = selectedSessionID
         guard let result = sessionSupervisor.readoptArchivedSession(
@@ -2510,6 +2540,12 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         applySessionStoreState(result.state)
+        sessions.first(where: { $0.id == result.sessionID })?
+            .applyDiscoveredLaunchMetadata(
+                from: reconciledLaunchSpec,
+                synchronizedMetadata: synchronizedMetadata,
+                refreshGitSnapshot: false
+            )
         selectedSessionID = result.sessionID
         var pendingEvents = result.pendingEvents
         pendingEvents.append(contentsOf: selectionEvents(
@@ -2814,23 +2850,26 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     private func localTmuxLaunchSpec(for session: HolyDiscoveredTmuxSession) -> HolySessionLaunchSpec {
-        HolySessionLaunchSpec(
-            runtime: session.runtime ?? .shell,
-            title: session.displayTitle,
-            objective: session.objective,
-            budget: nil,
-            transport: .local,
-            tmux: .init(
-                socketName: session.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
-                sessionName: session.sessionName,
-                createIfMissing: false
+        discoveredTmuxLaunchSpec(
+            HolySessionLaunchSpec(
+                runtime: session.runtime ?? .shell,
+                title: session.displayTitle,
+                objective: session.objective,
+                budget: nil,
+                transport: .local,
+                tmux: .init(
+                    socketName: session.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
+                    sessionName: session.sessionName,
+                    createIfMissing: false
+                ),
+                workingDirectory: session.workingDirectory,
+                command: session.bootstrapCommand,
+                initialInput: nil,
+                waitAfterCommand: false,
+                environment: [:],
+                workspace: nil
             ),
-            workingDirectory: session.workingDirectory,
-            command: session.bootstrapCommand,
-            initialInput: nil,
-            waitAfterCommand: false,
-            environment: [:],
-            workspace: nil
+            synchronizedMetadata: session.synchronizedMetadata
         )
     }
 
@@ -2838,28 +2877,84 @@ final class HolyWorkspaceStore: ObservableObject {
         for session: HolyDiscoveredTmuxSession,
         on host: HolyRemoteHostRecord
     ) -> HolySessionLaunchSpec {
-        HolySessionLaunchSpec(
-            runtime: session.runtime ?? .shell,
-            title: session.displayTitle,
-            objective: session.objective,
-            budget: nil,
-            transport: .init(
-                kind: .ssh,
-                hostLabel: host.displayTitle,
-                sshDestination: host.sshDestination
+        discoveredTmuxLaunchSpec(
+            HolySessionLaunchSpec(
+                runtime: session.runtime ?? .shell,
+                title: session.displayTitle,
+                objective: session.objective,
+                budget: nil,
+                transport: .init(
+                    kind: .ssh,
+                    hostLabel: host.displayTitle,
+                    sshDestination: host.sshDestination
+                ),
+                tmux: .init(
+                    socketName: session.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
+                    sessionName: session.sessionName,
+                    createIfMissing: false
+                ),
+                workingDirectory: session.workingDirectory,
+                command: session.bootstrapCommand,
+                initialInput: nil,
+                waitAfterCommand: false,
+                environment: [:],
+                workspace: nil
             ),
-            tmux: .init(
-                socketName: session.tmuxSocketName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
-                sessionName: session.sessionName,
-                createIfMissing: false
-            ),
-            workingDirectory: session.workingDirectory,
-            command: session.bootstrapCommand,
-            initialInput: nil,
-            waitAfterCommand: false,
-            environment: [:],
-            workspace: nil
+            synchronizedMetadata: session.synchronizedMetadata
         )
+    }
+
+    private func discoveredTmuxLaunchSpec(
+        _ launchSpec: HolySessionLaunchSpec,
+        synchronizedMetadata: HolyTmuxSessionMetadataSnapshot
+    ) -> HolySessionLaunchSpec {
+        var launchSpec = launchSpec
+        if let note = synchronizedMetadata.note,
+           note.isValid,
+           let updatedAtMilliseconds = note.updatedAtMilliseconds {
+            launchSpec.note = note.value
+            launchSpec.noteUpdatedAtMilliseconds = updatedAtMilliseconds
+        }
+        if let todayPin = synchronizedMetadata.todayPin,
+           todayPin.isValid,
+           let updatedAtMilliseconds = todayPin.updatedAtMilliseconds {
+            launchSpec.isFocused = todayPin.value ? true : nil
+            launchSpec.todayPinUpdatedAtMilliseconds = updatedAtMilliseconds
+        }
+        return launchSpec
+    }
+
+    private func mergingSynchronizedMetadata(
+        into launchSpec: HolySessionLaunchSpec,
+        from synchronizedMetadata: HolyTmuxSessionMetadataSnapshot
+    ) -> HolySessionLaunchSpec {
+        var launchSpec = launchSpec
+        let localNote = HolyTmuxSessionMetadataField<String?>(
+            value: launchSpec.note,
+            updatedAtMilliseconds: launchSpec.noteUpdatedAtMilliseconds,
+            isPresent: launchSpec.note != nil || launchSpec.noteUpdatedAtMilliseconds != nil
+        )
+        if case let .applyRemote(value, updatedAtMilliseconds) = HolyTmuxSessionMetadataMerge.action(
+            local: localNote,
+            remote: synchronizedMetadata.note
+        ) {
+            launchSpec.note = value
+            launchSpec.noteUpdatedAtMilliseconds = updatedAtMilliseconds
+        }
+
+        let localTodayPin = HolyTmuxSessionMetadataField(
+            value: launchSpec.isFocused ?? false,
+            updatedAtMilliseconds: launchSpec.todayPinUpdatedAtMilliseconds,
+            isPresent: launchSpec.isFocused == true || launchSpec.todayPinUpdatedAtMilliseconds != nil
+        )
+        if case let .applyRemote(value, updatedAtMilliseconds) = HolyTmuxSessionMetadataMerge.action(
+            local: localTodayPin,
+            remote: synchronizedMetadata.todayPin
+        ) {
+            launchSpec.isFocused = value ? true : nil
+            launchSpec.todayPinUpdatedAtMilliseconds = updatedAtMilliseconds
+        }
+        return launchSpec
     }
 
     private func applyDiscoveredLocalSessionMetadata(_ discoveredSessions: [HolyDiscoveredTmuxSession]) -> Bool {
@@ -2873,7 +2968,11 @@ final class HolyWorkspaceStore: ObservableObject {
 
             let launchSpec = localTmuxLaunchSpec(for: discoveredSession)
             changed = session.applyDiscoveredTmuxIdentity(discoveredSession) || changed
-            changed = session.applyDiscoveredLaunchMetadata(from: launchSpec, refreshGitSnapshot: false) || changed
+            changed = session.applyDiscoveredLaunchMetadata(
+                from: launchSpec,
+                synchronizedMetadata: discoveredSession.synchronizedMetadata,
+                refreshGitSnapshot: false
+            ) || changed
         }
 
         if changed { refreshAgentStateMonitorIfNeeded() }
@@ -2894,7 +2993,10 @@ final class HolyWorkspaceStore: ObservableObject {
 
             let launchSpec = remoteTmuxLaunchSpec(for: discoveredSession, on: host)
             changed = session.applyDiscoveredTmuxIdentity(discoveredSession) || changed
-            changed = session.applyDiscoveredLaunchMetadata(from: launchSpec) || changed
+            changed = session.applyDiscoveredLaunchMetadata(
+                from: launchSpec,
+                synchronizedMetadata: discoveredSession.synchronizedMetadata
+            ) || changed
         }
 
         if changed { refreshAgentStateMonitorIfNeeded() }
