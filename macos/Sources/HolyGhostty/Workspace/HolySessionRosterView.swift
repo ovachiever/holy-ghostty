@@ -1451,30 +1451,33 @@ private struct HolyAgentStatusOrb: View {
     var isAnimated = true
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            baseOrb
-
-            if showsUnreadPip {
-                // Corner badge, not an eclipse: sized and offset so the tier
-                // dot underneath stays fully readable (Erik: "two colors
-                // overlapping" when the 8.5pt pip sat on the 9px dot). The
-                // bg-colored ring separates pip from dot at every tier color.
-                Circle()
-                    .fill(HolyAgentPalette.unreadGreen)
-                    .frame(width: 7, height: 7)
-                    .overlay(
-                        Circle()
-                            .stroke(HolyGhosttyTheme.bg, lineWidth: 1.5)
-                    )
-                    // Preserve the approved unread treatment from 665e925b2:
-                    // a tight bright halo plus a wider soft bloom.
+        Group {
+            // Unread REPLACES the recency dot — one dot, green when green
+            // (Erik, 2026-07-20, after living with the corner-badge: the
+            // two-dot form "looks dumb"; the exclusive glowing green wins).
+            // Operational glyphs still outrank it: a spinner or question is
+            // more urgent than unread, and unread shows once they settle.
+            if showsUnreadPip, isRecencyTier {
+                HolyAgentStaticOrb(color: HolyAgentPalette.unreadGreen, symbol: nil, opacity: 1)
+                    // The approved unread treatment from 665e925b2: a tight
+                    // bright halo plus a wider soft bloom.
                     .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.85), radius: 2.5)
                     .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.45), radius: 6)
-                    .offset(x: 3, y: -3)
                     .accessibilityLabel("Unread agent update")
+            } else {
+                baseOrb
             }
         }
         .frame(width: 16, height: 16)
+    }
+
+    private var isRecencyTier: Bool {
+        switch state {
+        case .usedToday, .onAutomation, .inactive, .sleeping:
+            return true
+        case .working, .needsUser:
+            return false
+        }
     }
 
     @ViewBuilder
