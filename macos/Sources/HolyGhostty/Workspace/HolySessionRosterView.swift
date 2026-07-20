@@ -1455,18 +1455,22 @@ private struct HolyAgentStatusOrb: View {
             baseOrb
 
             if showsUnreadPip {
+                // Corner badge, not an eclipse: sized and offset so the tier
+                // dot underneath stays fully readable (Erik: "two colors
+                // overlapping" when the 8.5pt pip sat on the 9px dot). The
+                // bg-colored ring separates pip from dot at every tier color.
                 Circle()
                     .fill(HolyAgentPalette.unreadGreen)
-                    .frame(width: 8.5, height: 8.5)
+                    .frame(width: 7, height: 7)
                     .overlay(
                         Circle()
-                            .stroke(HolyGhosttyTheme.bgSurface, lineWidth: 1)
+                            .stroke(HolyGhosttyTheme.bg, lineWidth: 1.5)
                     )
                     // Preserve the approved unread treatment from 665e925b2:
                     // a tight bright halo plus a wider soft bloom.
                     .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.85), radius: 2.5)
                     .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.45), radius: 6)
-                    .offset(x: 1, y: -1)
+                    .offset(x: 3, y: -3)
                     .accessibilityLabel("Unread agent update")
             }
         }

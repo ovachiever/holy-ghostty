@@ -107,7 +107,7 @@ enum HolySessionAttentionKind: String, Codable, Equatable, Hashable, CaseIterabl
 }
 
 struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
-    static let currentSeenTrackingVersion = 3
+    static let currentSeenTrackingVersion = 4
     static let currentNotificationTrackingVersion = 1
 
     let sessionID: UUID
@@ -213,11 +213,15 @@ extension HolySessionAttentionMetadata {
     mutating func migrateToCurrentSeenTracking(at date: Date) -> Bool {
         guard seenTrackingVersion != Self.currentSeenTrackingVersion else { return false }
         seenTrackingVersion = Self.currentSeenTrackingVersion
-        // This v3 repair also runs for machines that already persisted the
-        // flawed v2 nil-human baseline. Preserve any post-v2 evidence, then
-        // seed missing history from the newest pre-split seen/used watermark.
-        // It is deliberately a migration approximation only: once upgraded,
-        // blue advances exclusively through prompts or genuine focus dwell.
+        // v4: the v3 rollout was destroyed in the field by a launch-time
+        // metadata wipe (empty-roster reconcile dropped every row, then the
+        // missing-row baseline stamped the whole roster seen-at-boot), so v3's
+        // seeding sources were gone before it ran. v4 re-seeds from whatever
+        // watermark survived — for wiped rows that is the boot baseline, which
+        // deliberately errs toward blue-today (the familiar pre-split look)
+        // rather than a violet flood. A migration approximation only: once
+        // upgraded, blue advances exclusively through prompts or genuine
+        // focus dwell, so the roster self-corrects within one 24h window.
         lastHumanUsedAt = [lastHumanUsedAt, lastSeenAt, lastUsedAt]
             .compactMap(\.self)
             .max()

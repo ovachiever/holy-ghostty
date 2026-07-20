@@ -2282,6 +2282,12 @@ final class HolyWorkspaceStore: ObservableObject {
         seedMissingAsSeen: Bool = false,
         at date: Date = .init()
     ) {
+        // A transient empty roster (mid-restore, mid-reload) must never wipe
+        // the attention map: dropping every row makes each session "missing",
+        // and the subsequent baseline sweep stamps the whole roster seen-now —
+        // observed live 2026-07-20 (37 rows stamped in the same minute),
+        // destroying human-recency history and every unread pip.
+        guard !sessions.isEmpty || attentionMetadataBySessionID.isEmpty else { return }
         let activeIDs = Set(sessions.map(\.id))
         var next = attentionMetadataBySessionID.filter { activeIDs.contains($0.key) }
         var changed = next.count != attentionMetadataBySessionID.count
