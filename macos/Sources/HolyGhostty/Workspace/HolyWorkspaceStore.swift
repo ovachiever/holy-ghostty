@@ -2376,7 +2376,7 @@ final class HolyWorkspaceStore: ObservableObject {
         let lastHumanUsedAt = metadata?.lastHumanUsedAt
         let lastAgentActiveAt = metadata?.lastAgentActiveAt
         let latestActivityAt = [lastHumanUsedAt, lastAgentActiveAt].compactMap(\.self).max()
-        let decision = HolySessionIndicatorPolicy.decision(for: .init(
+        let indicatorEvidence = HolySessionIndicatorEvidence(
             lifecycle: envelope?.lifecycle,
             lifecycleOccurredAt: eventOccurredAt,
             processExited: session.surfaceView.processProvablyExited,
@@ -2385,9 +2385,11 @@ final class HolyWorkspaceStore: ObservableObject {
             lastHumanUsedAt: lastHumanUsedAt,
             lastAgentActiveAt: lastAgentActiveAt,
             now: attentionClock
-        ))
+        )
+        let decision = HolySessionIndicatorPolicy.decision(for: indicatorEvidence)
         let unreadDetail = decision.showsUnreadPip ? completedDetail : nil
 
+        let base: HolySessionAttentionPresentation = {
         switch decision.kind {
         case .working:
             return .init(
@@ -2450,6 +2452,11 @@ final class HolyWorkspaceStore: ObservableObject {
                 becameAvailableAt: latestActivityAt
             )
         }
+        }()
+
+        var presentation = base
+        presentation.evidenceSummary = HolySessionIndicatorEvidenceSummary.text(for: indicatorEvidence)
+        return presentation
     }
 
     private func applySessionStoreState(_ state: HolySessionStoreState) {

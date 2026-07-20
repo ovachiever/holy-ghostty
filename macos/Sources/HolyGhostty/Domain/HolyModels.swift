@@ -367,6 +367,9 @@ struct HolySessionAttentionPresentation: Equatable {
     let detail: String?
     let isProminent: Bool
     let becameAvailableAt: Date?
+    /// One-line evidence trail: why the policy chose this state. Rendered in
+    /// the row tooltip so a surprising dot is self-explaining on hover.
+    var evidenceSummary: String? = nil
 
     var helpText: String {
         let base = if let detail, !detail.isEmpty {
@@ -374,7 +377,41 @@ struct HolySessionAttentionPresentation: Equatable {
         } else {
             title
         }
-        return showsUnreadPip ? "Unread agent update · \(base)" : base
+        let withPip = showsUnreadPip ? "Unread agent update · \(base)" : base
+        guard let evidenceSummary else { return withPip }
+        return "\(withPip)\nWhy: \(evidenceSummary)"
+    }
+}
+
+enum HolySessionIndicatorEvidenceSummary {
+    static func text(for evidence: HolySessionIndicatorEvidence) -> String {
+        var parts: [String] = []
+        if let lifecycle = evidence.lifecycle, let at = evidence.lifecycleOccurredAt {
+            let age = max(0, evidence.now.timeIntervalSince(at))
+            parts.append("hook: \(lifecycle.rawValue) \(brief(age)) ago")
+        } else {
+            parts.append("hook: none")
+        }
+        if evidence.processExited {
+            parts.append("process: exited")
+        }
+        if let human = evidence.lastHumanUsedAt {
+            parts.append("you: \(brief(max(0, evidence.now.timeIntervalSince(human)))) ago")
+        } else {
+            parts.append("you: never")
+        }
+        if let agent = evidence.lastAgentActiveAt {
+            parts.append("agent: \(brief(max(0, evidence.now.timeIntervalSince(agent)))) ago")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func brief(_ interval: TimeInterval) -> String {
+        let seconds = Int(interval)
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3_600 { return "\(seconds / 60)m" }
+        if seconds < 172_800 { return "\(seconds / 3_600)h" }
+        return "\(seconds / 86_400)d"
     }
 }
 
