@@ -1032,6 +1032,9 @@ struct HolyWorkspaceRootView: View {
         #endif
 
         Ghostty.moveFocus(to: session.surfaceView)
+        if eventType != nil {
+            store.sessionSurfaceDidReceiveUserFocus(session.id)
+        }
     }
 
     private func statusColor(for phase: HolySessionPhase) -> Color {

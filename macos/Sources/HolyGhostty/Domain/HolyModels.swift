@@ -107,7 +107,7 @@ enum HolySessionAttentionKind: String, Codable, Equatable, Hashable, CaseIterabl
 }
 
 struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
-    static let currentSeenTrackingVersion = 2
+    static let currentSeenTrackingVersion = 3
     static let currentNotificationTrackingVersion = 1
 
     let sessionID: UUID
@@ -133,6 +133,10 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
     /// can still explain when Holy actually observed the event.
     var lastAuthoritativeEventOccurredAt: Date?
     var lastAuthoritativeEventObservedAt: Date?
+    /// Migration-only v1 evidence. The old recency model advanced this when
+    /// the session was seen or used. Keep decoding the legacy key through the
+    /// v3 repair, then clear it so new persistence never writes it again.
+    var lastUsedAt: Date?
     /// Human recency advances only from a committed `user-prompt` envelope or
     /// a genuine focused-surface dwell. Restore, attach, and watcher activity
     /// cannot fabricate it.
@@ -169,6 +173,7 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
         lastAuthoritativeFinishedEventID: String? = nil,
         lastAuthoritativeEventOccurredAt: Date? = nil,
         lastAuthoritativeEventObservedAt: Date? = nil,
+        lastUsedAt: Date? = nil,
         lastHumanUsedAt: Date? = nil,
         lastAgentActiveAt: Date? = nil,
         notificationTrackingVersion: Int? = nil,
@@ -192,6 +197,7 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
         self.lastAuthoritativeFinishedEventID = lastAuthoritativeFinishedEventID
         self.lastAuthoritativeEventOccurredAt = lastAuthoritativeEventOccurredAt
         self.lastAuthoritativeEventObservedAt = lastAuthoritativeEventObservedAt
+        self.lastUsedAt = lastUsedAt
         self.lastHumanUsedAt = lastHumanUsedAt
         self.lastAgentActiveAt = lastAgentActiveAt
         self.notificationTrackingVersion = notificationTrackingVersion
@@ -207,11 +213,18 @@ extension HolySessionAttentionMetadata {
     mutating func migrateToCurrentSeenTracking(at date: Date) -> Bool {
         guard seenTrackingVersion != Self.currentSeenTrackingVersion else { return false }
         seenTrackingVersion = Self.currentSeenTrackingVersion
-        // v1's lastUsedAt mixed launch, attach, focus churn, and agent events,
-        // so none of it is admissible evidence for human use. A durable finish
-        // is the only legacy timestamp safe enough to seed agent activity.
-        lastHumanUsedAt = nil
-        lastAgentActiveAt = lastAgentFinishedAt
+        // This v3 repair also runs for machines that already persisted the
+        // flawed v2 nil-human baseline. Preserve any post-v2 evidence, then
+        // seed missing history from the newest pre-split seen/used watermark.
+        // It is deliberately a migration approximation only: once upgraded,
+        // blue advances exclusively through prompts or genuine focus dwell.
+        lastHumanUsedAt = [lastHumanUsedAt, lastSeenAt, lastUsedAt]
+            .compactMap(\.self)
+            .max()
+        lastAgentActiveAt = [lastAgentActiveAt, lastAgentFinishedAt]
+            .compactMap(\.self)
+            .max()
+        lastUsedAt = nil
         updatedAt = date
         return true
     }

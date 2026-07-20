@@ -91,7 +91,7 @@ struct HolySessionIndicatorPolicyTests {
         #expect(kind() == .sleeping)
     }
 
-    @Test func v2MigrationKeepsSeenResetsHumanAndRebaselinesAgentToLastFinish() {
+    @Test func recencyMigrationSeedsHumanFromSeenEvidenceAndAgentFromLastFinish() {
         let seen = now.addingTimeInterval(-3_600)
         let finished = now.addingTimeInterval(-7_200)
         var metadata = HolySessionAttentionMetadata(
@@ -99,8 +99,6 @@ struct HolySessionIndicatorPolicyTests {
             lastSeenAt: seen,
             lastAgentFinishedAt: finished,
             seenTrackingVersion: 1,
-            lastHumanUsedAt: now,
-            lastAgentActiveAt: now,
             updatedAt: now
         )
 
@@ -109,9 +107,43 @@ struct HolySessionIndicatorPolicyTests {
         #expect(didMigrate)
         #expect(!didMigrateAgain)
         #expect(metadata.lastSeenAt == seen)
-        #expect(metadata.lastHumanUsedAt == nil)
+        #expect(metadata.lastHumanUsedAt == seen)
         #expect(metadata.lastAgentActiveAt == finished)
         #expect(metadata.seenTrackingVersion == HolySessionAttentionMetadata.currentSeenTrackingVersion)
+    }
+
+    @Test func recencyRepairPreservesExistingV2Clocks() {
+        let human = now.addingTimeInterval(-120)
+        let agent = now.addingTimeInterval(-60)
+        var metadata = HolySessionAttentionMetadata(
+            sessionID: UUID(),
+            lastSeenAt: now.addingTimeInterval(-3_600),
+            seenTrackingVersion: 2,
+            lastHumanUsedAt: human,
+            lastAgentActiveAt: agent,
+            updatedAt: now
+        )
+
+        let didMigrate = metadata.migrateToCurrentSeenTracking(at: now)
+        #expect(didMigrate)
+        #expect(metadata.lastHumanUsedAt == human)
+        #expect(metadata.lastAgentActiveAt == agent)
+    }
+
+    @Test func recencyRepairSeedsMissingV2HumanFromPreservedSeenEvidence() {
+        let seen = now.addingTimeInterval(-300)
+        var metadata = HolySessionAttentionMetadata(
+            sessionID: UUID(),
+            lastSeenAt: seen,
+            seenTrackingVersion: 2,
+            lastHumanUsedAt: nil,
+            lastAgentActiveAt: now.addingTimeInterval(-60),
+            updatedAt: now
+        )
+
+        let didMigrate = metadata.migrateToCurrentSeenTracking(at: now)
+        #expect(didMigrate)
+        #expect(metadata.lastHumanUsedAt == seen)
     }
 
     @Test func baselineSeenDoesNotFabricateEitherRecencyClock() {
@@ -201,15 +233,16 @@ struct HolySessionIndicatorPolicyTests {
         #expect(decoded == original)
     }
 
-    @Test func legacyLastUsedPayloadDecodesAndMigratesWithoutInventingHumanUse() throws {
+    @Test func legacyLastUsedPayloadSeedsHumanFromNewestSeenTrackingEvidence() throws {
         let seen = now.addingTimeInterval(-3_600)
         let finished = now.addingTimeInterval(-7_200)
+        let legacyUsed = now.addingTimeInterval(-1_800)
         let encoded = try JSONEncoder().encode(LegacyAttentionMetadata(
             sessionID: UUID(),
             lastSeenAt: seen,
             lastAgentFinishedAt: finished,
             seenTrackingVersion: 1,
-            lastUsedAt: now,
+            lastUsedAt: legacyUsed,
             updatedAt: now
         ))
         var decoded = try JSONDecoder().decode(HolySessionAttentionMetadata.self, from: encoded)
@@ -219,8 +252,29 @@ struct HolySessionIndicatorPolicyTests {
         #expect(decoded.lastAgentActiveAt == nil)
         let didMigrate = decoded.migrateToCurrentSeenTracking(at: now)
         #expect(didMigrate)
-        #expect(decoded.lastHumanUsedAt == nil)
+        #expect(decoded.lastHumanUsedAt == legacyUsed)
         #expect(decoded.lastAgentActiveAt == finished)
+        let migratedJSON = try #require(String(
+            bytes: try JSONEncoder().encode(decoded),
+            encoding: .utf8
+        ))
+        #expect(!migratedJSON.contains("\"lastUsedAt\""))
+    }
+
+    @Test func migrationTakesNewerLastSeenOverOlderLegacyUsedEvidence() {
+        let seen = now.addingTimeInterval(-600)
+        let legacyUsed = now.addingTimeInterval(-1_200)
+        var metadata = HolySessionAttentionMetadata(
+            sessionID: UUID(),
+            lastSeenAt: seen,
+            seenTrackingVersion: 1,
+            lastUsedAt: legacyUsed,
+            updatedAt: now
+        )
+
+        let didMigrate = metadata.migrateToCurrentSeenTracking(at: now)
+        #expect(didMigrate)
+        #expect(metadata.lastHumanUsedAt == seen)
     }
 
     @Test func nextReplyBecomesUnreadUntilHumanDwell() throws {

@@ -1457,13 +1457,16 @@ private struct HolyAgentStatusOrb: View {
             if showsUnreadPip {
                 Circle()
                     .fill(HolyAgentPalette.unreadGreen)
-                    .frame(width: 5.5, height: 5.5)
+                    .frame(width: 8.5, height: 8.5)
                     .overlay(
                         Circle()
                             .stroke(HolyGhosttyTheme.bgSurface, lineWidth: 1)
                     )
-                    .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.75), radius: 2)
-                    .offset(x: 1.5, y: -1.5)
+                    // Preserve the approved unread treatment from 665e925b2:
+                    // a tight bright halo plus a wider soft bloom.
+                    .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.85), radius: 2.5)
+                    .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.45), radius: 6)
+                    .offset(x: 1, y: -1)
                     .accessibilityLabel("Unread agent update")
             }
         }

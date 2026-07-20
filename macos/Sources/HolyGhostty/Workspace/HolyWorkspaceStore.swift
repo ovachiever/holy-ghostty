@@ -364,6 +364,16 @@ final class HolyWorkspaceStore: ObservableObject {
             focusedPaneSlot = nil
             paneLayout = HolyPaneLayout(kind: .single, sessionIDs: [sessionID])
         }
+
+        // A roster click or keyboard cycle is explicit human intent, but blue
+        // is committed only after AppKit has moved focus to the terminal and
+        // the dwell gate has held it there. Yield once so the root view's
+        // selection observer can install the real first responder first.
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, self.selectedSessionID == sessionID else { return }
+            self.sessionSurfaceDidReceiveUserFocus(sessionID)
+        }
     }
 
     @discardableResult
@@ -2306,9 +2316,9 @@ final class HolyWorkspaceStore: ObservableObject {
         var metadata = existing[session.id] ?? HolySessionAttentionMetadata(sessionID: session.id)
         var changed = false
 
-        // v2 deliberately rejects v1's conflated lastUsedAt. Keep the existing
-        // seen watermark, seed agent recency only from a durable finish, and
-        // let blue be earned by a prompt or post-restore focus dwell.
+        // v3 repairs the v2 nil-human cold start from preserved seen history.
+        // After that one-time bridge, blue is earned only by a prompt or a
+        // post-restore focus dwell.
         if metadata.seenTrackingVersion != HolySessionAttentionMetadata.currentSeenTrackingVersion {
             changed = metadata.migrateToCurrentSeenTracking(at: date) || changed
         }
