@@ -41,7 +41,7 @@ struct HolySessionRosterView: View {
     // Triage — sessions regrouped into status lanes so what needs you floats up.
     private var triageSections: [HolyRosterSection] {
         let lanes = Dictionary(grouping: store.sessions) { session in
-            HolyRosterTriageLane(kind: store.attentionPresentation(for: session).kind)
+            HolyRosterTriageLane(attention: store.attentionPresentation(for: session))
         }
         return HolyRosterTriageLane.allCases.compactMap { lane in
             guard let sessions = lanes[lane], !sessions.isEmpty else { return nil }
@@ -600,13 +600,17 @@ private enum HolyRosterTriageLane: String, CaseIterable {
     case working
     case idle
 
-    init(kind: HolySessionAttentionKind) {
-        switch kind {
-        case .needsUser, .unread:
+    init(attention: HolySessionAttentionPresentation) {
+        if attention.showsUnreadPip {
+            self = .needsYou
+            return
+        }
+        switch attention.kind {
+        case .needsUser:
             self = .needsYou
         case .working:
             self = .working
-        case .usedToday, .inactive, .sleeping:
+        case .usedToday, .onAutomation, .inactive, .sleeping:
             self = .idle
         }
     }
@@ -762,6 +766,7 @@ private struct HolyRosterRow: View {
         HStack(alignment: .center, spacing: 8) {
             HolyAgentStatusOrb(
                 state: displayActivityState,
+                showsUnreadPip: attention.showsUnreadPip,
                 isAnimated: isSelected
             )
             .frame(width: 18, height: 18)
@@ -1220,10 +1225,10 @@ extension HolySessionAttentionKind {
             return HolyAgentPalette.workingBlue
         case .needsUser:
             return HolyAgentPalette.approvalNeeded
-        case .unread:
-            return HolyAgentPalette.unreadGreen
         case .usedToday:
             return HolyAgentPalette.waitingReply
+        case .onAutomation:
+            return HolyAgentPalette.workingViolet
         case .inactive, .sleeping:
             return HolyGhosttyTheme.textTertiary
         }
@@ -1442,9 +1447,31 @@ private struct HolyRowActionContextMenuOverlay: NSViewRepresentable {
 
 private struct HolyAgentStatusOrb: View {
     let state: HolySessionAttentionKind
+    let showsUnreadPip: Bool
     var isAnimated = true
 
     var body: some View {
+        ZStack(alignment: .topTrailing) {
+            baseOrb
+
+            if showsUnreadPip {
+                Circle()
+                    .fill(HolyAgentPalette.unreadGreen)
+                    .frame(width: 5.5, height: 5.5)
+                    .overlay(
+                        Circle()
+                            .stroke(HolyGhosttyTheme.bgSurface, lineWidth: 1)
+                    )
+                    .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.75), radius: 2)
+                    .offset(x: 1.5, y: -1.5)
+                    .accessibilityLabel("Unread agent update")
+            }
+        }
+        .frame(width: 16, height: 16)
+    }
+
+    @ViewBuilder
+    private var baseOrb: some View {
         switch state {
         case .working:
             if isAnimated {
@@ -1456,15 +1483,10 @@ private struct HolyAgentStatusOrb: View {
         case .needsUser:
             HolyAgentPlanningQuestionOrb()
                 .frame(width: 15, height: 15)
-        case .unread:
-            // Glow separates unread green from used-today blue at 9px: a
-            // tight bright halo plus a wider soft bloom, static (motion stays
-            // reserved for working states).
-            HolyAgentStaticOrb(color: HolyAgentPalette.unreadGreen, symbol: nil, opacity: 1)
-                .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.85), radius: 2.5)
-                .shadow(color: HolyAgentPalette.unreadGreen.opacity(0.45), radius: 6)
         case .usedToday:
             HolyAgentStaticOrb(color: HolyAgentPalette.waitingReply, symbol: nil, opacity: 0.95)
+        case .onAutomation:
+            HolyAgentStaticOrb(color: HolyAgentPalette.workingViolet, symbol: nil, opacity: 0.95)
         case .inactive:
             HolyAgentStaticOrb(color: HolyGhosttyTheme.textTertiary, symbol: nil, opacity: 0.52)
         case .sleeping:
