@@ -46,7 +46,15 @@ extension HolyAgentStateBridge {
             return contents.isEmpty ? block + "\n" : block + "\n\n" + contents
         case .multiline:
             throw HolyCodexNotifyConfigurationError.ambiguousNotify
-        case .singleLine:
+        case let .singleLine(line):
+            // A foreign notifier that itself references Holy's adapter (Codex
+            // Computer Use chains it via --previous-notify) is a delegation,
+            // not a conflict: committed-turn events still reach the register
+            // through the chain. Leave the delegated line untouched so an
+            // unrelated conflict elsewhere cannot block the whole install.
+            if notifyLineDelegatesToHolyAdapter(line) {
+                return contents
+            }
             throw HolyCodexNotifyConfigurationError.foreignNotify
         }
     }
@@ -76,15 +84,26 @@ extension HolyAgentStateBridge {
             return contents
         case .multiline:
             throw HolyCodexNotifyConfigurationError.ambiguousNotify
-        case .singleLine:
+        case let .singleLine(line):
+            // Uninstall cannot unchain a delegated notifier it does not own;
+            // leaving the line is the reversible, non-destructive choice.
+            if notifyLineDelegatesToHolyAdapter(line) {
+                return contents
+            }
             throw HolyCodexNotifyConfigurationError.foreignNotify
         }
     }
 
-    private enum TopLevelNotifyState {
+    private enum TopLevelNotifyState: Equatable {
         case absent
-        case singleLine
+        case singleLine(String)
         case multiline
+    }
+
+    /// Escape-robust delegation check: the adapter file name contains no
+    /// slashes, so it survives TOML and JSON escaping schemes verbatim.
+    private static func notifyLineDelegatesToHolyAdapter(_ line: String) -> Bool {
+        line.contains(codexNotifyAdapterFileName)
     }
 
     private static func codexNotifyConfigurationBlock(adapterURL: URL) -> String {
@@ -131,14 +150,14 @@ extension HolyAgentStateBridge {
                 if !trimmed.isEmpty && !trimmed.hasPrefix("#") {
                     if trimmed.hasPrefix("[") {
                         if tableHeaderTargetsNotify(trimmed) {
-                            return .singleLine
+                            return .singleLine(trimmed)
                         }
                         enteredTable = true
                     } else if isNotifyAssignmentPrefix(trimmed) {
                         if result != .absent {
                             return .multiline
                         }
-                        result = notifyAssignmentIsSingleLine(trimmed) ? .singleLine : .multiline
+                        result = notifyAssignmentIsSingleLine(trimmed) ? .singleLine(trimmed) : .multiline
                     }
                 }
             }
