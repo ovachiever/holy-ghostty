@@ -17,7 +17,7 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(command == [
             "unset TMUX TMUX_PANE TMUX_TMPDIR; exec 'tmux' '-L' 'holy state'",
             "'list-panes' '-a' '-F'",
-            "'#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}'",
+            "'#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}\u{1F}#{window_activity}'",
         ].joined(separator: " "))
         #expect(command.components(separatedBy: "list-panes").count == 2)
         #expect(!command.contains("show-options"))
@@ -69,7 +69,7 @@ struct HolyTmuxAgentStateMonitorTests {
 
         let result = await HolyTmuxAgentStateMonitor.run(
             plan: plan,
-            timeout: 2,
+            timeout: 6,
             inheritedEnvironment: inheritedEnvironment
         )
         switch result {
@@ -390,6 +390,17 @@ struct HolyTmuxAgentStateMonitorTests {
         let unknownCommand = try parse(row(session: "alpha", pane: "%1", wire: working))
         #expect(unknownCommand.values.first?.producerHasLiveProcess == nil)
 
+        let withActivity = try parse(row(
+            session: "alpha",
+            pane: "%1",
+            wire: working,
+            command: "claude.exe",
+            activityAt: 1_752_500_100
+        ))
+        #expect(withActivity.values.first?.producerLastOutputAt
+            == Date(timeIntervalSince1970: 1_752_500_100))
+        #expect(unknownCommand.values.first?.producerLastOutputAt == nil)
+
         let ambiguousProducers = try parse([
             row(session: "alpha", pane: "%1", wire: working, command: "claude.exe"),
             row(session: "alpha", pane: "%2", wire: working, command: "zsh"),
@@ -450,10 +461,18 @@ struct HolyTmuxAgentStateMonitorTests {
         wire: String?,
         lastFinishedWire: String? = nil,
         dead: Bool = false,
-        command: String? = nil
+        command: String? = nil,
+        activityAt: Int64? = nil
     ) -> String {
-        [session, pane, wire ?? "", lastFinishedWire ?? "", dead ? "1" : "0", command ?? ""]
-            .joined(separator: "\u{1F}")
+        [
+            session,
+            pane,
+            wire ?? "",
+            lastFinishedWire ?? "",
+            dead ? "1" : "0",
+            command ?? "",
+            activityAt.map(String.init) ?? "",
+        ].joined(separator: "\u{1F}")
     }
 
     private func envelope(

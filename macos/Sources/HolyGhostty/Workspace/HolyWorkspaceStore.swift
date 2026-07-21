@@ -128,6 +128,7 @@ final class HolyWorkspaceStore: ObservableObject {
     /// Latest producer-process evidence per session from the tmux monitor.
     /// Absent means unknown, which the indicator policy treats as lease-only.
     private var producerProcessAliveBySessionID: [UUID: Bool] = [:]
+    private var producerLastOutputAtBySessionID: [UUID: Date] = [:]
     private var agentStateArrivalCancellable: AnyCancellable?
     private var draftLaunchGuardrailTask: Task<Void, Never>?
     private var selectedSessionReadTask: Task<Void, Never>?
@@ -2347,6 +2348,7 @@ final class HolyWorkspaceStore: ObservableObject {
             lastSeenAt: metadata?.lastSeenAt,
             lastUsedAt: lastUsedAt,
             producerProcessAlive: producerProcessAliveBySessionID[session.id],
+            producerLastOutputAt: producerLastOutputAtBySessionID[session.id],
             lastActivityAt: lastActivityAt,
             now: attentionClock
         ))
@@ -2658,6 +2660,13 @@ final class HolyWorkspaceStore: ObservableObject {
             }
             if previousAlive != observation.producerHasLiveProcess {
                 attentionEvidenceChanged = true
+            }
+            // Output recency changes every poll while a TUI redraws; it only
+            // matters at lease expiry, so it never triggers a repaint itself.
+            if let outputAt = observation.producerLastOutputAt {
+                producerLastOutputAtBySessionID[session.id] = outputAt
+            } else {
+                producerLastOutputAtBySessionID.removeValue(forKey: session.id)
             }
 
             if let finishedEnvelope = observation.lastFinishedEnvelope {

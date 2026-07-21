@@ -536,10 +536,15 @@ enum HolyAgentStateBridge {
         .init(event: "SessionStart", matcher: nil, lifecycle: .idle, reasonCode: "session-start"),
         .init(event: "UserPromptSubmit", matcher: nil, lifecycle: .working, reasonCode: "user-prompt"),
         .init(event: "Notification", matcher: "permission_prompt", lifecycle: .needsUser, reasonCode: "permission"),
-        // Claude Stop is only a stop attempt: matching hooks run in parallel
-        // and a sibling may block it, making an immediate `finished` false.
-        // idle_prompt is non-blocking and explicitly means Claude is done and
-        // waiting, but Claude documents no latency SLA for this notification.
+        // Claude Stop is a stop attempt — a parallel sibling hook can force
+        // continuation, making an immediate `finished` transiently false. That
+        // error self-corrects in seconds: the next tool or prompt event
+        // publishes a newer working envelope and newest-wins ordering repairs
+        // the state. The inverse failure proved unbounded in the field
+        // (2026-07-21): idle_prompt has no latency SLA and does not fire for
+        // focused sessions, leaving every watched turn-end stuck on working.
+        // So Stop publishes finished, and idle_prompt stays as confirmation.
+        .init(event: "Stop", matcher: nil, lifecycle: .finished, reasonCode: "turn-finished"),
         .init(event: "Notification", matcher: "idle_prompt", lifecycle: .finished, reasonCode: "idle-finished"),
         .init(event: "PostToolUse", matcher: nil, lifecycle: .working, reasonCode: "tool-complete"),
         .init(event: "StopFailure", matcher: nil, lifecycle: .failed, reasonCode: "turn-failed"),

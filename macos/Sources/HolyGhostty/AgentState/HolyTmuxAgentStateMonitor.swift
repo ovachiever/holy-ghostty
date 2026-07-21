@@ -98,6 +98,10 @@ struct HolyTmuxAgentStateObservation: Equatable, Sendable {
     /// there is no unambiguous producer pane or the command is unreadable —
     /// unknown must degrade to lease behavior, never invalidate a claim.
     let producerHasLiveProcess: Bool?
+    /// Last output activity in the producer pane's window. A working agent
+    /// TUI redraws continuously; one idle at its prompt goes static. Bounds
+    /// lease extension so a process merely existing cannot pin a spinner.
+    let producerLastOutputAt: Date?
 }
 
 struct HolyTmuxAgentStateSnapshot: Equatable, Sendable {
@@ -155,7 +159,7 @@ actor HolyTmuxAgentStateMonitor {
 
     private static let fieldSeparator = "\u{1F}"
     private static let listPanesFormat =
-        "#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}"
+        "#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}\u{1F}#{window_activity}"
     private static let maximumOutputBytes = 4 * 1_024 * 1_024
     private static let maximumLineBytes = 2 * 1_024
     private static let maximumPaneRows = 4_096
@@ -416,6 +420,7 @@ extension HolyTmuxAgentStateMonitor {
             let rawLastFinishedWireValue: String?
             let isDead: Bool
             let currentCommand: String?
+            let windowActivityAt: Date?
         }
 
         var grouped: [String: [PaneValue]] = [:]
@@ -431,7 +436,7 @@ extension HolyTmuxAgentStateMonitor {
                 separator: Character(fieldSeparator),
                 omittingEmptySubsequences: false
             )
-            guard fields.count == 6,
+            guard fields.count == 7,
                   !fields[0].isEmpty,
                   !fields[1].isEmpty else {
                 throw HolyTmuxAgentStateMonitorFailure(
@@ -449,7 +454,8 @@ extension HolyTmuxAgentStateMonitor {
                 rawWireValue: rawWireValue,
                 rawLastFinishedWireValue: rawLastFinishedWireValue,
                 isDead: fields[4] == "1",
-                currentCommand: fields[5].isEmpty ? nil : String(fields[5])
+                currentCommand: fields[5].isEmpty ? nil : String(fields[5]),
+                windowActivityAt: Int64(fields[6]).map { Date(timeIntervalSince1970: TimeInterval($0)) }
             ))
         }
 
@@ -474,7 +480,8 @@ extension HolyTmuxAgentStateMonitor {
                     lastFinishedEnvelope: nil,
                     rawWireValue: nil,
                     rawLastFinishedWireValue: nil,
-                    producerHasLiveProcess: nil
+                    producerHasLiveProcess: nil,
+                    producerLastOutputAt: nil
                 )
                 continue
             }
@@ -483,6 +490,7 @@ extension HolyTmuxAgentStateMonitor {
             // the latest-state register; ambiguity fails closed to unknown.
             let producerPanes = paneValues.filter { $0.rawWireValue != nil }
             let producerHasLiveProcess: Bool?
+            let producerLastOutputAt: Date?
             if producerPanes.count == 1, let producer = producerPanes.first {
                 if producer.isDead {
                     producerHasLiveProcess = false
@@ -491,8 +499,10 @@ extension HolyTmuxAgentStateMonitor {
                 } else {
                     producerHasLiveProcess = nil
                 }
+                producerLastOutputAt = producer.windowActivityAt
             } else {
                 producerHasLiveProcess = nil
+                producerLastOutputAt = nil
             }
 
             var validByCanonicalWire: [String: HolyAgentStateEnvelope] = [:]
@@ -563,7 +573,8 @@ extension HolyTmuxAgentStateMonitor {
                     ? nil
                     : finishedEnvelope?.wireValue
                         ?? (invalidFinishedValues.count == 1 ? invalidFinishedValues.first : nil),
-                producerHasLiveProcess: producerHasLiveProcess
+                producerHasLiveProcess: producerHasLiveProcess,
+                producerLastOutputAt: producerLastOutputAt
             )
         }
 

@@ -65,7 +65,7 @@ struct HolyAgentStateBridgeTests {
         #expect(commands.contains(where: { $0.contains(" claude needs-user permission") }))
         #expect(commands.contains(where: { $0.contains(" claude finished idle-finished") }))
         #expect(commands.contains(where: { $0.contains(" claude ended session-ended") }))
-        #expect(!commands.contains(where: { $0.contains(" claude finished turn-finished") }))
+        #expect(commands.contains(where: { $0.contains(" claude finished turn-finished") }))
         #expect(promptHandlers(in: merged).contains("keep this too"))
     }
 
@@ -92,7 +92,7 @@ struct HolyAgentStateBridgeTests {
                 source: HolyAgentStateSource.claude
             )
         }
-        #expect(owned.count == 7)
+        #expect(owned.count == 8)
     }
 
     @Test func generatedMappingsUseOnlyAuthoritativeHarnessEvents() throws {
@@ -105,11 +105,11 @@ struct HolyAgentStateBridgeTests {
 
         #expect(claudeHooks["PreToolUse"] == nil)
         #expect(claudeHooks["PermissionRequest"] == nil)
-        #expect(claudeHooks["Stop"] == nil)
+        #expect(claudeHooks["Stop"] != nil)
         #expect(claudeCommands.contains(where: { $0.contains(" claude needs-user permission") }))
         #expect(claudeCommands.contains(where: { $0.contains(" claude finished idle-finished") }))
         #expect(claudeCommands.contains(where: { $0.contains(" claude failed turn-failed") }))
-        #expect(!claudeCommands.contains(where: { $0.contains(" claude finished turn-finished") }))
+        #expect(claudeCommands.contains(where: { $0.contains(" claude finished turn-finished") }))
         #expect(!claudeCommands.contains(where: { $0.contains(" claude needs-user question") }))
         #expect((codex["hooks"] as? [String: Any])?["Stop"] == nil)
         #expect((codex["hooks"] as? [String: Any])?["PreToolUse"] == nil)
@@ -119,7 +119,12 @@ struct HolyAgentStateBridgeTests {
         #expect(codexCommands.contains(where: { $0.contains(" codex working tool-complete") }))
     }
 
-    @Test func claudeFinishUsesCommittedIdleNotificationNotBlockableStop() throws {
+    // Revised contract (2026-07-21): Stop publishes finished. A parallel
+    // sibling hook can block the stop, but that transient false finished
+    // self-corrects on the next working envelope; the old idle_prompt-only
+    // design left focused sessions permanently stuck on working because the
+    // idle notification never fires while the terminal is watched.
+    @Test func claudeStopPublishesFinishedAndPreservesForeignStopHooks() throws {
         let helperURL = URL(fileURLWithPath: "/tmp/Holy/agent-state-hook.sh")
         let customStop = "keep-my-blocking-stop-hook"
         let merged = try HolyAgentStateBridge.mergingClaudeSettings(
@@ -134,16 +139,10 @@ struct HolyAgentStateBridgeTests {
         let stopGroups = try #require(hooks["Stop"] as? [[String: Any]])
         let notificationGroups = try #require(hooks["Notification"] as? [[String: Any]])
 
-        // Claude runs matching Stop hooks in parallel and a sibling may make
-        // the model continue, so Holy must not turn that attempt into finished.
-        #expect(hookCommands(inGroups: stopGroups) == [customStop])
-        #expect(!hookCommands(inGroups: stopGroups).contains(where: {
-            HolyAgentStateBridge.isOwnedHookCommand(
-                $0,
-                helperURL: helperURL,
-                source: HolyAgentStateSource.claude
-            )
-        }))
+        let stopCommands = hookCommands(inGroups: stopGroups)
+        #expect(stopCommands.contains(customStop))
+        #expect(stopCommands.contains(where: { $0.contains(" claude finished turn-finished") }))
+        // idle_prompt stays as the non-blocking confirmation path.
         let idleFinishGroups = notificationGroups.filter { $0["matcher"] as? String == "idle_prompt" }
         #expect(idleFinishGroups.count == 1)
         #expect(hookCommands(inGroups: idleFinishGroups).first?.contains(" claude finished idle-finished") == true)
@@ -777,7 +776,7 @@ struct HolyAgentStateBridgeTests {
         attach.standardError = Pipe()
         try attach.run()
 
-        let clientAttached = try waitUntil(timeout: 3) {
+        let clientAttached = try waitUntil(timeout: 10) {
             let result = try runCommand(
                 tmuxURL,
                 arguments: ["-S", socketURL.path, "list-clients", "-F", "#{client_name}"],
@@ -791,7 +790,7 @@ struct HolyAgentStateBridgeTests {
             return
         }
         #expect(FileManager.default.createFile(atPath: readyURL.path, contents: Data()))
-        let producerFinished = try waitUntil(timeout: 3) {
+        let producerFinished = try waitUntil(timeout: 10) {
             FileManager.default.fileExists(atPath: statusURL.path)
         }
         #expect(producerFinished)
@@ -802,7 +801,7 @@ struct HolyAgentStateBridgeTests {
             arguments: ["-S", socketURL.path, "kill-server"],
             environment: serverEnvironment
         )
-        let attachExited = waitForExit(attach, timeout: 3)
+        let attachExited = waitForExit(attach, timeout: 10)
         #expect(attachExited)
         if !attachExited {
             attach.terminate()

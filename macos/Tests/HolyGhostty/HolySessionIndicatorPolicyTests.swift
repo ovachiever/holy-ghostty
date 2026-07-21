@@ -296,6 +296,7 @@ struct HolySessionIndicatorPolicyTests {
         lastSeenAt: Date? = nil,
         lastUsedAgo: TimeInterval = 0,
         producerProcessAlive: Bool? = nil,
+        producerOutputAgo: TimeInterval? = nil,
         lastActivityAgo: TimeInterval? = nil
     ) -> HolySessionAttentionKind {
         HolySessionIndicatorPolicy.kind(for: .init(
@@ -306,6 +307,7 @@ struct HolySessionIndicatorPolicyTests {
             lastSeenAt: lastSeenAt,
             lastUsedAt: now.addingTimeInterval(-lastUsedAgo),
             producerProcessAlive: producerProcessAlive,
+            producerLastOutputAt: producerOutputAgo.map { now.addingTimeInterval(-$0) },
             lastActivityAt: lastActivityAgo.map { now.addingTimeInterval(-$0) },
             now: now
         ))
@@ -397,9 +399,29 @@ struct HolySessionIndicatorPolicyTests {
         #expect(kind(lifecycle: .working, occurredAgo: 60, producerProcessAlive: nil) == .working)
     }
 
-    @Test func liveProducerExtendsAWorkingClaimPastTheLease() {
-        #expect(kind(lifecycle: .working, occurredAgo: 31 * 60, producerProcessAlive: true) == .working)
-        #expect(kind(lifecycle: .working, occurredAgo: 31 * 60, producerProcessAlive: nil) == .usedToday)
+    // Extension demands a live process AND fresh pane output: a working TUI
+    // redraws continuously, while a process idling at its prompt goes static
+    // (Erik's ghost-spinner report, 2026-07-21).
+    @Test func liveProducerExtendsAWorkingClaimOnlyWhileOutputStaysFresh() {
+        #expect(kind(
+            lifecycle: .working,
+            occurredAgo: 31 * 60,
+            producerProcessAlive: true,
+            producerOutputAgo: 30
+        ) == .working)
+        #expect(kind(
+            lifecycle: .working,
+            occurredAgo: 31 * 60,
+            producerProcessAlive: true,
+            producerOutputAgo: 10 * 60
+        ) == .usedToday)
+        #expect(kind(lifecycle: .working, occurredAgo: 31 * 60, producerProcessAlive: true) == .usedToday)
+        #expect(kind(
+            lifecycle: .working,
+            occurredAgo: 31 * 60,
+            producerProcessAlive: nil,
+            producerOutputAgo: 30
+        ) == .usedToday)
         #expect(kind(lifecycle: .working, occurredAgo: 31 * 60, producerProcessAlive: false) == .usedToday)
     }
 
