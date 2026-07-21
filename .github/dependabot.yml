@@ -1,8 +1,11 @@
 version: 2
 updates:
-  # Maintain dependencies for GitHub Actions
+  # This fork takes GitHub Actions updates through upstream Ghostty merges,
+  # and the Holy-owned workflows pin their actions deliberately. The zero
+  # limit keeps dependabot security alerts available without opening PRs;
+  # raise it to re-enable update PRs.
   - package-ecosystem: "github-actions"
     directory: "/"
+    open-pull-requests-limit: 0
     schedule:
-      # Check for updates to GitHub Actions every weekday
-      interval: "daily"
+      interval: "monthly"
