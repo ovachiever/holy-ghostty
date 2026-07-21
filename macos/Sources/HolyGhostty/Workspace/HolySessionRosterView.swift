@@ -96,6 +96,7 @@ struct HolySessionRosterView: View {
             paneSlot: paneSlotsBySessionID[session.id],
             coordination: store.coordination(for: session),
             attention: store.attentionPresentation(for: session),
+            watcherFireAt: store.watcherFireAt(for: session),
             isSelected: store.selectedSessionID == session.id,
             layout: layout,
             dimmed: dimmed,
@@ -724,6 +725,7 @@ private struct HolyRosterRow: View {
     let paneSlot: Int?
     let coordination: HolySessionCoordination
     let attention: HolySessionAttentionPresentation
+    var watcherFireAt: Date? = nil
     let isSelected: Bool
     var layout: HolyRosterLayout = .classic
     var dimmed: Bool = false
@@ -784,6 +786,7 @@ private struct HolyRosterRow: View {
             Spacer(minLength: 0)
 
             if !isRenaming && !isEditingNote {
+                watcherEye
                 ageLabel
             }
 
@@ -1126,6 +1129,45 @@ private struct HolyRosterRow: View {
         let hours = Int(seconds / 3600)
         if hours < 24 { return "\(hours)h" }
         return "\(hours / 24)d"
+    }
+
+    // The watcher eye (mn-f4d77b): a static mark, never a throbber, for a
+    // session armed to reawaken itself via a scheduled /loop wakeup. Motion
+    // stays reserved for burning compute; a promise to wake is not burning.
+    private static let watcherGrace: TimeInterval = 10 * 60
+
+    private static let watcherTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    @ViewBuilder
+    private var watcherEye: some View {
+        if let watcherFireAt {
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                // The grace window covers the stretch between a wakeup firing
+                // and the loop's next turn rescheduling it; a loop that truly
+                // died stops earning the eye once the grace lapses.
+                if context.date < watcherFireAt.addingTimeInterval(Self.watcherGrace) {
+                    Image(systemName: "eye.fill")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                        .opacity(isSelected ? 0.9 : 0.65)
+                        .help(watcherHelpText(asOf: context.date))
+                        .accessibilityLabel("Watching")
+                }
+            }
+        }
+    }
+
+    private func watcherHelpText(asOf now: Date) -> String {
+        guard let watcherFireAt else { return "Watching" }
+        if watcherFireAt > now {
+            let minutes = max(1, Int((watcherFireAt.timeIntervalSince(now) / 60).rounded(.up)))
+            return "Watching: next wakeup at \(Self.watcherTimeFormatter.string(from: watcherFireAt)) (in \(minutes)m)"
+        }
+        return "Watching: wakeup fired, awaiting reschedule"
     }
 
     @ViewBuilder

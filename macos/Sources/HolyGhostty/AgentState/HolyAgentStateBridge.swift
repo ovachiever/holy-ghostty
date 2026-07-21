@@ -530,6 +530,51 @@ enum HolyAgentStateBridge {
         let matcher: String?
         let lifecycle: HolyAgentLifecycleState
         let reasonCode: String
+        /// Overrides the helper-based command entirely. Used by the watcher
+        /// producer, which lives inline in the hook command so no second
+        /// installed artifact is needed.
+        var command: String? = nil
+    }
+
+    /// Marker embedded in the inline watcher program; ownership detection
+    /// keys on it so merges stay idempotent and uninstall strips the hook.
+    static let watcherHookCommandMarker = "holy-watcher-v1"
+
+    /// Inline producer for the `@holy_watcher_v1` pane register (mn-f4d77b).
+    /// A committed ScheduleWakeup means this session will reawaken itself;
+    /// the program reads ONLY delaySeconds and stop from the tool input on
+    /// stdin — never the loop prompt — and either arms the register with the
+    /// computed fire time or clears it on stop. It always exits 0 so a
+    /// register failure can never block the tool.
+    static var claudeWatcherHookCommand: String {
+        let program = """
+        "\(watcherHookCommandMarker)"
+        import json,os,subprocess,sys,time
+        try:
+         payload=json.load(sys.stdin)
+        except Exception:
+         sys.exit(0)
+        tool_input=payload.get("tool_input") or {}
+        pane=os.environ.get("TMUX_PANE")
+        if not pane:
+         sys.exit(0)
+        if tool_input.get("stop") is True:
+         subprocess.run(["tmux","set-option","-pqu","-t",pane,"@holy_watcher_v1"],check=False)
+         sys.exit(0)
+        delay=tool_input.get("delaySeconds")
+        if not isinstance(delay,(int,float)) or isinstance(delay,bool) or delay<=0 or delay>86400:
+         sys.exit(0)
+        fire_at_ms=int(time.time()*1000)+int(delay*1000)
+        wire="v1|claude|watching|%d|loop-wakeup" % fire_at_ms
+        subprocess.run(["tmux","set-option","-pq","-t",pane,"@holy_watcher_v1",wire],check=False)
+        sys.exit(0)
+        """
+        return "/usr/bin/python3 -c \(shellQuote(program))"
+    }
+
+    static func isOwnedWatcherHookCommand(_ command: String) -> Bool {
+        command.hasPrefix("/usr/bin/python3 -c ")
+            && command.contains(watcherHookCommandMarker)
     }
 
     private static let claudeHookSpecifications: [HookSpecification] = [
@@ -547,6 +592,15 @@ enum HolyAgentStateBridge {
         .init(event: "Stop", matcher: nil, lifecycle: .finished, reasonCode: "turn-finished"),
         .init(event: "Notification", matcher: "idle_prompt", lifecycle: .finished, reasonCode: "idle-finished"),
         .init(event: "PostToolUse", matcher: nil, lifecycle: .working, reasonCode: "tool-complete"),
+        // Watcher eye (mn-f4d77b): a scheduled /loop wakeup arms the
+        // @holy_watcher_v1 register with its fire time; stop clears it.
+        .init(
+            event: "PostToolUse",
+            matcher: "ScheduleWakeup",
+            lifecycle: .idle,
+            reasonCode: "wakeup-scheduled",
+            command: claudeWatcherHookCommand
+        ),
         .init(event: "StopFailure", matcher: nil, lifecycle: .failed, reasonCode: "turn-failed"),
         .init(event: "SessionEnd", matcher: nil, lifecycle: .ended, reasonCode: "session-ended"),
     ]
@@ -597,7 +651,7 @@ enum HolyAgentStateBridge {
                             command,
                             helperURL: helperURL,
                             source: source
-                        )
+                        ) && !isOwnedWatcherHookCommand(command)
                     }
                     if retainedHandlers.count != handlers.count,
                        firstOwnedInsertionIndex == nil {
@@ -647,7 +701,7 @@ enum HolyAgentStateBridge {
             "hooks": [
                 [
                     "type": "command",
-                    "command": hookCommand(
+                    "command": specification.command ?? hookCommand(
                         helperURL: helperURL,
                         source: source,
                         lifecycle: specification.lifecycle,

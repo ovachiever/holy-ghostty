@@ -314,7 +314,7 @@ enum HolyAgentStateBridgeInstaller {
                         command,
                         helperURL: helperURL,
                         source: source
-                    )
+                    ) && !HolyAgentStateBridge.isOwnedWatcherHookCommand(command)
                 }
                 guard !retainedHandlers.isEmpty else { return nil }
                 var retained = group

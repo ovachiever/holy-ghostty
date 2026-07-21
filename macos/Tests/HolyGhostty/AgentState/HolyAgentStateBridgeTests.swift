@@ -148,6 +148,38 @@ struct HolyAgentStateBridgeTests {
         #expect(hookCommands(inGroups: idleFinishGroups).first?.contains(" claude finished idle-finished") == true)
     }
 
+    // Watcher eye producer (mn-f4d77b): a ScheduleWakeup-matched PostToolUse
+    // hook maintains @holy_watcher_v1 inline, reading only delaySeconds and
+    // stop from the tool input. Ownership keys on the embedded marker so the
+    // merge stays idempotent and uninstall strips it.
+    @Test func claudeWatcherHookArmsTheWatcherRegisterInline() throws {
+        let helperURL = URL(fileURLWithPath: "/tmp/Holy/agent-state-hook.sh")
+        let merged = try HolyAgentStateBridge.mergingClaudeSettings([:], helperURL: helperURL)
+        let hooks = try #require(merged["hooks"] as? [String: Any])
+        let postToolGroups = try #require(hooks["PostToolUse"] as? [[String: Any]])
+
+        let watcherGroups = postToolGroups.filter { $0["matcher"] as? String == "ScheduleWakeup" }
+        #expect(watcherGroups.count == 1)
+        let command = try #require(hookCommands(inGroups: watcherGroups).first)
+        #expect(command.hasPrefix("/usr/bin/python3 -c "))
+        #expect(command.contains("@holy_watcher_v1"))
+        #expect(command.contains("delaySeconds"))
+        #expect(HolyAgentStateBridge.isOwnedWatcherHookCommand(command))
+        #expect(!HolyAgentStateBridge.isOwnedHookCommand(
+            command,
+            helperURL: helperURL,
+            source: HolyAgentStateSource.claude
+        ))
+
+        // The inline program never reads the loop prompt.
+        #expect(!command.contains("\"prompt\""))
+
+        // Re-merging replaces rather than duplicates the watcher group.
+        let twice = try HolyAgentStateBridge.mergingClaudeSettings(merged, helperURL: helperURL)
+        let twiceGroups = try #require((twice["hooks"] as? [String: Any])?["PostToolUse"] as? [[String: Any]])
+        #expect(twiceGroups.filter { $0["matcher"] as? String == "ScheduleWakeup" }.count == 1)
+    }
+
     @Test func codexMergeLeavesTrustAndExistingHookIndexesAlone() throws {
         let helperURL = URL(fileURLWithPath: "/tmp/Holy/agent-state-hook.sh")
         let existingSessionStart: [[String: Any]] = [

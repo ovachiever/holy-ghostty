@@ -102,6 +102,10 @@ struct HolyTmuxAgentStateObservation: Equatable, Sendable {
     /// TUI redraws continuously; one idle at its prompt goes static. Bounds
     /// lease extension so a process merely existing cannot pin a spinner.
     let producerLastOutputAt: Date?
+    /// When the session's armed /loop wakeup will fire (mn-f4d77b). Read from
+    /// the independent @holy_watcher_v1 register; nil when no pane publishes
+    /// a valid claim or when multiple panes disagree.
+    let watcherFireAt: Date?
 }
 
 struct HolyTmuxAgentStateSnapshot: Equatable, Sendable {
@@ -159,7 +163,7 @@ actor HolyTmuxAgentStateMonitor {
 
     private static let fieldSeparator = "\u{1F}"
     private static let listPanesFormat =
-        "#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}\u{1F}#{window_activity}"
+        "#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}\u{1F}#{window_activity}\u{1F}#{@holy_watcher_v1}"
     private static let maximumOutputBytes = 4 * 1_024 * 1_024
     private static let maximumLineBytes = 2 * 1_024
     private static let maximumPaneRows = 4_096
@@ -421,6 +425,7 @@ extension HolyTmuxAgentStateMonitor {
             let isDead: Bool
             let currentCommand: String?
             let windowActivityAt: Date?
+            let rawWatcherValue: String?
         }
 
         var grouped: [String: [PaneValue]] = [:]
@@ -436,7 +441,7 @@ extension HolyTmuxAgentStateMonitor {
                 separator: Character(fieldSeparator),
                 omittingEmptySubsequences: false
             )
-            guard fields.count == 7,
+            guard fields.count == 8,
                   !fields[0].isEmpty,
                   !fields[1].isEmpty else {
                 throw HolyTmuxAgentStateMonitorFailure(
@@ -455,7 +460,8 @@ extension HolyTmuxAgentStateMonitor {
                 rawLastFinishedWireValue: rawLastFinishedWireValue,
                 isDead: fields[4] == "1",
                 currentCommand: fields[5].isEmpty ? nil : String(fields[5]),
-                windowActivityAt: Int64(fields[6]).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+                windowActivityAt: Int64(fields[6]).map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                rawWatcherValue: fields[7].isEmpty ? nil : String(fields[7])
             ))
         }
 
@@ -481,7 +487,8 @@ extension HolyTmuxAgentStateMonitor {
                     rawWireValue: nil,
                     rawLastFinishedWireValue: nil,
                     producerHasLiveProcess: nil,
-                    producerLastOutputAt: nil
+                    producerLastOutputAt: nil,
+                    watcherFireAt: watcherFireAt(fromRawValues: paneValues.compactMap(\.rawWatcherValue))
                 )
                 continue
             }
@@ -574,7 +581,8 @@ extension HolyTmuxAgentStateMonitor {
                     : finishedEnvelope?.wireValue
                         ?? (invalidFinishedValues.count == 1 ? invalidFinishedValues.first : nil),
                 producerHasLiveProcess: producerHasLiveProcess,
-                producerLastOutputAt: producerLastOutputAt
+                producerLastOutputAt: producerLastOutputAt,
+                watcherFireAt: watcherFireAt(fromRawValues: paneValues.compactMap(\.rawWatcherValue))
             )
         }
 
@@ -586,6 +594,23 @@ extension HolyTmuxAgentStateMonitor {
     private static let shellCommandNames: Set<String> = [
         "zsh", "bash", "fish", "sh", "dash", "tcsh", "csh", "ksh", "login",
     ]
+
+    /// Parses the independent watcher register. Exactly one distinct valid
+    /// claim across the session's panes is required; disagreement or any
+    /// malformed value fails closed to nil.
+    private static func watcherFireAt(fromRawValues rawWatcherValues: [String]) -> Date? {
+        let rawValues = Set(rawWatcherValues)
+        guard rawValues.count == 1, let raw = rawValues.first else { return nil }
+        let fields = raw.split(separator: "|", omittingEmptySubsequences: false)
+        guard fields.count == 5,
+              fields[0] == "v1",
+              fields[2] == "watching",
+              let fireAtMilliseconds = Int64(fields[3]),
+              fireAtMilliseconds > 0 else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: TimeInterval(fireAtMilliseconds) / 1_000)
+    }
 
     private static func tmuxCommandArguments(socketName: String?) -> [String] {
         var arguments: [String] = []

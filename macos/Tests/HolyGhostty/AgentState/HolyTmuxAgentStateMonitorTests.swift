@@ -17,7 +17,7 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(command == [
             "unset TMUX TMUX_PANE TMUX_TMPDIR; exec 'tmux' '-L' 'holy state'",
             "'list-panes' '-a' '-F'",
-            "'#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}\u{1F}#{window_activity}'",
+            "'#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}\u{1F}#{window_activity}\u{1F}#{@holy_watcher_v1}'",
         ].joined(separator: " "))
         #expect(command.components(separatedBy: "list-panes").count == 2)
         #expect(!command.contains("show-options"))
@@ -411,6 +411,45 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(noState.values.first?.producerHasLiveProcess == nil)
     }
 
+    // Watcher register (mn-f4d77b): one distinct valid claim per session, or
+    // nothing. Works with or without a lifecycle register on the same pane.
+    @Test func watcherRegisterParsesOneValidClaimAndFailsClosed() throws {
+        let working = try envelope(
+            lifecycle: .working,
+            timestamp: 1_752_500_123_456,
+            token: "working-1"
+        ).wireValue
+
+        let armed = try parse(row(
+            session: "alpha",
+            pane: "%1",
+            wire: working,
+            watcher: "v1|claude|watching|1752500600000|loop-wakeup"
+        ))
+        #expect(armed.values.first?.watcherFireAt == Date(timeIntervalSince1970: 1_752_500_600))
+
+        let armedWithoutLifecycle = try parse(row(
+            session: "alpha",
+            pane: "%1",
+            wire: nil,
+            watcher: "v1|claude|watching|1752500600000|loop-wakeup"
+        ))
+        #expect(armedWithoutLifecycle.values.first?.watcherFireAt
+            == Date(timeIntervalSince1970: 1_752_500_600))
+
+        let disarmed = try parse(row(session: "alpha", pane: "%1", wire: working))
+        #expect(disarmed.values.first?.watcherFireAt == nil)
+
+        let malformed = try parse(row(session: "alpha", pane: "%1", wire: working, watcher: "v1|claude|watching|not-a-time|x"))
+        #expect(malformed.values.first?.watcherFireAt == nil)
+
+        let conflicting = try parse([
+            row(session: "alpha", pane: "%1", wire: working, watcher: "v1|claude|watching|1752500600000|loop-wakeup"),
+            row(session: "alpha", pane: "%2", wire: nil, watcher: "v1|claude|watching|1752500700000|loop-wakeup"),
+        ].joined(separator: "\n"))
+        #expect(conflicting.values.first?.watcherFireAt == nil)
+    }
+
     @Test func malformedGroupedRowsRejectTheWholeSnapshot() {
         do {
             _ = try parse("alpha\u{1F}%1")
@@ -462,7 +501,8 @@ struct HolyTmuxAgentStateMonitorTests {
         lastFinishedWire: String? = nil,
         dead: Bool = false,
         command: String? = nil,
-        activityAt: Int64? = nil
+        activityAt: Int64? = nil,
+        watcher: String? = nil
     ) -> String {
         [
             session,
@@ -472,6 +512,7 @@ struct HolyTmuxAgentStateMonitorTests {
             dead ? "1" : "0",
             command ?? "",
             activityAt.map(String.init) ?? "",
+            watcher ?? "",
         ].joined(separator: "\u{1F}")
     }
 

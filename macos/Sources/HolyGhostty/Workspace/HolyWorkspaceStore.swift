@@ -129,6 +129,10 @@ final class HolyWorkspaceStore: ObservableObject {
     /// Absent means unknown, which the indicator policy treats as lease-only.
     private var producerProcessAliveBySessionID: [UUID: Bool] = [:]
     private var producerLastOutputAtBySessionID: [UUID: Date] = [:]
+    /// Armed /loop wakeup fire times per session (mn-f4d77b), from the
+    /// @holy_watcher_v1 register. Feeds the static watcher eye only; never
+    /// touches the indicator policy.
+    private var watcherFireAtBySessionID: [UUID: Date] = [:]
     private var agentStateArrivalCancellable: AnyCancellable?
     private var draftLaunchGuardrailTask: Task<Void, Never>?
     private var selectedSessionReadTask: Task<Void, Never>?
@@ -322,6 +326,11 @@ final class HolyWorkspaceStore: ObservableObject {
 
     func attentionPresentation(for session: HolySession) -> HolySessionAttentionPresentation {
         attentionPresentation(for: session, coordination: coordination(for: session))
+    }
+
+    /// When this session's armed /loop wakeup will fire, if any (mn-f4d77b).
+    func watcherFireAt(for session: HolySession) -> Date? {
+        watcherFireAtBySessionID[session.id]
     }
 
     func session(withID id: UUID) -> HolySession? {
@@ -2667,6 +2676,20 @@ final class HolyWorkspaceStore: ObservableObject {
                 producerLastOutputAtBySessionID[session.id] = outputAt
             } else {
                 producerLastOutputAtBySessionID.removeValue(forKey: session.id)
+            }
+
+            // A dead producer cannot wake itself; its armed watcher is void.
+            let previousWatcher = watcherFireAtBySessionID[session.id]
+            let watcher = observation.producerHasLiveProcess == false
+                ? nil
+                : observation.watcherFireAt
+            if let watcher {
+                watcherFireAtBySessionID[session.id] = watcher
+            } else {
+                watcherFireAtBySessionID.removeValue(forKey: session.id)
+            }
+            if previousWatcher != watcher {
+                attentionEvidenceChanged = true
             }
 
             if let finishedEnvelope = observation.lastFinishedEnvelope {
