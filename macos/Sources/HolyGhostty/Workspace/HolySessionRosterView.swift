@@ -760,9 +760,12 @@ private struct HolyRosterRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
+            // Working must be glanceable across the whole roster, not just the
+            // selected row (40466c243 fixed this once already). The 15fps
+            // periodic tick keeps N concurrent spinners cheap.
             HolyAgentStatusOrb(
                 state: displayActivityState,
-                isAnimated: isSelected
+                isAnimated: true
             )
             .frame(width: 18, height: 18)
             .help(attention.helpText)
