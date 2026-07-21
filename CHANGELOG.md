@@ -4,6 +4,10 @@ All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
+No unreleased changes.
+
+## 0.44 (2026-07-21)
+
 The roster now tells the truth at a glance: every indicator is driven by
 structured lifecycle facts from the agent harnesses, blue means you actually
 used the session, and spinners cannot outlive the work they describe.

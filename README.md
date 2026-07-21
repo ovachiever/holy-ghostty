@@ -26,7 +26,7 @@
 
 Holy Ghostty is a product fork of Ghostty. The terminal core remains Ghostty. The Holy layer adds a native macOS workspace for launching, attaching, supervising, archiving, and restoring terminal-backed coding sessions.
 
-Current Holy Ghostty release: `0.40`.
+Current Holy Ghostty release: `0.44`.
 
 The app currently supports:
 

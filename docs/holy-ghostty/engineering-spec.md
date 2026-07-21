@@ -4,7 +4,7 @@ Last updated: 2026-07-21
 
 This document describes the current repository implementation. It is an as-is engineering spec.
 
-Current release: `0.40`.
+Current release: `0.44`.
 
 ## 1. Purpose
 

@@ -796,7 +796,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-					MARKETING_VERSION = 0.40;
+					MARKETING_VERSION = 0.44;
 				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
 				PRODUCT_BUNDLE_IDENTIFIER = "org.holyghostty.app";
 				PRODUCT_MODULE_NAME = Ghostty;
@@ -1194,7 +1194,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-					MARKETING_VERSION = 0.40;
+					MARKETING_VERSION = 0.44;
 				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
 				PRODUCT_BUNDLE_IDENTIFIER = "org.holyghostty.app.debug";
 				PRODUCT_MODULE_NAME = Ghostty;
@@ -1250,7 +1250,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-					MARKETING_VERSION = 0.40;
+					MARKETING_VERSION = 0.44;
 				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
 				PRODUCT_BUNDLE_IDENTIFIER = "org.holyghostty.app";
 				PRODUCT_MODULE_NAME = Ghostty;
