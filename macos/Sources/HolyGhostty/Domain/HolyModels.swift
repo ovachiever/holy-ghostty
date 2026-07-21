@@ -107,7 +107,7 @@ enum HolySessionAttentionKind: String, Codable, Equatable, Hashable, CaseIterabl
 }
 
 struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
-    static let currentSeenTrackingVersion = 1
+    static let currentSeenTrackingVersion = 2
     static let currentNotificationTrackingVersion = 1
 
     let sessionID: UUID
@@ -133,9 +133,10 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
     /// can still explain when Holy actually observed the event.
     var lastAuthoritativeEventOccurredAt: Date?
     var lastAuthoritativeEventObservedAt: Date?
-    /// Recency is advanced only by an operator seeing the session or by a
-    /// structured harness event. Terminal redraws and screen prose cannot
-    /// make an old session look newly used.
+    /// Human recency: advanced only by a committed `user-prompt` envelope,
+    /// meaning the operator actually submitted something to this session.
+    /// Agent events, finishes, restores, focus sweeps, and boot baselines
+    /// can never advance it — blue is earned, not inherited.
     var lastUsedAt: Date?
     /// Persists which actionable producer event has already scheduled an OS
     /// notification, preventing both restart duplicates and offline-event loss.
@@ -198,12 +199,24 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
 }
 
 extension HolySessionAttentionMetadata {
+    /// Reason code that marks an envelope as direct human use. Only a
+    /// submitted prompt advances the blue recency axis, which makes it
+    /// immune by construction to launch sweeps and attach-all seeding.
+    static let humanUseReasonCode = "user-prompt"
+
     @discardableResult
-    mutating func baselineLegacySeenTracking(at date: Date) -> Bool {
+    mutating func migrateSeenTracking(at date: Date) -> Bool {
         guard seenTrackingVersion != Self.currentSeenTrackingVersion else { return false }
+        let firstAdoption = seenTrackingVersion == nil
         seenTrackingVersion = Self.currentSeenTrackingVersion
-        lastSeenAt = date
-        lastUsedAt = max(lastUsedAt ?? .distantPast, date)
+        if firstAdoption {
+            // First hook-aware adoption only: baseline seen so historical
+            // replies cannot badge-storm the whole roster.
+            lastSeenAt = date
+        }
+        // v2: used-today is earned by user prompts alone. Clear pre-v2
+        // stamps that conflated agent events and boot baselines with use.
+        lastUsedAt = nil
         updatedAt = date
         return true
     }
@@ -227,7 +240,9 @@ extension HolySessionAttentionMetadata {
         lastAuthoritativeEventID = envelope.eventIdentity
         lastAuthoritativeEventOccurredAt = occurredAt
         lastAuthoritativeEventObservedAt = observedAt
-        lastUsedAt = max(lastUsedAt ?? .distantPast, occurredAt)
+        if envelope.reasonCode == Self.humanUseReasonCode {
+            lastUsedAt = max(lastUsedAt ?? .distantPast, occurredAt)
+        }
         lastAttentionWasActiveWork = envelope.lifecycle == .working
         switch envelope.lifecycle {
         case .finished:
@@ -272,16 +287,16 @@ extension HolySessionAttentionMetadata {
         lastAgentFinishedAt = occurredAt
         lastAgentFinishedSource = envelope.source
         lastAgentFinishedReasonCode = envelope.reasonCode
-        lastUsedAt = max(lastUsedAt ?? .distantPast, occurredAt)
         updatedAt = observedAt
         return true
     }
 
+    /// Seeing a session acknowledges its unread reply; it does not count as
+    /// using it. Blue advances only through `humanUseReasonCode` envelopes.
     @discardableResult
     mutating func markSeen(at date: Date) -> Bool {
         guard lastSeenAt.map({ $0 < date }) ?? true else { return false }
         lastSeenAt = date
-        lastUsedAt = max(lastUsedAt ?? .distantPast, date)
         updatedAt = date
         return true
     }
@@ -354,6 +369,10 @@ struct HolySessionIndicatorEvidence: Equatable {
     let lastAgentFinishedAt: Date?
     let lastSeenAt: Date?
     let lastUsedAt: Date
+    /// Durable-register process evidence from the tmux monitor: whether the
+    /// pane that published the latest working claim still runs a non-shell
+    /// foreground process. nil means unknown and degrades to lease behavior.
+    var producerProcessAlive: Bool? = nil
     let now: Date
 }
 
@@ -381,9 +400,19 @@ enum HolySessionIndicatorPolicy {
                     }
                 }
             case .working:
-                if let occurredAt = evidence.lifecycleOccurredAt {
-                    let age = evidence.now.timeIntervalSince(occurredAt)
-                    if age >= 0, age < workingLease {
+                // Process evidence may extend or invalidate a committed
+                // working claim, never create one (mn-8cec74). A provably
+                // dead producer drops the spinner on the next poll; a live
+                // producer keeps a long tool-less turn spinning past the
+                // lease. Unknown evidence falls back to the lease alone.
+                if evidence.producerProcessAlive != false {
+                    if let occurredAt = evidence.lifecycleOccurredAt {
+                        let age = evidence.now.timeIntervalSince(occurredAt)
+                        if age >= 0, age < workingLease {
+                            return .working
+                        }
+                    }
+                    if evidence.producerProcessAlive == true {
                         return .working
                     }
                 }

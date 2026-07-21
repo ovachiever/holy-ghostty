@@ -92,6 +92,12 @@ struct HolyTmuxAgentStateObservation: Equatable, Sendable {
     /// Conflicts intentionally expose neither candidate as authoritative.
     let rawWireValue: String?
     let rawLastFinishedWireValue: String?
+    /// Whether the single pane that published the latest-state register still
+    /// runs a non-shell foreground process. When an agent dies, tmux shows
+    /// the pane's shell again, which proves the producer is gone. nil when
+    /// there is no unambiguous producer pane or the command is unreadable —
+    /// unknown must degrade to lease behavior, never invalidate a claim.
+    let producerHasLiveProcess: Bool?
 }
 
 struct HolyTmuxAgentStateSnapshot: Equatable, Sendable {
@@ -149,7 +155,7 @@ actor HolyTmuxAgentStateMonitor {
 
     private static let fieldSeparator = "\u{1F}"
     private static let listPanesFormat =
-        "#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}"
+        "#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}"
     private static let maximumOutputBytes = 4 * 1_024 * 1_024
     private static let maximumLineBytes = 2 * 1_024
     private static let maximumPaneRows = 4_096
@@ -408,6 +414,8 @@ extension HolyTmuxAgentStateMonitor {
             let paneID: String
             let rawWireValue: String?
             let rawLastFinishedWireValue: String?
+            let isDead: Bool
+            let currentCommand: String?
         }
 
         var grouped: [String: [PaneValue]] = [:]
@@ -423,7 +431,7 @@ extension HolyTmuxAgentStateMonitor {
                 separator: Character(fieldSeparator),
                 omittingEmptySubsequences: false
             )
-            guard fields.count == 4,
+            guard fields.count == 6,
                   !fields[0].isEmpty,
                   !fields[1].isEmpty else {
                 throw HolyTmuxAgentStateMonitorFailure(
@@ -439,7 +447,9 @@ extension HolyTmuxAgentStateMonitor {
             grouped[sessionName, default: []].append(PaneValue(
                 paneID: paneID,
                 rawWireValue: rawWireValue,
-                rawLastFinishedWireValue: rawLastFinishedWireValue
+                rawLastFinishedWireValue: rawLastFinishedWireValue,
+                isDead: fields[4] == "1",
+                currentCommand: fields[5].isEmpty ? nil : String(fields[5])
             ))
         }
 
@@ -463,9 +473,26 @@ extension HolyTmuxAgentStateMonitor {
                     envelope: nil,
                     lastFinishedEnvelope: nil,
                     rawWireValue: nil,
-                    rawLastFinishedWireValue: nil
+                    rawLastFinishedWireValue: nil,
+                    producerHasLiveProcess: nil
                 )
                 continue
+            }
+
+            // Process evidence is meaningful only when exactly one pane owns
+            // the latest-state register; ambiguity fails closed to unknown.
+            let producerPanes = paneValues.filter { $0.rawWireValue != nil }
+            let producerHasLiveProcess: Bool?
+            if producerPanes.count == 1, let producer = producerPanes.first {
+                if producer.isDead {
+                    producerHasLiveProcess = false
+                } else if let command = producer.currentCommand {
+                    producerHasLiveProcess = !shellCommandNames.contains(command.lowercased())
+                } else {
+                    producerHasLiveProcess = nil
+                }
+            } else {
+                producerHasLiveProcess = nil
             }
 
             var validByCanonicalWire: [String: HolyAgentStateEnvelope] = [:]
@@ -535,12 +562,19 @@ extension HolyTmuxAgentStateMonitor {
                 rawLastFinishedWireValue: finishedConflicting
                     ? nil
                     : finishedEnvelope?.wireValue
-                        ?? (invalidFinishedValues.count == 1 ? invalidFinishedValues.first : nil)
+                        ?? (invalidFinishedValues.count == 1 ? invalidFinishedValues.first : nil),
+                producerHasLiveProcess: producerHasLiveProcess
             )
         }
 
         return observations
     }
+
+    /// Foreground commands that prove the producer process exited: when an
+    /// agent dies, tmux reports the pane's shell as the current command.
+    private static let shellCommandNames: Set<String> = [
+        "zsh", "bash", "fish", "sh", "dash", "tcsh", "csh", "ksh", "login",
+    ]
 
     private static func tmuxCommandArguments(socketName: String?) -> [String] {
         var arguments: [String] = []

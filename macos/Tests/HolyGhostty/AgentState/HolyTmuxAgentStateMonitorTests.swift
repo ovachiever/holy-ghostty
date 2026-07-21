@@ -17,7 +17,7 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(command == [
             "unset TMUX TMUX_PANE TMUX_TMPDIR; exec 'tmux' '-L' 'holy state'",
             "'list-panes' '-a' '-F'",
-            "'#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}'",
+            "'#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}'",
         ].joined(separator: " "))
         #expect(command.components(separatedBy: "list-panes").count == 2)
         #expect(!command.contains("show-options"))
@@ -369,6 +369,37 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(observations[emptyKey]?.envelope == nil)
     }
 
+    // Producer-process evidence: known only for a single unambiguous
+    // producer pane; a shell foreground or dead pane proves the agent exited.
+    @Test func producerProcessEvidenceReadsTheProducerPaneForeground() throws {
+        let working = try envelope(
+            lifecycle: .working,
+            timestamp: 1_752_500_123_456,
+            token: "working-1"
+        ).wireValue
+
+        let alive = try parse(row(session: "alpha", pane: "%1", wire: working, command: "claude.exe"))
+        #expect(alive.values.first?.producerHasLiveProcess == true)
+
+        let fellBackToShell = try parse(row(session: "alpha", pane: "%1", wire: working, command: "zsh"))
+        #expect(fellBackToShell.values.first?.producerHasLiveProcess == false)
+
+        let deadPane = try parse(row(session: "alpha", pane: "%1", wire: working, dead: true, command: "claude.exe"))
+        #expect(deadPane.values.first?.producerHasLiveProcess == false)
+
+        let unknownCommand = try parse(row(session: "alpha", pane: "%1", wire: working))
+        #expect(unknownCommand.values.first?.producerHasLiveProcess == nil)
+
+        let ambiguousProducers = try parse([
+            row(session: "alpha", pane: "%1", wire: working, command: "claude.exe"),
+            row(session: "alpha", pane: "%2", wire: working, command: "zsh"),
+        ].joined(separator: "\n"))
+        #expect(ambiguousProducers.values.first?.producerHasLiveProcess == nil)
+
+        let noState = try parse(row(session: "alpha", pane: "%1", wire: nil, command: "claude.exe"))
+        #expect(noState.values.first?.producerHasLiveProcess == nil)
+    }
+
     @Test func malformedGroupedRowsRejectTheWholeSnapshot() {
         do {
             _ = try parse("alpha\u{1F}%1")
@@ -417,9 +448,12 @@ struct HolyTmuxAgentStateMonitorTests {
         session: String,
         pane: String,
         wire: String?,
-        lastFinishedWire: String? = nil
+        lastFinishedWire: String? = nil,
+        dead: Bool = false,
+        command: String? = nil
     ) -> String {
-        [session, pane, wire ?? "", lastFinishedWire ?? ""].joined(separator: "\u{1F}")
+        [session, pane, wire ?? "", lastFinishedWire ?? "", dead ? "1" : "0", command ?? ""]
+            .joined(separator: "\u{1F}")
     }
 
     private func envelope(

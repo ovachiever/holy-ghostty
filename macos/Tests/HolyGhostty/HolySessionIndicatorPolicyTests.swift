@@ -47,7 +47,7 @@ struct HolySessionIndicatorPolicyTests {
             reasonCode: "question"
         )
         var metadata = HolySessionAttentionMetadata(sessionID: UUID())
-        _ = metadata.baselineLegacySeenTracking(at: eventTime.addingTimeInterval(-1))
+        _ = metadata.migrateSeenTracking(at: eventTime.addingTimeInterval(-1))
         let didRecord = metadata.record(envelope: envelope, observedAt: now)
         #expect(didRecord)
         #expect(metadata.lastAgentFinishedAt == nil)
@@ -76,8 +76,8 @@ struct HolySessionIndicatorPolicyTests {
     @Test func metadataMigrationBaselinesOnceAndNextReplyBecomesUnread() throws {
         var metadata = HolySessionAttentionMetadata(sessionID: UUID())
         let baseline = now.addingTimeInterval(-10)
-        let didBaseline = metadata.baselineLegacySeenTracking(at: baseline)
-        let didBaselineAgain = metadata.baselineLegacySeenTracking(at: now)
+        let didBaseline = metadata.migrateSeenTracking(at: baseline)
+        let didBaselineAgain = metadata.migrateSeenTracking(at: now)
         #expect(didBaseline)
         #expect(!didBaselineAgain)
         #expect(metadata.lastSeenAt == baseline)
@@ -241,7 +241,7 @@ struct HolySessionIndicatorPolicyTests {
 
     @Test func independentFinishedRegisterSurvivesALaterEndedLifecycle() throws {
         var metadata = HolySessionAttentionMetadata(sessionID: UUID())
-        _ = metadata.baselineLegacySeenTracking(at: now.addingTimeInterval(-120))
+        _ = metadata.migrateSeenTracking(at: now.addingTimeInterval(-120))
         let finished = try HolyAgentStateEnvelope(
             source: HolyAgentStateSource.openCode,
             lifecycle: .finished,
@@ -294,7 +294,8 @@ struct HolySessionIndicatorPolicyTests {
         processExited: Bool = false,
         lastFinishedAt: Date? = nil,
         lastSeenAt: Date? = nil,
-        lastUsedAgo: TimeInterval = 0
+        lastUsedAgo: TimeInterval = 0,
+        producerProcessAlive: Bool? = nil
     ) -> HolySessionAttentionKind {
         HolySessionIndicatorPolicy.kind(for: .init(
             lifecycle: lifecycle,
@@ -303,8 +304,86 @@ struct HolySessionIndicatorPolicyTests {
             lastAgentFinishedAt: lastFinishedAt,
             lastSeenAt: lastSeenAt,
             lastUsedAt: now.addingTimeInterval(-lastUsedAgo),
+            producerProcessAlive: producerProcessAlive,
             now: now
         ))
+    }
+
+    // Human freshness: blue is earned by prompts alone. Agent events,
+    // finishes, and seen-marks acknowledge or inform, but never claim use.
+    @Test func humanUseAdvancesOnlyOnUserPromptEnvelopes() throws {
+        var metadata = HolySessionAttentionMetadata(sessionID: UUID())
+        _ = metadata.migrateSeenTracking(at: now.addingTimeInterval(-3_600))
+        #expect(metadata.lastUsedAt == nil)
+
+        let toolComplete = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.claude,
+            lifecycle: .working,
+            occurredAt: now.addingTimeInterval(-60),
+            eventToken: "tool-1",
+            reasonCode: "tool-complete"
+        )
+        _ = metadata.record(envelope: toolComplete, observedAt: now)
+        #expect(metadata.lastUsedAt == nil)
+
+        let finished = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.claude,
+            lifecycle: .finished,
+            occurredAt: now.addingTimeInterval(-50),
+            eventToken: "finish-1",
+            reasonCode: "idle-finished"
+        )
+        _ = metadata.recordFinished(envelope: finished, observedAt: now)
+        #expect(metadata.lastUsedAt == nil)
+
+        _ = metadata.markSeen(at: now.addingTimeInterval(-40))
+        #expect(metadata.lastUsedAt == nil)
+
+        let prompt = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.claude,
+            lifecycle: .working,
+            occurredAt: now.addingTimeInterval(-30),
+            eventToken: "prompt-1",
+            reasonCode: HolySessionAttentionMetadata.humanUseReasonCode
+        )
+        _ = metadata.record(envelope: prompt, observedAt: now)
+        #expect(metadata.lastUsedAt == prompt.occurredAt)
+    }
+
+    @Test func migrationClearsPreV2UseStampsButKeepsSeenAndRunsOnce() {
+        let seenAt = now.addingTimeInterval(-7_200)
+        var metadata = HolySessionAttentionMetadata(
+            sessionID: UUID(),
+            lastSeenAt: seenAt,
+            seenTrackingVersion: 1,
+            lastUsedAt: now.addingTimeInterval(-60),
+            updatedAt: now.addingTimeInterval(-60)
+        )
+        let didMigrate = metadata.migrateSeenTracking(at: now)
+        let didMigrateAgain = metadata.migrateSeenTracking(at: now.addingTimeInterval(1))
+        #expect(didMigrate)
+        #expect(!didMigrateAgain)
+        #expect(metadata.lastUsedAt == nil)
+        #expect(metadata.lastSeenAt == seenAt)
+    }
+
+    // Process evidence may extend or invalidate a working claim, never
+    // create one (mn-8cec74).
+    @Test func deadProducerInvalidatesAWorkingClaimWithinItsLease() {
+        #expect(kind(lifecycle: .working, occurredAgo: 60, producerProcessAlive: false) == .usedToday)
+        #expect(kind(lifecycle: .working, occurredAgo: 60, producerProcessAlive: true) == .working)
+        #expect(kind(lifecycle: .working, occurredAgo: 60, producerProcessAlive: nil) == .working)
+    }
+
+    @Test func liveProducerExtendsAWorkingClaimPastTheLease() {
+        #expect(kind(lifecycle: .working, occurredAgo: 31 * 60, producerProcessAlive: true) == .working)
+        #expect(kind(lifecycle: .working, occurredAgo: 31 * 60, producerProcessAlive: nil) == .usedToday)
+        #expect(kind(lifecycle: .working, occurredAgo: 31 * 60, producerProcessAlive: false) == .usedToday)
+    }
+
+    @Test func processEvidenceNeverCreatesOrExtendsOtherStates() {
+        #expect(kind(lifecycle: .needsUser, occurredAgo: 31 * 60, producerProcessAlive: true) == .usedToday)
+        #expect(kind(lifecycle: .idle, occurredAgo: 60, producerProcessAlive: true) == .usedToday)
     }
 
     // Mark Unread (roster context menu): clearing the seen timestamp returns

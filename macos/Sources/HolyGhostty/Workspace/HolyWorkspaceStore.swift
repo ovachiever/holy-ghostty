@@ -125,6 +125,10 @@ final class HolyWorkspaceStore: ObservableObject {
     private var attentionClockCancellable: AnyCancellable?
     private var monitoredAgentStateEndpoints: Set<HolyTmuxAgentStateEndpoint> = []
     private var agentStateMonitorConfigurationGeneration: UInt64 = 0
+    /// Latest producer-process evidence per session from the tmux monitor.
+    /// Absent means unknown, which the indicator policy treats as lease-only.
+    private var producerProcessAliveBySessionID: [UUID: Bool] = [:]
+    private var agentStateArrivalCancellable: AnyCancellable?
     private var draftLaunchGuardrailTask: Task<Void, Never>?
     private var selectedSessionReadTask: Task<Void, Never>?
     private var selectedSessionReadTaskKey: String?
@@ -2238,7 +2242,7 @@ final class HolyWorkspaceStore: ObservableObject {
             if updateAttentionMetadata(
                 for: session,
                 markSeen: shouldMarkSeen,
-                baselineLegacySeenTracking: seedMissingAsSeen,
+                migrateSeenTracking: seedMissingAsSeen,
                 existing: &next,
                 at: date
             ) {
@@ -2255,7 +2259,7 @@ final class HolyWorkspaceStore: ObservableObject {
     private func updateAttentionMetadata(
         for session: HolySession,
         markSeen: Bool,
-        baselineLegacySeenTracking: Bool = false,
+        migrateSeenTracking: Bool = false,
         existing: inout [UUID: HolySessionAttentionMetadata],
         at date: Date = .init()
     ) -> Bool {
@@ -2263,15 +2267,14 @@ final class HolyWorkspaceStore: ObservableObject {
         var metadata = existing[session.id] ?? HolySessionAttentionMetadata(sessionID: session.id)
         var changed = false
 
-        // Seen tracking was intentionally disabled in an earlier release.
-        // Baseline every legacy row once during restore, and baseline a newly
-        // created session before its first event, so historical replies cannot
-        // all become unread during rollout.
+        // Migrate rows to the current seen-tracking version during restore,
+        // and baseline a newly created session before its first event, so
+        // historical replies cannot all become unread during rollout.
         if metadata.seenTrackingVersion != HolySessionAttentionMetadata.currentSeenTrackingVersion,
-           baselineLegacySeenTracking || !hadExistingMetadata {
-            changed = metadata.baselineLegacySeenTracking(at: date) || changed
+           migrateSeenTracking || !hadExistingMetadata {
+            changed = metadata.migrateSeenTracking(at: date) || changed
         }
-        if baselineLegacySeenTracking || !hadExistingMetadata {
+        if migrateSeenTracking || !hadExistingMetadata {
             changed = metadata.baselineNotificationTracking(at: date) || changed
         }
 
@@ -2337,6 +2340,7 @@ final class HolyWorkspaceStore: ObservableObject {
             lastAgentFinishedAt: finishedAt,
             lastSeenAt: metadata?.lastSeenAt,
             lastUsedAt: lastUsedAt,
+            producerProcessAlive: producerProcessAliveBySessionID[session.id],
             now: attentionClock
         ))
 
@@ -2372,8 +2376,8 @@ final class HolyWorkspaceStore: ObservableObject {
             return .init(
                 kind: .usedToday,
                 symbolName: "circle.fill",
-                title: "Used in the last 24 hours",
-                detail: nil,
+                title: "You used this in the last 24 hours",
+                detail: "Advances only when you submit a prompt here",
                 isProminent: false,
                 becameAvailableAt: lastUsedAt
             )
@@ -2615,6 +2619,7 @@ final class HolyWorkspaceStore: ObservableObject {
     private func applyAgentStateSnapshot(_ snapshot: HolyTmuxAgentStateSnapshot) {
         guard snapshot.failure == nil else { return }
 
+        var attentionEvidenceChanged = false
         for observation in snapshot.observations.values {
             // Each register fails closed independently. Aggregate integrity is
             // diagnostic; consume only whichever uniquely valid envelope the
@@ -2634,6 +2639,20 @@ final class HolyWorkspaceStore: ObservableObject {
                 // to guess which row owns a producer event.
                 continue
             }
+
+            // Producer-process evidence extends or invalidates working claims
+            // in the indicator policy; repaint on the poll that observed a
+            // transition so a killed agent stops spinning within a second.
+            let previousAlive = producerProcessAliveBySessionID[session.id]
+            if let alive = observation.producerHasLiveProcess {
+                producerProcessAliveBySessionID[session.id] = alive
+            } else {
+                producerProcessAliveBySessionID.removeValue(forKey: session.id)
+            }
+            if previousAlive != observation.producerHasLiveProcess {
+                attentionEvidenceChanged = true
+            }
+
             if let finishedEnvelope = observation.lastFinishedEnvelope {
                 recordDurableFinishedEnvelope(
                     finishedEnvelope,
@@ -2643,7 +2662,9 @@ final class HolyWorkspaceStore: ObservableObject {
                 )
             }
             if let envelope = observation.envelope {
-                _ = session.applyAgentStateEnvelope(envelope, observedAt: observation.observedAt)
+                if session.applyAgentStateEnvelope(envelope, observedAt: observation.observedAt) {
+                    attentionEvidenceChanged = true
+                }
             }
 
             // Notification retry is independent of whether metadata changed on
@@ -2668,6 +2689,13 @@ final class HolyWorkspaceStore: ObservableObject {
                 )
             }
         }
+
+        // Attention presentations are recomputed against the published clock.
+        // Advancing it on real evidence changes repaints the roster within
+        // one poll instead of waiting out the periodic minute tick.
+        if attentionEvidenceChanged {
+            attentionClock = .now
+        }
     }
 
     private func recordDurableFinishedEnvelope(
@@ -2679,7 +2707,7 @@ final class HolyWorkspaceStore: ObservableObject {
         var metadata = attentionMetadataBySessionID[session.id]
             ?? HolySessionAttentionMetadata(sessionID: session.id)
         if metadata.seenTrackingVersion != HolySessionAttentionMetadata.currentSeenTrackingVersion {
-            _ = metadata.baselineLegacySeenTracking(at: workspaceStartedAt)
+            _ = metadata.migrateSeenTracking(at: workspaceStartedAt)
         }
         _ = metadata.baselineNotificationTracking(at: workspaceStartedAt)
         guard metadata.recordFinished(envelope: envelope, observedAt: observedAt) else { return }
@@ -2768,6 +2796,17 @@ final class HolyWorkspaceStore: ObservableObject {
             .autoconnect()
             .sink { [weak self] date in
                 self?.attentionClock = date
+            }
+
+        // The immediate OSC delivery path lands on the session object without
+        // touching any store-published state, so the roster would not learn
+        // about a fresh working claim until the next minute tick. Nudge the
+        // clock on arrival, coalescing bursts.
+        agentStateArrivalCancellable = NotificationCenter.default
+            .publisher(for: .holyAgentStateEnvelopeDidArrive)
+            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.attentionClock = .now
             }
     }
 
