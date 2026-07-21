@@ -1,6 +1,6 @@
 # Holy Ghostty Engineering Spec
 
-Last updated: 2026-05-12
+Last updated: 2026-07-21
 
 This document describes the current repository implementation. It is an as-is engineering spec.
 
@@ -210,7 +210,70 @@ The telemetry parser infers structured activity from terminal preview text, sign
 
 Current filters remove terminal chrome, tmux status bars, separator lines, and readiness footer/prompt lines before classifying activity. If there is no current structured signal, stale telemetry is cleared instead of displayed.
 
-This is not a provider-native telemetry bridge. It is a runtime-classification layer that combines adapter markers with inference from terminal output.
+This heuristic layer feeds phase chrome and stall detection only. The roster's six-state indicators come from the provider-native agent-state bridge (section 6A) and never consume screen text.
+
+## 6A. Agent State Bridge And Authoritative Indicators
+
+The authoritative indicator system lives in:
+
+- `macos/Sources/HolyGhostty/AgentState/HolyAgentStateBridge.swift`
+- `macos/Sources/HolyGhostty/AgentState/HolyAgentStateBridgeInstaller.swift`
+- `macos/Sources/HolyGhostty/AgentState/HolyAgentStateEnvelope.swift`
+- `macos/Sources/HolyGhostty/AgentState/HolyTmuxAgentStateMonitor.swift`
+- `macos/Sources/HolyGhostty/AgentState/HolyCodexNotifyConfiguration.swift`
+- `HolySessionIndicatorPolicy` and `HolySessionAttentionMetadata` in `macos/Sources/HolyGhostty/Domain/HolyModels.swift`
+
+Canonical contract: `docs/superpowers/specs/2026-07-14-authoritative-agent-indicators.md`.
+
+Producers. Holy generates and exact-merges lifecycle hooks for Claude Code
+and Codex, a Codex committed-turn notify adapter, and an OpenCode plugin. All
+publish the same bounded metadata-only envelope
+(`v1|source|lifecycle|epoch-ms|event-token|session-id|reason-code`) through a
+shared helper into the pane-scoped tmux option `@holy_agent_state_v1`, with
+finishes copied to the independent `@holy_agent_last_finished_v1` register and
+an OSC 777 fast path for immediate delivery. Claude publishes `finished` from
+its Stop hook (a blocked stop self-corrects via newest-wins ordering), with
+idle_prompt as confirmation. A second five-field register,
+`@holy_watcher_v1`, is maintained by an inline ScheduleWakeup-matched hook
+program that reads only `delaySeconds` and `stop` from the tool input and
+records when an armed `/loop` wakeup will fire.
+
+Transport. `HolyTmuxAgentStateMonitor` is an actor polling each distinct
+tmux endpoint with one grouped `list-panes` read per second locally (0.75 s
+remote start cadence, bounded command timeouts). Each poll carries both
+registers plus process evidence: `pane_dead`, `pane_current_command`, and
+`window_activity`. Parsing fails closed per register: malformed, conflicting,
+or ambiguously owned values yield nothing rather than a guess.
+
+Policy. `HolySessionIndicatorPolicy` derives exactly six mutually exclusive
+states. Working and needs-user claims carry 30-minute leases. Process
+evidence may extend or invalidate a working claim, never create one: a live
+non-shell producer with pane output fresher than three minutes extends past
+the lease, and a provably dead producer invalidates within a poll. The
+used-today axis (`lastUsedAt`) advances only on committed `user-prompt`
+envelopes; the inactive/sleeping split anchors to the latest activity on any
+axis. Seen tracking is versioned; the current version clears pre-existing
+recency stamps once so blue is earned from real prompts.
+
+Presentation. `HolyWorkspaceStore` recomputes attention presentations against
+a published attention clock that ticks each minute and additionally advances
+on envelope arrival and process-evidence transitions, so the roster repaints
+within about a second of a real change. The watcher eye renders from the
+watcher register as a static glyph beside the age label and never feeds
+policy.
+
+Notifications. Actionable events (finished, needs-user, failed) schedule
+macOS notifications through a deterministic request identity and a persisted
+monotonic watermark, so duplicates, restarts, and older recovery registers
+never re-alert. Focused visibility acknowledges an event before a banner can
+fire for the session the operator is already watching.
+
+Installation. `HolyAgentStateBridgeInstaller` is consent-gated behind the
+`Enable Authoritative Agent Indicators` menu action, snapshot-and-rollback
+transactional across every touched file, and ownership-exact: it merges only
+handlers it can prove it owns, blocks on foreign files, and accepts one
+delegation case — a foreign Codex notifier that chains Holy's adapter by file
+name is left untouched in both directions.
 
 ## 7. Budget Intelligence
 
@@ -696,10 +759,13 @@ Current alert triggers:
 - phase becomes failed
 - phase becomes waiting for input
 - branch ownership drift
-- session stalled
-- session looping
 - budget warning or exceeded
 - phase becomes completed
+
+Authoritative agent events (replied, needs you, failed) notify separately
+through the agent-state gate described in section 6A, with deterministic
+request identities and a persisted watermark so duplicates and restarts never
+re-alert.
 
 ## 22. Views And User-Facing Surfaces
 
@@ -871,22 +937,27 @@ Installed bundle path:
 
 ```text
 macos/Sources/HolyGhostty/
+├── AgentState/             # Lifecycle hook bridge, installer, envelope, tmux monitor, notify config
 ├── App/                    # Window controller, app shell
 ├── Adapters/               # Runtime-specific heuristic adapters
+├── Automation/             # URL scheme parsing for session spawn
 ├── Budget/                 # Budget parsing and intelligence repository
+├── Claude/                 # Claude model indicator bridge and statusline helper
 ├── Database/               # SQLite engine, migrator, schema, paths
 ├── DesignSystem/           # Shared colors, spacing, styling
-├── Domain/                 # Core data model (enums, structs)
+├── Domain/                 # Core data model, indicator policy, attention metadata
 ├── Events/                 # Event model and event repository
 ├── Git/                    # Git snapshot model and client
 ├── Persistence/            # JSON persistence, DB persistence, coders
 ├── Profiles/               # Launch profiles and default New target persistence
+├── Remote/                 # Remote host registry, import, tmux discovery
 ├── Session/                # Live session model
 ├── Store/                  # In-memory state struct
 ├── Supervisor/             # Lifecycle orchestration, migration, workspace repository
 ├── Tasks/                  # External task models and repository
-├── Templates/              # Built-in and custom template catalog
 ├── Telemetry/              # Runtime telemetry parser
+├── Templates/              # Built-in and custom template catalog
+├── Tmux/                   # tmux models and launch command builder
 ├── Workspace/              # SwiftUI views: roster, pane layouts, detail, inspector, composer, history, task inbox, timeline, budget
 └── Worktree/               # Worktree creation, validation, recovery, cleanup
 ```

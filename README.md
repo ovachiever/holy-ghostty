@@ -40,6 +40,9 @@ The app currently supports:
 - Durable SQLite workspace persistence with migrations, WAL, and event history.
 - Session archive, search, relaunch, and recovery context.
 - Launch templates and external task records.
+- Authoritative six-state agent indicators driven by structured lifecycle hooks for Claude Code, Codex, and OpenCode, with a metadata-only wire contract.
+- A watcher eye marking sessions armed with a scheduled `/loop` wakeup, with the fire time in the tooltip.
+- Deterministic agent notifications (replied, needs you, failed) with restart-safe deduplication.
 - Runtime telemetry inferred from terminal state, shell integration, and runtime output.
 - Budget telemetry and budget enforcement policy fields.
 - Git snapshot tracking for local and remote sessions.
@@ -99,37 +102,48 @@ Window behavior:
 - The left roster width is persisted and can be resized below its default.
 - The inspector is collapsed by default to reserve space for the terminal.
 
-## Runtime Status
+## Agent Indicators
 
-Runtime status is inferred. Holy Ghostty does not receive structured internal state from Claude, Codex, or OpenCode.
+Session status has two layers: authoritative indicators driven by structured
+lifecycle hooks, and heuristic phase telemetry inferred from terminal output.
 
-Current inputs:
+The authoritative layer is the roster's vocabulary. Claude Code, Codex, and
+OpenCode publish lifecycle facts (working, needs-user, finished, failed, idle,
+ended) through Holy-installed hooks into a metadata-only wire envelope; the
+envelope never contains prompts, responses, or terminal text. Holy derives
+exactly six mutually exclusive states from those facts plus its own persisted
+seen and recency timestamps:
 
-- Ghostty surface state.
-- Ghostty progress reports.
-- OSC 133 shell integration command-finished events.
-- Visible terminal output near the bottom of the screen.
-- tmux session metadata.
-- SSH-based git probes for remote sessions.
+- Spinner: the agent is working, backed by a committed lifecycle event within
+  its lease, extended past the lease only while the agent process is alive and
+  visibly producing output, and dropped within a second of the process dying.
+- Question mark: the agent needs you (a committed question, permission
+  request, or failure).
+- Green dot: an unread agent reply, cleared only by genuinely focusing the
+  session.
+- Blue dot: you prompted this session within 24 hours. Blue is earned by the
+  operator alone; agent activity never fakes it.
+- Grey dot: no prompt from you in 24 hours, but the session saw activity on
+  some axis within 48.
+- Sleeping Z: everything quiet for 48 hours or more.
 
-The parser filters terminal chrome, tmux status bars, separators, and prompt/footer lines before reporting activity. Stale telemetry is cleared when there is no current structured signal.
+A separate static watcher eye marks sessions armed with a scheduled `/loop`
+wakeup, with the next fire time in the tooltip. Motion in the roster always
+means compute burning; the eye is a promise to wake, so it does not move.
 
-Displayed phase labels:
+Hook installation is explicit and consent-gated behind the
+`Enable Authoritative Agent Indicators` menu action. Holy merges only
+exact-owned handlers, leaves unrelated configuration intact, and fails closed
+on anything it does not own. Codex hook trust remains a manual `/hooks`
+approval, and a foreign Codex notifier that chains Holy's adapter is accepted
+as a delegation rather than blocked.
 
-- `Ready`
-- `Working`
-- `Needs Input`
-- `Complete`
-- `Issue`
-
-Visual cues:
-
-- working sessions use a multicolor spinner.
-- newly waiting sessions use a bright waiting orb that ages through warmer colors.
-- completed sessions use a subdued gray orb.
-- stalled sessions use orange.
-- failed sessions use red.
-- shared worktree, shared branch, branch drift, and overlapping-file risks use quiet inline icons instead of warning text.
+The heuristic layer supplements this with phase labels (`Ready`, `Working`,
+`Needs Input`, `Complete`, `Issue`) inferred from Ghostty surface state,
+OSC 133 shell integration, visible output, tmux metadata, and SSH git probes.
+It feeds the bottom status chrome and stall detection; it never decides the
+roster's six-state vocabulary. Shared worktree, shared branch, branch drift,
+and overlapping-file risks use quiet inline icons beside the orb.
 
 ## Requirements
 
@@ -236,7 +250,8 @@ This repository is source-release ready. GitHub releases may include an ad-hoc s
 
 Known gaps:
 
-- Runtime status is heuristic rather than provider-native.
+- Phase telemetry (the bottom status chrome) is heuristic; the roster's
+  six-state indicators are hook-driven and authoritative.
 - Remote orchestration is tmux/SSH based.
 - Broadcast input and dependency-chain automation are not implemented.
 - External task status writeback is not implemented.

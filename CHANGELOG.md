@@ -4,7 +4,49 @@ All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
-No unreleased changes.
+The roster now tells the truth at a glance: every indicator is driven by
+structured lifecycle facts from the agent harnesses, blue means you actually
+used the session, and spinners cannot outlive the work they describe.
+
+### Added
+
+- Authoritative six-state roster vocabulary (spinner, question mark, unread
+  green, used-today blue, inactive grey, sleeping Z) driven by exact-owned
+  lifecycle hooks for Claude Code, Codex, and OpenCode over a metadata-only
+  wire contract.
+- A watcher eye: a static mark on any session armed with a scheduled `/loop`
+  wakeup, showing the next fire time on hover and clearing itself when the
+  loop stops or its session dies.
+- Process evidence for working claims: a live agent visibly producing output
+  keeps its spinner through long tool-less stretches, and a killed agent
+  stops spinning within a second.
+- Deterministic agent notifications (replied, needs you, failed) with
+  restart-safe deduplication and focused-visibility acknowledgement.
+- A `Mark Unread` roster action that restores the green dot for a reply worth
+  revisiting.
+
+### Changed
+
+- The used-today blue dot is earned only by submitting a prompt; agent
+  activity, restores, and app launches can no longer fake recency. Existing
+  recency stamps are cleared once on upgrade, so blue grows back from real
+  use within a day.
+- Sleeping Z now requires every axis quiet for 48 hours; reading a fresh
+  reply in an old session lands on plain grey instead of jumping to sleeping.
+- Claude turn-endings publish `finished` immediately from the Stop hook, so a
+  watched session's spinner clears the moment its turn ends.
+- Roster indicators repaint within about a second of a lifecycle event
+  instead of waiting for the next minute tick.
+- The working spinner animates on every roster row, not only the selected
+  one, at a fixed low frame rate.
+- A Codex notifier owned by another tool that chains Holy's adapter (the
+  Codex Computer Use pattern) is recognized as a delegation and no longer
+  blocks enabling the indicators.
+
+### Removed
+
+- Screen-derived stalled/looping notifications; stall handling is moving to
+  working-lease evidence.
 
 ## 0.40 (2026-05-14)
 

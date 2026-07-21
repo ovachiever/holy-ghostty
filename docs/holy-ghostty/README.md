@@ -1,6 +1,6 @@
 # Holy Ghostty Guide
 
-Updated: 2026-05-12
+Updated: 2026-07-21
 
 Holy Ghostty is a macOS workspace for live Ghostty terminal sessions. The app treats a session as the primary unit instead of a terminal tab.
 
@@ -109,9 +109,54 @@ Shortcuts:
 - `Command-W`: detach selected session.
 - `Option-Q`: kill selected tmux session when available.
 
-## Runtime Status
+## Agent Indicators
 
-Holy Ghostty infers runtime status. It does not receive structured internal state from Claude, Codex, or OpenCode.
+The roster's activity orb speaks a six-state vocabulary driven by structured
+lifecycle hooks, not by reading terminal text. Each state answers one
+question:
+
+| Orb | Meaning |
+|---|---|
+| Spinner | The agent is working right now. The spinner stops within a second of the agent process dying, and survives long tool-less stretches only while the agent is visibly producing output |
+| Question mark | The agent needs you: a committed question, permission request, or failure |
+| Glowing green dot | An unread agent reply. It clears only when you genuinely focus the session; selecting a row in a background window does not count |
+| Blue dot | You prompted this session within the last 24 hours. Blue is earned by you alone — agent activity, restores, and app launches never fake it |
+| Grey dot | No prompt from you in 24 hours, but something happened here (a reply landed, or you read one) within 48 |
+| Sleeping Z | Nothing at all for 48 hours or more |
+
+Two quiet companions sit beside the orb:
+
+- The **watcher eye**: a small static eye on any session armed with a
+  scheduled `/loop` wakeup. Hover for the next fire time. It disappears when
+  the loop stops, the session dies, or a fired wakeup goes ten minutes without
+  rescheduling. It never animates: motion in the roster always means compute
+  burning, and a promise to wake is not burning.
+- Risk icons for shared worktree, shared branch, branch drift, and
+  overlapping changed files.
+
+`Mark Unread` in a row's context menu restores the green dot for a reply you
+want to revisit.
+
+### Enabling the indicators
+
+Hook installation is explicit: run `Enable Authoritative Agent Indicators`
+from the app menu. Holy adds exact-owned lifecycle hooks for Claude Code and
+Codex, a Codex committed-turn notifier, and one OpenCode plugin. The hooks
+publish only state, source, time, and an opaque event token — never prompts,
+responses, or terminal text. Existing hooks and settings stay intact, and
+anything Holy does not own fails closed instead of being overwritten. Codex
+asks you to approve the handlers once via `/hooks`. Sessions already running
+keep their previous hooks until restarted.
+
+Agent notifications (replied, needs you, failed) ride the same event
+identities with a persisted watermark, so restarts and duplicate deliveries
+never re-alert, and a finish committed while Holy is closed alerts exactly
+once on the next launch.
+
+## Phase Telemetry
+
+Beneath the authoritative indicators, Holy infers a phase for the bottom
+status chrome: `Ready`, `Working`, `Needs Input`, `Complete`, `Issue`.
 
 Inputs:
 
@@ -122,30 +167,10 @@ Inputs:
 - tmux metadata.
 - SSH git probes for remote sessions.
 
-Filtering:
-
-- tmux status bars are ignored.
-- terminal separators are ignored.
-- terminal chrome is ignored.
-- prompt/footer lines are treated as readiness evidence.
-- stale telemetry is cleared when there is no current structured signal.
-
-Displayed phases:
-
-- `Ready`
-- `Working`
-- `Needs Input`
-- `Complete`
-- `Issue`
-
-Roster cues:
-
-- Working: multicolor spinner.
-- Waiting on user: waiting orb colored by freshness.
-- Complete: subdued gray orb.
-- Stalled: orange orb.
-- Failed: red orb.
-- Shared worktree, shared branch, branch drift, and overlapping files: quiet inline risk icons.
+The parser filters tmux status bars, separators, and terminal chrome, treats
+prompt/footer lines as readiness evidence, and clears stale telemetry when
+there is no current structured signal. Phase telemetry never decides the
+roster's six-state vocabulary.
 
 ## Creating Sessions
 
@@ -285,7 +310,7 @@ Missing release infrastructure:
 
 Known implementation limits:
 
-- Runtime status is heuristic.
+- Phase telemetry is heuristic; roster indicators are hook-driven.
 - Remote orchestration is SSH/tmux based.
 - Broadcast input is not implemented.
 - Dependency-chain automation is not implemented.
