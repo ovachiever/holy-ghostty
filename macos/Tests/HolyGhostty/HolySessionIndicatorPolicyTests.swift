@@ -295,7 +295,8 @@ struct HolySessionIndicatorPolicyTests {
         lastFinishedAt: Date? = nil,
         lastSeenAt: Date? = nil,
         lastUsedAgo: TimeInterval = 0,
-        producerProcessAlive: Bool? = nil
+        producerProcessAlive: Bool? = nil,
+        lastActivityAgo: TimeInterval? = nil
     ) -> HolySessionAttentionKind {
         HolySessionIndicatorPolicy.kind(for: .init(
             lifecycle: lifecycle,
@@ -305,8 +306,29 @@ struct HolySessionIndicatorPolicyTests {
             lastSeenAt: lastSeenAt,
             lastUsedAt: now.addingTimeInterval(-lastUsedAgo),
             producerProcessAlive: producerProcessAlive,
+            lastActivityAt: lastActivityAgo.map { now.addingTimeInterval(-$0) },
             now: now
         ))
+    }
+
+    // Erik's field report 2026-07-21: an old session's fresh reply was read
+    // and the row jumped straight to sleeping-z off its ancient creation
+    // date. Aging must key off the whole session going quiet, not the
+    // human-use axis alone.
+    @Test func readingAnOldSessionsFreshReplyLandsOnPlainGreyNotSleeping() {
+        #expect(kind(
+            lastFinishedAt: now.addingTimeInterval(-3_600),
+            lastSeenAt: now,
+            lastUsedAgo: 72 * 60 * 60,
+            lastActivityAgo: 0
+        ) == .inactive)
+    }
+
+    @Test func sleepingRequiresEveryAxisQuietForFortyEightHours() {
+        #expect(kind(lastUsedAgo: 72 * 60 * 60, lastActivityAgo: (48 * 60 * 60) - 1) == .inactive)
+        #expect(kind(lastUsedAgo: 72 * 60 * 60, lastActivityAgo: 48 * 60 * 60) == .sleeping)
+        // Recent agent activity never earns blue — that stays human-only.
+        #expect(kind(lastUsedAgo: 25 * 60 * 60, lastActivityAgo: 0) == .inactive)
     }
 
     // Human freshness: blue is earned by prompts alone. Agent events,

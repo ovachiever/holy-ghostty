@@ -2333,6 +2333,12 @@ final class HolyWorkspaceStore: ObservableObject {
             .nilIfEmpty
         let eventOccurredAt = envelope.map { min($0.occurredAt, observedAt ?? .now) }
         let lastUsedAt = metadata?.lastUsedAt ?? session.record.createdAt
+        let lastActivityAt = [
+            lastUsedAt,
+            finishedAt,
+            metadata?.lastSeenAt,
+            metadata?.lastAuthoritativeEventOccurredAt,
+        ].compactMap(\.self).max() ?? lastUsedAt
         let kind = HolySessionIndicatorPolicy.kind(for: .init(
             lifecycle: envelope?.lifecycle,
             lifecycleOccurredAt: eventOccurredAt,
@@ -2341,6 +2347,7 @@ final class HolyWorkspaceStore: ObservableObject {
             lastSeenAt: metadata?.lastSeenAt,
             lastUsedAt: lastUsedAt,
             producerProcessAlive: producerProcessAliveBySessionID[session.id],
+            lastActivityAt: lastActivityAt,
             now: attentionClock
         ))
 
@@ -2385,8 +2392,8 @@ final class HolyWorkspaceStore: ObservableObject {
             return .init(
                 kind: .inactive,
                 symbolName: "circle.fill",
-                title: "Inactive for 24–48 hours",
-                detail: nil,
+                title: "No prompt from you in 24+ hours",
+                detail: "Recent activity is keeping it awake",
                 isProminent: false,
                 becameAvailableAt: lastUsedAt
             )
@@ -2394,7 +2401,7 @@ final class HolyWorkspaceStore: ObservableObject {
             return .init(
                 kind: .sleeping,
                 symbolName: "zzz",
-                title: "Sleeping for more than 48 hours",
+                title: "No activity at all for 48+ hours",
                 detail: nil,
                 isProminent: false,
                 becameAvailableAt: lastUsedAt

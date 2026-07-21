@@ -373,6 +373,11 @@ struct HolySessionIndicatorEvidence: Equatable {
     /// pane that published the latest working claim still runs a non-shell
     /// foreground process. nil means unknown and degrades to lease behavior.
     var producerProcessAlive: Bool? = nil
+    /// Latest moment anything happened here on any axis — human prompt,
+    /// agent event, or the operator reading the session. Splits plain grey
+    /// (quiet for you, but alive) from sleeping (dormant on every axis).
+    /// nil degrades to `lastUsedAt`.
+    var lastActivityAt: Date? = nil
     let now: Date
 }
 
@@ -426,11 +431,17 @@ enum HolySessionIndicatorPolicy {
             return .unread
         }
 
-        let age = max(0, evidence.now.timeIntervalSince(evidence.lastUsedAt))
-        if age < usedTodayInterval {
+        // Blue is earned by human use alone, but the aging axis below it
+        // keys off the whole session going quiet: a session whose agent
+        // replied an hour ago is not "sleeping" just because the operator
+        // has not prompted it since yesterday (mn-596f61's later-axis rule).
+        let humanAge = max(0, evidence.now.timeIntervalSince(evidence.lastUsedAt))
+        if humanAge < usedTodayInterval {
             return .usedToday
         }
-        if age < sleepingInterval {
+        let activityAnchor = max(evidence.lastActivityAt ?? evidence.lastUsedAt, evidence.lastUsedAt)
+        let activityAge = max(0, evidence.now.timeIntervalSince(activityAnchor))
+        if activityAge < sleepingInterval {
             return .inactive
         }
         return .sleeping
