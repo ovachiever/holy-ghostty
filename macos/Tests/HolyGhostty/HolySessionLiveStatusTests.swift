@@ -223,4 +223,49 @@ struct HolySessionLiveStatusTests {
         let after = HolySession.visibleActivitySignatureForTesting(preview: pane(spinner: "✽ Frolicking… (2m 4s · ↓ 8.2k tokens)"))
         #expect(before != after)
     }
+
+    // The shell census feeds the watcher eye from the input-box footer only.
+    // The mid-turn epitaph ("· 1 shell still running") freezes into
+    // scrollback when the turn ends, so it must never count — that is the
+    // exact false-permanence HolySession's working rules already refuse.
+    @Test func backgroundShellCensusReadsTheFooterSegment() {
+        let pane = [
+            "✳ Cogitated for 27s · 1 shell still running",
+            "❯",
+            "Model · Fable 5 · xhigh",
+            "⏵⏵ auto mode on · 2 shells · ← for agents",
+        ].joined(separator: "\n")
+        #expect(HolySession.backgroundShellCountForTesting(fromActiveContents: pane) == 2)
+    }
+
+    @Test func backgroundShellCensusIgnoresTheFrozenEpitaph() {
+        let pane = [
+            "Transcript prose about work",
+            "✻ Churned for 7m 12s · 1 shell still running",
+            "❯",
+            "Model · Fable 5 · xhigh",
+            "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+        ].joined(separator: "\n")
+        #expect(HolySession.backgroundShellCountForTesting(fromActiveContents: pane) == 0)
+    }
+
+    @Test func backgroundShellCensusIgnoresTranscriptAboveTheChromeWindow() {
+        let pane = [
+            "At the time the footer read auto mode on · 3 shells",
+            "More transcript prose",
+            "❯",
+            "Model · Fable 5 · xhigh",
+            "⏵⏵ auto mode on · ← for agents",
+        ].joined(separator: "\n")
+        #expect(HolySession.backgroundShellCountForTesting(fromActiveContents: pane) == 0)
+    }
+
+    @Test func backgroundShellCensusHandlesTheSingularFooter() {
+        let pane = [
+            "❯",
+            "Model · Fable 5 · xhigh",
+            "⏵⏵ auto mode on · 1 shell · ← for agents",
+        ].joined(separator: "\n")
+        #expect(HolySession.backgroundShellCountForTesting(fromActiveContents: pane) == 1)
+    }
 }

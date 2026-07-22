@@ -1133,7 +1133,8 @@ private struct HolyRosterRow: View {
     }
 
     // The watcher eye (mn-f4d77b): a static mark, never a throbber, for a
-    // session armed to reawaken itself via a scheduled /loop wakeup. Motion
+    // session watching something on its own — an armed /loop wakeup or live
+    // background shells reported by the runtime's own footer chrome. Motion
     // stays reserved for burning compute; a promise to wake is not burning.
     private static let watcherGrace: TimeInterval = 10 * 60
 
@@ -1151,15 +1152,30 @@ private struct HolyRosterRow: View {
                 // and the loop's next turn rescheduling it; a loop that truly
                 // died stops earning the eye once the grace lapses.
                 if context.date < watcherFireAt.addingTimeInterval(Self.watcherGrace) {
-                    Image(systemName: "eye.fill")
-                        .font(.system(size: 8.5, weight: .semibold))
-                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                        .opacity(isSelected ? 0.9 : 0.65)
-                        .help(watcherHelpText(asOf: context.date))
-                        .accessibilityLabel("Watching")
+                    watcherEyeMark(help: watcherHelpText(asOf: context.date))
+                } else if session.backgroundShellCount > 0 {
+                    watcherEyeMark(help: backgroundShellHelpText)
                 }
             }
+        } else if session.backgroundShellCount > 0 {
+            watcherEyeMark(help: backgroundShellHelpText)
         }
+    }
+
+    private func watcherEyeMark(help: String) -> some View {
+        Image(systemName: "eye.fill")
+            .font(.system(size: 8.5, weight: .semibold))
+            .foregroundStyle(HolyGhosttyTheme.textTertiary)
+            .opacity(isSelected ? 0.9 : 0.65)
+            .help(help)
+            .accessibilityLabel("Watching")
+    }
+
+    private var backgroundShellHelpText: String {
+        let count = session.backgroundShellCount
+        return count == 1
+            ? "Watching: 1 background shell running"
+            : "Watching: \(count) background shells running"
     }
 
     private func watcherHelpText(asOf now: Date) -> String {

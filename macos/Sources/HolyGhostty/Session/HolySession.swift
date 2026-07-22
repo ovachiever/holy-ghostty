@@ -169,6 +169,10 @@ final class HolySession: ObservableObject, Identifiable {
     /// Screen-derived telemetry never writes this value.
     @Published private(set) var agentStateEnvelope: HolyAgentStateEnvelope?
     @Published private(set) var agentStateObservedAt: Date?
+    /// Live count of Claude Code background shells, read from the input-box
+    /// footer chrome ("⏵⏵ auto mode on · 1 shell · ← for agents"). Feeds the
+    /// watcher eye alongside armed /loop wakeups; never a working claim.
+    @Published private(set) var backgroundShellCount: Int = 0
 
     private var cancellables: Set<AnyCancellable> = []
     private var gitRefreshTask: Task<Void, Never>?
@@ -902,6 +906,12 @@ final class HolySession: ObservableObject, Identifiable {
             ),
             current: runtimeTelemetry
         )
+        let nextBackgroundShellCount = effectiveRuntime == .claude
+            ? Self.backgroundShellCount(fromActiveContents: activeContents)
+            : 0
+        if backgroundShellCount != nextBackgroundShellCount {
+            backgroundShellCount = nextBackgroundShellCount
+        }
         let budgetTelemetryChanged = nextBudgetTelemetry.map { $0 != budgetTelemetry } ?? false
         let runtimeTelemetryChanged = nextRuntimeTelemetry.map { $0 != runtimeTelemetry } ?? false
 
@@ -1308,6 +1318,37 @@ final class HolySession: ObservableObject, Identifiable {
             .suffix(8)
             .joined(separator: "\n")
         return trimmed.isEmpty ? "Interactive shell ready." : trimmed
+    }
+
+    // The footer's shell segment renders as "· 1 shell ·" between chrome
+    // segments; the mid-turn epitaph renders "· 1 shell still running" and
+    // freezes into scrollback when the turn ends. The lookahead demands a
+    // following separator or end-of-line, so only the retractable footer
+    // segment ever counts.
+    private static let backgroundShellCensusPattern = try? NSRegularExpression(
+        pattern: #"·\s*([0-9]{1,2})\s+shells?(?=\s*·|\s*$)"#
+    )
+
+    /// Census of live Claude Code background shells from the input-box
+    /// footer. Only the last three non-empty screen rows qualify — the
+    /// footer is live chrome that Claude Code retracts when shells finish,
+    /// while transcript text above the input box is history and must never
+    /// arm the watcher eye.
+    private static func backgroundShellCount(fromActiveContents contents: String) -> Int {
+        guard let pattern = backgroundShellCensusPattern else { return 0 }
+        let liveChromeLines = contents
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .suffix(3)
+        for line in liveChromeLines.reversed() {
+            let range = NSRange(line.startIndex..., in: line)
+            guard let match = pattern.firstMatch(in: line, range: range),
+                  let countRange = Range(match.range(at: 1), in: line),
+                  let count = Int(line[countRange]) else { continue }
+            return count
+        }
+        return 0
     }
 
     // Detection needs a deeper window than the 8-line display preview:
@@ -2288,6 +2329,10 @@ final class HolySession: ObservableObject, Identifiable {
 
     static func visibleActivitySignatureForTesting(preview: String, surfaceTitle: String = "") -> String? {
         normalizedVisibleActivitySignature(from: preview, surfaceTitle: surfaceTitle)
+    }
+
+    static func backgroundShellCountForTesting(fromActiveContents contents: String) -> Int {
+        backgroundShellCount(fromActiveContents: contents)
     }
 #endif
 
