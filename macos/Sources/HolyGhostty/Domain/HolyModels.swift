@@ -406,8 +406,15 @@ enum HolySessionIndicatorPolicy {
             switch lifecycle {
             case .needsUser, .failed:
                 if let occurredAt = evidence.lifecycleOccurredAt {
+                    // A question or permission prompt keeps demanding until
+                    // answered — looking at it resolves nothing. A failed
+                    // turn is different: it asks for nothing but eyes, so
+                    // seeing the session after the failure acknowledges it
+                    // and the row falls back to the ordinary axes.
+                    let acknowledged = lifecycle == .failed
+                        && (evidence.lastSeenAt ?? .distantPast) >= occurredAt
                     let age = evidence.now.timeIntervalSince(occurredAt)
-                    if age >= 0, age < needsUserLease {
+                    if !acknowledged, age >= 0, age < needsUserLease {
                         return .needsUser
                     }
                 }

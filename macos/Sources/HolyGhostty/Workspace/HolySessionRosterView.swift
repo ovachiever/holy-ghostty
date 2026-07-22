@@ -767,7 +767,8 @@ private struct HolyRosterRow: View {
             // periodic tick keeps N concurrent spinners cheap.
             HolyAgentStatusOrb(
                 state: displayActivityState,
-                isAnimated: true
+                isAnimated: true,
+                needsUserSymbolName: attention.symbolName
             )
             .frame(width: 18, height: 18)
             .help(attention.helpText)
@@ -1488,6 +1489,10 @@ private struct HolyRowActionContextMenuOverlay: NSViewRepresentable {
 private struct HolyAgentStatusOrb: View {
     let state: HolySessionAttentionKind
     var isAnimated = true
+    /// The bubble face for `.needsUser`, from the attention presentation:
+    /// questionmark when the agent has questions, exclamationmark when a
+    /// turn failed. The kind alone cannot tell those apart.
+    var needsUserSymbolName = "questionmark.bubble.fill"
 
     var body: some View {
         switch state {
@@ -1499,7 +1504,7 @@ private struct HolyAgentStatusOrb: View {
                 HolyAgentStaticOrb(color: HolyAgentPalette.workingBlue, symbol: nil, opacity: 0.85)
             }
         case .needsUser:
-            HolyAgentPlanningQuestionOrb()
+            HolyAgentPlanningQuestionOrb(symbolName: needsUserSymbolName)
                 .frame(width: 15, height: 15)
         case .unread:
             // Glow separates unread green from used-today blue at 9px: a
@@ -1537,13 +1542,15 @@ private struct HolyAgentSleepingOrb: View {
 }
 
 private struct HolyAgentPlanningQuestionOrb: View {
+    var symbolName = "questionmark.bubble.fill"
+
     var body: some View {
         ZStack {
             Circle()
                 .fill(HolyAgentPalette.planningQuestion.opacity(0.18))
                 .frame(width: 14, height: 14)
 
-            Image(systemName: "questionmark.bubble.fill")
+            Image(systemName: symbolName)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(HolyAgentPalette.planningQuestion)
         }

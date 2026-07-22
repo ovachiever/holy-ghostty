@@ -2373,10 +2373,14 @@ final class HolyWorkspaceStore: ObservableObject {
                 becameAvailableAt: observedAt
             )
         case .needsUser:
+            // The question bubble is reserved for an agent that literally has
+            // questions (an ordered list awaiting your pick). A failed turn
+            // demands the same attention but must not wear that face.
+            let agentFailed = envelope?.lifecycle == .failed
             return .init(
                 kind: .needsUser,
-                symbolName: "questionmark.bubble.fill",
-                title: envelope?.lifecycle == .failed ? "Needs you — agent failed" : "Needs you",
+                symbolName: agentFailed ? "exclamationmark.bubble.fill" : "questionmark.bubble.fill",
+                title: agentFailed ? "Needs you — agent failed" : "Needs you",
                 detail: currentDetail,
                 isProminent: true,
                 becameAvailableAt: observedAt

@@ -37,6 +37,39 @@ struct HolySessionIndicatorPolicyTests {
         #expect(kind(lifecycle: .needsUser, occurredAgo: 30 * 60) == .usedToday)
     }
 
+    // Erik's field report 2026-07-22 (ORCHA): a turn-failed badge survived
+    // him opening the session and reading the wreck. A failure asks for
+    // nothing but eyes, so seeing the session after it occurred acknowledges
+    // it. Questions and permission prompts stay demanding until answered —
+    // looking at an unanswered question resolves nothing.
+    @Test func seeingASessionAcknowledgesItsFailedTurn() {
+        let failedAt = now.addingTimeInterval(-5 * 60)
+        #expect(kind(lifecycle: .failed, occurredAgo: 5 * 60, lastSeenAt: nil) == .needsUser)
+        #expect(kind(
+            lifecycle: .failed,
+            occurredAgo: 5 * 60,
+            lastSeenAt: failedAt.addingTimeInterval(-1)
+        ) == .needsUser)
+        #expect(kind(
+            lifecycle: .failed,
+            occurredAgo: 5 * 60,
+            lastSeenAt: failedAt
+        ) == .usedToday)
+        #expect(kind(
+            lifecycle: .failed,
+            occurredAgo: 5 * 60,
+            lastSeenAt: failedAt.addingTimeInterval(60)
+        ) == .usedToday)
+    }
+
+    @Test func seeingAnUnansweredQuestionResolvesNothing() {
+        #expect(kind(
+            lifecycle: .needsUser,
+            occurredAgo: 5 * 60,
+            lastSeenAt: now
+        ) == .needsUser)
+    }
+
     @Test func expiredQuestionDoesNotBecomeAnUnreadReplyThroughMetadata() throws {
         let eventTime = now.addingTimeInterval(-30 * 60)
         let envelope = try HolyAgentStateEnvelope(
