@@ -2271,11 +2271,12 @@ final class HolySession: ObservableObject, Identifiable {
 #if DEBUG
     static func inferredRuntimeForTesting(
         preview: String = "",
-        command: String? = nil
+        command: String? = nil,
+        surfaceTitle: String = ""
     ) -> HolySessionRuntime? {
         inferredRuntime(
             launchRuntime: .shell,
-            surfaceTitle: "",
+            surfaceTitle: surfaceTitle,
             preview: preview,
             command: command,
             initialInput: nil,
@@ -2360,12 +2361,17 @@ final class HolySession: ObservableObject, Identifiable {
         // Launch intent (what was actually started) is authoritative. Screen
         // scrollback is NOT — agents constantly discuss each other by name, so
         // a bare "opencode"/"codex"/"claude" in the chat body must never decide
-        // the runtime.
-        let launchEvidence = [title, launchMetadata, commandText]
+        // the runtime. The live terminal title is screen state too (agents
+        // write task text into it, editors write filenames like CLAUDE.md),
+        // so it joins the structural screen lane, never the launch lane.
+        let launchEvidence = [launchMetadata, commandText]
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
             .lowercased()
-        let previewEvidence = preview.lowercased()
+        let previewEvidence = [title, preview]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+            .lowercased()
 
         if containsOpenCodeMarker(launchEvidence) { return .opencode }
         if containsCodexMarker(launchEvidence) { return .codex }
@@ -2393,19 +2399,28 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     private static func containsClaudeScreenMarker(_ evidence: String) -> Bool {
-        evidence.contains("claude code")
-            || evidence.contains("claude.exe")
-            || evidence.contains("claude.md")
-            || evidence.contains(".claude")
+        // Structural live chrome only, never prose tokens. Session browsers
+        // and transcript viewers render "Claude Code", resume commands, and
+        // .claude paths as DATA — a screen about Claude is not a screen of
+        // Claude (2026-07-28: the agent-sessions browser TUI reclassified
+        // its shell session through exactly those substrings). Real evidence
+        // is chrome only Claude Code itself draws: the ⏵⏵ mode footer, the
+        // welcome banner, the shortcut hint, or a tmux status bar whose
+        // ACTIVE window is literally running claude.
+        evidence.range(
+            of: #"(?m)^\s*⏵⏵\s|^\s*[✢✳✶✻✽·]?\s*welcome to claude code|^\s*\? for shortcuts\b|\[[^\[\]\n]*:claude(\.[a-z0-9]+)?\*"#,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func containsCodexScreenMarker(_ evidence: String) -> Bool {
-        evidence.contains("openai codex")
-            || evidence.contains("codex cli")
-            || evidence.range(
-                of: #"(?m)^\s*codex\s*$"#,
-                options: .regularExpression
-            ) != nil
+        // Line-anchored for the same reason as the Claude markers above:
+        // "OpenAI Codex" as mid-line prose is something browsers print about
+        // sessions; the real banner and CLI chrome start their own lines.
+        evidence.range(
+            of: #"(?m)^\s*openai codex\b|^\s*codex cli\b|^\s*codex\s*$|\[[^\[\]\n]*:codex(\.[a-z0-9]+)?\*"#,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func containsClaudeMarker(_ evidence: String) -> Bool {
