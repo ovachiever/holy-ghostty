@@ -220,6 +220,12 @@ final class HolyRestoreEngine: ObservableObject {
         await restore(rowIDs: [rowID], attach: false)
     }
 
+    /// Restores (or adopts, when already live/restored) one row and attaches
+    /// its surface. The lazy-attach path for headless rows.
+    func attach(rowID: UUID) async {
+        await restore(rowIDs: [rowID], attach: true)
+    }
+
     func setSelected(_ selected: Bool, rowID: UUID) {
         updateRow(rowID) { $0.isSelected = selected }
     }
@@ -399,6 +405,12 @@ final class HolyRestoreEngine: ObservableObject {
 
     private func adopt(rowID: UUID, attach: Bool) {
         guard let row = rows.first(where: { $0.id == rowID }) else { return }
+        // A roster session with this Holy UUID means adoption already
+        // happened (the archive row is retired); re-adopting would fail.
+        if adapter.rosterOwnsSession(withHolyID: row.archived.sourceSessionID) {
+            updateRow(rowID) { $0.phase = .restored(attached: true) }
+            return
+        }
         guard attach else {
             updateRow(rowID) { $0.phase = .restored(attached: false) }
             return

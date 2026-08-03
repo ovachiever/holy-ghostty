@@ -172,6 +172,9 @@ struct HolyWorkspaceRootView: View {
         .sheet(isPresented: $store.historyPresented) {
             HolySessionHistorySheet(store: store)
         }
+        .sheet(isPresented: $store.restorePresented) {
+            HolyRestoreSheet(store: store)
+        }
         .sheet(isPresented: $store.tasksPresented) {
             HolyTaskInboxSheet(store: store)
         }
@@ -273,6 +276,14 @@ struct HolyWorkspaceRootView: View {
 
     private var mainWorkspaceContent: some View {
         VStack(spacing: 0) {
+            if store.shouldOfferCrashRestore {
+                HolyRestoreBanner(
+                    interruptedCount: store.crashRestoreCandidates.count,
+                    onRestore: { store.presentRestore() },
+                    onDismiss: { store.dismissRestoreBanner() }
+                )
+            }
+
             primaryWorkspaceContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .layoutPriority(1)
