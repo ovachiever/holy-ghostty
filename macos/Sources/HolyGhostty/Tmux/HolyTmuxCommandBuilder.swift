@@ -53,10 +53,49 @@ enum HolyTmuxCommandBuilder {
         launchScript(for: launchSpec)
     }
 
+    /// Create-only variant for the crash-restore engine: identical tmux
+    /// create/metadata/ownership script, no attach, no surface. Deliberately
+    /// never realizes the spec — restore must target the exact persisted
+    /// identity, not a synthesized one. Local transport only (restore v1).
+    static func detachedCreateCommand(
+        for launchSpec: HolySessionLaunchSpec
+    ) -> HolyTmuxDetachedCreateCommand? {
+        guard !launchSpec.transport.normalized.isRemote,
+              let tmux = launchSpec.tmux?.normalized,
+              tmux.createIfMissing,
+              let localScript = localLaunchScript(for: launchSpec, attach: false) else {
+            return nil
+        }
+
+        return .init(
+            executablePath: "/bin/zsh",
+            arguments: ["-lc", "unset TMUX TMUX_PANE TMUX_TMPDIR; \(localScript)"]
+        )
+    }
+
     private static func launchScript(for launchSpec: HolySessionLaunchSpec) -> String? {
+        guard let localScript = localLaunchScript(for: launchSpec, attach: true) else {
+            return launchSpec.command?.holyTrimmed.nilIfEmpty
+        }
+
+        if launchSpec.transport.isRemote {
+            guard let destination = launchSpec.transport.sshDestination?.holyTrimmed.nilIfEmpty else {
+                return shellCommand(["zsh", "-lc", localScript])
+            }
+
+            return shellCommand(["zsh", "-lc", remoteLaunchWrapper(destination: destination, localScript: localScript)])
+        }
+
+        return shellCommand(["zsh", "-lc", localScript])
+    }
+
+    private static func localLaunchScript(
+        for launchSpec: HolySessionLaunchSpec,
+        attach: Bool
+    ) -> String? {
         guard let tmux = launchSpec.tmux?.normalized,
               let sessionName = tmux.sessionName?.holyTrimmed.nilIfEmpty else {
-            return launchSpec.command?.holyTrimmed.nilIfEmpty
+            return nil
         }
 
         let usesManagedServer = tmux.createIfMissing && tmux.socketName == HolySessionTmuxSpec.defaultSocketName
@@ -101,18 +140,10 @@ enum HolyTmuxCommandBuilder {
             }
         }
 
-        lines.append("exec \(shellCommand(tmuxPrefix + ["attach", "-t", sessionName]))")
-        let localScript = lines.joined(separator: "; ")
-
-        if launchSpec.transport.isRemote {
-            guard let destination = launchSpec.transport.sshDestination?.holyTrimmed.nilIfEmpty else {
-                return shellCommand(["zsh", "-lc", localScript])
-            }
-
-            return shellCommand(["zsh", "-lc", remoteLaunchWrapper(destination: destination, localScript: localScript)])
+        if attach {
+            lines.append("exec \(shellCommand(tmuxPrefix + ["attach", "-t", sessionName]))")
         }
-
-        return shellCommand(["zsh", "-lc", localScript])
+        return lines.joined(separator: "; ")
     }
 
     private static func bootstrapCommand(for launchSpec: HolySessionLaunchSpec) -> String {
@@ -359,6 +390,13 @@ enum HolyTmuxCommandBuilder {
 
         return tmux.socketName?.holyTrimmed.nilIfEmpty == HolySessionTmuxSpec.defaultSocketName
     }
+}
+
+/// A create-only tmux invocation for headless restore. Run directly via
+/// Process with a scrubbed TMUX environment; nothing here attaches.
+struct HolyTmuxDetachedCreateCommand: Sendable, Equatable {
+    let executablePath: String
+    let arguments: [String]
 }
 
 struct HolyTmuxModelLabelUpdateCommand: Sendable, Equatable {
