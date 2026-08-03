@@ -229,8 +229,262 @@ final class HolyMannaInboxSource: HolyInboxRowSource {
     }
 }
 
+/// Everything one board answered on one refresh tick. `degradedDetail` is set
+/// when either command failed: a whole-board failure carries no issues, a
+/// reconcile-only failure still carries the `list` half, and both still owe
+/// the human one honest degraded row.
+struct HolyMannaBoardReading: Equatable, Sendable {
+    /// Absolute path of the directory containing `.manna`.
+    let root: String
+    let issues: [HolyMannaIssueSummary]
+    let findings: [HolyMannaReconcileFinding]
+    let degradedDetail: String?
+
+    init(
+        root: String,
+        issues: [HolyMannaIssueSummary] = [],
+        findings: [HolyMannaReconcileFinding] = [],
+        degradedDetail: String? = nil
+    ) {
+        self.root = root
+        self.issues = issues
+        self.findings = findings
+        self.degradedDetail = degradedDetail
+    }
+
+    var displayName: String {
+        URL(fileURLWithPath: root).lastPathComponent
+    }
+}
+
 /// The admission law for manna rows, kept out of the source so it is a pure
 /// function of board data (same shape as HolyGitHubInboxSectioner).
+///
+/// Most manna traffic is agent-to-agent and never belongs here. Exactly three
+/// board states are a decision only the human can make, and each clears when
+/// the board moves — never by dismissal:
+///
+///   1. **Dreams awaiting triage.** The grammar says a dream is converted or
+///      closed with a written reason; until then it waits on Erik. Converting
+///      moves its type off `dream`; closing sets it done. Either way the row
+///      leaves on the next tick.
+///   2. **Unblocked but unclaimed.** `done` never auto-unblocks dependents, so
+///      work whose blockers are all resolved sits invisibly blocked with
+///      nobody on it. Reconcile calls this `blocker_desync`. A claim or a
+///      blocker-state change clears it.
+///   3. **Stale claims.** A claim held by a session that is provably gone
+///      (`dead_claim`). A reclaim or an abandon clears it.
+///
+/// Open backlogs, in_progress work, and tracks stay out: the inbox is not a
+/// board mirror. So does the rest of reconcile's drift (`landed_open`,
+/// `dangling_track`, `doc_reference`, `prompt_pairing`, `skipped`) — that is
+/// agent bookkeeping, addressed to the swarm and not to Erik.
 enum HolyMannaInboxSectioner {
     static let sourceID = "manna"
+
+    static func sections(
+        boards: [HolyMannaBoardReading],
+        focusedBoardRoot: String? = nil
+    ) -> [HolyInboxSection] {
+        var dreams: [HolyInboxRow] = []
+        var unblocked: [HolyInboxRow] = []
+        var staleClaims: [HolyInboxRow] = []
+        var degraded: [HolyInboxRow] = []
+
+        for board in boards {
+            let byID = Dictionary(board.issues.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            let staleDreamIDs = Set(findingIssueIDs(board.findings, kind: .staleDream))
+
+            // 1. Dreams awaiting triage.
+            for issue in board.issues where issue.type == .dream && issue.status != .done {
+                var chips = [HolyInboxChip("dream", emphasis: .attention)]
+                if staleDreamIDs.contains(issue.id) {
+                    chips.append(HolyInboxChip("stale", emphasis: .warning))
+                }
+                dreams.append(row(board: board, issue: issue, chips: chips, evidence: nil))
+            }
+
+            // 2. Unblocked but unclaimed. A dream is never claimable and a
+            //    track is a grouping, so neither can be this row.
+            for finding in deduplicated(board.findings, kind: .blockerDesync) {
+                guard let id = finding.issueID,
+                      let issue = byID[id],
+                      issue.type == .item,
+                      issue.claimedBy == nil else {
+                    continue
+                }
+                unblocked.append(row(
+                    board: board,
+                    issue: issue,
+                    chips: [HolyInboxChip("unblocked", emphasis: .attention)],
+                    evidence: finding.evidence
+                ))
+            }
+
+            // 3. Stale claims.
+            for finding in deduplicated(board.findings, kind: .deadClaim) {
+                guard let id = finding.issueID,
+                      let issue = byID[id],
+                      issue.claimedBy != nil,
+                      issue.status != .done else {
+                    continue
+                }
+                staleClaims.append(row(
+                    board: board,
+                    issue: issue,
+                    chips: [HolyInboxChip("stale claim", emphasis: .warning)],
+                    evidence: finding.evidence ?? finding.detail
+                ))
+            }
+
+            if let detail = board.degradedDetail {
+                degraded.append(HolyInboxRow(
+                    id: "manna:\(board.root):degraded",
+                    title: "manna unavailable — \(board.displayName)",
+                    subtitle: detail,
+                    isDegraded: true
+                ))
+            }
+        }
+
+        var sections: [HolyInboxSection] = []
+
+        func append(
+            id: String,
+            title: String,
+            rows: [HolyInboxRow],
+            collapsedByDefault: Bool = false,
+            countsTowardBadge: Bool = false
+        ) {
+            guard !rows.isEmpty else { return }
+            sections.append(HolyInboxSection(
+                id: id,
+                sourceID: sourceID,
+                title: title,
+                rows: sorted(rows, focusedBoardRoot: focusedBoardRoot),
+                collapsedByDefault: collapsedByDefault,
+                countsTowardBadge: countsTowardBadge
+            ))
+        }
+
+        append(
+            id: "manna.dreams",
+            title: "Dreams awaiting triage",
+            rows: dreams,
+            countsTowardBadge: true
+        )
+        append(
+            id: "manna.unblocked",
+            title: "Unblocked, nobody on it",
+            rows: unblocked,
+            countsTowardBadge: true
+        )
+        // Drift cleanup is real work but it is not first-person attention;
+        // it stays collapsed and out of the badge so the badge cannot lie.
+        append(
+            id: "manna.staleclaims",
+            title: "Stale claims",
+            rows: staleClaims,
+            collapsedByDefault: true
+        )
+        append(id: "manna.degraded", title: "manna", rows: degraded)
+
+        return sections
+    }
+
+    // MARK: Rows
+
+    private static func row(
+        board: HolyMannaBoardReading,
+        issue: HolyMannaIssueSummary,
+        chips: [HolyInboxChip],
+        evidence: String?
+    ) -> HolyInboxRow {
+        let subtitle = [board.displayName, issue.id, evidence]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+
+        return HolyInboxRow(
+            id: rowID(boardRoot: board.root, issueID: issue.id),
+            title: issue.title,
+            subtitle: subtitle,
+            updatedAt: issue.updatedDate,
+            chips: chips,
+            action: spawnURL(boardRoot: board.root, issueID: issue.id)
+                .map(HolyInboxRowAction.openURL) ?? .none
+        )
+    }
+
+    static func rowID(boardRoot: String, issueID: String) -> String {
+        "manna:\(boardRoot):\(issueID)"
+    }
+
+    /// Clicking a row opens a shell in the board's repo showing the issue.
+    ///
+    /// `initial_input` is piped to the child's stdin, so whatever goes here
+    /// RUNS — which is exactly why it is `manna show` and never `claim`,
+    /// `abandon`, or `reconcile --fix`. A glance must never move the board.
+    static func spawnURL(boardRoot: String, issueID: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = HolyAutomationURLParser.scheme
+        components.host = "spawn"
+        components.queryItems = [
+            URLQueryItem(name: "runtime", value: "shell"),
+            URLQueryItem(name: "workingDirectory", value: boardRoot),
+            URLQueryItem(name: "title", value: "manna · \(URL(fileURLWithPath: boardRoot).lastPathComponent)"),
+            URLQueryItem(name: "initialInput", value: "agent-do manna show \(issueID)"),
+        ]
+        // URLComponents leaves "+" literal in a query value and the automation
+        // parser reads it back as a space (form-encoding convention), so a
+        // path like "a+b" would arrive mangled. Encode it here.
+        components.percentEncodedQuery = components.percentEncodedQuery?
+            .replacingOccurrences(of: "+", with: "%2B")
+        return components.url
+    }
+
+    // MARK: Findings
+
+    private static func findingIssueIDs(
+        _ findings: [HolyMannaReconcileFinding],
+        kind: HolyMannaFindingKind
+    ) -> [String] {
+        findings.filter { $0.kind == kind }.compactMap(\.issueID)
+    }
+
+    /// Reconcile can report the same issue twice under one kind (blocked with
+    /// an empty `blocked_by` and blocked with everything resolved are separate
+    /// findings). One issue is one row.
+    private static func deduplicated(
+        _ findings: [HolyMannaReconcileFinding],
+        kind: HolyMannaFindingKind
+    ) -> [HolyMannaReconcileFinding] {
+        var seen: Set<String> = []
+        return findings.filter { finding in
+            guard finding.kind == kind, let id = finding.issueID else { return false }
+            return seen.insert(id).inserted
+        }
+    }
+
+    // MARK: Ordering
+
+    /// Focused board first, then newest activity first, then id for a stable
+    /// order across ticks. Focus reorders, never filters — what waits on Erik
+    /// on another board still waits on Erik.
+    private static func sorted(
+        _ rows: [HolyInboxRow],
+        focusedBoardRoot: String?
+    ) -> [HolyInboxRow] {
+        let focusedPrefix = focusedBoardRoot.map { "manna:\($0):" }
+        return rows.sorted { lhs, rhs in
+            if let focusedPrefix {
+                let lhsFocused = lhs.id.hasPrefix(focusedPrefix)
+                let rhsFocused = rhs.id.hasPrefix(focusedPrefix)
+                if lhsFocused != rhsFocused { return lhsFocused }
+            }
+            let lhsDate = lhs.updatedAt ?? .distantPast
+            let rhsDate = rhs.updatedAt ?? .distantPast
+            if lhsDate != rhsDate { return lhsDate > rhsDate }
+            return lhs.id < rhs.id
+        }
+    }
 }
