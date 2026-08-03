@@ -1366,6 +1366,9 @@ private final class HolySessionAlertCoordinator {
     private var authorizationRequested = false
     private var hasEstablishedBaseline = false
     private var previousStates: [UUID: HolySessionAlertState] = [:]
+    /// Delivery also lands in the alerts table so the human inbox can render
+    /// and acknowledge it; the notification path itself is unchanged.
+    private let inboxAlertStore = HolyInboxAlertStore()
 
     func reconcile(
         sessions: [HolySession],
@@ -1433,6 +1436,7 @@ private final class HolySessionAlertCoordinator {
         if !previous.hasBlockingConflict && current.hasBlockingConflict {
             deliver(
                 for: session,
+                alertType: "collision",
                 title: "Session collision detected",
                 body: coordination.summary,
                 requestAttention: true
@@ -1443,6 +1447,7 @@ private final class HolySessionAlertCoordinator {
         if !previous.hasBranchOwnershipDrift && current.hasBranchOwnershipDrift {
             deliver(
                 for: session,
+                alertType: "ownership_drift",
                 title: "Branch ownership drift",
                 body: session.ownershipStatusText,
                 requestAttention: true
@@ -1453,6 +1458,7 @@ private final class HolySessionAlertCoordinator {
         if previous.budgetStatus != .exceeded && current.budgetStatus == .exceeded {
             deliver(
                 for: session,
+                alertType: "budget_exceeded",
                 title: "Budget exceeded",
                 body: session.budgetSummaryText,
                 requestAttention: true
@@ -1463,6 +1469,7 @@ private final class HolySessionAlertCoordinator {
         if previous.budgetStatus != .warning && current.budgetStatus == .warning {
             deliver(
                 for: session,
+                alertType: "budget_warning",
                 title: "Budget nearing limit",
                 body: session.budgetRemainingText,
                 requestAttention: false
@@ -1476,12 +1483,28 @@ private final class HolySessionAlertCoordinator {
 
     private func deliver(
         for session: HolySession,
+        alertType: String,
         title: String,
         body: String,
         requestAttention: Bool
     ) {
         if requestAttention {
             NSApplication.shared.requestUserAttention(.criticalRequest)
+        }
+
+        // Persist the delivery for the human inbox (acknowledge lifecycle
+        // lives there). Off the main thread; a failed write never blocks the
+        // notification.
+        let store = inboxAlertStore
+        let sessionID = session.id
+        Task.detached(priority: .utility) {
+            store.recordDelivery(
+                sessionID: sessionID,
+                alertType: alertType,
+                severity: requestAttention ? "critical" : "warning",
+                title: title,
+                body: body
+            )
         }
 
         // Route through SurfaceView so foreground presentation, click-to-focus,

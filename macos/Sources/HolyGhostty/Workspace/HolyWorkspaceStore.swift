@@ -99,6 +99,9 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published var composerErrorMessage: String?
     @Published var tmuxSessionTerminationError: String?
     @Published var historyPresented: Bool = false
+    /// Which pane the single right-hand region hosts (nil = hidden). Inbox
+    /// today; the archive surface adds its case, never a second panel.
+    @Published var rightPanelSelection: HolyWorkspaceRightPanel?
     @Published var restorePresented: Bool = false
     @Published var restoreBannerDismissed: Bool = false
     @Published var tasksPresented: Bool = false
@@ -120,6 +123,20 @@ final class HolyWorkspaceStore: ObservableObject {
         environment: HolyRestoreEnvironmentProbe(),
         adapter: HolyWorkspaceRestoreAdapter(store: self)
     )
+    private let inboxRepoSlugResolver = HolyGitHubRepoSlugResolver()
+    /// The human inbox engine: GitHub PR attention plus DB alerts. Sources
+    /// conform to HolyInboxRowSource; lane 08 registers manna triage here.
+    private(set) lazy var inboxEngine: HolyInboxEngine = {
+        let resolver = inboxRepoSlugResolver
+        return HolyInboxEngine(
+            sources: [HolyAlertInboxSource(), HolyGitHubInboxSource()],
+            focusedRepoSlugProvider: { [weak self] in
+                let root = await MainActor.run { self?.selectedSession?.ownership.repositoryRoot }
+                guard let root else { return nil }
+                return await resolver.slug(forRepositoryRoot: root)
+            }
+        )
+    }()
     private let agentStateMonitor = HolyTmuxAgentStateMonitor()
     private let workspaceStartedAt = Date()
     private let powerAssertionManager = HolyPowerAssertionManager()
@@ -1704,6 +1721,10 @@ final class HolyWorkspaceStore: ObservableObject {
     func presentHistory() {
         selectedArchivedSessionID = selectedArchivedSession?.id ?? archivedSessions.first?.id
         historyPresented = true
+    }
+
+    func toggleInboxPanel() {
+        rightPanelSelection = HolyInboxPanelLayout.toggled(rightPanelSelection)
     }
 
     func presentTasks() {
