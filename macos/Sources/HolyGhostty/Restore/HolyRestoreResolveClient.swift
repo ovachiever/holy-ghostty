@@ -201,9 +201,27 @@ struct HolyAgentSessionsResolveClient: HolyRestoreResolving {
             arguments: ["-lc", "command -v \(binaryName)"],
             timeout: 15
         )
-        guard case let .success(output) = result, output.exitCode == 0 else { return nil }
-        let path = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        return path.isEmpty ? nil : path
+        if case let .success(output) = result, output.exitCode == 0 {
+            let path = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !path.isEmpty {
+                return path
+            }
+        }
+        return wellKnownBinaryPath()
+    }
+
+    /// A Dock launch gets a login (non-interactive) shell whose PATH misses
+    /// managers initialized in .zshrc — pyenv shims on this machine. After
+    /// the PATH probe misses, check the well-known install locations.
+    static func wellKnownBinaryPath() -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let candidates = [
+            "\(home)/.pyenv/shims/\(binaryName)",
+            "\(home)/.local/bin/\(binaryName)",
+            "/opt/homebrew/bin/\(binaryName)",
+            "/usr/local/bin/\(binaryName)",
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 }
 
