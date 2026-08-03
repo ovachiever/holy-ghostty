@@ -1342,19 +1342,19 @@ final class HolyWorkspaceStore: ObservableObject {
                 }
             }
 
-            let command = HolyTmuxSessionTerminationCommand.command(for: identity)
-            let result = await Task.detached(priority: .utility) {
-                command.run()
-            }.value
-
-            guard case .success = result else {
-                if case let .failure(failure) = result {
-                    AppDelegate.logger.error(
-                        "Holy Ghostty failed to kill tmux session \(sessionTitle, privacy: .public): \(failure.message, privacy: .public)"
-                    )
-                    self.tmuxSessionTerminationError = "Holy Ghostty left \(sessionTitle) in the roster because tmux still reported it after the kill attempt. \(failure.message)"
-                }
+            switch await HolyTmuxLifecycleService.killVerified(identity) {
+            case let .failure(failure):
+                AppDelegate.logger.error(
+                    "Holy Ghostty failed to kill tmux session \(sessionTitle, privacy: .public): \(failure.message, privacy: .public)"
+                )
+                self.tmuxSessionTerminationError = "Holy Ghostty left \(sessionTitle) in the roster. \(failure.message)"
                 return
+            case let .success(outcome):
+                if outcome == .alreadyAbsent {
+                    AppDelegate.logger.notice(
+                        "Holy Ghostty archived \(sessionTitle, privacy: .public): its exact tmux identity was already gone before the kill ran"
+                    )
+                }
             }
 
             guard let currentSession = self.sessions.first(where: { $0.id == sessionID }) else {
@@ -1429,23 +1429,18 @@ final class HolyWorkspaceStore: ObservableObject {
             socketName: tmux.socketName?.holyTerminatorTrimmed.nilIfEmpty,
             sessionName: sessionName
         ) else { return }
-        let command = HolyTmuxSessionTerminationCommand.command(for: identity)
 
         tmuxSessionTerminationError = nil
 
         Task {
-            let result = await Task.detached(priority: .utility) {
-                command.run()
-            }.value
-
-            switch result {
+            switch await HolyTmuxLifecycleService.killVerified(identity) {
             case .success:
                 onCompletion()
             case let .failure(failure):
                 AppDelegate.logger.error(
                     "Holy Ghostty failed to kill discovered tmux session: \(failure.message, privacy: .public)"
                 )
-                tmuxSessionTerminationError = "Holy Ghostty left the tmux session running because tmux still reported it after the kill attempt. \(failure.message)"
+                tmuxSessionTerminationError = "Holy Ghostty left the tmux session running. \(failure.message)"
             }
         }
     }
@@ -4371,126 +4366,6 @@ private struct HolyTmuxSessionTitleUpdateCommand: Sendable {
     }
 }
 
-private struct HolyTmuxSessionTerminationCommand: Sendable {
-    struct Failure: Error, Sendable {
-        let message: String
-    }
-
-    let executableURL: URL
-    let arguments: [String]
-
-    static func command(for identity: HolyTmuxLiveIdentity) -> Self {
-        var tmuxArguments = ["tmux"]
-        if let socketName = identity.socketName?.holyTerminatorTrimmed.nilIfEmpty {
-            tmuxArguments += ["-L", socketName]
-        }
-        let exactTarget = "=\(identity.sessionName)"
-        let killCommand = shellCommand(tmuxArguments + ["kill-session", "-t", exactTarget])
-        let probeCommand = shellCommand(tmuxArguments + ["has-session", "-t", exactTarget])
-        let script = verificationScript(killCommand: killCommand, probeCommand: probeCommand)
-
-        if identity.transport.isRemote {
-            let destination = identity.transport.sshDestination?.holyTerminatorTrimmed.nilIfEmpty ?? ""
-
-            return Self(
-                executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-                arguments: [
-                    "ssh",
-                    "-o", "BatchMode=yes",
-                    "-o", "ConnectTimeout=5",
-                    destination,
-                    "zsh", "-lc", posixQuote(script),
-                ]
-            )
-        }
-
-        return Self(
-            executableURL: URL(fileURLWithPath: "/bin/zsh"),
-            arguments: ["-lc", script]
-        )
-    }
-
-    func run() -> Result<Void, Failure> {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = arguments
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-        process.environment = Self.scrubbedTmuxEnvironment(ProcessInfo.processInfo.environment)
-        let terminated = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in terminated.signal() }
-
-        do {
-            try process.run()
-            guard terminated.wait(timeout: .now() + 12) == .success else {
-                process.terminate()
-                if terminated.wait(timeout: .now() + 1) == .timedOut {
-                    Darwin.kill(process.processIdentifier, SIGKILL)
-                    _ = terminated.wait(timeout: .now() + 1)
-                }
-                return .failure(.init(message: "tmux termination timed out after 12 seconds."))
-            }
-            guard process.terminationStatus == 0 else {
-                let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
-                let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let detail = String(data: errorData, encoding: .utf8)?.holyTerminatorTrimmed.nilIfEmpty
-                    ?? String(data: outputData, encoding: .utf8)?.holyTerminatorTrimmed.nilIfEmpty
-                    ?? "tmux exited with status \(process.terminationStatus)."
-                return .failure(.init(message: detail))
-            }
-            return .success(())
-        } catch {
-            return .failure(.init(message: error.localizedDescription))
-        }
-    }
-
-    fileprivate static func scrubbedTmuxEnvironment(_ environment: [String: String]) -> [String: String] {
-        var environment = environment
-        environment.removeValue(forKey: "TMUX")
-        environment.removeValue(forKey: "TMUX_PANE")
-        environment.removeValue(forKey: "TMUX_TMPDIR")
-        return environment
-    }
-
-    private static func shellCommand(_ arguments: [String]) -> String {
-        arguments.map(posixQuote).joined(separator: " ")
-    }
-
-    private static func verificationScript(killCommand: String, probeCommand: String) -> String {
-        """
-        unset TMUX TMUX_PANE
-        kill_output=$(\(killCommand) 2>&1)
-        kill_status=$?
-        if (( kill_status != 0 )); then
-          if [[ -n "$kill_output" ]]; then printf '%s\n' "$kill_output" >&2; fi
-          exit "$kill_status"
-        fi
-        attempt=0
-        while \(probeCommand) >/dev/null 2>&1; do
-          attempt=$((attempt + 1))
-          if (( attempt >= 20 )); then
-            if [[ -n "$kill_output" ]]; then printf '%s\n' "$kill_output" >&2; fi
-            printf '%s\n' 'tmux still reports the session after kill verification.' >&2
-            exit 1
-          fi
-          sleep 0.1
-        done
-        exit 0
-        """
-    }
-
-    private static func posixQuote(_ value: String) -> String {
-        if value.isEmpty {
-            return "''"
-        }
-
-        let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
-        return "'\(escaped)'"
-    }
-}
-
 private extension String {
     var holyTerminatorTrimmed: String {
         trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4654,8 +4529,8 @@ extension HolyWorkspaceStore {
               ) else {
             return nil
         }
-        let command = HolyTmuxSessionTerminationCommand.command(for: identity)
-        return (command.executableURL.path, command.arguments)
+        let command = HolyTmuxLifecycleCommand.killCommand(for: identity)
+        return (command.executablePath, command.arguments)
     }
 
     static func discoveredTerminationCommandForTesting(
@@ -4668,14 +4543,14 @@ extension HolyWorkspaceStore {
             socketName: socketName,
             sessionName: sessionName
         ) else { return nil }
-        let command = HolyTmuxSessionTerminationCommand.command(for: identity)
-        return (command.executableURL.path, command.arguments)
+        let command = HolyTmuxLifecycleCommand.killCommand(for: identity)
+        return (command.executablePath, command.arguments)
     }
 
     static func scrubbedTerminationEnvironmentForTesting(
         _ environment: [String: String]
     ) -> [String: String] {
-        HolyTmuxSessionTerminationCommand.scrubbedTmuxEnvironment(environment)
+        HolyTmuxLifecycleService.scrubbedTmuxEnvironment(environment)
     }
 
     static func canReattachLaunchSpecForTesting(_ launchSpec: HolySessionLaunchSpec) -> Bool {

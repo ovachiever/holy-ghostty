@@ -166,22 +166,24 @@ actor HolyRemoteTmuxDiscoveryService {
         script: String,
         timeout: TimeInterval?
     ) async -> HolyProcessRunOutcome {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = [
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "ServerAliveInterval=5",
-            "-o",
-            "ServerAliveCountMax=1",
-            host.sshDestination,
-            "zsh -lc \(posixQuote(script))"
-        ]
-
-        return await run(process: process, context: host.sshDestination, timeout: timeout)
+        let quotedScript = posixQuote(script)
+        return await run(context: host.sshDestination, timeout: timeout) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            process.arguments = [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=1",
+                host.sshDestination,
+                "zsh -lc \(quotedScript)"
+            ]
+            return process
+        }
     }
 
     private func runLocalDiscovery(
@@ -198,22 +200,39 @@ actor HolyRemoteTmuxDiscoveryService {
         script: String,
         timeout: TimeInterval?
     ) async -> HolyProcessRunOutcome {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", script]
+        await run(context: "local tmux", timeout: timeout) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            process.arguments = ["-lc", script]
 
-        // Scrub the inherited tmux context. If Holy was launched from a shell
-        // running inside tmux, $TMUX makes a default-socket probe (no -L)
-        // resolve to that server instead of the real default socket — listing
-        // the same sessions twice in discovery. The probe must always mean the
-        // socket it names.
-        var environment = ProcessInfo.processInfo.environment
-        environment.removeValue(forKey: "TMUX")
-        environment.removeValue(forKey: "TMUX_PANE")
-        environment.removeValue(forKey: "TMUX_TMPDIR")
-        process.environment = environment
+            // Scrub the inherited tmux context. If Holy was launched from a
+            // shell running inside tmux, $TMUX makes a default-socket probe
+            // (no -L) resolve to that server instead of the real default
+            // socket — listing the same sessions twice in discovery. The
+            // probe must always mean the socket it names.
+            var environment = ProcessInfo.processInfo.environment
+            environment.removeValue(forKey: "TMUX")
+            environment.removeValue(forKey: "TMUX_PANE")
+            environment.removeValue(forKey: "TMUX_TMPDIR")
+            process.environment = environment
+            return process
+        }
+    }
 
-        return await run(process: process, context: "local tmux", timeout: timeout)
+    /// Runs a discovery process, retrying once when the helper cannot be
+    /// spawned at all. Discovery scripts are read-only, so a rerun is free of
+    /// side effects; a transient spawn failure (EAGAIN under process-table
+    /// pressure) heals in one beat instead of failing the whole inspection.
+    private func run(
+        context: String,
+        timeout: TimeInterval?,
+        makeProcess: () -> Process
+    ) async -> HolyProcessRunOutcome {
+        let firstAttempt = await runOnce(process: makeProcess(), context: context, timeout: timeout)
+        guard case .launchFailed = firstAttempt else { return firstAttempt }
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        return await runOnce(process: makeProcess(), context: context, timeout: timeout)
     }
 
     /// Runs a discovery process asynchronously. The blocking `waitUntilExit()`
@@ -223,7 +242,7 @@ actor HolyRemoteTmuxDiscoveryService {
     /// terminated and reported as a typed timeout - the async result is bounded
     /// regardless of whether the process honors SIGTERM, so the converge sweep
     /// can never wedge on a runaway child.
-    private func run(
+    private func runOnce(
         process: Process,
         context: String,
         timeout: TimeInterval?
@@ -251,10 +270,15 @@ actor HolyRemoteTmuxDiscoveryService {
             do {
                 try process.run()
             } catch {
-                logger.error("Failed to run tmux discovery for \(context, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                // Preserve the full error identity (domain, code, errno). A
+                // bare localizedDescription renders unmapped Foundation codes
+                // as an opaque "(Cocoa error NNNN.)" and destroys the only
+                // evidence of which spawn layer failed.
+                let detail = holyDetailedProcessLaunchErrorDescription(error)
+                logger.error("Failed to run tmux discovery for \(context, privacy: .public): \(detail, privacy: .public)")
                 resumeBox.resume(returning: .launchFailed(
                     context: context,
-                    description: error.localizedDescription
+                    description: detail
                 ))
                 return
             }
@@ -1001,7 +1025,7 @@ extension HolyRemoteTmuxDiscoveryService {
         _ process: Process,
         timeoutSeconds: TimeInterval
     ) async -> String? {
-        let outcome = await shared.run(
+        let outcome = await shared.runOnce(
             process: process,
             context: "timeout-test",
             timeout: timeoutSeconds
