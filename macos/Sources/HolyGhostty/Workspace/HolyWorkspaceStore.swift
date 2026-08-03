@@ -99,6 +99,8 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published var composerErrorMessage: String?
     @Published var tmuxSessionTerminationError: String?
     @Published var historyPresented: Bool = false
+    @Published var restorePresented: Bool = false
+    @Published var restoreBannerDismissed: Bool = false
     @Published var tasksPresented: Bool = false
     @Published var remoteHostsPresented: Bool = false
     @Published var draft: HolySessionDraft = .init()
@@ -112,6 +114,12 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     private let sessionSupervisor: HolySessionSupervisor
+    private(set) lazy var restoreEngine = HolyRestoreEngine(
+        resolver: HolyAgentSessionsResolveClient(),
+        tmux: HolyRestoreTmuxService(),
+        environment: HolyRestoreEnvironmentProbe(),
+        adapter: HolyWorkspaceRestoreAdapter(store: self)
+    )
     private let agentStateMonitor = HolyTmuxAgentStateMonitor()
     private let workspaceStartedAt = Date()
     private let powerAssertionManager = HolyPowerAssertionManager()
@@ -1606,11 +1614,84 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func relaunch(_ archivedSession: HolyArchivedSession) {
+        // Cold-boot rows must resume the exact provider conversation.
+        // Replaying the original launch command would silently open a fresh
+        // one, so those rows route through the restore engine (resolver,
+        // candidate picker, verified adoption) instead.
+        if Self.isCrashRestoreCandidate(archivedSession) {
+            historyPresented = false
+            presentRestore()
+            return
+        }
+
         attemptLaunch(
             using: makeDraft(from: archivedSession.record.launchSpec),
             origin: .archiveRelaunch,
             relaunchedFrom: archivedSession
         )
+    }
+
+    // MARK: - Crash restore
+
+    nonisolated static func isCrashRestoreCandidate(_ archivedSession: HolyArchivedSession) -> Bool {
+        guard archivedSession.record.launchSpec.transport.kind == .local else { return false }
+        return archivedSession.recoveryReason?
+            .hasPrefix(HolySessionSupervisor.coldBootRecoveryReasonPrefix) == true
+    }
+
+    var crashRestoreCandidates: [HolyArchivedSession] {
+        archivedSessions.filter(Self.isCrashRestoreCandidate)
+    }
+
+    var shouldOfferCrashRestore: Bool {
+        !restoreBannerDismissed && !restorePresented && !crashRestoreCandidates.isEmpty
+    }
+
+    func presentRestore() {
+        restoreEngine.buildPlan()
+        restorePresented = true
+        Task { [weak self] in
+            await self?.restoreEngine.runPreflight()
+        }
+    }
+
+    func dismissRestoreBanner() {
+        restoreBannerDismissed = true
+    }
+
+    /// Restore persists identities and resume commands onto the archived
+    /// record the moment they are decided, so retries and later cold boots
+    /// replay the same exact conversation, never a fresh one.
+    func updateArchivedSessionLaunchSpecForRestore(
+        archiveID: UUID,
+        launchSpec: HolySessionLaunchSpec
+    ) {
+        guard let index = archivedSessions.firstIndex(where: { $0.id == archiveID }) else { return }
+        archivedSessions[index].record.launchSpec = launchSpec
+        archivedSessions[index].record.updatedAt = .now
+        persist()
+    }
+
+    /// Adopts a verified-live restored session into the roster through the
+    /// supervisor's readopt path, preserving the Holy UUID, note, title,
+    /// and Today pin, and retiring the archive row.
+    func attachRestoredArchivedSession(
+        archiveID: UUID,
+        launchSpec: HolySessionLaunchSpec
+    ) -> Bool {
+        guard let archivedSession = archivedSessions.first(where: { $0.id == archiveID }),
+              let result = sessionSupervisor.readoptArchivedSession(
+                  archivedSession,
+                  with: launchSpec,
+                  in: currentSessionStoreState
+              ) else {
+            return false
+        }
+
+        applySessionStoreState(result.state)
+        persist(pendingEvents: result.pendingEvents)
+        refreshDraftLaunchGuardrail()
+        return true
     }
 
     func deleteArchive(_ archivedSession: HolyArchivedSession) {

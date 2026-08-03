@@ -106,6 +106,13 @@ private struct HolyTmuxRestorePreflightResult {
 
 @MainActor
 final class HolySessionSupervisor {
+    /// Stable prefix of the recovery reason stamped on sessions archived
+    /// because the whole tmux server was gone at launch (a crash/reboot).
+    /// The crash-restore engine classifies its candidates by this prefix, so
+    /// rows persisted by earlier builds keep matching.
+    nonisolated static let coldBootRecoveryReasonPrefix =
+        "Saved layout — the holy tmux server was not running at launch"
+
     private let ghostty: Ghostty.App
     private let seedDefaultSession: Bool
     private let alertCoordinator = HolySessionAlertCoordinator()
@@ -185,7 +192,7 @@ final class HolySessionSupervisor {
                 lastKnownWorkingDirectory: record.launchSpec.workingDirectory,
                 lastActivityAt: record.updatedAt,
                 archivedAt: .now,
-                recoveryReason: "Saved layout — the holy tmux server was not running at launch (probably a macOS reboot). Relaunch from history to recreate."
+                recoveryReason: "\(Self.coldBootRecoveryReasonPrefix) (probably a macOS reboot). Relaunch from history to recreate."
             )
         }
 
