@@ -534,6 +534,8 @@ struct HolyWorkspaceRootView: View {
             ) {
                 store.presentRemoteHosts()
             }
+
+            HolyInboxToggleButton(store: store, engine: store.inboxEngine)
         }
         .padding(.top, HolyWorkspaceLayout.titlebarControlInset + 8)
         .padding(.bottom, 10)
