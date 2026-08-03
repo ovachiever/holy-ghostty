@@ -396,39 +396,37 @@ final class HolyMannaInboxSource: HolyInboxRowSource {
     /// the drift half — the dreams `list` already returned still stand, and
     /// the pane still says the rest is missing.
     private static func readBoard(root: String, binaryPath: String) async -> HolyMannaBoardReading {
-        let listed = await run(binaryPath: binaryPath, arguments: listArguments, boardRoot: root)
-        guard case let .success(listOutput) = listed else {
-            guard case let .failure(reason) = listed else {
-                return HolyMannaBoardReading(root: root, degradedDetail: "manna list failed.")
-            }
+        let list: HolyMannaListPayload
+        switch await run(binaryPath: binaryPath, arguments: listArguments, boardRoot: root) {
+        case let .failure(reason):
             return HolyMannaBoardReading(root: root, degradedDetail: reason)
-        }
-        guard let list = HolyMannaListPayload.parse(Data(listOutput.utf8)) else {
-            return HolyMannaBoardReading(
-                root: root,
-                degradedDetail: "\(binaryName) manna list returned a payload outside the pinned contract."
-            )
+        case let .success(output):
+            guard let parsed = HolyMannaListPayload.parse(Data(output.utf8)) else {
+                return HolyMannaBoardReading(
+                    root: root,
+                    degradedDetail: "\(binaryName) manna list returned a payload outside the pinned contract."
+                )
+            }
+            list = parsed
         }
 
-        let reconciled = await run(
-            binaryPath: binaryPath,
-            arguments: reconcileArguments,
-            boardRoot: root
-        )
-        if case let .success(reconcileOutput) = reconciled,
-           let reconcile = HolyMannaReconcilePayload.parse(Data(reconcileOutput.utf8)) {
+        switch await run(binaryPath: binaryPath, arguments: reconcileArguments, boardRoot: root) {
+        case let .failure(reason):
+            return HolyMannaBoardReading(root: root, issues: list.issues, degradedDetail: reason)
+        case let .success(output):
+            guard let reconcile = HolyMannaReconcilePayload.parse(Data(output.utf8)) else {
+                return HolyMannaBoardReading(
+                    root: root,
+                    issues: list.issues,
+                    degradedDetail: "\(binaryName) manna reconcile returned a payload outside the pinned contract."
+                )
+            }
             return HolyMannaBoardReading(
                 root: root,
                 issues: list.issues,
                 findings: reconcile.findings
             )
         }
-
-        var detail = "\(binaryName) manna reconcile returned a payload outside the pinned contract."
-        if case let .failure(reason) = reconciled {
-            detail = reason
-        }
-        return HolyMannaBoardReading(root: root, issues: list.issues, degradedDetail: detail)
     }
 
     /// stdout of a clean run, or one human-readable reason it is missing.
