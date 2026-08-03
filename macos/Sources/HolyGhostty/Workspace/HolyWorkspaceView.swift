@@ -130,7 +130,9 @@ struct HolyWorkspaceRootView: View {
     @FocusedValue(\.ghosttySurfaceView) private var focusedSurface
     @AppStorage("holy.workspace.rosterWidth.v3") private var rosterWidthRaw = Double(HolyWorkspaceLayout.rosterDefaultWidth)
     @AppStorage("holy.workspace.rosterCollapsed.v1") private var rosterCollapsed = false
+    @AppStorage("holy.workspace.inboxWidth.v1") private var inboxWidthRaw = Double(HolyInboxPanelLayout.defaultWidth)
     @State private var rosterDragStartWidth: CGFloat?
+    @State private var inboxDragStartWidth: CGFloat?
 
     var body: some View {
         ZStack {
@@ -267,6 +269,31 @@ struct HolyWorkspaceRootView: View {
 
                 mainWorkspaceContent
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if store.rightPanelSelection != nil {
+                    HolyWorkspaceSplitHandle()
+                        .frame(width: HolyWorkspaceLayout.splitHandleWidth)
+                        .gesture(
+                            DragGesture(minimumDistance: 1)
+                                .onChanged { value in
+                                    let startWidth = inboxDragStartWidth
+                                        ?? clampedInboxWidth(for: geometry.size.width, rosterWidth: rosterWidth)
+                                    inboxDragStartWidth = startWidth
+                                    setInboxWidth(
+                                        startWidth - value.translation.width,
+                                        availableWidth: geometry.size.width,
+                                        rosterWidth: rosterWidth
+                                    )
+                                }
+                                .onEnded { _ in
+                                    inboxDragStartWidth = nil
+                                }
+                        )
+
+                    HolyWorkspaceRightPanelHost(store: store)
+                        .frame(width: clampedInboxWidth(for: geometry.size.width, rosterWidth: rosterWidth))
+                        .frame(maxHeight: .infinity)
+                }
             }
             .frame(width: max(0, geometry.size.width), height: max(0, geometry.size.height))
             .clipped()
@@ -456,6 +483,8 @@ struct HolyWorkspaceRootView: View {
             }
 
             Spacer(minLength: 0)
+
+            HolyInboxToggleButton(store: store, engine: store.inboxEngine)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
@@ -700,6 +729,28 @@ struct HolyWorkspaceRootView: View {
 
     private func clampedRosterWidth(for availableWidth: CGFloat) -> CGFloat {
         clampedRosterWidth(CGFloat(rosterWidthRaw), availableWidth: availableWidth)
+    }
+
+    private func inboxReservedLeft(rosterWidth: CGFloat) -> CGFloat {
+        rosterWidth
+            + HolyWorkspaceLayout.splitHandleWidth * 2
+            + HolyWorkspaceLayout.detailMinimumVisibleWidth
+    }
+
+    private func clampedInboxWidth(for availableWidth: CGFloat, rosterWidth: CGFloat) -> CGFloat {
+        HolyInboxPanelLayout.clampedWidth(
+            CGFloat(inboxWidthRaw),
+            available: availableWidth,
+            reservedLeft: inboxReservedLeft(rosterWidth: rosterWidth)
+        )
+    }
+
+    private func setInboxWidth(_ proposedWidth: CGFloat, availableWidth: CGFloat, rosterWidth: CGFloat) {
+        inboxWidthRaw = Double(HolyInboxPanelLayout.clampedWidth(
+            proposedWidth,
+            available: availableWidth,
+            reservedLeft: inboxReservedLeft(rosterWidth: rosterWidth)
+        ))
     }
 
     private func clampedRosterWidth(_ proposedWidth: CGFloat, availableWidth: CGFloat) -> CGFloat {

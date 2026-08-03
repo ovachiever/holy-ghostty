@@ -217,6 +217,11 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
             return killSelectedTmuxSessionIfAvailable()
         }
 
+        if key == "i", relevantFlags == [.command, .shift] {
+            workspaceStore.toggleInboxPanel()
+            return true
+        }
+
         return false
     }
 

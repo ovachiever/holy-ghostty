@@ -136,7 +136,22 @@ struct TerminalCommandPaletteView: View {
 
     /// Commands for jumping to other terminal surfaces.
     private var jumpOptions: [CommandOption] {
-        terminalJumpOptions + holyWorkspaceJumpOptions
+        terminalJumpOptions + holyWorkspaceJumpOptions + holyWorkspacePanelOptions
+    }
+
+    /// Workspace panel commands (the human inbox). The subtitle carries the
+    /// unread count so the palette never hides what waits.
+    private var holyWorkspacePanelOptions: [CommandOption] {
+        HolyWorkspaceWindowController.all.map { workspace in
+            let badgeCount = workspace.workspaceStore.inboxEngine.badgeCount
+            return CommandOption(
+                title: "Toggle Inbox",
+                subtitle: badgeCount > 0 ? "\(badgeCount) waiting on you" : "Nothing waiting",
+                leadingIcon: "tray"
+            ) {
+                workspace.workspaceStore.toggleInboxPanel()
+            }
+        }
     }
 
     private var terminalJumpOptions: [CommandOption] {
