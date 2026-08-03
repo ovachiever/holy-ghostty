@@ -124,12 +124,25 @@ final class HolyWorkspaceStore: ObservableObject {
         adapter: HolyWorkspaceRestoreAdapter(store: self)
     )
     private let inboxRepoSlugResolver = HolyGitHubRepoSlugResolver()
-    /// The human inbox engine: GitHub PR attention plus DB alerts. Sources
-    /// conform to HolyInboxRowSource; lane 08 registers manna triage here.
+    /// The human inbox engine: GitHub PR attention, DB alerts, and manna
+    /// triage. Sources conform to HolyInboxRowSource.
     private(set) lazy var inboxEngine: HolyInboxEngine = {
         let resolver = inboxRepoSlugResolver
         return HolyInboxEngine(
-            sources: [HolyAlertInboxSource(), HolyGitHubInboxSource()],
+            sources: [
+                HolyAlertInboxSource(),
+                HolyGitHubInboxSource(),
+                // A manna board is a path, not a GitHub slug, so board scope
+                // comes from the sessions rather than the refresh context.
+                HolyMannaInboxSource(repositoryRootsProvider: { [weak self] in
+                    await MainActor.run {
+                        HolyMannaInboxSource.repositoryRoots(
+                            sessions: self?.sessions ?? [],
+                            focused: self?.selectedSession
+                        )
+                    }
+                }),
+            ],
             focusedRepoSlugProvider: { [weak self] in
                 let root = await MainActor.run { self?.selectedSession?.ownership.repositoryRoot }
                 guard let root else { return nil }

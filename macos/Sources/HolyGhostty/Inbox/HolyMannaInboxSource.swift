@@ -496,6 +496,22 @@ final class HolyMannaInboxSource: HolyInboxRowSource {
     }
 }
 
+extension HolyMannaInboxSource {
+    /// Repository roots of the live sessions, focused session first — the
+    /// priority order the board locator reads. Focus reorders, never filters.
+    @MainActor
+    static func repositoryRoots(sessions: [HolySession], focused: HolySession?) -> [String] {
+        var roots: [String] = []
+        if let focusedRoot = focused?.ownership.repositoryRoot {
+            roots.append(focusedRoot)
+        }
+        roots.append(contentsOf: sessions.compactMap { session in
+            session.id == focused?.id ? nil : session.ownership.repositoryRoot
+        })
+        return roots
+    }
+}
+
 // MARK: - Process runner
 
 /// A process runner with a working directory.
