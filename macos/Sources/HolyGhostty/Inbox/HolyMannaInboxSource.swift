@@ -788,12 +788,27 @@ enum HolyMannaInboxSectioner {
         "manna:\(boardRoot):\(issueID)"
     }
 
+    /// Manna's own id alphabet: `mn-` plus a short lowercase [a-z0-9] token.
+    /// Issue ids arrive from `.manna/issues.jsonl` in discovered repos, which
+    /// makes them untrusted input when a board sits in a cloned third-party
+    /// repo — and `spawnURL` puts the id into executed stdin. Anything outside
+    /// this alphabet must never reach that surface.
+    static func isValidIssueID(_ id: String) -> Bool {
+        guard id.hasPrefix("mn-") else { return false }
+        let token = id.dropFirst(3)
+        guard (4...12).contains(token.count) else { return false }
+        return token.allSatisfy { ($0.isLowercase && $0.isLetter && $0.isASCII) || ($0.isNumber && $0.isASCII) }
+    }
+
     /// Clicking a row opens a shell in the board's repo showing the issue.
     ///
     /// `initial_input` is piped to the child's stdin, so whatever goes here
     /// RUNS — which is exactly why it is `manna show` and never `claim`,
-    /// `abandon`, or `reconcile --fix`. A glance must never move the board.
+    /// `abandon`, or `reconcile --fix`, and why the id is validated against
+    /// manna's alphabet first. A glance must never move the board, and a
+    /// hostile board must never move the machine.
     static func spawnURL(boardRoot: String, issueID: String) -> URL? {
+        guard isValidIssueID(issueID) else { return nil }
         var components = URLComponents()
         components.scheme = HolyAutomationURLParser.scheme
         components.host = "spawn"
