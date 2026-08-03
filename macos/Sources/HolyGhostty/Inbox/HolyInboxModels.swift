@@ -13,6 +13,7 @@ struct HolyInboxChip: Equatable, Hashable, Sendable {
         case neutral
         case attention
         case warning
+        case danger
     }
 
     let label: String
