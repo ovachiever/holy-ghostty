@@ -217,12 +217,21 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
             return killSelectedTmuxSessionIfAvailable()
         }
 
-        if key == "i", relevantFlags == [.command, .shift] {
+        // P for Panel — sits beside ⌘⇧P (palette) as the workspace P-family.
+        if key == "p", relevantFlags == .command {
             workspaceStore.toggleInboxPanel()
             return true
         }
 
         return false
+    }
+
+    /// First-responder target of the View ▸ Inbox Panel menu item. The menu
+    /// carries the same ⌘P equivalent for discoverability; the key itself is
+    /// consumed by `handleWorkspaceKeyEquivalent` before menu dispatch, so
+    /// both paths land on the same toggle.
+    @objc func toggleInboxPanel(_ sender: Any?) {
+        workspaceStore.toggleInboxPanel()
     }
 
     func handleSessionCycleKey(_ event: NSEvent) -> Bool {

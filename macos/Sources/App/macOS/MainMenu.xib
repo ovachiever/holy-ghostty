@@ -327,6 +327,11 @@
                                     <action selector="toggleQuickTerminal:" target="bbz-4X-AYv" id="qDV-sz-Agc"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Inbox Panel" keyEquivalent="p" id="hIp-4d-Bx1">
+                                <connections>
+                                    <action selector="toggleInboxPanel:" target="-1" id="hIp-4d-Ax2"/>
+                                </connections>
+                            </menuItem>
                             <menuItem isSeparatorItem="YES" id="bC9-n9-RbJ"/>
                             <menuItem title="Terminal Inspector" id="QwP-M5-fvh">
                                 <modifierMask key="keyEquivalentModifierMask"/>

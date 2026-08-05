@@ -471,6 +471,6 @@ struct HolyInboxToggleButton: View {
                 ? HolyGhosttyTheme.halo
                 : HolyGhosttyTheme.textSecondary
         )
-        .help("Inbox — what needs you (⌘⇧I)")
+        .help("Inbox — what needs you (⌘P)")
     }
 }
