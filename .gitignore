@@ -42,3 +42,4 @@ GhosttyKit.xcframework.debug-backup/
 # state stays local.
 /.manna/sessions.jsonl
 /.superpowers/
+/.manna/board.lock
