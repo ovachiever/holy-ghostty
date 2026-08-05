@@ -4,7 +4,34 @@ All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
-No unreleased changes.
+A crash is no longer a loss, and attention has a home: after the tmux server
+dies, Restore rebuilds every session with its exact conversation, and a new
+right-hand Inbox panel shows what waits on the human — nothing else.
+
+### Added
+
+- Crash restore: cold boot shows a banner counting interrupted sessions;
+  Restore All/Selected recreates each one in its own directory running the
+  exact original conversation (`claude --resume`, `codex resume`,
+  `opencode --session`), resolved by joining the session archive index by
+  directory and time. Ambiguous matches open a candidate picker with
+  first-prompt previews; missing history honestly demotes to a labeled
+  shell-only recreate. Never `--continue`, never a guess.
+- Verified tmux lifecycle primitive: liveness probe, kill, and
+  poll-until-absent against the exact persisted socket and session name,
+  inventory-proven and idempotent. Kill failures now surface stage, socket,
+  target, and stderr instead of an opaque Cocoa error.
+- The human inbox (⌘P, View ▸ Inbox Panel): GitHub PRs needing review or
+  maintainer attention (bot PRs collapsed to per-repo digests), in-app
+  alerts with acknowledge, and manna triage rows limited to genuinely human
+  decisions — untriaged dreams, unblocked-but-unclaimed work, dead-session
+  claims. Rows clear themselves when reality changes.
+
+### Fixed
+
+- Manna issue ids are validated against manna's own alphabet before they can
+  reach a spawned shell, closing a command-injection path from hostile
+  `.manna` boards in cloned repositories.
 
 ## 0.44 (2026-07-21)
 
