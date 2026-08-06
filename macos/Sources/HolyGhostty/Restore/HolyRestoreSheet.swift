@@ -1,12 +1,14 @@
 import SwiftUI
 
-/// The crash-restore surface: every interrupted session as one row with an
-/// honest verdict, restored only on explicit action. Restore Selected
-/// attaches as each row verifies; Restore All stays headless and lets
-/// attach happen lazily. Nothing here launches without a click.
+/// The crash-restore surface: this reboot's interruptions as one honest
+/// section, older interruptions collapsed beneath, every row restored only
+/// on explicit action. Restore Selected attaches as each row verifies;
+/// Restore All recreates the fresh batch headless and lets attach happen
+/// lazily. Nothing here launches without a click.
 struct HolyRestoreSheet: View {
     @ObservedObject var store: HolyWorkspaceStore
     @ObservedObject var engine: HolyRestoreEngine
+    @State private var olderExpanded = false
 
     init(store: HolyWorkspaceStore) {
         self.store = store
@@ -53,7 +55,7 @@ struct HolyRestoreSheet: View {
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundStyle(HolyGhosttyTheme.halo)
 
-            Text("\(engine.interruptedCount) interrupted")
+            Text(headerCounts)
                 .font(.system(size: 11))
                 .foregroundStyle(HolyGhosttyTheme.textTertiary)
 
@@ -75,26 +77,106 @@ struct HolyRestoreSheet: View {
         .background(HolyGhosttyTheme.bgElevated)
     }
 
+    private var headerCounts: String {
+        engine.olderCount > 0
+            ? "\(engine.interruptedCount) interrupted · \(engine.olderCount) older"
+            : "\(engine.interruptedCount) interrupted"
+    }
+
     // MARK: - Rows
+
+    /// The rows the user can currently see; Select All / Select None act on
+    /// exactly these, never on rows hidden behind the collapsed section.
+    private var visibleRowIDs: [UUID] {
+        engine.freshRows.map(\.id) + (olderExpanded ? engine.olderRows.map(\.id) : [])
+    }
 
     private var rowList: some View {
         ScrollView {
             LazyVStack(spacing: 1) {
-                ForEach(engine.rows) { row in
-                    RestoreRowView(
-                        row: row,
-                        isBusy: engine.isRestoring,
-                        onToggleSelection: { engine.setSelected(!row.isSelected, rowID: row.id) },
-                        onPickCandidate: { engine.pickCandidate(rowID: row.id, candidateID: $0) },
-                        onRetry: { Task { await engine.retry(rowID: row.id) } },
-                        onAttach: { Task { await engine.attach(rowID: row.id) } }
-                    )
+                if !engine.freshRows.isEmpty {
+                    freshSectionHeader
+                    ForEach(engine.freshRows) { row in
+                        restoreRow(row)
+                    }
+                }
+
+                if engine.olderCount > 0 {
+                    olderSectionToggle
+                    if olderExpanded {
+                        ForEach(engine.olderRows) { row in
+                            restoreRow(row)
+                        }
+                    }
                 }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
         }
         .scrollIndicators(.hidden)
+    }
+
+    private func restoreRow(_ row: HolyRestoreRow) -> some View {
+        RestoreRowView(
+            row: row,
+            isBusy: engine.isRestoring,
+            onToggleSelection: { engine.setSelected(!row.isSelected, rowID: row.id) },
+            onPickCandidate: { engine.pickCandidate(rowID: row.id, candidateID: $0) },
+            onRetry: { Task { await engine.retry(rowID: row.id) } },
+            onAttach: { Task { await engine.attach(rowID: row.id) } }
+        )
+    }
+
+    private var freshSectionHeader: some View {
+        HStack(spacing: 8) {
+            Text("Interrupted by the last shutdown")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                .textCase(.uppercase)
+                .tracking(0.5)
+
+            Spacer()
+
+            Button("Select All") { engine.setSelection(true, rowIDs: visibleRowIDs) }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(HolyGhosttyTheme.accent)
+                .disabled(engine.isRestoring)
+
+            Button("Select None") { engine.setSelection(false, rowIDs: visibleRowIDs) }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(HolyGhosttyTheme.accent)
+                .disabled(engine.isRestoring)
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 4)
+        .padding(.bottom, 3)
+    }
+
+    private var olderSectionToggle: some View {
+        Button {
+            olderExpanded.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: olderExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+
+                Text("Older interruptions (\(engine.olderCount))")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                    .textCase(.uppercase)
+                    .tracking(0.5)
+
+                Spacer()
+            }
+            .padding(.horizontal, 4)
+            .padding(.top, 10)
+            .padding(.bottom, 3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Footer
@@ -115,17 +197,17 @@ struct HolyRestoreSheet: View {
 
             Spacer()
 
-            Button("Restore Selected (\(engine.selectedCount))") {
-                Task { await engine.restoreSelected() }
-            }
-            .buttonStyle(HolyGhosttyActionButtonStyle())
-            .disabled(engine.isRestoring || engine.isPreflighting || engine.selectedCount == 0)
-
-            Button("Restore All (headless)") {
+            Button("Restore All (\(engine.interruptedCount), headless)") {
                 Task { await engine.restoreAll() }
             }
             .buttonStyle(HolyGhosttyActionButtonStyle())
-            .disabled(engine.isRestoring || engine.isPreflighting || engine.rows.isEmpty)
+            .disabled(engine.isRestoring || engine.isPreflighting || engine.interruptedCount == 0)
+
+            Button("Restore Selected (\(engine.selectedCount))") {
+                Task { await engine.restoreSelected() }
+            }
+            .buttonStyle(HolyGhosttyProminentButtonStyle())
+            .disabled(engine.isRestoring || engine.isPreflighting || engine.selectedCount == 0)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -382,38 +464,59 @@ private struct CandidatePicker: View {
 
 // MARK: - Cold-boot banner
 
-/// Thin bar above the workspace after a cold boot: states the interrupted
-/// count and offers the restore sheet. Never launches anything itself.
+/// Bar above the workspace after a cold boot: states this reboot's
+/// interrupted count and offers the restore sheet as its one primary
+/// action. Never launches anything itself. The warning tint and accent
+/// edge exist because this bar renders in the titlebar strip, where a
+/// chrome-colored bar disappears — the first human contact after a crash
+/// must survive a stressed glance.
 struct HolyRestoreBanner: View {
     let interruptedCount: Int
+    let interruptedAt: Date?
     let onRestore: () -> Void
     let onDismiss: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "bolt.trianglebadge.exclamationmark")
-                .font(.system(size: 12))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(HolyGhosttyTheme.warning)
 
-            Text("\(interruptedCount) session\(interruptedCount == 1 ? "" : "s") interrupted by the last shutdown.")
-                .font(.system(size: 11, weight: .medium))
+            Text(headline)
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(HolyGhosttyTheme.textPrimary)
+
+            if let interruptedAt {
+                Text(interruptedAt.formatted(.relative(presentation: .named)))
+                    .font(.system(size: 11))
+                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
+            }
 
             Spacer()
 
             Button("Restore…", action: onRestore)
-                .buttonStyle(HolyGhosttyActionButtonStyle())
+                .buttonStyle(HolyGhosttyProminentButtonStyle())
 
             Button("Keep for Later", action: onDismiss)
                 .buttonStyle(HolyGhosttyActionButtonStyle())
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
+        .background(HolyGhosttyTheme.warning.opacity(0.10))
         .background(HolyGhosttyTheme.bgElevated)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(HolyGhosttyTheme.warning.opacity(0.55))
+                .frame(height: 2)
+        }
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(HolyGhosttyTheme.border)
                 .frame(height: 0.5)
         }
+    }
+
+    private var headline: String {
+        "\(interruptedCount) session\(interruptedCount == 1 ? "" : "s") interrupted by the last shutdown."
     }
 }

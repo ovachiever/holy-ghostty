@@ -178,6 +178,10 @@ final class HolySessionSupervisor {
             presentRecords.append(contentsOf: revivedArchivedSessions.map(\.record))
         }
         let revivedArchiveIDs = Set(revivedArchivedSessions.map(\.archiveID))
+        // One id per cold-boot pass: every session swept by THIS launch's
+        // sweep shares it, giving the restore surface an exact "this reboot"
+        // scope that survives persistence and later relaunches.
+        let coldBootBatchID = UUID()
         let coldBootArchived = dormantRecords.map { record in
             HolyArchivedSession(
                 sourceSessionID: record.id,
@@ -192,7 +196,8 @@ final class HolySessionSupervisor {
                 lastKnownWorkingDirectory: record.launchSpec.workingDirectory,
                 lastActivityAt: record.updatedAt,
                 archivedAt: .now,
-                recoveryReason: "\(Self.coldBootRecoveryReasonPrefix) (probably a macOS reboot). Relaunch from history to recreate."
+                recoveryReason: "\(Self.coldBootRecoveryReasonPrefix) (probably a macOS reboot). Relaunch from history to recreate.",
+                recoveryBootBatchID: coldBootBatchID
             )
         }
 

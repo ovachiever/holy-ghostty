@@ -1,5 +1,20 @@
 import Foundation
 
+/// Cold-boot restore candidates split by boot event. `fresh` is the most
+/// recent cold-boot batch — the sessions this reboot interrupted; `older`
+/// is every earlier unrestored interruption. The split is the load-bearing
+/// honesty of the whole surface: banners and preselection speak only for
+/// `fresh`, while `older` stays reachable but never presumed wanted.
+struct HolyCrashRestoreBatch: Equatable {
+    var fresh: [HolyArchivedSession]
+    var older: [HolyArchivedSession]
+
+    static let empty = HolyCrashRestoreBatch(fresh: [], older: [])
+
+    var isEmpty: Bool { fresh.isEmpty && older.isEmpty }
+    var totalCount: Int { fresh.count + older.count }
+}
+
 /// What kind of restore a row can honestly offer. Derived from preflight
 /// facts plus the resolve CLI's `confidence`, which is law: exact restores,
 /// ambiguous asks the user to pick, none is only ever a labeled shell

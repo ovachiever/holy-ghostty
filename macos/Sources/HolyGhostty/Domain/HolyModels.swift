@@ -928,6 +928,12 @@ struct HolyArchivedSession: Codable, Identifiable, Equatable {
     var archivedAt: Date
     var recoveryReason: String?
     var recoveryCleanupSummary: String?
+    /// Identity of the cold-boot event that archived this session. Every row
+    /// swept by one supervisor cold-boot pass shares one id, so the restore
+    /// surface can scope "this reboot" exactly instead of guessing from
+    /// wall-clock proximity. Nil on rows persisted before the marker existed
+    /// and on rows not archived by a cold boot.
+    var recoveryBootBatchID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -944,7 +950,8 @@ struct HolyArchivedSession: Codable, Identifiable, Equatable {
         lastActivityAt: Date,
         archivedAt: Date = .init(),
         recoveryReason: String? = nil,
-        recoveryCleanupSummary: String? = nil
+        recoveryCleanupSummary: String? = nil,
+        recoveryBootBatchID: UUID? = nil
     ) {
         self.id = id
         self.sourceSessionID = sourceSessionID
@@ -961,6 +968,7 @@ struct HolyArchivedSession: Codable, Identifiable, Equatable {
         self.archivedAt = archivedAt
         self.recoveryReason = recoveryReason
         self.recoveryCleanupSummary = recoveryCleanupSummary
+        self.recoveryBootBatchID = recoveryBootBatchID
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -979,6 +987,7 @@ struct HolyArchivedSession: Codable, Identifiable, Equatable {
         case archivedAt
         case recoveryReason
         case recoveryCleanupSummary
+        case recoveryBootBatchID
     }
 
     init(from decoder: Decoder) throws {
@@ -998,6 +1007,7 @@ struct HolyArchivedSession: Codable, Identifiable, Equatable {
         archivedAt = try container.decodeIfPresent(Date.self, forKey: .archivedAt) ?? .init()
         recoveryReason = try container.decodeIfPresent(String.self, forKey: .recoveryReason)
         recoveryCleanupSummary = try container.decodeIfPresent(String.self, forKey: .recoveryCleanupSummary)
+        recoveryBootBatchID = try container.decodeIfPresent(UUID.self, forKey: .recoveryBootBatchID)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1017,6 +1027,7 @@ struct HolyArchivedSession: Codable, Identifiable, Equatable {
         try container.encode(archivedAt, forKey: .archivedAt)
         try container.encodeIfPresent(recoveryReason, forKey: .recoveryReason)
         try container.encodeIfPresent(recoveryCleanupSummary, forKey: .recoveryCleanupSummary)
+        try container.encodeIfPresent(recoveryBootBatchID, forKey: .recoveryBootBatchID)
     }
 
     var runtime: HolySessionRuntime {

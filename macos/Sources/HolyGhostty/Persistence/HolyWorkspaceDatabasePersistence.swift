@@ -352,7 +352,8 @@ enum HolyWorkspaceDatabasePersistence {
                 lastActivityAt: resumeMetadata.lastActivityAt ?? updatedAt,
                 archivedAt: archivedAt,
                 recoveryReason: resumeMetadata.recoveryReason,
-                recoveryCleanupSummary: resumeMetadata.recoveryCleanupSummary
+                recoveryCleanupSummary: resumeMetadata.recoveryCleanupSummary,
+                recoveryBootBatchID: resumeMetadata.recoveryBootBatchID
             ))
         }
 
@@ -804,7 +805,8 @@ enum HolyWorkspaceDatabasePersistence {
             lastKnownWorkingDirectory: nil,
             lastActivityAt: nil,
             recoveryReason: nil,
-            recoveryCleanupSummary: nil
+            recoveryCleanupSummary: nil,
+            recoveryBootBatchID: nil
         )
     }
 
@@ -898,6 +900,7 @@ private struct HolyResumeMetadata: Codable {
     let lastActivityAt: Date?
     let recoveryReason: String?
     let recoveryCleanupSummary: String?
+    let recoveryBootBatchID: UUID?
 
     static func active(
         sourceSessionID: UUID,
@@ -914,7 +917,8 @@ private struct HolyResumeMetadata: Codable {
             lastKnownWorkingDirectory: nil,
             lastActivityAt: nil,
             recoveryReason: nil,
-            recoveryCleanupSummary: nil
+            recoveryCleanupSummary: nil,
+            recoveryBootBatchID: nil
         )
     }
 
@@ -929,7 +933,8 @@ private struct HolyResumeMetadata: Codable {
             lastKnownWorkingDirectory: archivedSession.lastKnownWorkingDirectory,
             lastActivityAt: archivedSession.lastActivityAt,
             recoveryReason: archivedSession.recoveryReason,
-            recoveryCleanupSummary: archivedSession.recoveryCleanupSummary
+            recoveryCleanupSummary: archivedSession.recoveryCleanupSummary,
+            recoveryBootBatchID: archivedSession.recoveryBootBatchID
         )
     }
 }

@@ -304,8 +304,10 @@ struct HolyWorkspaceRootView: View {
     private var mainWorkspaceContent: some View {
         VStack(spacing: 0) {
             if store.shouldOfferCrashRestore {
+                let freshBatch = store.crashRestoreBatch.fresh
                 HolyRestoreBanner(
-                    interruptedCount: store.crashRestoreCandidates.count,
+                    interruptedCount: freshBatch.count,
+                    interruptedAt: freshBatch.first?.archivedAt,
                     onRestore: { store.presentRestore() },
                     onDismiss: { store.dismissRestoreBanner() }
                 )

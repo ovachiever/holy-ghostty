@@ -11,8 +11,8 @@ final class HolyWorkspaceRestoreAdapter: HolyRestoreWorkspaceAdapting {
         self.store = store
     }
 
-    var restoreCandidateArchives: [HolyArchivedSession] {
-        store?.crashRestoreCandidates ?? []
+    var restoreCandidateBatch: HolyCrashRestoreBatch {
+        store?.crashRestoreBatch ?? .empty
     }
 
     func rosterOwnsSession(withHolyID id: UUID) -> Bool {
