@@ -305,16 +305,6 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         }
     }
 
-    /// Menu auto-enablement would light every item whose action a responder
-    /// implements; Restore from Crash… must instead track whether there is
-    /// anything to restore. Every other item keeps the default behavior.
-    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(presentCrashRestore(_:)) {
-            return !workspaceStore.crashRestoreBatch.isEmpty
-        }
-        return true
-    }
-
     static var all: [HolyWorkspaceWindowController] {
         NSApp.windows.compactMap { $0.windowController as? HolyWorkspaceWindowController }
     }
@@ -323,5 +313,19 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         all.first(where: { $0.window?.isMainWindow ?? false })
         ?? all.first(where: { $0.window?.isKeyWindow ?? false })
         ?? all.last
+    }
+}
+
+// MARK: NSMenuItemValidation
+
+extension HolyWorkspaceWindowController: NSMenuItemValidation {
+    /// Menu auto-enablement would light every item whose action a responder
+    /// implements; Restore from Crash… must instead track whether there is
+    /// anything to restore. Every other item keeps the default behavior.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(presentCrashRestore(_:)) {
+            return !workspaceStore.crashRestoreBatch.isEmpty
+        }
+        return true
     }
 }
