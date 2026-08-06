@@ -43,7 +43,6 @@ struct HolyRestoreRow: Identifiable, Equatable {
     var plannedLaunchSpec: HolySessionLaunchSpec
     var state: HolyRestoreRowState
     var phase: HolyRestoreRowPhase
-    var confirmation: HolyRestoreIdentityConfirmation
     var isSelected: Bool
     /// True when the row belongs to the most recent cold-boot batch. Older
     /// rows render collapsed, are never preselected, and are excluded from
@@ -51,10 +50,15 @@ struct HolyRestoreRow: Identifiable, Equatable {
     let isFresh: Bool
 }
 
-/// Orchestrates crash restore: plan from cold-boot archives, preflight each
-/// row to a single verdict, create detached tmux sessions in bounded
-/// batches, confirm provider identity, and adopt instead of duplicating on
-/// every retry.
+/// Orchestrates crash restore: plan from cold-boot archives, preflight local
+/// facts per row, resolve every provider row's conversation through ONE
+/// batch call with globally unique assignment, create detached tmux
+/// sessions in bounded batches, and adopt instead of duplicating on every
+/// retry. The identity guarantee is the argv: restore launches
+/// `claude --resume <exact id>` as an argument array, and a provider that
+/// accepts it has resumed exactly that conversation — no post-restore
+/// re-resolve exists, because re-resolving near "now" against a forked
+/// session file can only lie in both directions.
 @MainActor
 final class HolyRestoreEngine: ObservableObject {
     static let maxConcurrentRestores = 4
@@ -67,7 +71,7 @@ final class HolyRestoreEngine: ObservableObject {
     @Published private(set) var isPreflighting = false
     @Published private(set) var isRestoring = false
 
-    private let resolver: any HolyRestoreResolving
+    private let batchResolver: any HolyRestoreBatchResolving
     private let tmux: any HolyRestoreTmuxControlling
     private let environment: any HolyRestoreEnvironmentProbing
     // Held strongly: the engine owns its adapter's lifetime. Production
@@ -75,12 +79,12 @@ final class HolyRestoreEngine: ObservableObject {
     private let adapter: any HolyRestoreWorkspaceAdapting
 
     init(
-        resolver: any HolyRestoreResolving,
+        batchResolver: any HolyRestoreBatchResolving,
         tmux: any HolyRestoreTmuxControlling,
         environment: any HolyRestoreEnvironmentProbing,
         adapter: any HolyRestoreWorkspaceAdapting
     ) {
-        self.resolver = resolver
+        self.batchResolver = batchResolver
         self.tmux = tmux
         self.environment = environment
         self.adapter = adapter
@@ -135,7 +139,6 @@ final class HolyRestoreEngine: ObservableObject {
             plannedLaunchSpec: planned,
             state: .blocked("Preflight has not run yet."),
             phase: .pending,
-            confirmation: .notApplicable,
             isSelected: isSelected,
             isFresh: isFresh
         )
@@ -143,15 +146,25 @@ final class HolyRestoreEngine: ObservableObject {
 
     // MARK: - Preflight
 
+    /// Two-stage preflight. Stage one gathers local facts per row (tmux
+    /// liveness, cwd, provider executable) with bounded concurrency; every
+    /// row that needs no conversation resolution reaches its final verdict
+    /// there and is immediately restorable — a slow resolver never holds the
+    /// whole sheet hostage. Stage two ships every remaining question as ONE
+    /// resolve-batch subprocess call and assigns candidates to rows
+    /// globally, each conversation id spent at most once.
     func runPreflight() async {
         guard !isPreflighting else { return }
         isPreflighting = true
         defer { isPreflighting = false }
 
+        pendingResolutions.removeAll()
         let conflictReasons = planConflictReasons()
         await runBounded(rowIDs: rows.map(\.id)) { [weak self] rowID in
-            await self?.preflightOne(rowID: rowID, conflictReasons: conflictReasons)
+            await self?.preflightLocalFacts(rowID: rowID, conflictReasons: conflictReasons)
         }
+        await resolvePendingRowsInOneBatch()
+        pendingResolutions.removeAll()
     }
 
     /// Identity collisions visible from the plan itself: two rows targeting
@@ -182,7 +195,19 @@ final class HolyRestoreEngine: ObservableObject {
         return reasons
     }
 
-    private func preflightOne(rowID: UUID, conflictReasons: [UUID: String]) async {
+    /// One row's question awaiting the batch resolver, with the local facts
+    /// already gathered so the final verdict is a pure mapping.
+    private struct PendingResolution {
+        let rowID: UUID
+        let workingDirectory: String
+        let harness: String
+        let nearUnixSeconds: Int
+        var context: HolyRestorePreflightContext
+    }
+
+    private var pendingResolutions: [UUID: PendingResolution] = [:]
+
+    private func preflightLocalFacts(rowID: UUID, conflictReasons: [UUID: String]) async {
         guard let index = rows.firstIndex(where: { $0.id == rowID }) else { return }
         let row = rows[index]
         updateRow(rowID) { $0.phase = .preflighting }
@@ -217,21 +242,180 @@ final class HolyRestoreEngine: ObservableObject {
 
         if runtime != .shell {
             context.executableAvailable = await environment.executableExists(runtime.rawValue)
-            if let workingDirectory,
-               context.workingDirectoryExists == true,
-               context.executableAvailable == true {
-                context.resolveOutcome = await resolver.resolve(.init(
-                    workingDirectory: workingDirectory,
-                    harness: runtime.rawValue,
-                    nearUnixSeconds: Int(row.archived.lastActivityAt.timeIntervalSince1970)
-                ))
-            }
+        }
+
+        // Only provider rows that pass every local gate go to the resolver;
+        // everything else already has its final verdict in the local facts.
+        let needsResolution = runtime != .shell
+            && context.hostSupported
+            && context.conflictReason == nil
+            && (context.liveness == .absent || context.liveness == nil)
+            && context.workingDirectoryExists == true
+            && context.executableAvailable == true
+            && workingDirectory != nil
+
+        if needsResolution, let workingDirectory {
+            // The row keeps phase .preflighting (rendered "Checking…") and a
+            // blocked state, so a mid-preflight Restore skips it honestly.
+            pendingResolutions[rowID] = .init(
+                rowID: rowID,
+                workingDirectory: workingDirectory,
+                harness: runtime.rawValue,
+                nearUnixSeconds: Int(row.archived.lastActivityAt.timeIntervalSince1970),
+                context: context
+            )
+            return
         }
 
         let state = HolyRestorePreflight.rowState(runtime: runtime, context: context)
         updateRow(rowID) {
             $0.state = state
             $0.phase = .ready
+        }
+    }
+
+    /// Stage two: one resolve-batch call for every pending row, then global
+    /// unique assignment. On resolver failure every pending row degrades to
+    /// a retryable blocked state — nothing restores blind.
+    private func resolvePendingRowsInOneBatch() async {
+        // Sheet order, so assignment tie-breaks favor the row the user sees
+        // first and the result is deterministic across runs.
+        let pending = rows.compactMap { pendingResolutions[$0.id] }
+        guard !pending.isEmpty else { return }
+
+        let outcome = await batchResolver.resolveBatch(pending.map {
+            .init(cwd: $0.workingDirectory, harness: $0.harness, near: $0.nearUnixSeconds)
+        })
+
+        switch outcome {
+        case let .resolverUnavailable(reason):
+            for item in pending {
+                finalizePendingRow(item, resolveOutcome: .resolverUnavailable(reason))
+            }
+        case let .resolved(results):
+            // POSITIONAL pairing is the contract: results[i] answers
+            // requests[i], duplicates included. Coordinates cannot key the
+            // match — the CLI canonicalizes the echoed harness ("claude" in,
+            // "claude-code" out), and two same-cwd rows are two distinct
+            // questions. A count mismatch is a contract violation, and
+            // fail-closed beats guessing which row lost its answer.
+            guard results.count == pending.count else {
+                let reason = "resolve-batch returned \(results.count) results for \(pending.count) requests."
+                for item in pending {
+                    finalizePendingRow(item, resolveOutcome: .resolverUnavailable(reason))
+                }
+                return
+            }
+
+            // Rows whose result carries a per-request error are blocked
+            // (retryable), never demoted to shell-only: "the resolver could
+            // not answer" is not "no history exists".
+            var assignmentRows: [HolyRestoreAssignment.Row] = []
+            var errorsByRowID: [UUID: String] = [:]
+            for (item, result) in zip(pending, results) {
+                if let error = result.error {
+                    errorsByRowID[item.rowID] = error
+                    continue
+                }
+                assignmentRows.append(.init(
+                    id: item.rowID,
+                    lastActivityUnixSeconds: item.nearUnixSeconds,
+                    candidates: result.candidates
+                ))
+            }
+
+            let verdicts = HolyRestoreAssignment.assign(rows: assignmentRows)
+
+            for item in pending {
+                if let error = errorsByRowID[item.rowID] {
+                    finalizePendingRow(item, resolveOutcome: .resolverUnavailable(error))
+                    continue
+                }
+                finalizePendingRow(
+                    item,
+                    resolveOutcome: .resolved(resolution(
+                        for: verdicts[item.rowID] ?? .unmatched,
+                        item: item
+                    ))
+                )
+            }
+            assertUniqueExactAssignments()
+        }
+    }
+
+    private func finalizePendingRow(
+        _ item: PendingResolution,
+        resolveOutcome: HolyRestoreResolveOutcome
+    ) {
+        guard let row = rows.first(where: { $0.id == item.rowID }) else { return }
+        var context = item.context
+        context.resolveOutcome = resolveOutcome
+        let state = HolyRestorePreflight.rowState(
+            runtime: row.plannedLaunchSpec.runtime,
+            context: context
+        )
+        updateRow(item.rowID) {
+            $0.state = state
+            $0.phase = .ready
+        }
+    }
+
+    /// Bridges an assignment verdict back into the resolve-outcome shape the
+    /// preflight matrix speaks, so the precedence law and its tests stay one
+    /// total function.
+    private func resolution(
+        for verdict: HolyRestoreAssignmentVerdict,
+        item: PendingResolution
+    ) -> HolyRestoreResolution {
+        switch verdict {
+        case let .exact(providerSessionID):
+            return .init(
+                matched: true,
+                providerSessionID: providerSessionID,
+                harness: item.harness,
+                runtime: item.harness,
+                projectPath: item.workingDirectory,
+                resumeCommand: nil,
+                confidence: .exact,
+                candidates: []
+            )
+        case let .ambiguous(candidates):
+            return .init(
+                matched: false,
+                providerSessionID: nil,
+                harness: item.harness,
+                runtime: item.harness,
+                projectPath: item.workingDirectory,
+                resumeCommand: nil,
+                confidence: .ambiguous,
+                candidates: candidates
+            )
+        case .unmatched:
+            return .init(
+                matched: false,
+                providerSessionID: nil,
+                harness: item.harness,
+                runtime: item.harness,
+                projectPath: item.workingDirectory,
+                resumeCommand: nil,
+                confidence: .none,
+                candidates: []
+            )
+        }
+    }
+
+    /// Debug backstop for the uniqueness law. The assignment algorithm and
+    /// the pickCandidate guard enforce it structurally; this catches any
+    /// future regression the moment it happens instead of in Erik's roster.
+    private func assertUniqueExactAssignments() {
+        var seen: Set<String> = []
+        for row in rows {
+            if case let .exactResume(id) = row.state {
+                assert(
+                    seen.insert(id).inserted,
+                    "Two restore rows carry the same conversation id (\(id))."
+                )
+            }
         }
     }
 
@@ -275,15 +459,22 @@ final class HolyRestoreEngine: ObservableObject {
         }
     }
 
-    /// Resolves an ambiguous row to the candidate the user picked.
+    /// Resolves an ambiguous row to the candidate the user picked. The
+    /// uniqueness law holds here too: a conversation id another row already
+    /// carries (two ambiguous rows can list the same unclaimed candidate)
+    /// can never be picked into a duplicate.
     func pickCandidate(rowID: UUID, candidateID: String) {
         guard let row = rows.first(where: { $0.id == rowID }),
               case let .ambiguous(candidates) = row.state,
               candidates.contains(where: { $0.id == candidateID }),
-              HolyRestoreCommandBuilder.isSafeProviderSessionID(candidateID) else {
+              HolyRestoreCommandBuilder.isSafeProviderSessionID(candidateID),
+              !rows.contains(where: {
+                  $0.id != rowID && $0.state == .exactResume(providerSessionID: candidateID)
+              }) else {
             return
         }
         updateRow(rowID) { $0.state = .exactResume(providerSessionID: candidateID) }
+        assertUniqueExactAssignments()
     }
 
     private func restore(rowIDs: [UUID], attach: Bool) async {
@@ -336,17 +527,11 @@ final class HolyRestoreEngine: ObservableObject {
 
         guard await createIfAbsent(rowID: rowID, spec: spec) else { return }
 
-        let confirmation = await confirmIdentity(expected: providerSessionID, row: row)
-        updateRow(rowID) { $0.confirmation = confirmation }
-        if case let .mismatch(expected, resolved) = confirmation {
-            updateRow(rowID) {
-                $0.phase = .failed(
-                    "Identity confirmation mismatch: expected \(expected), the resolver now reports \(resolved). The session was left running; retry or inspect before attaching."
-                )
-            }
-            return
-        }
-
+        // No post-restore re-resolve: the identity guarantee is the argv.
+        // We launched `--resume <exact id>` as an argument array; a provider
+        // that accepted it resumed that conversation, and `--resume` forks a
+        // NEW session file, so re-resolving near "now" would contradict even
+        // a perfectly correct restore.
         adopt(rowID: rowID, attach: attach)
     }
 
@@ -368,7 +553,6 @@ final class HolyRestoreEngine: ObservableObject {
         }
 
         guard await createIfAbsent(rowID: rowID, spec: spec) else { return }
-        updateRow(rowID) { $0.confirmation = .notApplicable }
         adopt(rowID: rowID, attach: attach)
     }
 
@@ -412,39 +596,6 @@ final class HolyRestoreEngine: ObservableObject {
         case let .undetermined(failure):
             updateRow(rowID) { $0.phase = .failed(failure.message) }
             return false
-        }
-    }
-
-    /// Post-restore identity confirmation. Asymmetric on purpose: a positive
-    /// contradiction (the same coordinates now resolve to a different id)
-    /// blocks; a resolver outage or an inconclusive re-resolve is surfaced
-    /// as unverified but never invents a mismatch.
-    private func confirmIdentity(
-        expected: String,
-        row: HolyRestoreRow
-    ) async -> HolyRestoreIdentityConfirmation {
-        guard let workingDirectory = resolvedWorkingDirectory(for: row) else {
-            return .unverified("No working directory to re-resolve against.")
-        }
-
-        let outcome = await resolver.resolve(.init(
-            workingDirectory: workingDirectory,
-            harness: row.plannedLaunchSpec.runtime.rawValue,
-            nearUnixSeconds: Int(row.archived.lastActivityAt.timeIntervalSince1970)
-        ))
-
-        switch outcome {
-        case let .resolverUnavailable(reason):
-            return .unverified(reason)
-        case let .resolved(resolution):
-            if let resolvedID = resolution.providerSessionID {
-                return resolvedID == expected
-                    ? .confirmed
-                    : .mismatch(expected: expected, resolved: resolvedID)
-            }
-            return .unverified(
-                "Re-resolve returned confidence \(resolution.confidence.rawValue) without an id."
-            )
         }
     }
 

@@ -3,32 +3,76 @@ import Testing
 @testable import Ghostty
 
 // The engine orchestrates restore end to end: plan from archived sessions,
-// preflight to a row state, create detached tmux sessions in bounded
-// batches, confirm the provider identity, and adopt instead of duplicating
-// on every retry. All side effects live behind fakes here; the real tmux
-// and resolver are covered by the integration suite.
+// preflight local facts per row, resolve every provider row through ONE
+// batch call with globally unique assignment, create detached tmux sessions
+// in bounded batches, and adopt instead of duplicating on every retry. All
+// side effects live behind fakes here; the real tmux and resolver are
+// covered by the integration suite.
 
-private final class FakeResolver: HolyRestoreResolving, @unchecked Sendable {
+/// Opens once; every waiter before that suspends. Lets a test hold the
+/// batch resolver mid-flight while the rest of the engine keeps moving.
+private actor BatchGate {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        opened = true
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
+    }
+}
+
+private final class FakeBatchResolver: HolyRestoreBatchResolving, @unchecked Sendable {
     private let lock = NSLock()
-    private var outcomesByCwd: [String: HolyRestoreResolveOutcome]
-    private(set) var queries: [HolyRestoreResolveQuery] = []
+    private let candidatesByCwd: [String: [HolyRestoreResolveCandidate]]
+    private let errorsByCwd: [String: String]
+    private let unavailableReason: String?
+    private(set) var calls: [[HolyRestoreResolveBatchRequest]] = []
+    var gate: BatchGate?
+    /// Extra results appended to violate the positional contract on purpose.
+    var extraResults: [HolyRestoreResolveBatchResult] = []
 
-    init(outcomesByCwd: [String: HolyRestoreResolveOutcome] = [:]) {
-        self.outcomesByCwd = outcomesByCwd
+    init(
+        candidatesByCwd: [String: [HolyRestoreResolveCandidate]] = [:],
+        errorsByCwd: [String: String] = [:],
+        unavailableReason: String? = nil
+    ) {
+        self.candidatesByCwd = candidatesByCwd
+        self.errorsByCwd = errorsByCwd
+        self.unavailableReason = unavailableReason
     }
 
-    func setOutcome(_ outcome: HolyRestoreResolveOutcome, forCwd cwd: String) {
+    func resolveBatch(
+        _ requests: [HolyRestoreResolveBatchRequest]
+    ) async -> HolyRestoreBatchResolveOutcome {
         lock.lock()
-        defer { lock.unlock() }
-        outcomesByCwd[cwd] = outcome
-    }
+        calls.append(requests)
+        lock.unlock()
 
-    func resolve(_ query: HolyRestoreResolveQuery) async -> HolyRestoreResolveOutcome {
-        lock.lock()
-        defer { lock.unlock() }
-        queries.append(query)
-        return outcomesByCwd[query.workingDirectory]
-            ?? .resolverUnavailable("no scripted outcome for \(query.workingDirectory)")
+        if let gate {
+            await gate.wait()
+        }
+        if let unavailableReason {
+            return .resolverUnavailable(unavailableReason)
+        }
+        // Positional 1:1, echoing the CANONICAL harness the way the real CLI
+        // does ("claude" in, "claude-code" out) — any engine keying on the
+        // request's harness string would break here, exactly as it would in
+        // the field.
+        return .resolved(requests.map { request in
+            .init(
+                cwd: request.cwd,
+                harness: request.harness == "claude" ? "claude-code" : request.harness,
+                runtime: request.harness,
+                candidates: errorsByCwd[request.cwd] == nil ? (candidatesByCwd[request.cwd] ?? []) : [],
+                error: errorsByCwd[request.cwd]
+            )
+        } + extraResults)
     }
 }
 
@@ -153,6 +197,8 @@ private final class FakeAdapter: HolyRestoreWorkspaceAdapting {
 @MainActor
 struct HolyRestoreEngineTests {
     private static let coldBootReason = "Saved layout — the holy tmux server was not running at launch."
+    /// The default archive last-activity instant, unix seconds.
+    private static let lastActivity = 1_785_261_280
 
     private func archived(
         title: String = "Lane",
@@ -160,7 +206,7 @@ struct HolyRestoreEngineTests {
         workingDirectory: String? = "/tmp/lane-a",
         command: String? = "claude",
         sessionName: String? = "holy-lane-claude-11111111",
-        lastActivityAt: Date = Date(timeIntervalSince1970: 1_785_261_280)
+        lastActivityAt: Date = Date(timeIntervalSince1970: TimeInterval(lastActivity))
     ) -> HolyArchivedSession {
         var spec = HolySessionLaunchSpec.interactiveTmuxShell(title: title)
         spec.runtime = runtime
@@ -185,28 +231,23 @@ struct HolyRestoreEngineTests {
         )
     }
 
-    private func exactOutcome(id: String) -> HolyRestoreResolveOutcome {
-        .resolved(.init(
-            matched: true,
-            providerSessionID: id,
-            harness: "claude-code",
-            runtime: "claude",
-            projectPath: "/tmp/lane-a",
-            resumeCommand: "claude --resume \(id)",
-            confidence: .exact,
-            candidates: [.init(id: id, timestampEnd: 1_785_261_280, preview: "preview")]
-        ))
+    private func candidate(
+        _ id: String,
+        end: Int = lastActivity,
+        preview: String = "preview"
+    ) -> HolyRestoreResolveCandidate {
+        .init(id: id, timestampEnd: end, preview: preview)
     }
 
     private func makeEngine(
         archives: [HolyArchivedSession],
-        resolver: FakeResolver,
+        resolver: FakeBatchResolver,
         tmux: FakeTmux = FakeTmux(),
         environment: FakeEnvironment? = nil
     ) -> (HolyRestoreEngine, FakeAdapter, FakeTmux) {
         let adapter = FakeAdapter(archives: archives)
         let engine = HolyRestoreEngine(
-            resolver: resolver,
+            batchResolver: resolver,
             tmux: tmux,
             environment: environment ?? FakeEnvironment(
                 existingDirectories: ["/tmp/lane-a", "/tmp/lane-b"],
@@ -217,10 +258,19 @@ struct HolyRestoreEngineTests {
         return (engine, adapter, tmux)
     }
 
+    private func row(
+        _ engine: HolyRestoreEngine,
+        sessionName: String
+    ) throws -> HolyRestoreRow {
+        try #require(engine.rows.first {
+            $0.plannedLaunchSpec.tmux?.sessionName == sessionName
+        })
+    }
+
     // MARK: - Plan + preflight
 
-    @Test func preflightMapsExactResolutionToExactResumeRow() async throws {
-        let resolver = FakeResolver(outcomesByCwd: ["/tmp/lane-a": exactOutcome(id: "aaa-111")])
+    @Test func preflightMapsADecisiveAssignmentToExactResumeRow() async throws {
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]])
         let (engine, _, _) = makeEngine(archives: [archived()], resolver: resolver)
 
         engine.buildPlan()
@@ -231,21 +281,31 @@ struct HolyRestoreEngineTests {
         #expect((try #require(engine.rows.first)).phase == .ready)
     }
 
-    @Test func preflightPassesArchiveCoordinatesToTheResolver() async throws {
-        let resolver = FakeResolver(outcomesByCwd: ["/tmp/lane-a": exactOutcome(id: "aaa-111")])
-        let (engine, _, _) = makeEngine(archives: [archived()], resolver: resolver)
+    @Test func preflightShipsTheWholeSheetAsOneBatchCall() async throws {
+        let resolver = FakeBatchResolver(candidatesByCwd: [
+            "/tmp/lane-a": [candidate("aaa-111")],
+            "/tmp/lane-b": [candidate("bbb-222")],
+        ])
+        let (engine, _, _) = makeEngine(
+            archives: [
+                archived(workingDirectory: "/tmp/lane-a", sessionName: "holy-one"),
+                archived(runtime: .codex, workingDirectory: "/tmp/lane-b", command: "codex", sessionName: "holy-two"),
+            ],
+            resolver: resolver
+        )
 
         engine.buildPlan()
         await engine.runPreflight()
 
-        #expect(resolver.queries.count == 1)
-        #expect(resolver.queries[0].workingDirectory == "/tmp/lane-a")
-        #expect(resolver.queries[0].harness == "claude")
-        #expect(resolver.queries[0].nearUnixSeconds == 1_785_261_280)
+        #expect(resolver.calls.count == 1)
+        let requests = try #require(resolver.calls.first)
+        #expect(requests.count == 2)
+        #expect(requests[0] == .init(cwd: "/tmp/lane-a", harness: "claude", near: Self.lastActivity))
+        #expect(requests[1] == .init(cwd: "/tmp/lane-b", harness: "codex", near: Self.lastActivity))
     }
 
     @Test func planGeneratesAndPersistsAMissingTmuxIdentityOnce() async throws {
-        let resolver = FakeResolver(outcomesByCwd: ["/tmp/lane-a": exactOutcome(id: "aaa-111")])
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]])
         let (engine, adapter, _) = makeEngine(
             archives: [archived(sessionName: nil)],
             resolver: resolver
@@ -265,7 +325,7 @@ struct HolyRestoreEngineTests {
     }
 
     @Test func duplicateIdentitiesAcrossRowsConflictBothWays() async throws {
-        let resolver = FakeResolver(outcomesByCwd: ["/tmp/lane-a": exactOutcome(id: "aaa-111")])
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]])
         let (engine, _, _) = makeEngine(
             archives: [
                 archived(sessionName: "holy-shared-name"),
@@ -287,7 +347,7 @@ struct HolyRestoreEngineTests {
 
     @Test func rosterOwnedHolySessionIsAlreadyRestored() async throws {
         let archive = archived()
-        let resolver = FakeResolver()
+        let resolver = FakeBatchResolver()
         let (engine, adapter, _) = makeEngine(archives: [archive], resolver: resolver)
         adapter.rosterHolyIDs = [archive.sourceSessionID]
 
@@ -295,12 +355,245 @@ struct HolyRestoreEngineTests {
         await engine.runPreflight()
 
         #expect((try #require(engine.rows.first)).state == .alreadyRestored)
+        #expect(resolver.calls.isEmpty)
+    }
+
+    // MARK: - Assignment uniqueness (the e3565698 field failure)
+
+    @Test func eriksSameCwdSwarmNeverRestoresTheSameConversationTwice_e3565698() async throws {
+        // Field failure 2026-08-06: holy-shell-12 and holy-shell-9, both in
+        // /Users/erik/Custom-Coding, were each resolved independently to the
+        // nearest end timestamp in that cwd — and BOTH "restored"
+        // conversation e3565698…. Global unique assignment makes the
+        // collision impossible by construction: each row pairs with the
+        // conversation hugging its own last activity, and no id is spent
+        // twice.
+        let cwd = "/Users/erik/Custom-Coding"
+        let lane12 = archived(
+            title: "holy-shell-12",
+            workingDirectory: cwd,
+            sessionName: "holy-shell-12",
+            lastActivityAt: Date(timeIntervalSince1970: TimeInterval(Self.lastActivity))
+        )
+        let lane9 = archived(
+            title: "holy-shell-9",
+            workingDirectory: cwd,
+            sessionName: "holy-shell-9",
+            lastActivityAt: Date(timeIntervalSince1970: TimeInterval(Self.lastActivity - 180))
+        )
+        let resolver = FakeBatchResolver(candidatesByCwd: [cwd: [
+            candidate("e3565698-repro", end: Self.lastActivity),
+            candidate("41d7e2aa-sibling", end: Self.lastActivity - 180),
+        ]])
+        let (engine, _, tmux) = makeEngine(
+            archives: [lane12, lane9],
+            resolver: resolver,
+            environment: FakeEnvironment(
+                existingDirectories: [cwd],
+                availableExecutables: ["claude"]
+            )
+        )
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        #expect(try row(engine, sessionName: "holy-shell-12").state
+            == .exactResume(providerSessionID: "e3565698-repro"))
+        #expect(try row(engine, sessionName: "holy-shell-9").state
+            == .exactResume(providerSessionID: "41d7e2aa-sibling"))
+
+        await engine.restoreAll()
+
+        let commands = tmux.createdSpecs.compactMap(\.command)
+        #expect(commands.count == 2)
+        #expect(Set(commands).count == 2, "Two rows restored the same conversation: \(commands)")
+    }
+
+    @Test func nearTieCandidatesLeftUnclaimedDemoteToThePicker() async throws {
+        // One row, two conversations ending 10s apart: auto-picking either
+        // would be the old guess in new clothes. The row goes ambiguous and
+        // the human picks.
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [
+            candidate("aaa", end: Self.lastActivity, preview: "first"),
+            candidate("bbb", end: Self.lastActivity - 10, preview: "second"),
+        ]])
+        let (engine, _, _) = makeEngine(archives: [archived()], resolver: resolver)
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        guard case let .ambiguous(candidates) = (try #require(engine.rows.first)).state else {
+            Issue.record("Expected ambiguous, got \((try #require(engine.rows.first)).state)")
+            return
+        }
+        #expect(candidates.map(\.id) == ["aaa", "bbb"])
+    }
+
+    @Test func pickCandidateRefusesAConversationAnotherRowAlreadyCarries() async throws {
+        // Two same-cwd rows, three near-tie conversations: both rows demote
+        // to the picker and both pickers list the unclaimed "b". Once one
+        // row picks it, the other row's pick of the same id must bounce —
+        // the uniqueness law survives human clicks too.
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [
+            candidate("aa-pick", end: Self.lastActivity),
+            candidate("bb-pick", end: Self.lastActivity - 5),
+            candidate("cc-pick", end: Self.lastActivity - 12),
+        ]])
+        let (engine, _, _) = makeEngine(
+            archives: [
+                archived(sessionName: "holy-amb-1"),
+                archived(
+                    sessionName: "holy-amb-2",
+                    lastActivityAt: Date(timeIntervalSince1970: TimeInterval(Self.lastActivity - 10))
+                ),
+            ],
+            resolver: resolver
+        )
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        let first = try row(engine, sessionName: "holy-amb-1")
+        let second = try row(engine, sessionName: "holy-amb-2")
+        guard case .ambiguous = first.state, case .ambiguous = second.state else {
+            Issue.record("Expected both rows ambiguous, got \(first.state) / \(second.state)")
+            return
+        }
+
+        engine.pickCandidate(rowID: first.id, candidateID: "bb-pick")
+        #expect(try row(engine, sessionName: "holy-amb-1").state
+            == .exactResume(providerSessionID: "bb-pick"))
+
+        // The same conversation cannot be picked into a second row.
+        engine.pickCandidate(rowID: second.id, candidateID: "bb-pick")
+        guard case .ambiguous = (try row(engine, sessionName: "holy-amb-2")).state else {
+            Issue.record("Expected the second row to stay ambiguous after a duplicate pick")
+            return
+        }
+
+        // A different candidate remains pickable.
+        engine.pickCandidate(rowID: second.id, candidateID: "cc-pick")
+        #expect(try row(engine, sessionName: "holy-amb-2").state
+            == .exactResume(providerSessionID: "cc-pick"))
+    }
+
+    // MARK: - Resolver outage and speed
+
+    @Test func batchResolverOutageBlocksRowsRetryablyNeverGuesses() async throws {
+        let resolver = FakeBatchResolver(unavailableReason: "resolve-batch timed out")
+        let (engine, _, tmux) = makeEngine(archives: [archived()], resolver: resolver)
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        #expect((try #require(engine.rows.first)).state == .blocked("resolve-batch timed out"))
+        #expect((try #require(engine.rows.first)).phase == .ready)
+
+        await engine.restoreAll()
+        #expect(tmux.createdSpecs.isEmpty)
+    }
+
+    @Test func perRequestResolverErrorBlocksOnlyItsOwnRow() async throws {
+        // The CLI exits 0 and answers every request even when one carries an
+        // "error" (e.g. unknown harness). The erroring row blocks retryably —
+        // never shell-only demotion, because "the resolver could not answer"
+        // is not "no history exists" — and its neighbors resolve normally.
+        let resolver = FakeBatchResolver(
+            candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]],
+            errorsByCwd: ["/tmp/lane-b": "unknown harness 'emacs'; expected one of claude, claude-code, codex, opencode"]
+        )
+        let (engine, _, _) = makeEngine(
+            archives: [
+                archived(sessionName: "holy-good"),
+                archived(workingDirectory: "/tmp/lane-b", sessionName: "holy-errored"),
+            ],
+            resolver: resolver
+        )
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        #expect(try row(engine, sessionName: "holy-good").state
+            == .exactResume(providerSessionID: "aaa-111"))
+        #expect(try row(engine, sessionName: "holy-errored").state
+            == .blocked("unknown harness 'emacs'; expected one of claude, claude-code, codex, opencode"))
+    }
+
+    @Test func resultCountMismatchFailsClosedForEveryPendingRow() async throws {
+        // results[i] answers requests[i]; a count mismatch means the pairing
+        // is unknowable, and fail-closed beats guessing which row lost its
+        // answer.
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]])
+        resolver.extraResults = [
+            .init(cwd: "/tmp/phantom", harness: "claude-code", runtime: "claude", candidates: [], error: nil),
+        ]
+        let (engine, _, tmux) = makeEngine(archives: [archived()], resolver: resolver)
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        guard case let .blocked(reason) = (try #require(engine.rows.first)).state else {
+            Issue.record("Expected blocked, got \((try #require(engine.rows.first)).state)")
+            return
+        }
+        #expect(reason.contains("2 results for 1 requests"))
+
+        await engine.restoreAll()
+        #expect(tmux.createdSpecs.isEmpty)
+    }
+
+    @Test func readyRowsRestoreWhileTheResolverIsStillRunning() async throws {
+        // The field failure's wall clock: 25 minutes of resolver starvation
+        // held even shell rows hostage. Local facts finish in milliseconds;
+        // rows they verify must be restorable before the batch returns.
+        let gate = BatchGate()
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]])
+        resolver.gate = gate
+        let (engine, _, tmux) = makeEngine(
+            archives: [
+                archived(),
+                archived(
+                    title: "Fast Shell",
+                    runtime: .shell,
+                    workingDirectory: "/tmp/lane-b",
+                    command: "htop",
+                    sessionName: "holy-shell-fast"
+                ),
+            ],
+            resolver: resolver
+        )
+
+        engine.buildPlan()
+        let preflight = Task { await engine.runPreflight() }
+
+        var shellReady = false
+        for _ in 0 ..< 2_000 {
+            if (try? row(engine, sessionName: "holy-shell-fast"))?.phase == .ready {
+                shellReady = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        #expect(shellReady, "Shell row never reached ready while the resolver hung")
+        #expect(engine.isPreflighting)
+
+        await engine.restoreSelected()
+
+        #expect(tmux.createCount(forSessionName: "holy-shell-fast") == 1)
+        #expect(try row(engine, sessionName: "holy-shell-fast").phase == .restored(attached: true))
+        // The provider row was skipped honestly, not restored blind.
+        #expect(tmux.createCount(forSessionName: "holy-lane-claude-11111111") == 0)
+
+        await gate.open()
+        await preflight.value
+        #expect(try row(engine, sessionName: "holy-lane-claude-11111111").state
+            == .exactResume(providerSessionID: "aaa-111"))
     }
 
     // MARK: - Restore execution
 
     @Test func restoreCreatesDetachedSessionWithExactResumeCommand() async throws {
-        let resolver = FakeResolver(outcomesByCwd: ["/tmp/lane-a": exactOutcome(id: "aaa-111")])
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]])
         let (engine, adapter, tmux) = makeEngine(archives: [archived()], resolver: resolver)
 
         engine.buildPlan()
@@ -312,14 +605,30 @@ struct HolyRestoreEngineTests {
         #expect(spec.command == "'claude' '--resume' 'aaa-111'")
         #expect(spec.initialInput == nil)
         #expect((try #require(engine.rows.first)).phase == .restored(attached: false))
-        #expect((try #require(engine.rows.first)).confirmation == .confirmed)
         #expect(adapter.attachedArchiveIDs.isEmpty)
         let persisted = adapter.persistedSpecsByArchiveID[(try #require(engine.rows.first)).id]?.last
         #expect(persisted?.command == "'claude' '--resume' 'aaa-111'")
     }
 
+    @Test func restoreNeverReResolvesAfterLaunching() async throws {
+        // The argv is the identity. One batch call at preflight is the only
+        // resolver traffic; restore adds none, so a post-restore re-resolve
+        // can neither bless a wrong pairing nor false-flag a right one.
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]])
+        let (engine, _, _) = makeEngine(archives: [archived()], resolver: resolver)
+
+        engine.buildPlan()
+        await engine.runPreflight()
+        #expect(resolver.calls.count == 1)
+
+        await engine.restoreSelected()
+
+        #expect(resolver.calls.count == 1)
+        #expect((try #require(engine.rows.first)).phase == .restored(attached: true))
+    }
+
     @Test func restoreSelectedAttachesTheSelectedRow() async throws {
-        let resolver = FakeResolver(outcomesByCwd: ["/tmp/lane-a": exactOutcome(id: "aaa-111")])
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]])
         let (engine, adapter, _) = makeEngine(archives: [archived()], resolver: resolver)
 
         engine.buildPlan()
@@ -331,7 +640,7 @@ struct HolyRestoreEngineTests {
     }
 
     @Test func retryAdoptsTheAlreadyLiveSessionInsteadOfDuplicating() async throws {
-        let resolver = FakeResolver(outcomesByCwd: ["/tmp/lane-a": exactOutcome(id: "aaa-111")])
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]])
         let (engine, _, tmux) = makeEngine(archives: [archived()], resolver: resolver)
 
         engine.buildPlan()
@@ -346,7 +655,7 @@ struct HolyRestoreEngineTests {
     }
 
     @Test func liveSessionAtRestoreTimeIsAdoptedNotRecreated() async throws {
-        let resolver = FakeResolver(outcomesByCwd: ["/tmp/lane-a": exactOutcome(id: "aaa-111")])
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]])
         let tmux = FakeTmux()
         tmux.markLive("holy-lane-claude-11111111")
         let (engine, adapter, _) = makeEngine(
@@ -358,6 +667,8 @@ struct HolyRestoreEngineTests {
         engine.buildPlan()
         await engine.runPreflight()
         #expect((try #require(engine.rows.first)).state == .alreadyRestored)
+        // A live identity needs no conversation resolution at all.
+        #expect(resolver.calls.isEmpty)
 
         await engine.restoreSelected()
 
@@ -368,7 +679,7 @@ struct HolyRestoreEngineTests {
 
     @Test func restoresRunInBoundedBatches() async throws {
         var archives: [HolyArchivedSession] = []
-        var outcomes: [String: HolyRestoreResolveOutcome] = [:]
+        var candidatesByCwd: [String: [HolyRestoreResolveCandidate]] = [:]
         var directories: Set<String> = []
         for index in 0 ..< 10 {
             let cwd = "/tmp/batch-\(index)"
@@ -376,14 +687,15 @@ struct HolyRestoreEngineTests {
                 workingDirectory: cwd,
                 sessionName: "holy-batch-\(index)"
             ))
-            outcomes[cwd] = exactOutcome(id: "id-\(index)")
+            candidatesByCwd[cwd] = [candidate("id-\(index)")]
             directories.insert(cwd)
         }
         let tmux = FakeTmux()
         tmux.createDelayNanoseconds = 30_000_000
+        let resolver = FakeBatchResolver(candidatesByCwd: candidatesByCwd)
         let (engine, _, _) = makeEngine(
             archives: archives,
-            resolver: FakeResolver(outcomesByCwd: outcomes),
+            resolver: resolver,
             tmux: tmux,
             environment: FakeEnvironment(
                 existingDirectories: directories,
@@ -395,64 +707,19 @@ struct HolyRestoreEngineTests {
         await engine.runPreflight()
         await engine.restoreAll()
 
+        #expect(resolver.calls.count == 1)
         #expect(tmux.createdSpecs.count == 10)
         #expect(tmux.maxObservedConcurrentCreates <= HolyRestoreEngine.maxConcurrentRestores)
         #expect(engine.rows.allSatisfy { $0.phase == .restored(attached: false) })
     }
 
-    // MARK: - Identity confirmation
-
-    @Test func confirmationMismatchBlocksTheRow() async throws {
-        let resolver = FakeResolver(outcomesByCwd: ["/tmp/lane-a": exactOutcome(id: "aaa-111")])
-        let (engine, adapter, tmux) = makeEngine(archives: [archived()], resolver: resolver)
-
-        engine.buildPlan()
-        await engine.runPreflight()
-        resolver.setOutcome(exactOutcome(id: "zzz-999"), forCwd: "/tmp/lane-a")
-        await engine.restoreSelected()
-
-        guard case .failed = (try #require(engine.rows.first)).phase else {
-            Issue.record("Expected failed phase, got \((try #require(engine.rows.first)).phase)")
-            return
-        }
-        #expect((try #require(engine.rows.first)).confirmation == .mismatch(expected: "aaa-111", resolved: "zzz-999"))
-        #expect(adapter.attachedArchiveIDs.isEmpty)
-        #expect(tmux.createdSpecs.count == 1)
-    }
-
-    @Test func confirmationOutageIsUnverifiedNotAMismatch() async throws {
-        let resolver = FakeResolver(outcomesByCwd: ["/tmp/lane-a": exactOutcome(id: "aaa-111")])
-        let (engine, _, _) = makeEngine(archives: [archived()], resolver: resolver)
-
-        engine.buildPlan()
-        await engine.runPreflight()
-        resolver.setOutcome(.resolverUnavailable("resolver died mid-batch"), forCwd: "/tmp/lane-a")
-        await engine.restoreAll()
-
-        #expect((try #require(engine.rows.first)).phase == .restored(attached: false))
-        guard case .unverified = (try #require(engine.rows.first)).confirmation else {
-            Issue.record("Expected unverified, got \((try #require(engine.rows.first)).confirmation)")
-            return
-        }
-    }
-
     // MARK: - Ambiguity and honest non-resumes
 
     @Test func ambiguousRowsAreSkippedUntilACandidateIsPicked() async throws {
-        let candidates: [HolyRestoreResolveCandidate] = [
-            .init(id: "aaa", timestampEnd: 100, preview: "first"),
-            .init(id: "bbb", timestampEnd: 200, preview: "second"),
-        ]
-        let resolver = FakeResolver(outcomesByCwd: ["/tmp/lane-a": .resolved(.init(
-            matched: false,
-            providerSessionID: nil,
-            harness: "claude-code",
-            runtime: "claude",
-            projectPath: "/tmp/lane-a",
-            resumeCommand: nil,
-            confidence: .ambiguous,
-            candidates: candidates
-        ))])
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [
+            candidate("aaa", end: Self.lastActivity, preview: "first"),
+            candidate("bbb", end: Self.lastActivity - 10, preview: "second"),
+        ]])
         let (engine, _, tmux) = makeEngine(archives: [archived()], resolver: resolver)
 
         engine.buildPlan()
@@ -463,23 +730,13 @@ struct HolyRestoreEngineTests {
         engine.pickCandidate(rowID: (try #require(engine.rows.first)).id, candidateID: "bbb")
         #expect((try #require(engine.rows.first)).state == .exactResume(providerSessionID: "bbb"))
 
-        resolver.setOutcome(exactOutcome(id: "bbb"), forCwd: "/tmp/lane-a")
         await engine.restoreAll()
         #expect(tmux.createdSpecs.count == 1)
         #expect(tmux.createdSpecs[0].command == "'claude' '--resume' 'bbb'")
     }
 
     @Test func missingHistoryRecreatesAnHonestShellNeverAFreshConversation() async throws {
-        let resolver = FakeResolver(outcomesByCwd: ["/tmp/lane-a": .resolved(.init(
-            matched: false,
-            providerSessionID: nil,
-            harness: "claude-code",
-            runtime: "claude",
-            projectPath: "/tmp/lane-a",
-            resumeCommand: nil,
-            confidence: .none,
-            candidates: []
-        ))])
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": []])
         let (engine, _, tmux) = makeEngine(archives: [archived()], resolver: resolver)
 
         engine.buildPlan()
@@ -492,11 +749,10 @@ struct HolyRestoreEngineTests {
         #expect(spec.runtime == .shell)
         #expect(spec.command == nil)
         #expect((try #require(engine.rows.first)).phase == .restored(attached: false))
-        #expect((try #require(engine.rows.first)).confirmation == .notApplicable)
     }
 
-    @Test func shellRowsRecreateTheExplicitCommandOnly() async throws {
-        let resolver = FakeResolver()
+    @Test func shellRowsRecreateTheExplicitCommandOnlyWithoutTheResolver() async throws {
+        let resolver = FakeBatchResolver()
         let (engine, _, tmux) = makeEngine(
             archives: [archived(runtime: .shell, command: "htop", sessionName: "holy-shell-1")],
             resolver: resolver
@@ -510,6 +766,6 @@ struct HolyRestoreEngineTests {
         #expect(tmux.createdSpecs.count == 1)
         #expect(tmux.createdSpecs[0].command == "htop")
         #expect(tmux.createdSpecs[0].initialInput == nil)
-        #expect(resolver.queries.isEmpty)
+        #expect(resolver.calls.isEmpty)
     }
 }

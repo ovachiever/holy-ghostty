@@ -197,17 +197,22 @@ struct HolyRestoreSheet: View {
 
             Spacer()
 
+            // Deliberately NOT disabled while preflight is still running:
+            // rows whose checks finished are restorable immediately, and
+            // rows still checking are skipped honestly (blocked state) and
+            // restorable once ready. A slow resolver must never hold rows
+            // that are already verified hostage.
             Button("Restore All (\(engine.interruptedCount), headless)") {
                 Task { await engine.restoreAll() }
             }
             .buttonStyle(HolyGhosttyActionButtonStyle())
-            .disabled(engine.isRestoring || engine.isPreflighting || engine.interruptedCount == 0)
+            .disabled(engine.isRestoring || engine.interruptedCount == 0)
 
             Button("Restore Selected (\(engine.selectedCount))") {
                 Task { await engine.restoreSelected() }
             }
             .buttonStyle(HolyGhosttyProminentButtonStyle())
-            .disabled(engine.isRestoring || engine.isPreflighting || engine.selectedCount == 0)
+            .disabled(engine.isRestoring || engine.selectedCount == 0)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -334,8 +339,7 @@ private struct RestoreRowView: View {
         }
     }
 
-    /// One honest line combining the preflight verdict, lifecycle phase,
-    /// and identity confirmation.
+    /// One honest line combining the preflight verdict and lifecycle phase.
     private var statusLine: String {
         switch row.phase {
         case let .failed(reason):
@@ -345,18 +349,18 @@ private struct RestoreRowView: View {
         case .preflighting, .pending:
             return "Checking…"
         case let .restored(attached):
-            var line = attached
+            // The argv is the identity: we launched `--resume <exact id>` as
+            // an argument array, so the resumed conversation IS that id. No
+            // re-resolve happens, and nothing here claims one did.
+            if case let .exactResume(providerSessionID) = row.state {
+                let shortID = String(providerSessionID.prefix(8))
+                return attached
+                    ? "Restored and attached — resumed conversation \(shortID)…"
+                    : "Restored headless — resumed conversation \(shortID)…, attach when ready."
+            }
+            return attached
                 ? "Restored and attached."
                 : "Restored headless — attach when ready."
-            switch row.confirmation {
-            case .confirmed:
-                line += " Conversation identity confirmed."
-            case let .unverified(reason):
-                line += " Identity unverified: \(reason)"
-            case .mismatch, .notApplicable:
-                break
-            }
-            return line
         case .ready:
             break
         }

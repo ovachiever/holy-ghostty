@@ -8,8 +8,10 @@ import Testing
 // Restore All is scoped to the fresh batch; Restore Selected follows
 // selection wherever it lives. "Restore Selected (N)" must always be true.
 
-private final class StubResolver: HolyRestoreResolving, @unchecked Sendable {
-    func resolve(_ query: HolyRestoreResolveQuery) async -> HolyRestoreResolveOutcome {
+private struct StubBatchResolver: HolyRestoreBatchResolving {
+    func resolveBatch(
+        _ requests: [HolyRestoreResolveBatchRequest]
+    ) async -> HolyRestoreBatchResolveOutcome {
         .resolverUnavailable("stub")
     }
 }
@@ -108,7 +110,7 @@ struct HolyRestoreSelectionLawTests {
         )
         let tmux = RecordingTmux()
         let engine = HolyRestoreEngine(
-            resolver: StubResolver(),
+            batchResolver: StubBatchResolver(),
             tmux: tmux,
             environment: StubEnvironment(),
             adapter: adapter
