@@ -2,9 +2,9 @@ import Foundation
 import Testing
 @testable import Ghostty
 
-// Session History is where people land by accident after a crash. Its
+// Session History is where people land by accident after a cold boot. Its
 // signage must say what the screen is, mark interrupted rows as such, and
-// hand the user one obvious road into Crash Restore with honest counts.
+// hand the user one obvious road into Session Restore with honest counts.
 struct HolySessionHistorySignageTests {
     private static let coldBootReason =
         "Saved layout — the holy tmux server was not running at launch (probably a macOS reboot). Relaunch from history to recreate."
@@ -42,19 +42,19 @@ struct HolySessionHistorySignageTests {
     @Test func affordanceCarriesTheFreshCount() {
         #expect(HolySessionHistorySheet.crashRestoreAffordanceTitle(
             freshCount: 8, olderCount: 0
-        ) == "Open Crash Restore (8 interrupted)")
+        ) == "Open Session Restore (8 interrupted)")
     }
 
     @Test func affordanceNamesOlderInterruptionsSeparatelyNeverMerged() {
         #expect(HolySessionHistorySheet.crashRestoreAffordanceTitle(
             freshCount: 8, olderCount: 46
-        ) == "Open Crash Restore (8 interrupted · 46 older)")
+        ) == "Open Session Restore (8 interrupted · 46 older)")
     }
 
     @Test func affordanceStaysReachableWhenOnlyOlderRowsRemain() {
         #expect(HolySessionHistorySheet.crashRestoreAffordanceTitle(
             freshCount: 0, olderCount: 12
-        ) == "Open Crash Restore (12 older)")
+        ) == "Open Session Restore (12 older)")
     }
 
     // MARK: - Row recovery labels

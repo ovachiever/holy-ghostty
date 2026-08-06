@@ -12,11 +12,11 @@ struct HolySessionHistorySheet: View {
     static func crashRestoreAffordanceTitle(freshCount: Int, olderCount: Int) -> String? {
         guard freshCount + olderCount > 0 else { return nil }
         guard freshCount > 0 else {
-            return "Open Crash Restore (\(olderCount) older)"
+            return "Open Session Restore (\(olderCount) older)"
         }
         return olderCount > 0
-            ? "Open Crash Restore (\(freshCount) interrupted · \(olderCount) older)"
-            : "Open Crash Restore (\(freshCount) interrupted)"
+            ? "Open Session Restore (\(freshCount) interrupted · \(olderCount) older)"
+            : "Open Session Restore (\(freshCount) interrupted)"
     }
 
     /// Recovery-state label for a history row; nil for plain archives.
@@ -130,7 +130,7 @@ struct HolySessionHistorySheet: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(HolyGhosttyTheme.warning)
 
-                Text("Interrupted sessions resume their exact conversations in Crash Restore.")
+                Text("Interrupted sessions resume their exact conversations in Session Restore.")
                     .font(.system(size: 11))
                     .foregroundStyle(HolyGhosttyTheme.textPrimary)
 
@@ -264,7 +264,7 @@ struct HolySessionHistorySheet: View {
                 // button says where the click actually goes.
                 Label(
                     HolyWorkspaceStore.isCrashRestoreCandidate(archived)
-                        ? "Open Crash Restore"
+                        ? "Open Session Restore"
                         : archived.relaunchActionTitle,
                     systemImage: "arrow.clockwise"
                 )
