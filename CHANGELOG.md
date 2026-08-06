@@ -29,6 +29,16 @@ right-hand Inbox panel shows what waits on the human — nothing else.
 
 ### Fixed
 
+- Crash restore now survives first human contact: the sheet scopes to the
+  most recent boot batch (a durable per-sweep batch id; legacy rows cluster
+  by archive time) with older interruptions collapsed, unselected, and
+  never counted in the banner. Small fresh batches open fully selected,
+  large ones open with nothing selected, and Select All / Select None act
+  on the visible rows. A durable View ▸ Restore from Crash… menu item and a
+  prominent Session History callout join the banner as entry points, the
+  banner gained warning prominence with an honest per-reboot count and
+  relative timestamp, and history rows now label interrupted and
+  needs-repair states.
 - Manna issue ids are validated against manna's own alphabet before they can
   reach a spawned shell, closing a command-injection path from hostile
   `.manna` boards in cloned repositories.
