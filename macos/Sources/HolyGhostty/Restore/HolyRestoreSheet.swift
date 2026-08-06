@@ -2,17 +2,19 @@ import SwiftUI
 
 /// The crash-restore surface: this reboot's interruptions as one honest
 /// section, helper shells grouped one click away inside it, older
-/// interruptions collapsed beneath, every row restored only on explicit
-/// action. Restore Selected attaches as each row verifies; Restore All
-/// recreates the fresh batch's parent rows headless and lets attach happen
-/// lazily. Nothing here launches without a click, and nothing is deleted
-/// without a confirmation that states the count.
+/// interruptions grouped per crash event beneath, every row restored only on
+/// explicit action. Each crash wears its recency hue — a wash and a leading
+/// edge, never a status — so a whole holy experience can be spotted and
+/// restored as one. Restore Selected attaches as each row verifies; Restore
+/// All recreates the fresh batch's parent rows headless and lets attach
+/// happen lazily. Nothing here launches without a click, and nothing is
+/// deleted without a confirmation that states the count.
 struct HolyRestoreSheet: View {
     @ObservedObject var store: HolyWorkspaceStore
     @ObservedObject var engine: HolyRestoreEngine
-    @State private var olderExpanded = false
     @State private var freshHelpersExpanded = false
-    @State private var olderHelpersExpanded = false
+    @State private var expandedOlderGroups: Set<HolyRestoreCrashGroupKey> = []
+    @State private var expandedOlderHelperGroups: Set<HolyRestoreCrashGroupKey> = []
     @State private var clearOlderConfirmationPresented = false
 
     init(store: HolyWorkspaceStore) {
@@ -106,9 +108,9 @@ struct HolyRestoreSheet: View {
     /// disclosures are open.
     private var visibleRowIDs: [UUID] {
         engine.visibleRowIDs(
-            olderExpanded: olderExpanded,
             freshHelpersExpanded: freshHelpersExpanded,
-            olderHelpersExpanded: olderHelpersExpanded
+            expandedOlderGroups: expandedOlderGroups,
+            expandedOlderHelperGroups: expandedOlderHelperGroups
         )
     }
 
@@ -118,24 +120,19 @@ struct HolyRestoreSheet: View {
                 if !engine.freshRows.isEmpty {
                     freshSectionHeader
                     ForEach(engine.freshParentRows) { row in
-                        restoreRow(row)
+                        restoreRow(row, rank: HolyRestoreEngine.freshCrashRank)
                     }
                     helperSection(
                         rows: engine.freshHelperRows,
-                        isExpanded: $freshHelpersExpanded
+                        isExpanded: $freshHelpersExpanded,
+                        rank: HolyRestoreEngine.freshCrashRank
                     )
                 }
 
                 if engine.olderCount > 0 {
-                    olderSectionToggle
-                    if olderExpanded {
-                        ForEach(engine.olderParentRows) { row in
-                            restoreRow(row)
-                        }
-                        helperSection(
-                            rows: engine.olderHelperRows,
-                            isExpanded: $olderHelpersExpanded
-                        )
+                    olderSectionHeader
+                    ForEach(engine.olderCrashSections) { section in
+                        olderCrashSectionView(section)
                     }
                 }
             }
@@ -145,12 +142,120 @@ struct HolyRestoreSheet: View {
         .scrollIndicators(.hidden)
     }
 
+    /// One crash event: a header naming when and how much, its parent rows,
+    /// and its helper shells nested one more click down. Every row inside
+    /// wears the crash's recency hue.
+    @ViewBuilder
+    private func olderCrashSectionView(_ section: HolyRestoreEngine.OlderCrashSection) -> some View {
+        let isExpanded = expandedOlderGroups.contains(section.key)
+
+        HStack(spacing: 8) {
+            Button {
+                if isExpanded {
+                    expandedOlderGroups.remove(section.key)
+                } else {
+                    expandedOlderGroups.insert(section.key)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
+
+                    Circle()
+                        .fill(
+                            HolyGhosttyTheme.crashBatchHue(rank: section.rank)
+                                .opacity(HolyGhosttyTheme.crashBatchTickOpacity)
+                        )
+                        .frame(width: 6, height: 6)
+
+                    Text(crashSectionTitle(section))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            if engine.restoringCrashGroupKey == section.key {
+                ProgressView()
+                    .controlSize(.mini)
+            } else if !section.parentRows.isEmpty {
+                Button("Restore this crash (\(section.parentRows.count))") {
+                    Task { await engine.restoreCrashGroup(key: section.key) }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(HolyGhosttyTheme.accent)
+                .disabled(engine.isRestoring)
+                .help(
+                    "Recreates this crash's \(section.parentRows.count) named "
+                        + "session\(section.parentRows.count == 1 ? "" : "s") headless. "
+                        + "Helper shells restore only by explicit selection."
+                )
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 8)
+        .padding(.bottom, 3)
+
+        if isExpanded {
+            ForEach(section.parentRows) { row in
+                restoreRow(row, rank: section.rank)
+            }
+            helperSection(
+                rows: section.helperRows,
+                isExpanded: helperExpansionBinding(for: section.key),
+                rank: section.rank
+            )
+        }
+    }
+
+    /// "Crash · 2 days ago · 5 sessions · 3 helpers". Parents and helpers are
+    /// itemized separately so the restore action's count is checkable against
+    /// the header; a batch with nothing but helpers says so instead of
+    /// showing an empty crash.
+    private func crashSectionTitle(_ section: HolyRestoreEngine.OlderCrashSection) -> String {
+        var parts = ["Crash", Self.relativeTime(section.newestArchivedAt)]
+        let parents = section.parentRows.count
+        let helpers = section.helperRows.count
+        if parents > 0 {
+            parts.append("\(parents) session\(parents == 1 ? "" : "s")")
+            if helpers > 0 {
+                parts.append("\(helpers) helper\(helpers == 1 ? "" : "s")")
+            }
+        } else {
+            parts.append("only helper sessions (\(helpers))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func helperExpansionBinding(for key: HolyRestoreCrashGroupKey) -> Binding<Bool> {
+        Binding(
+            get: { expandedOlderHelperGroups.contains(key) },
+            set: { expanded in
+                if expanded {
+                    expandedOlderHelperGroups.insert(key)
+                } else {
+                    expandedOlderHelperGroups.remove(key)
+                }
+            }
+        )
+    }
+
+    static func relativeTime(_ date: Date) -> String {
+        date.formatted(.relative(presentation: .named))
+    }
+
     /// Helper shells, grouped one click away. Grouped, never hidden: the
     /// count is always visible and every row inside stays fully restorable.
     @ViewBuilder
     private func helperSection(
         rows: [HolyRestoreRow],
-        isExpanded: Binding<Bool>
+        isExpanded: Binding<Bool>,
+        rank: Int
     ) -> some View {
         if !rows.isEmpty {
             Button {
@@ -180,15 +285,24 @@ struct HolyRestoreSheet: View {
 
             if isExpanded.wrappedValue {
                 ForEach(rows) { row in
-                    restoreRow(row)
+                    restoreRow(row, rank: rank)
                 }
             }
         }
     }
 
-    private func restoreRow(_ row: HolyRestoreRow) -> some View {
+    private func restoreRow(_ row: HolyRestoreRow, rank: Int) -> some View {
         RestoreRowView(
             row: row,
+            batchHue: HolyGhosttyTheme.crashBatchHue(rank: rank),
+            lineageTicks: engine.lineageTicks(for: row).map { tick in
+                RestoreLineageTickDisplay(
+                    sectionID: tick.sectionID,
+                    color: HolyGhosttyTheme.crashBatchHue(rank: tick.rank),
+                    tooltip: "Also interrupted in the crash of "
+                        + "\(Self.relativeTime(tick.occurredAt))."
+                )
+            },
             isBusy: engine.isRestoring,
             onToggleSelection: { engine.setSelected(!row.isSelected, rowID: row.id) },
             onPickCandidate: { engine.pickCandidate(rowID: row.id, candidateID: $0) },
@@ -199,6 +313,15 @@ struct HolyRestoreSheet: View {
 
     private var freshSectionHeader: some View {
         HStack(spacing: 8) {
+            // The fresh batch's hue swatch, mirroring the older crash
+            // headers: a blue lineage tick anywhere below points here.
+            Circle()
+                .fill(
+                    HolyGhosttyTheme.crashBatchHue(rank: HolyRestoreEngine.freshCrashRank)
+                        .opacity(HolyGhosttyTheme.crashBatchTickOpacity)
+                )
+                .frame(width: 6, height: 6)
+
             Text("Interrupted by the last shutdown")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(HolyGhosttyTheme.textTertiary)
@@ -224,25 +347,16 @@ struct HolyRestoreSheet: View {
         .padding(.bottom, 3)
     }
 
-    private var olderSectionToggle: some View {
+    /// The umbrella label over the per-crash subsections. Not a disclosure
+    /// itself — each crash opens and shuts on its own — but it keeps the
+    /// honest region total and carries the one destructive action.
+    private var olderSectionHeader: some View {
         HStack(spacing: 8) {
-            Button {
-                olderExpanded.toggle()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: olderExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
-
-                    Text("Older interruptions (\(engine.olderCount))")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                        .textCase(.uppercase)
-                        .tracking(0.5)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+            Text("Older interruptions (\(engine.olderCount))")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                .textCase(.uppercase)
+                .tracking(0.5)
 
             Spacer()
 
@@ -265,8 +379,8 @@ struct HolyRestoreSheet: View {
         ) {
             Button(clearOlderConfirmationAction, role: .destructive) {
                 engine.clearOlderInterruptions()
-                olderExpanded = false
-                olderHelpersExpanded = false
+                expandedOlderGroups.removeAll()
+                expandedOlderHelperGroups.removeAll()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -352,8 +466,21 @@ struct HolyRestoreSheet: View {
 
 // MARK: - Row
 
+/// One lineage tick, resolved to render facts: the other crash's hue and a
+/// tooltip naming when it happened. Information, never dual membership.
+private struct RestoreLineageTickDisplay: Identifiable, Equatable {
+    let sectionID: HolyRestoreCrashSectionID
+    let color: Color
+    let tooltip: String
+
+    var id: HolyRestoreCrashSectionID { sectionID }
+}
+
 private struct RestoreRowView: View {
     let row: HolyRestoreRow
+    /// The recency hue of the crash this row belongs to.
+    let batchHue: Color
+    let lineageTicks: [RestoreLineageTickDisplay]
     let isBusy: Bool
     let onToggleSelection: () -> Void
     let onPickCandidate: (String) -> Void
@@ -387,6 +514,17 @@ private struct RestoreRowView: View {
                             RoundedRectangle(cornerRadius: 3, style: .continuous)
                                 .fill(HolyGhosttyTheme.bgSurface)
                         )
+
+                    // Lineage: this same session also died in another crash.
+                    // A 6pt swatch in that crash's hue — a fact to notice,
+                    // not a state to act on.
+                    ForEach(lineageTicks) { tick in
+                        Circle()
+                            .fill(tick.color.opacity(HolyGhosttyTheme.crashBatchTickOpacity))
+                            .frame(width: 6, height: 6)
+                            .help(tick.tooltip)
+                            .accessibilityLabel(tick.tooltip)
+                    }
                 }
 
                 Text(row.archived.workingDirectoryDisplay)
@@ -417,8 +555,20 @@ private struct RestoreRowView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(HolyGhosttyTheme.bgElevated.opacity(0.6))
+            // The batch's recency wash over the row surface, plus a leading
+            // edge in the same hue: the edge names the batch even where the
+            // mist is too soft to call. Neither carries health — status
+            // stays with the dot.
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(HolyGhosttyTheme.bgElevated.opacity(0.6))
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(batchHue.opacity(HolyGhosttyTheme.crashBatchWashOpacity))
+                Rectangle()
+                    .fill(batchHue.opacity(HolyGhosttyTheme.crashBatchEdgeOpacity))
+                    .frame(width: HolyGhosttyTheme.crashBatchEdgeWidth)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         )
     }
 

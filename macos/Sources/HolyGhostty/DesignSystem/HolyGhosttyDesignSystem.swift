@@ -32,6 +32,45 @@ enum HolyGhosttyTheme {
     static let border = Color.white.opacity(0.05)
     static let borderActive = Color.white.opacity(0.10)
 
+    // MARK: Crash-batch recency ramp (restore sheet)
+    //
+    // Ranked by recency, never by health: rank 0 is always the newest crash
+    // and the ramp descends by SATURATION, not by hue parade — the newest
+    // batch is a cool blue mist, the previous one the palette's warm
+    // counterweight (a dusty rose far below danger's saturation, so a wash
+    // can never read as an alarm), the third a muted mauve between them, and
+    // everything older converges to the neutral scale's cool grey. Hue
+    // carries identity only while recency makes identity useful. None of
+    // these are status colors — health stays with success/warning/danger —
+    // and none sit near the amber banner or the gold primary buttons.
+    static let crashBatchNewest = Color(red: 0.48, green: 0.66, blue: 0.86)
+    static let crashBatchPrevious = Color(red: 0.84, green: 0.55, blue: 0.58)
+    static let crashBatchThird = Color(red: 0.62, green: 0.58, blue: 0.70)
+    static let crashBatchStale = Color(red: 0.55, green: 0.56, blue: 0.60)
+
+    /// The hue for a crash's recency rank (0 = newest). Everything at rank 3
+    /// or older shares the stale grey — age past three crashes stops being
+    /// worth a color of its own.
+    static func crashBatchHue(rank: Int) -> Color {
+        switch rank {
+        case 0: return crashBatchNewest
+        case 1: return crashBatchPrevious
+        case 2: return crashBatchThird
+        default: return crashBatchStale
+        }
+    }
+
+    /// Row wash: a mist, not a paint bucket. The batch hue at this opacity
+    /// over the dark chrome groups rows without competing with text.
+    static let crashBatchWashOpacity: Double = 0.08
+    /// The 2.5pt leading edge that names the batch even where the wash is
+    /// too soft to call.
+    static let crashBatchEdgeOpacity: Double = 0.55
+    static let crashBatchEdgeWidth: CGFloat = 2.5
+    /// The 6pt lineage tick and the group header's swatch read as objects,
+    /// not washes, so they carry the hue near full strength.
+    static let crashBatchTickOpacity: Double = 0.85
+
     // MARK: Legacy aliases
     static let backgroundTop = bg
     static let backgroundBottom = bg
