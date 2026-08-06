@@ -9,7 +9,11 @@ import Testing
 struct HolyRestoreResolveClientTests {
     // MARK: - Query → argument array
 
-    @Test func queryBuildsExactArgumentArray() {
+    @Test func queryBuildsExactArgumentArrayAndAlwaysSkipsReindex() {
+        // --no-reindex is unconditional: a single resolve is a lookup, never
+        // a reindex trigger. The post-reboot stampede (every per-row resolve
+        // racing its own full 2.5GB reindex into 90s timeouts) must stay
+        // impossible by construction.
         let query = HolyRestoreResolveQuery(
             workingDirectory: "/Users/erik/Custom-Coding/holy-ghostty",
             harness: "claude",
@@ -21,11 +25,12 @@ struct HolyRestoreResolveClientTests {
             "--cwd", "/Users/erik/Custom-Coding/holy-ghostty",
             "--harness", "claude",
             "--near", "1785261280",
+            "--no-reindex",
             "--json",
         ])
     }
 
-    @Test func queryCarriesOptionalWindowLimitAndReindexFlags() {
+    @Test func queryCarriesOptionalWindowAndLimitFlags() {
         var query = HolyRestoreResolveQuery(
             workingDirectory: "/tmp/project",
             harness: "codex",
@@ -33,7 +38,6 @@ struct HolyRestoreResolveClientTests {
         )
         query.windowSeconds = 172_800
         query.limit = 5
-        query.skipReindex = true
 
         #expect(query.arguments == [
             "resolve",
@@ -147,5 +151,129 @@ struct HolyRestoreResolveClientTests {
             return
         }
         #expect(!reason.isEmpty)
+    }
+
+    // MARK: - Batch contract (resolve-batch)
+
+    @Test func batchQueryUsesTheResolveBatchSubcommand() {
+        let query = HolyRestoreResolveBatchQuery(requests: [
+            .init(cwd: "/tmp/a", harness: "claude", near: 100),
+        ])
+        #expect(query.arguments == ["resolve-batch", "--json"])
+    }
+
+    @Test func batchStdinPayloadMatchesThePinnedEnvelopeByteForByte() throws {
+        let query = HolyRestoreResolveBatchQuery(requests: [
+            .init(cwd: "/Users/erik/Custom-Coding", harness: "claude", near: 1_785_261_280),
+            .init(cwd: "/tmp/other", harness: "codex", near: 42),
+        ])
+
+        let payload = try #require(query.stdinPayload())
+        let rendered = try #require(String(bytes: payload, encoding: .utf8))
+        #expect(rendered == #"{"requests":[{"cwd":"\/Users\/erik\/Custom-Coding","harness":"claude","near":1785261280},{"cwd":"\/tmp\/other","harness":"codex","near":42}]}"#)
+    }
+
+    @Test func batchPayloadParsesEveryPinnedField() throws {
+        // Mirrors real CLI output: the echoed harness is CANONICAL
+        // ("claude-code" for a "claude" request), runtime is never null, and
+        // a nonexistent cwd still gets a full result with empty candidates.
+        let payload = """
+        {"results": [\
+        {"cwd": "/Users/erik/Custom-Coding", "harness": "claude-code", "runtime": "claude", \
+        "candidates": [\
+        {"id": "e3565698-4bd2-449b-9f84-000000000001", "timestamp_end": 1785261280, \
+        "preview": "lane twelve", "resume_command": "claude --resume e3565698-4bd2-449b-9f84-000000000001"}, \
+        {"id": "41d7e2aa-0000-0000-0000-000000000002", "timestamp_end": 1785261100, "preview": "lane nine"}]}, \
+        {"cwd": "/Users/erik/does-not-exist", "harness": "claude-code", "runtime": "claude", "candidates": []}]}
+        """
+
+        let resolution = try #require(HolyRestoreBatchResolution.parse(Data(payload.utf8)))
+        #expect(resolution.results.count == 2)
+
+        let first = resolution.results[0]
+        #expect(first.cwd == "/Users/erik/Custom-Coding")
+        #expect(first.harness == "claude-code")
+        #expect(first.runtime == "claude")
+        #expect(first.error == nil)
+        #expect(first.candidates.map(\.id) == [
+            "e3565698-4bd2-449b-9f84-000000000001",
+            "41d7e2aa-0000-0000-0000-000000000002",
+        ])
+        #expect(first.candidates.map(\.timestampEnd) == [1_785_261_280, 1_785_261_100])
+        #expect(first.candidates.first?.preview == "lane twelve")
+
+        let second = resolution.results[1]
+        #expect(second.runtime == "claude")
+        #expect(second.candidates.isEmpty)
+        #expect(second.error == nil)
+    }
+
+    @Test func batchPayloadCarriesPerRequestErrors() throws {
+        // Unknown harness: exit 0, full result, harness/runtime echo the
+        // input verbatim, candidates empty, "error" explains.
+        let payload = """
+        {"results": [{"cwd": "/p", "harness": "emacs", "runtime": "emacs", "candidates": [], \
+        "error": "unknown harness 'emacs'; expected one of claude, claude-code, codex, opencode"}]}
+        """
+
+        let resolution = try #require(HolyRestoreBatchResolution.parse(Data(payload.utf8)))
+        #expect(resolution.results.first?.error
+            == "unknown harness 'emacs'; expected one of claude, claude-code, codex, opencode")
+        #expect(resolution.results.first?.candidates.isEmpty == true)
+    }
+
+    @Test func batchPayloadToleratesMissingCandidatesAndPreview() throws {
+        let payload = """
+        {"results": [{"cwd": "/p", "harness": "claude-code", "runtime": "claude"}, \
+        {"cwd": "/q", "harness": "claude-code", "runtime": "claude", \
+        "candidates": [{"id": "abc", "timestamp_end": 7}]}]}
+        """
+
+        let resolution = try #require(HolyRestoreBatchResolution.parse(Data(payload.utf8)))
+        #expect(resolution.results[0].candidates.isEmpty)
+        #expect(resolution.results[1].candidates == [
+            .init(id: "abc", timestampEnd: 7, preview: ""),
+        ])
+    }
+
+    @Test func batchPayloadOutsideTheContractParsesAsNil() {
+        #expect(HolyRestoreBatchResolution.parse(Data("not json".utf8)) == nil)
+        #expect(HolyRestoreBatchResolution.parse(Data()) == nil)
+        #expect(HolyRestoreBatchResolution.parse(Data("[]".utf8)) == nil)
+        #expect(HolyRestoreBatchResolution.parse(Data(#"{"matched": true}"#.utf8)) == nil)
+        // A results entry missing its cwd is a contract violation, not a
+        // partial success.
+        #expect(HolyRestoreBatchResolution.parse(
+            Data(#"{"results": [{"harness": "claude-code"}]}"#.utf8)
+        ) == nil)
+        // runtime is pinned non-null; null is a contract violation.
+        #expect(HolyRestoreBatchResolution.parse(
+            Data(#"{"results": [{"cwd": "/p", "harness": "claude-code", "runtime": null, "candidates": []}]}"#.utf8)
+        ) == nil)
+    }
+
+    @Test func missingBinaryDegradesBatchToResolverUnavailable() async {
+        let client = HolyAgentSessionsResolveClient(
+            binaryPathOverride: "/nonexistent/definitely-not-agent-sessions"
+        )
+        let outcome = await client.resolveBatch([
+            .init(cwd: "/tmp", harness: "claude", near: 1),
+        ])
+
+        guard case let .resolverUnavailable(reason) = outcome else {
+            Issue.record("Expected resolverUnavailable, got \(outcome)")
+            return
+        }
+        #expect(!reason.isEmpty)
+    }
+
+    @Test func emptyBatchNeverSpawnsAProcess() async {
+        // A sheet with nothing to resolve must not pay a subprocess launch;
+        // the nonexistent-binary override would fail if it tried.
+        let client = HolyAgentSessionsResolveClient(
+            binaryPathOverride: "/nonexistent/definitely-not-agent-sessions"
+        )
+        let outcome = await client.resolveBatch([])
+        #expect(outcome == .resolved([]))
     }
 }

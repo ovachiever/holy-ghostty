@@ -211,14 +211,30 @@ struct HolyRestoreIntegrationTests {
         runRestoreTestShell("command -v agent-sessions >/dev/null 2>&1") == 0
             || HolyAgentSessionsResolveClient.wellKnownBinaryPath() != nil
 
+    /// Capability detection, not version sniffing: `resolve-batch --help`
+    /// exits 0 only on builds where the subcommand landed. Until then the
+    /// batch integration test skips and the app-side batch client is covered
+    /// by the fixture tests against the pinned contract.
+    private static let agentSessionsSupportsResolveBatch: Bool = {
+        guard agentSessionsAvailable else { return false }
+        if runRestoreTestShell(
+            "command -v agent-sessions >/dev/null 2>&1 && agent-sessions resolve-batch --help >/dev/null 2>&1"
+        ) == 0 {
+            return true
+        }
+        guard let wellKnown = HolyAgentSessionsResolveClient.wellKnownBinaryPath() else {
+            return false
+        }
+        return runRestoreTestShell("'\(wellKnown)' resolve-batch --help >/dev/null 2>&1") == 0
+    }()
+
     @Test(.enabled(if: agentSessionsAvailable))
     func realResolverHonorsThePinnedContractForAnUnknownCwd() async throws {
         let client = HolyAgentSessionsResolveClient()
         let outcome = await client.resolve(.init(
             workingDirectory: "/nonexistent/holy-restore-integration-\(UUID().uuidString)",
             harness: "claude",
-            nearUnixSeconds: 1_785_261_280,
-            skipReindex: true
+            nearUnixSeconds: 1_785_261_280
         ))
 
         guard case let .resolved(resolution) = outcome else {
@@ -229,5 +245,28 @@ struct HolyRestoreIntegrationTests {
         #expect(resolution.providerSessionID == nil)
         #expect(resolution.confidence == HolyRestoreResolution.Confidence.none)
         #expect(resolution.candidates.isEmpty)
+    }
+
+    @Test(.enabled(if: agentSessionsSupportsResolveBatch))
+    func realResolveBatchHonorsThePinnedContractForUnknownCwds() async throws {
+        let client = HolyAgentSessionsResolveClient()
+        let unknownCwd = "/nonexistent/holy-restore-batch-\(UUID().uuidString)"
+        let outcome = await client.resolveBatch([
+            .init(cwd: unknownCwd, harness: "claude", near: 1_785_261_280),
+        ])
+
+        guard case let .resolved(results) = outcome else {
+            Issue.record("Expected a resolved batch payload, got \(outcome)")
+            return
+        }
+        // One result per request in request order; a directory that never
+        // existed gets a full result (no error) with zero candidates, and
+        // the echoed harness is the canonical name, not the input string.
+        #expect(results.count == 1)
+        #expect(results.first?.cwd == unknownCwd)
+        #expect(results.first?.harness == "claude-code")
+        #expect(results.first?.runtime == "claude")
+        #expect(results.first?.candidates.isEmpty == true)
+        #expect(results.first?.error == nil)
     }
 }
