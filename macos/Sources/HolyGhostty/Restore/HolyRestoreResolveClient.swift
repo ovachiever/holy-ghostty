@@ -14,7 +14,6 @@ struct HolyRestoreResolveQuery: Equatable, Sendable {
     let nearUnixSeconds: Int
     var windowSeconds: Int?
     var limit: Int?
-    var skipReindex: Bool = false
 
     var arguments: [String] {
         var arguments = [
@@ -29,9 +28,11 @@ struct HolyRestoreResolveQuery: Equatable, Sendable {
         if let limit {
             arguments += ["--limit", String(limit)]
         }
-        if skipReindex {
-            arguments.append("--no-reindex")
-        }
+        // Non-negotiable: a single resolve must never trigger a full 2.5GB
+        // reindex. Post-reboot, concurrent implicit reindexes starved four of
+        // Erik's rows into 90-second timeouts; batch resolution owns reindex
+        // scoping, single resolves are lookups only.
+        arguments.append("--no-reindex")
         arguments.append("--json")
         return arguments
     }
@@ -135,15 +136,134 @@ protocol HolyRestoreResolving: Sendable {
     func resolve(_ query: HolyRestoreResolveQuery) async -> HolyRestoreResolveOutcome
 }
 
+// MARK: - Batch resolution
+
+/// One row's question inside a `resolve-batch` call. The whole sheet ships
+/// as one subprocess invocation so the CLI can scope a single reindex for
+/// everything instead of stampeding one full reindex per row.
+struct HolyRestoreResolveBatchRequest: Equatable, Sendable, Encodable {
+    let cwd: String
+    let harness: String
+    /// Unix SECONDS, same law as the single-resolve `--near`.
+    let near: Int
+}
+
+/// The full batch invocation. stdin carries `{"requests": [...]}`; stdout
+/// returns `{"results": [...]}` with per-request candidate lists best-first.
+struct HolyRestoreResolveBatchQuery: Equatable, Sendable {
+    let requests: [HolyRestoreResolveBatchRequest]
+
+    var arguments: [String] { ["resolve-batch", "--json"] }
+
+    /// The exact stdin payload. Sorted keys keep the byte shape deterministic
+    /// for tests and for diffing against the CLI's own fixtures.
+    func stdinPayload() -> Data? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try? encoder.encode(Envelope(requests: requests))
+    }
+
+    private struct Envelope: Encodable {
+        let requests: [HolyRestoreResolveBatchRequest]
+    }
+}
+
+/// One request's answer. POSITIONAL: `results[i]` answers `requests[i]`,
+/// always — duplicates included, nothing omitted. The echoed `harness` is
+/// canonicalized by the CLI (a "claude" request comes back "claude-code"),
+/// so matching results to requests by coordinates would silently miss;
+/// callers must pair by index. No confidence field — with global assignment
+/// the verdict (exact / ambiguous / none) is derived in the app, across
+/// rows, never per row.
+struct HolyRestoreResolveBatchResult: Equatable, Sendable {
+    let cwd: String
+    /// Canonical harness ("claude-code"), never null; echoes the input
+    /// verbatim only in the unknown-harness error case.
+    let harness: String
+    let runtime: String
+    let candidates: [HolyRestoreResolveCandidate]
+    /// Per-request failure (e.g. unknown harness). The batch still exits 0;
+    /// only this request degrades.
+    let error: String?
+}
+
+/// Parses the single JSON object `resolve-batch` prints to stdout.
+/// Fail-closed like the single-resolve parser: any payload without a
+/// `results` array (or with malformed entries) returns nil so callers
+/// degrade to resolver-unavailable instead of assigning guesses.
+struct HolyRestoreBatchResolution: Equatable, Sendable {
+    let results: [HolyRestoreResolveBatchResult]
+
+    static func parse(_ data: Data) -> HolyRestoreBatchResolution? {
+        guard let payload = try? JSONDecoder().decode(Payload.self, from: data) else {
+            return nil
+        }
+        return .init(results: payload.results.map { result in
+            .init(
+                cwd: result.cwd,
+                harness: result.harness,
+                runtime: result.runtime,
+                candidates: (result.candidates ?? []).map {
+                    .init(id: $0.id, timestampEnd: $0.timestampEnd, preview: $0.preview ?? "")
+                },
+                error: result.error
+            )
+        })
+    }
+
+    private struct Payload: Decodable {
+        let results: [ResultPayload]
+    }
+
+    private struct ResultPayload: Decodable {
+        let cwd: String
+        let harness: String
+        let runtime: String
+        let candidates: [CandidatePayload]?
+        let error: String?
+    }
+
+    private struct CandidatePayload: Decodable {
+        let id: String
+        let timestampEnd: Int
+        let preview: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case timestampEnd = "timestamp_end"
+            case preview
+        }
+    }
+}
+
+enum HolyRestoreBatchResolveOutcome: Equatable, Sendable {
+    case resolved([HolyRestoreResolveBatchResult])
+    /// The CLI is missing, lacks resolve-batch, crashed, timed out, or
+    /// violated the contract. Every unresolved row degrades to a retryable
+    /// blocked state; nothing restores blind.
+    case resolverUnavailable(String)
+}
+
+protocol HolyRestoreBatchResolving: Sendable {
+    func resolveBatch(
+        _ requests: [HolyRestoreResolveBatchRequest]
+    ) async -> HolyRestoreBatchResolveOutcome
+}
+
 /// Production bridge to the installed `agent-sessions` binary. The binary is
 /// PATH-resolved through a login shell once (a Dock launch does not inherit
 /// Homebrew or pyenv bin directories) and then always invoked directly with
 /// an argument array — the query never passes through shell source.
 struct HolyAgentSessionsResolveClient: HolyRestoreResolving {
     static let binaryName = "agent-sessions"
-    /// Post-crash the first resolve triggers a full reindex of the provider
-    /// stores; give it room before declaring the resolver broken.
+    /// Single resolves always pass --no-reindex, so they are pure index
+    /// lookups; this ceiling is generous headroom, not reindex budget.
     static let commandTimeout: TimeInterval = 90
+    /// One batch call covers the whole sheet including the CLI's own scoped
+    /// reindex; the sheet must reach an actionable state in seconds, so a
+    /// batch that cannot finish inside this window is declared broken and
+    /// every pending row degrades to a retryable blocked state.
+    static let batchTimeout: TimeInterval = 30
 
     private let binaryPathOverride: String?
 
@@ -184,7 +304,7 @@ struct HolyAgentSessionsResolveClient: HolyRestoreResolving {
         }
     }
 
-    private func resolvedBinaryPath() async -> String? {
+    fileprivate func resolvedBinaryPath() async -> String? {
         if let binaryPathOverride {
             return FileManager.default.isExecutableFile(atPath: binaryPathOverride)
                 ? binaryPathOverride
@@ -225,6 +345,56 @@ struct HolyAgentSessionsResolveClient: HolyRestoreResolving {
     }
 }
 
+extension HolyAgentSessionsResolveClient: HolyRestoreBatchResolving {
+    /// One subprocess call for the whole restore sheet. The CLI scopes any
+    /// needed reindex internally — this is the fix for the post-reboot
+    /// stampede where every per-row resolve raced its own full reindex.
+    func resolveBatch(
+        _ requests: [HolyRestoreResolveBatchRequest]
+    ) async -> HolyRestoreBatchResolveOutcome {
+        guard !requests.isEmpty else { return .resolved([]) }
+
+        guard let binaryPath = await resolvedBinaryPath() else {
+            return .resolverUnavailable(
+                "The \(Self.binaryName) CLI was not found on PATH. Install it to resolve conversations; sessions can still be recreated as shells."
+            )
+        }
+
+        let query = HolyRestoreResolveBatchQuery(requests: requests)
+        guard let stdinPayload = query.stdinPayload() else {
+            return .resolverUnavailable(
+                "The resolve-batch request payload could not be encoded."
+            )
+        }
+
+        let result = await HolyRestoreProcessRunner.run(
+            executablePath: binaryPath,
+            arguments: query.arguments,
+            timeout: Self.batchTimeout,
+            stdinData: stdinPayload
+        )
+
+        switch result {
+        case let .failure(reason):
+            return .resolverUnavailable(reason)
+        case let .success(output):
+            guard output.exitCode == 0 else {
+                let detail = output.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                return .resolverUnavailable(
+                    "\(Self.binaryName) resolve-batch exited with status \(output.exitCode)."
+                        + (detail.isEmpty ? "" : " \(detail)")
+                )
+            }
+            guard let resolution = HolyRestoreBatchResolution.parse(Data(output.stdout.utf8)) else {
+                return .resolverUnavailable(
+                    "\(Self.binaryName) resolve-batch returned a payload outside the pinned contract."
+                )
+            }
+            return .resolved(resolution.results)
+        }
+    }
+}
+
 struct HolyRestoreProcessOutput: Sendable {
     let stdout: String
     let stderr: String
@@ -244,7 +414,8 @@ enum HolyRestoreProcessRunner {
         executablePath: String,
         arguments: [String],
         timeout: TimeInterval,
-        environment: [String: String]? = nil
+        environment: [String: String]? = nil,
+        stdinData: Data? = nil
     ) async -> HolyRestoreProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
@@ -256,6 +427,10 @@ enum HolyRestoreProcessRunner {
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
+        let stdin: Pipe? = stdinData != nil ? Pipe() : nil
+        if let stdin {
+            process.standardInput = stdin
+        }
 
         let resumeBox = ResumeBox()
 
@@ -279,6 +454,14 @@ enum HolyRestoreProcessRunner {
                     holyDetailedProcessLaunchErrorDescription(error)
                 ))
                 return
+            }
+
+            if let stdin, let stdinData {
+                // Payloads here are small (a JSON envelope for at most a few
+                // dozen rows), far below pipe buffer size; write-then-close
+                // cannot block against a reading child.
+                try? stdin.fileHandleForWriting.write(contentsOf: stdinData)
+                try? stdin.fileHandleForWriting.close()
             }
 
             Task.detached {

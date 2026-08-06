@@ -16,15 +16,17 @@ struct HolyCrashRestoreBatch: Equatable {
 }
 
 /// What kind of restore a row can honestly offer. Derived from preflight
-/// facts plus the resolve CLI's `confidence`, which is law: exact restores,
-/// ambiguous asks the user to pick, none is only ever a labeled shell
-/// recreate — never called a resume.
+/// facts plus a confidence verdict which is law: exact restores, ambiguous
+/// asks the user to pick, none is only ever a labeled shell recreate —
+/// never called a resume. The confidence comes from global unique
+/// assignment across the whole sheet (HolyRestoreAssignment), never from a
+/// per-row nearest-timestamp guess.
 enum HolyRestoreRowState: Equatable, Sendable {
-    /// Resolve returned confidence "exact": restore runs the exact resume
-    /// command for this provider conversation id.
+    /// Assignment was decisive: restore runs the exact resume command for
+    /// this provider conversation id, which no other row carries.
     case exactResume(providerSessionID: String)
-    /// Resolve returned confidence "ambiguous": the user picks among
-    /// candidates (first-prompt preview + end timestamp) before restoring.
+    /// Assignment found near-tie candidates: the user picks among them
+    /// (first-prompt preview + end timestamp) before restoring.
     case ambiguous(candidates: [HolyRestoreResolveCandidate])
     /// A shell-runtime row: recreates cwd and the explicit command only.
     /// RAM, processes, PTY state, and scrollback are gone and never claimed.
@@ -63,16 +65,6 @@ enum HolyRestoreRowPhase: Equatable, Sendable {
     case restoring
     case restored(attached: Bool)
     case failed(String)
-}
-
-/// The post-restore identity confirmation verdict. Fail-closed asymmetric:
-/// a positive contradiction (different id resolved for the same coordinates)
-/// blocks; missing evidence is surfaced but never upgraded to a mismatch.
-enum HolyRestoreIdentityConfirmation: Equatable, Sendable {
-    case notApplicable
-    case confirmed
-    case mismatch(expected: String, resolved: String)
-    case unverified(String)
 }
 
 /// The verified facts preflight gathered for one archived session. Pure data

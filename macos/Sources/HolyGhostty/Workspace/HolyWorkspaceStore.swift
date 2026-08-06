@@ -118,7 +118,7 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private let sessionSupervisor: HolySessionSupervisor
     private(set) lazy var restoreEngine = HolyRestoreEngine(
-        resolver: HolyAgentSessionsResolveClient(),
+        batchResolver: HolyAgentSessionsResolveClient(),
         tmux: HolyRestoreTmuxService(),
         environment: HolyRestoreEnvironmentProbe(),
         adapter: HolyWorkspaceRestoreAdapter(store: self)
