@@ -349,6 +349,17 @@ extension HolyAgentSessionsResolveClient: HolyRestoreBatchResolving {
     /// One subprocess call for the whole restore sheet. The CLI scopes any
     /// needed reindex internally — this is the fix for the post-reboot
     /// stampede where every per-row resolve raced its own full reindex.
+    ///
+    /// Staleness bound, and where the safety actually lives: the CLI skips
+    /// the scoped refresh for a cwd claimed within the last 120 seconds, so
+    /// a session that ended after the last refresh but before a rapid
+    /// relaunch (rebuild-install-relaunch churn) can be genuinely absent
+    /// from the answers. The index is NOT provably complete inside that
+    /// window. Correctness rests on the degradation path instead: a missing
+    /// conversation surfaces as a visible "no history found" row offering a
+    /// shell-only recreate that a human must click, and reopening the sheet
+    /// after the bound expires self-heals. Never build logic on top of this
+    /// call that would turn that window into a silent failure.
     func resolveBatch(
         _ requests: [HolyRestoreResolveBatchRequest]
     ) async -> HolyRestoreBatchResolveOutcome {
