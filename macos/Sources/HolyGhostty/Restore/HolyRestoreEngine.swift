@@ -138,6 +138,113 @@ final class HolyRestoreEngine: ObservableObject {
 
     var olderHelperRows: [HolyRestoreRow] { olderRows.filter(\.isHelperSession) }
 
+    // MARK: - Crash groups
+
+    /// One crash event inside the older section: its rows split by
+    /// provenance, plus the recency rank that names its hue. The fresh
+    /// section is rank 0 by definition — it IS the newest crash — so older
+    /// sections rank from 1, ordered by their newest archive time. Rank is
+    /// pure data: no disclosure state feeds it, so a batch keeps its color
+    /// whether it is open or shut.
+    struct OlderCrashSection: Equatable, Identifiable {
+        let key: HolyRestoreCrashGroupKey
+        let rank: Int
+        let newestArchivedAt: Date
+        let parentRows: [HolyRestoreRow]
+        let helperRows: [HolyRestoreRow]
+
+        var id: HolyRestoreCrashGroupKey { key }
+        var sectionID: HolyRestoreCrashSectionID { .older(key) }
+        var totalCount: Int { parentRows.count + helperRows.count }
+    }
+
+    /// The recency rank of the fresh section, fixed by definition.
+    static let freshCrashRank = 0
+
+    /// The older rows partitioned per crash event, newest crash first.
+    /// Freshness itself is never re-derived here — the adapter's fresh/older
+    /// split stays the single authority; this only subdivides `older`.
+    var olderCrashSections: [OlderCrashSection] {
+        let groups = HolyRestoreCrashGrouping.groups(from: olderRows.map(\.archived))
+        let rowsByID = Dictionary(uniqueKeysWithValues: olderRows.map { ($0.id, $0) })
+        return groups.enumerated().map { index, group in
+            let groupRows = group.sessions.compactMap { rowsByID[$0.id] }
+            return OlderCrashSection(
+                key: group.key,
+                rank: index + 1,
+                newestArchivedAt: group.newestArchivedAt,
+                parentRows: groupRows.filter { !$0.isHelperSession },
+                helperRows: groupRows.filter(\.isHelperSession)
+            )
+        }
+    }
+
+    // MARK: - Lineage
+
+    /// A row's presence in a crash OTHER than its own: the same Holy session
+    /// (by `sourceSessionID`) also left an archive in that crash. Membership
+    /// stays singular — the row belongs to its own batch; the tick is
+    /// information about a sibling archive, never dual membership.
+    struct LineageTick: Equatable, Identifiable {
+        let sectionID: HolyRestoreCrashSectionID
+        /// The other crash's recency rank, which is also its hue.
+        let rank: Int
+        /// The other crash's newest archive time, for a relative-time tooltip.
+        let occurredAt: Date
+
+        var id: HolyRestoreCrashSectionID { sectionID }
+    }
+
+    /// Every section each source session has an archive in. Kept as its own
+    /// map, not fused into row building, so flipping ticks to true dual
+    /// membership later is a render change: the memberships are already here.
+    var crashLineageBySourceSession: [UUID: Set<HolyRestoreCrashSectionID>] {
+        var memberships: [UUID: Set<HolyRestoreCrashSectionID>] = [:]
+        for row in freshRows {
+            memberships[row.archived.sourceSessionID, default: []].insert(.fresh)
+        }
+        for section in olderCrashSections {
+            for row in section.parentRows + section.helperRows {
+                memberships[row.archived.sourceSessionID, default: []]
+                    .insert(section.sectionID)
+            }
+        }
+        return memberships
+    }
+
+    /// The ticks a row renders: every OTHER crash holding an archive of the
+    /// same source session, sorted newest crash first. Empty for the common
+    /// row that died exactly once.
+    func lineageTicks(for row: HolyRestoreRow) -> [LineageTick] {
+        let memberships = crashLineageBySourceSession[row.archived.sourceSessionID] ?? []
+        guard memberships.count > 1 else { return [] }
+
+        let ownSectionID: HolyRestoreCrashSectionID = row.isFresh
+            ? .fresh
+            : olderCrashSections
+                .first { section in
+                    (section.parentRows + section.helperRows).contains { $0.id == row.id }
+                }
+                .map(\.sectionID) ?? .fresh
+
+        var facts: [HolyRestoreCrashSectionID: (rank: Int, occurredAt: Date)] = [:]
+        if let freshNewest = freshRows.map(\.archived.archivedAt).max() {
+            facts[.fresh] = (Self.freshCrashRank, freshNewest)
+        }
+        for section in olderCrashSections {
+            facts[section.sectionID] = (section.rank, section.newestArchivedAt)
+        }
+
+        return memberships
+            .filter { $0 != ownSectionID }
+            .compactMap { sectionID in
+                facts[sectionID].map {
+                    LineageTick(sectionID: sectionID, rank: $0.rank, occurredAt: $0.occurredAt)
+                }
+            }
+            .sorted { $0.rank < $1.rank }
+    }
+
     /// The honest headline count: this boot's interruptions, parents only.
     ///
     /// A helper shell is scaffolding a sub-agent run created and the crash
@@ -166,21 +273,37 @@ final class HolyRestoreEngine: ObservableObject {
     /// shells — are not selectable by a button the user cannot see them
     /// under.
     func visibleRowIDs(
-        olderExpanded: Bool,
         freshHelpersExpanded: Bool,
-        olderHelpersExpanded: Bool
+        expandedOlderGroups: Set<HolyRestoreCrashGroupKey>,
+        expandedOlderHelperGroups: Set<HolyRestoreCrashGroupKey>
     ) -> [UUID] {
         var ids = freshParentRows.map(\.id)
         if freshHelpersExpanded {
             ids += freshHelperRows.map(\.id)
         }
-        if olderExpanded {
-            ids += olderParentRows.map(\.id)
-            if olderHelpersExpanded {
-                ids += olderHelperRows.map(\.id)
+        for section in olderCrashSections where expandedOlderGroups.contains(section.key) {
+            ids += section.parentRows.map(\.id)
+            if expandedOlderHelperGroups.contains(section.key) {
+                ids += section.helperRows.map(\.id)
             }
         }
         return ids
+    }
+
+    /// The pre-crash-sections projection of the same law: one switch for the
+    /// whole older region, one for all its helper disclosures. Delegates to
+    /// the per-group law with every group in the named state.
+    func visibleRowIDs(
+        olderExpanded: Bool,
+        freshHelpersExpanded: Bool,
+        olderHelpersExpanded: Bool
+    ) -> [UUID] {
+        let allKeys = Set(olderCrashSections.map(\.key))
+        return visibleRowIDs(
+            freshHelpersExpanded: freshHelpersExpanded,
+            expandedOlderGroups: olderExpanded ? allKeys : [],
+            expandedOlderHelperGroups: olderHelpersExpanded ? allKeys : []
+        )
     }
 
     // MARK: - Plan
@@ -526,6 +649,24 @@ final class HolyRestoreEngine: ObservableObject {
     /// Restores the selected rows and attaches each one as it verifies.
     func restoreSelected() async {
         await restore(rowIDs: rows.filter(\.isSelected).map(\.id), attach: true)
+    }
+
+    /// The older crash group currently mid-restore, so its header can show
+    /// progress in place. Nil the moment the batch settles.
+    @Published private(set) var restoringCrashGroupKey: HolyRestoreCrashGroupKey?
+
+    /// Restores one older crash's PARENT rows headless — the same scope law
+    /// as Restore All, applied to exactly that batch. Helper shells stay out
+    /// of every bulk path; they restore only by explicit selection or a
+    /// per-row action.
+    func restoreCrashGroup(key: HolyRestoreCrashGroupKey) async {
+        guard let section = olderCrashSections.first(where: { $0.key == key }),
+              !section.parentRows.isEmpty else {
+            return
+        }
+        restoringCrashGroupKey = key
+        defer { restoringCrashGroupKey = nil }
+        await restore(rowIDs: section.parentRows.map(\.id), attach: false)
     }
 
     func retry(rowID: UUID) async {
