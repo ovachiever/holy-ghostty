@@ -4,6 +4,31 @@ struct HolySessionHistorySheet: View {
     @ObservedObject var store: HolyWorkspaceStore
     @State private var searchText: String = ""
 
+    // MARK: - Signage (pure, testable)
+
+    /// Title for the sheet-top crash-restore affordance; nil when there is
+    /// nothing to restore. Counts mirror the banner's honesty: fresh batch
+    /// first, older interruptions named separately, never merged.
+    static func crashRestoreAffordanceTitle(freshCount: Int, olderCount: Int) -> String? {
+        guard freshCount + olderCount > 0 else { return nil }
+        guard freshCount > 0 else {
+            return "Open Crash Restore (\(olderCount) older)"
+        }
+        return olderCount > 0
+            ? "Open Crash Restore (\(freshCount) interrupted · \(olderCount) older)"
+            : "Open Crash Restore (\(freshCount) interrupted)"
+    }
+
+    /// Recovery-state label for a history row; nil for plain archives.
+    /// Cold-boot rows are restorable interruptions; every other recovery
+    /// reason means the workspace needs repair before a relaunch.
+    static func recoveryStateLabel(for archived: HolyArchivedSession) -> String? {
+        guard archived.recoveryReason != nil else { return nil }
+        return HolyWorkspaceStore.isCrashRestoreCandidate(archived)
+            ? "Interrupted"
+            : "Needs repair"
+    }
+
     private var filteredArchivedSessions: [HolyArchivedSession] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return store.archivedSessions }
@@ -43,6 +68,8 @@ struct HolySessionHistorySheet: View {
                     .fill(HolyGhosttyTheme.border)
                     .frame(height: 0.5)
 
+                crashRestoreCallout
+
                 HSplitView {
                     historyList
                         .frame(minWidth: 260, idealWidth: 320, maxWidth: 400, maxHeight: .infinity)
@@ -62,23 +89,69 @@ struct HolySessionHistorySheet: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Text("Session History")
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
-                .foregroundStyle(HolyGhosttyTheme.halo)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 10) {
+                Text("Session History")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(HolyGhosttyTheme.halo)
 
-            Text("\(store.archivedSessions.count) archived")
+                Text("\(store.archivedSessions.count) archived")
+                    .font(.system(size: 11))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+
+                Spacer()
+
+                Button("Done") { store.historyPresented = false }
+                    .buttonStyle(HolyGhosttyActionButtonStyle())
+            }
+
+            Text("Where sessions land after leaving the roster. Select a row to inspect, relaunch, or delete it.")
                 .font(.system(size: 11))
-                .foregroundStyle(HolyGhosttyTheme.textTertiary)
-
-            Spacer()
-
-            Button("Done") { store.historyPresented = false }
-                .buttonStyle(HolyGhosttyActionButtonStyle())
+                .foregroundStyle(HolyGhosttyTheme.textSecondary)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(HolyGhosttyTheme.bgElevated)
+    }
+
+    /// One prominent path from the place people land by accident to the
+    /// surface that actually restores: shown only while cold-boot archives
+    /// exist, styled like the workspace banner so the pattern reads as the
+    /// same event.
+    @ViewBuilder
+    private var crashRestoreCallout: some View {
+        let batch = store.crashRestoreBatch
+        if let title = Self.crashRestoreAffordanceTitle(
+            freshCount: batch.fresh.count,
+            olderCount: batch.older.count
+        ) {
+            HStack(spacing: 10) {
+                Image(systemName: "bolt.trianglebadge.exclamationmark")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(HolyGhosttyTheme.warning)
+
+                Text("Interrupted sessions resume their exact conversations in Crash Restore.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(HolyGhosttyTheme.textPrimary)
+
+                Spacer()
+
+                Button(title) {
+                    store.historyPresented = false
+                    store.presentRestore()
+                }
+                .buttonStyle(HolyGhosttyProminentButtonStyle())
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(HolyGhosttyTheme.warning.opacity(0.10))
+            .background(HolyGhosttyTheme.bgElevated)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(HolyGhosttyTheme.border)
+                    .frame(height: 0.5)
+            }
+        }
     }
 
     // MARK: - List
@@ -187,7 +260,14 @@ struct HolySessionHistorySheet: View {
                 store.relaunch(archived)
                 store.historyPresented = false
             } label: {
-                Label(archived.relaunchActionTitle, systemImage: "arrow.clockwise")
+                // Cold-boot rows route into the restore engine, so the
+                // button says where the click actually goes.
+                Label(
+                    HolyWorkspaceStore.isCrashRestoreCandidate(archived)
+                        ? "Open Crash Restore"
+                        : archived.relaunchActionTitle,
+                    systemImage: "arrow.clockwise"
+                )
             }
             .buttonStyle(HolyGhosttyActionButtonStyle())
 
@@ -460,10 +540,28 @@ private struct HistoryRow: View {
             HolyGhosttyStatusDot(color: phaseColor)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(archived.title)
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                    .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(archived.title)
+                        .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                        .foregroundStyle(isSelected ? Color.white : HolyGhosttyTheme.textPrimary)
+                        .lineLimit(1)
+
+                    if let recoveryLabel = HolySessionHistorySheet.recoveryStateLabel(for: archived) {
+                        Text(recoveryLabel)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(recoveryLabel == "Interrupted"
+                                ? HolyGhosttyTheme.warning
+                                : HolyGhosttyTheme.danger)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill((recoveryLabel == "Interrupted"
+                                        ? HolyGhosttyTheme.warning
+                                        : HolyGhosttyTheme.danger).opacity(0.12))
+                            )
+                    }
+                }
 
                 Text(archived.primarySignal?.headline ?? archived.phase.displayName)
                     .font(.system(size: 10))
