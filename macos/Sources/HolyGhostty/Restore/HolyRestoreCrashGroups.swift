@@ -1,5 +1,20 @@
 import Foundation
 
+// MARK: - Vocabulary
+//
+// "Crash" throughout these internal names (`HolyRestoreCrashGroupKey`,
+// `crashRestoreCandidates`, `isCrashRestoreCandidate`, `restoreCrashGroup`,
+// and their kin) means ANY cold-boot interruption of the tmux server, not a
+// fault. A deliberate reboot, a `tmux kill-server`, a logout, and an actual
+// crash are one and the same event to this code: the server went away and
+// live sessions became archived rows.
+//
+// The user-facing language deliberately does not inherit that word. Surfaces
+// say "Session Restore" (sheet title, menu item, history affordances) and
+// "Shutdown" (per-batch headers, lineage tooltips), because a user who
+// rebooted on purpose is not recovering from a crash. Keep the split: rename
+// strings freely, leave the identifiers alone.
+
 /// Identity of one crash event on the restore surface.
 ///
 /// Rows stamped by a cold-boot sweep share that sweep's boot-batch id; rows

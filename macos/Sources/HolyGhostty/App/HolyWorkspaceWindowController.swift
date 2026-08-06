@@ -234,7 +234,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         workspaceStore.toggleInboxPanel()
     }
 
-    /// First-responder target of View ▸ Restore from Crash…. The durable
+    /// First-responder target of View ▸ Restore Sessions…. The durable
     /// entry to the crash-restore sheet: unlike the cold-boot banner it
     /// survives dismissal and relaunches, so a missed banner never strands
     /// the user. Enabled whenever any cold-boot archive exists, fresh or
@@ -320,7 +320,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
 
 extension HolyWorkspaceWindowController: NSMenuItemValidation {
     /// Menu auto-enablement would light every item whose action a responder
-    /// implements; Restore from Crash… must instead track whether there is
+    /// implements; Restore Sessions… must instead track whether there is
     /// anything to restore. Every other item keeps the default behavior.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(presentCrashRestore(_:)) {

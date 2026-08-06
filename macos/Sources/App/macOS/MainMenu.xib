@@ -332,7 +332,7 @@
                                     <action selector="toggleInboxPanel:" target="-1" id="hIp-4d-Ax2"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Restore from Crash…" id="rFc-4d-Bx1">
+                            <menuItem title="Restore Sessions…" id="rFc-4d-Bx1">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="presentCrashRestore:" target="-1" id="rFc-4d-Ax2"/>

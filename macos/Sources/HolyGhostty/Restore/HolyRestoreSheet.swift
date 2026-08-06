@@ -58,7 +58,7 @@ struct HolyRestoreSheet: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Text("Crash Restore")
+            Text("Session Restore")
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundStyle(HolyGhosttyTheme.halo)
 
@@ -183,7 +183,7 @@ struct HolyRestoreSheet: View {
                 ProgressView()
                     .controlSize(.mini)
             } else if !section.parentRows.isEmpty {
-                Button("Restore this crash (\(section.parentRows.count))") {
+                Button("Restore this shutdown (\(section.parentRows.count))") {
                     Task { await engine.restoreCrashGroup(key: section.key) }
                 }
                 .buttonStyle(.plain)
@@ -191,7 +191,7 @@ struct HolyRestoreSheet: View {
                 .foregroundStyle(HolyGhosttyTheme.accent)
                 .disabled(engine.isRestoring)
                 .help(
-                    "Recreates this crash's \(section.parentRows.count) named "
+                    "Recreates this shutdown's \(section.parentRows.count) named "
                         + "session\(section.parentRows.count == 1 ? "" : "s") headless. "
                         + "Helper shells restore only by explicit selection."
                 )
@@ -213,12 +213,13 @@ struct HolyRestoreSheet: View {
         }
     }
 
-    /// "Crash · 2 days ago · 5 sessions · 3 helpers". Parents and helpers are
-    /// itemized separately so the restore action's count is checkable against
-    /// the header; a batch with nothing but helpers says so instead of
-    /// showing an empty crash.
+    /// "Shutdown · 2 days ago · 5 sessions · 3 helpers". Parents and helpers
+    /// are itemized separately so the restore action's count is checkable
+    /// against the header; a batch with nothing but helpers says so instead of
+    /// showing an empty batch. "Shutdown" covers every cold boot the batch can
+    /// come from — deliberate reboot, manual tmux server kill, or crash.
     private func crashSectionTitle(_ section: HolyRestoreEngine.OlderCrashSection) -> String {
-        var parts = ["Crash", Self.relativeTime(section.newestArchivedAt)]
+        var parts = ["Shutdown", Self.relativeTime(section.newestArchivedAt)]
         let parents = section.parentRows.count
         let helpers = section.helperRows.count
         if parents > 0 {
@@ -299,7 +300,7 @@ struct HolyRestoreSheet: View {
                 RestoreLineageTickDisplay(
                     sectionID: tick.sectionID,
                     color: HolyGhosttyTheme.crashBatchHue(rank: tick.rank),
-                    tooltip: "Also interrupted in the crash of "
+                    tooltip: "Also interrupted in the shutdown of "
                         + "\(Self.relativeTime(tick.occurredAt))."
                 )
             },

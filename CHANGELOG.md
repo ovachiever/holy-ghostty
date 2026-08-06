@@ -4,13 +4,14 @@ All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
-A crash is no longer a loss, and attention has a home: after the tmux server
-dies, Restore rebuilds every session with its exact conversation, and a new
-right-hand Inbox panel shows what waits on the human — nothing else.
+A shutdown is no longer a loss, and attention has a home: whenever the tmux
+server goes away — a reboot, a deliberate kill, a crash — Session Restore
+rebuilds every session with its exact conversation, and a new right-hand
+Inbox panel shows what waits on the human — nothing else.
 
 ### Added
 
-- Crash restore: cold boot shows a banner counting interrupted sessions;
+- Session Restore: cold boot shows a banner counting interrupted sessions;
   Restore All/Selected recreates each one in its own directory running the
   exact original conversation (`claude --resume`, `codex resume`,
   `opencode --session`), resolved by joining the session archive index by
@@ -29,12 +30,12 @@ right-hand Inbox panel shows what waits on the human — nothing else.
 
 ### Fixed
 
-- Crash restore now survives first human contact: the sheet scopes to the
+- Session Restore now survives first human contact: the sheet scopes to the
   most recent boot batch (a durable per-sweep batch id; legacy rows cluster
   by archive time) with older interruptions collapsed, unselected, and
   never counted in the banner. Small fresh batches open fully selected,
   large ones open with nothing selected, and Select All / Select None act
-  on the visible rows. A durable View ▸ Restore from Crash… menu item and a
+  on the visible rows. A durable View ▸ Restore Sessions… menu item and a
   prominent Session History callout join the banner as entry points, the
   banner gained warning prominence with an honest per-reboot count and
   relative timestamp, and history rows now label interrupted and
