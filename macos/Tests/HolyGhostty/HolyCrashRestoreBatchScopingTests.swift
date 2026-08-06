@@ -140,22 +140,24 @@ struct HolyCrashRestoreBatchScopingTests {
     // MARK: - Banner predicate matrix
 
     @Test(arguments: [
-        // (dismissed, presented, freshCount, expected)
+        // (dismissed, presented, freshParentCount, expected)
         (false, false, 1, true),
         (false, false, 54, true),
+        // Zero parents means zero alarm, even when helper shells were swept
+        // in the same boot batch: nothing a human named was lost.
         (false, false, 0, false),
         (true, false, 5, false),
         (false, true, 5, false),
         (true, true, 5, false),
     ] as [(Bool, Bool, Int, Bool)])
-    func bannerOffersExactlyWhenFreshRowsExistUndismissedUnpresented(
+    func bannerOffersExactlyWhenFreshParentRowsExistUndismissedUnpresented(
         _ matrix: (Bool, Bool, Int, Bool)
     ) {
-        let (dismissed, presented, freshCount, expected) = matrix
+        let (dismissed, presented, freshParentCount, expected) = matrix
         #expect(HolyWorkspaceStore.shouldOfferCrashRestore(
             bannerDismissed: dismissed,
             restorePresented: presented,
-            freshBatchCount: freshCount
+            freshParentCount: freshParentCount
         ) == expected)
     }
 

@@ -304,10 +304,12 @@ struct HolyWorkspaceRootView: View {
     private var mainWorkspaceContent: some View {
         VStack(spacing: 0) {
             if store.shouldOfferCrashRestore {
-                let freshBatch = store.crashRestoreBatch.fresh
+                // Parents only in the headline count; helper shells are
+                // itemized inside the sheet, never counted at the alarm.
+                let batch = store.crashRestoreBatch
                 HolyRestoreBanner(
-                    interruptedCount: freshBatch.count,
-                    interruptedAt: freshBatch.first?.archivedAt,
+                    interruptedCount: batch.freshParentCount,
+                    interruptedAt: batch.fresh.first?.archivedAt,
                     onRestore: { store.presentRestore() },
                     onDismiss: { store.dismissRestoreBanner() }
                 )

@@ -159,6 +159,7 @@ private final class FakeAdapter: HolyRestoreWorkspaceAdapting {
     var rosterTmuxSessionNames: Set<String> = []
     private(set) var persistedSpecsByArchiveID: [UUID: [HolySessionLaunchSpec]] = [:]
     private(set) var attachedArchiveIDs: [UUID] = []
+    private(set) var deletedArchiveIDs: [UUID] = []
     var attachSucceeds = true
 
     init(archives: [HolyArchivedSession]) {
@@ -191,6 +192,13 @@ private final class FakeAdapter: HolyRestoreWorkspaceAdapting {
         guard attachSucceeds else { return false }
         attachedArchiveIDs.append(archiveID)
         return true
+    }
+
+    func deleteArchives(archiveIDs: [UUID]) {
+        let targets = Set(archiveIDs)
+        deletedArchiveIDs += archiveIDs
+        archives.removeAll { targets.contains($0.id) }
+        olderArchives.removeAll { targets.contains($0.id) }
     }
 }
 

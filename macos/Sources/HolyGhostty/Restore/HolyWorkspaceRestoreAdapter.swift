@@ -38,4 +38,8 @@ final class HolyWorkspaceRestoreAdapter: HolyRestoreWorkspaceAdapting {
             launchSpec: launchSpec
         ) ?? false
     }
+
+    func deleteArchives(archiveIDs: [UUID]) {
+        store?.deleteArchives(withIDs: archiveIDs)
+    }
 }

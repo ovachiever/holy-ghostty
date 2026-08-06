@@ -1711,21 +1711,25 @@ final class HolyWorkspaceStore: ObservableObject {
         Self.crashRestoreBatch(from: archivedSessions)
     }
 
-    /// The banner speaks only for the freshest boot batch: older unrestored
-    /// interruptions never inflate its count or summon it on their own.
+    /// The banner speaks only for the freshest boot batch, parents only:
+    /// older unrestored interruptions never inflate its count or summon it,
+    /// and neither do the helper shells a sub-agent run left behind. A boot
+    /// batch made entirely of helpers raises no alarm — nothing a human
+    /// named was lost — and stays reachable through the View menu and
+    /// Session History, which enable on any cold-boot archive.
     nonisolated static func shouldOfferCrashRestore(
         bannerDismissed: Bool,
         restorePresented: Bool,
-        freshBatchCount: Int
+        freshParentCount: Int
     ) -> Bool {
-        !bannerDismissed && !restorePresented && freshBatchCount > 0
+        !bannerDismissed && !restorePresented && freshParentCount > 0
     }
 
     var shouldOfferCrashRestore: Bool {
         Self.shouldOfferCrashRestore(
             bannerDismissed: restoreBannerDismissed,
             restorePresented: restorePresented,
-            freshBatchCount: crashRestoreBatch.fresh.count
+            freshParentCount: crashRestoreBatch.freshParentCount
         )
     }
 
@@ -1779,6 +1783,28 @@ final class HolyWorkspaceStore: ObservableObject {
     func deleteArchive(_ archivedSession: HolyArchivedSession) {
         let result = sessionSupervisor.deleteArchive(archivedSession, in: currentSessionStoreState)
         applySessionStoreState(result.state)
+        persist()
+        refreshDraftLaunchGuardrail()
+    }
+
+    /// Bulk archive removal for "Clear older interruptions". Folds the exact
+    /// primitive `deleteArchive` uses over every id, then applies and
+    /// persists once: one removal mechanism, one write, no second code path
+    /// that could drift from the Session History delete flow. Ids that no
+    /// longer exist are simply absent from the fold.
+    func deleteArchives(withIDs archiveIDs: [UUID]) {
+        let targets = Set(archiveIDs)
+        guard !targets.isEmpty else { return }
+
+        var state = currentSessionStoreState
+        let doomed = state.archivedSessions.filter { targets.contains($0.id) }
+        guard !doomed.isEmpty else { return }
+
+        for archivedSession in doomed {
+            state = sessionSupervisor.deleteArchive(archivedSession, in: state).state
+        }
+
+        applySessionStoreState(state)
         persist()
         refreshDraftLaunchGuardrail()
     }

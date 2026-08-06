@@ -1,14 +1,19 @@
 import SwiftUI
 
 /// The crash-restore surface: this reboot's interruptions as one honest
-/// section, older interruptions collapsed beneath, every row restored only
-/// on explicit action. Restore Selected attaches as each row verifies;
-/// Restore All recreates the fresh batch headless and lets attach happen
-/// lazily. Nothing here launches without a click.
+/// section, helper shells grouped one click away inside it, older
+/// interruptions collapsed beneath, every row restored only on explicit
+/// action. Restore Selected attaches as each row verifies; Restore All
+/// recreates the fresh batch's parent rows headless and lets attach happen
+/// lazily. Nothing here launches without a click, and nothing is deleted
+/// without a confirmation that states the count.
 struct HolyRestoreSheet: View {
     @ObservedObject var store: HolyWorkspaceStore
     @ObservedObject var engine: HolyRestoreEngine
     @State private var olderExpanded = false
+    @State private var freshHelpersExpanded = false
+    @State private var olderHelpersExpanded = false
+    @State private var clearOlderConfirmationPresented = false
 
     init(store: HolyWorkspaceStore) {
         self.store = store
@@ -69,26 +74,42 @@ struct HolyRestoreSheet: View {
 
             Spacer()
 
-            Button("Keep for Later") { store.restorePresented = false }
-                .buttonStyle(HolyGhosttyActionButtonStyle())
+            HolyGhosttyCloseButton(
+                action: { store.restorePresented = false },
+                label: "Close",
+                isCancelAction: true
+            )
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(HolyGhosttyTheme.bgElevated)
     }
 
+    /// Itemized rather than summed: the interrupted count is parents only,
+    /// so helpers get their own number instead of quietly disappearing from
+    /// a total the user could otherwise check against the row list.
     private var headerCounts: String {
-        engine.olderCount > 0
-            ? "\(engine.interruptedCount) interrupted · \(engine.olderCount) older"
-            : "\(engine.interruptedCount) interrupted"
+        var parts = ["\(engine.interruptedCount) interrupted"]
+        if engine.freshHelperCount > 0 {
+            parts.append("\(engine.freshHelperCount) helper\(engine.freshHelperCount == 1 ? "" : "s")")
+        }
+        if engine.olderCount > 0 {
+            parts.append("\(engine.olderCount) older")
+        }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: - Rows
 
-    /// The rows the user can currently see; Select All / Select None act on
-    /// exactly these, never on rows hidden behind the collapsed section.
+    /// The rows the user can currently see. The law itself lives on the
+    /// engine (and is tested there); the sheet only reports which
+    /// disclosures are open.
     private var visibleRowIDs: [UUID] {
-        engine.freshRows.map(\.id) + (olderExpanded ? engine.olderRows.map(\.id) : [])
+        engine.visibleRowIDs(
+            olderExpanded: olderExpanded,
+            freshHelpersExpanded: freshHelpersExpanded,
+            olderHelpersExpanded: olderHelpersExpanded
+        )
     }
 
     private var rowList: some View {
@@ -96,17 +117,25 @@ struct HolyRestoreSheet: View {
             LazyVStack(spacing: 1) {
                 if !engine.freshRows.isEmpty {
                     freshSectionHeader
-                    ForEach(engine.freshRows) { row in
+                    ForEach(engine.freshParentRows) { row in
                         restoreRow(row)
                     }
+                    helperSection(
+                        rows: engine.freshHelperRows,
+                        isExpanded: $freshHelpersExpanded
+                    )
                 }
 
                 if engine.olderCount > 0 {
                     olderSectionToggle
                     if olderExpanded {
-                        ForEach(engine.olderRows) { row in
+                        ForEach(engine.olderParentRows) { row in
                             restoreRow(row)
                         }
+                        helperSection(
+                            rows: engine.olderHelperRows,
+                            isExpanded: $olderHelpersExpanded
+                        )
                     }
                 }
             }
@@ -114,6 +143,47 @@ struct HolyRestoreSheet: View {
             .padding(.vertical, 6)
         }
         .scrollIndicators(.hidden)
+    }
+
+    /// Helper shells, grouped one click away. Grouped, never hidden: the
+    /// count is always visible and every row inside stays fully restorable.
+    @ViewBuilder
+    private func helperSection(
+        rows: [HolyRestoreRow],
+        isExpanded: Binding<Bool>
+    ) -> some View {
+        if !rows.isEmpty {
+            Button {
+                isExpanded.wrappedValue.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
+
+                    Text("Helper sessions (\(rows.count))")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+
+                    Spacer()
+                }
+                .padding(.leading, 14)
+                .padding(.trailing, 4)
+                .padding(.top, 8)
+                .padding(.bottom, 3)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Named by Holy when it adopted a sub-agent's shell. Grouped, not hidden.")
+
+            if isExpanded.wrappedValue {
+                ForEach(rows) { row in
+                    restoreRow(row)
+                }
+            }
+        }
     }
 
     private func restoreRow(_ row: HolyRestoreRow) -> some View {
@@ -155,28 +225,69 @@ struct HolyRestoreSheet: View {
     }
 
     private var olderSectionToggle: some View {
-        Button {
-            olderExpanded.toggle()
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: olderExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+        HStack(spacing: 8) {
+            Button {
+                olderExpanded.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: olderExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
 
-                Text("Older interruptions (\(engine.olderCount))")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                    .textCase(.uppercase)
-                    .tracking(0.5)
-
-                Spacer()
+                    Text("Older interruptions (\(engine.olderCount))")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+                }
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 4)
-            .padding(.top, 10)
-            .padding(.bottom, 3)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            // Quiet by weight, danger by color: it sits in a header row, so
+            // it must never outrank the restore actions below it, and it
+            // must never be mistaken for one of them.
+            Button("Clear older interruptions…") { clearOlderConfirmationPresented = true }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(HolyGhosttyTheme.danger)
+                .disabled(engine.isRestoring)
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 4)
+        .padding(.top, 10)
+        .padding(.bottom, 3)
+        .confirmationDialog(
+            clearOlderConfirmationTitle,
+            isPresented: $clearOlderConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button(clearOlderConfirmationAction, role: .destructive) {
+                engine.clearOlderInterruptions()
+                olderExpanded = false
+                olderHelpersExpanded = false
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Deletes the archived records from Session History. "
+                    + "The sessions themselves ended at the last shutdown; "
+                    + "this boot's interruptions are not touched."
+            )
+        }
+    }
+
+    private var clearOlderConfirmationTitle: String {
+        engine.olderCount == 1
+            ? "Clear 1 older interruption?"
+            : "Clear \(engine.olderCount) older interruptions?"
+    }
+
+    private var clearOlderConfirmationAction: String {
+        engine.olderCount == 1
+            ? "Clear 1 record"
+            : "Clear \(engine.olderCount) records"
     }
 
     // MARK: - Footer
@@ -284,6 +395,14 @@ private struct RestoreRowView: View {
                     .lineLimit(1)
                     .truncationMode(.head)
 
+                // The note sits with the identity lines, not the status
+                // line: it answers "which one is this?", not "what will
+                // restore do?". Five rows in the same worktree are told
+                // apart by exactly this.
+                if let note = row.noteDisplay {
+                    RestoreNoteLine(note: note)
+                }
+
                 Text(statusLine)
                     .font(.system(size: 10))
                     .foregroundStyle(statusColor)
@@ -326,7 +445,11 @@ private struct RestoreRowView: View {
                     .buttonStyle(HolyGhosttyActionButtonStyle())
                     .disabled(isBusy)
                     .popover(isPresented: $pickerPresented, arrowEdge: .bottom) {
-                        CandidatePicker(candidates: candidates) { candidateID in
+                        CandidatePicker(
+                            rowTitle: row.archived.title,
+                            rowNote: row.noteDisplay,
+                            candidates: candidates
+                        ) { candidateID in
                             pickerPresented = false
                             onPickCandidate(candidateID)
                         }
@@ -419,17 +542,56 @@ private struct RestoreRowView: View {
     }
 }
 
+// MARK: - Note line
+
+/// The session note, drawn the way the roster draws it — orange rule, warm
+/// rounded text — so one note reads as the same object wherever it surfaces.
+private struct RestoreNoteLine: View {
+    let note: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Capsule(style: .continuous)
+                .fill(HolyGhosttyTheme.noteAccent.opacity(0.58))
+                .frame(width: 3, height: 10)
+
+            Text(note)
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundStyle(HolyGhosttyTheme.noteAccent.opacity(0.82))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+    }
+}
+
 // MARK: - Candidate picker
 
 private struct CandidatePicker: View {
+    /// Which row is being answered. The popover floats away from its row and
+    /// every candidate here looks like every other, so the question needs to
+    /// name the session it is about — the note especially, since two rows in
+    /// one worktree differ by nothing else.
+    let rowTitle: String
+    let rowNote: String?
     let candidates: [HolyRestoreResolveCandidate]
     let onPick: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Which conversation was this session running?")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(HolyGhosttyTheme.textPrimary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Which conversation was this session running?")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(HolyGhosttyTheme.textPrimary)
+
+                Text(rowTitle)
+                    .font(.system(size: 10))
+                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                    .lineLimit(1)
+
+                if let rowNote {
+                    RestoreNoteLine(note: rowNote)
+                }
+            }
 
             ForEach(candidates) { candidate in
                 Button {
@@ -501,8 +663,13 @@ struct HolyRestoreBanner: View {
             Button("Restore…", action: onRestore)
                 .buttonStyle(HolyGhosttyProminentButtonStyle())
 
-            Button("Keep for Later", action: onDismiss)
-                .buttonStyle(HolyGhosttyActionButtonStyle())
+            // The bar's one labeled action is gold and to its left; dismiss
+            // is the conventional X, so nothing competes with Restore.
+            HolyGhosttyCloseButton(
+                action: onDismiss,
+                size: .compact,
+                label: "Dismiss"
+            )
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
