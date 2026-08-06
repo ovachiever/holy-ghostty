@@ -171,6 +171,61 @@ struct HolyGhosttyStatusDot: View {
     }
 }
 
+// MARK: - Close Button (the one icon-only affordance)
+
+/// The dismiss affordance: a quiet circular X. Icon-only is earned exactly
+/// here, because the glyph is the one convention every user already reads
+/// without a label — and a word invented for the occasion ("Keep for Later")
+/// costs more thought than the X it replaced. It still carries a tooltip and
+/// an accessibility label, so nothing is lost to a screen reader.
+///
+/// Every dismissible Holy surface uses this, so "close" looks identical
+/// wherever it appears.
+struct HolyGhosttyCloseButton: View {
+    /// Two sizes, both on the scale: `standard` for surface headers,
+    /// `compact` for inline bars where the row height is the constraint.
+    enum Size {
+        case standard
+        case compact
+
+        var diameter: CGFloat { self == .standard ? 22 : 18 }
+        var glyphSize: CGFloat { self == .standard ? 10 : 9 }
+    }
+
+    let action: () -> Void
+    var size: Size = .standard
+    /// Spoken by VoiceOver and shown on hover. Says what closing does when
+    /// "Close" alone would be vague.
+    var label: String = "Close"
+    /// Binds the button to Escape. True for the primary dismiss of a modal
+    /// surface, false for an inline bar that Escape should not touch.
+    var isCancelAction: Bool = false
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: size.glyphSize, weight: .semibold))
+                .foregroundStyle(
+                    isHovering ? HolyGhosttyTheme.textPrimary : HolyGhosttyTheme.textSecondary
+                )
+                .frame(width: size.diameter, height: size.diameter)
+                .background(
+                    Circle().fill(
+                        HolyGhosttyTheme.bgSurface.opacity(isHovering ? 1 : 0.55)
+                    )
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(isCancelAction ? .cancelAction : nil)
+        .onHover { isHovering = $0 }
+        .help(label)
+        .accessibilityLabel(label)
+    }
+}
+
 // MARK: - Action Button (tighter, more native)
 
 struct HolyGhosttyActionButtonStyle: ButtonStyle {

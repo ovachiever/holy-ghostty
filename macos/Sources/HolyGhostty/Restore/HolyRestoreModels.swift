@@ -13,6 +13,45 @@ struct HolyCrashRestoreBatch: Equatable {
 
     var isEmpty: Bool { fresh.isEmpty && older.isEmpty }
     var totalCount: Int { fresh.count + older.count }
+
+    /// The fresh rows a human named and would actually miss. Helper shells
+    /// Holy titled itself are still restorable, but they never trip the
+    /// banner and never inflate its count — see `HolyRestoreProvenance`.
+    var freshParents: [HolyArchivedSession] {
+        fresh.filter { !HolyRestoreProvenance.isHelperSessionTitle($0.title) }
+    }
+
+    var freshParentCount: Int { freshParents.count }
+}
+
+/// Provenance heuristics for archived sessions.
+///
+/// Holy has no parent/child edge in its schema: a sub-agent's helper shell
+/// and the human session that spawned it are two peer archived records with
+/// nothing linking them. Until a real edge exists, the only reliable
+/// discriminator is Holy's own machine-generated adoption title, which ends
+/// in the pane's shell suffix plus eight uppercase hex digits — for example
+/// `holy-shell-12-shell-EC0053C9`. No human types that.
+///
+/// This is a HEURISTIC, not a fact. It earns its keep by grouping noise out
+/// of the way; it never blocks an action, never hides a row behind anything
+/// but one click, and must be replaced by a stored parent id the moment the
+/// schema carries one.
+enum HolyRestoreProvenance {
+    /// The machine-generated adoption-title suffix. Deliberately in ONE
+    /// place: the sheet, the selection law, the banner, and the tests all
+    /// ask this question here, so the heuristic can be replaced in one edit.
+    ///
+    /// Uppercase-only by design — the hex comes from a UUID prefix Holy
+    /// uppercases, and accepting lowercase would start swallowing
+    /// human-written titles.
+    static let helperTitlePattern = "-shell-[0-9A-F]{8}$"
+
+    static func isHelperSessionTitle(_ title: String) -> Bool {
+        title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .range(of: helperTitlePattern, options: .regularExpression) != nil
+    }
 }
 
 /// What kind of restore a row can honestly offer. Derived from preflight

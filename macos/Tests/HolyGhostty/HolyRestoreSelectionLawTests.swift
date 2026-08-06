@@ -48,6 +48,7 @@ private final class BatchAdapter: HolyRestoreWorkspaceAdapting {
     var fresh: [HolyArchivedSession]
     var older: [HolyArchivedSession]
     private(set) var attachedArchiveIDs: [UUID] = []
+    private(set) var deletedArchiveIDs: [UUID] = []
 
     init(fresh: [HolyArchivedSession], older: [HolyArchivedSession] = []) {
         self.fresh = fresh
@@ -65,6 +66,13 @@ private final class BatchAdapter: HolyRestoreWorkspaceAdapting {
     func attachRestoredArchive(archiveID: UUID, launchSpec: HolySessionLaunchSpec) -> Bool {
         attachedArchiveIDs.append(archiveID)
         return true
+    }
+
+    func deleteArchives(archiveIDs: [UUID]) {
+        let targets = Set(archiveIDs)
+        deletedArchiveIDs += archiveIDs
+        fresh.removeAll { targets.contains($0.id) }
+        older.removeAll { targets.contains($0.id) }
     }
 }
 

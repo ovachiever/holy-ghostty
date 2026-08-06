@@ -31,6 +31,9 @@ protocol HolyRestoreWorkspaceAdapting: AnyObject {
     /// Readopts the archived session with an attach-only spec. Returns
     /// whether adoption succeeded.
     func attachRestoredArchive(archiveID: UUID, launchSpec: HolySessionLaunchSpec) -> Bool
+    /// Deletes archived records outright, through the same removal path
+    /// Session History uses. Restore never invents a second way to delete.
+    func deleteArchives(archiveIDs: [UUID])
 }
 
 struct HolyRestoreRow: Identifiable, Equatable {
@@ -48,6 +51,36 @@ struct HolyRestoreRow: Identifiable, Equatable {
     /// rows render collapsed, are never preselected, and are excluded from
     /// Restore All and the interrupted count.
     let isFresh: Bool
+
+    /// True when the archived title carries Holy's machine-generated
+    /// adoption suffix — almost always a sub-agent's helper shell rather
+    /// than a session a human named and would miss. Provenance heuristic;
+    /// see `HolyRestoreProvenance` for what it costs when it is wrong.
+    var isHelperSession: Bool {
+        HolyRestoreProvenance.isHelperSessionTitle(archived.title)
+    }
+
+    /// Longest note the row renders. Past this the line stops being a clue
+    /// and starts being a paragraph competing with the title.
+    static let noteDisplayLimit = 90
+
+    /// The session note as one capped line, or nil when there is none.
+    ///
+    /// The note is the only human-authored clue that tells two rows in the
+    /// same directory running the same runtime apart, so the row shows it.
+    /// Newlines collapse to spaces and the tail is cut, because a note is
+    /// usually written front-loaded: "rebasing the auth branch, do not kill".
+    var noteDisplay: String? {
+        guard let raw = archived.record.launchSpec.note else { return nil }
+        let flattened = raw
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard !flattened.isEmpty else { return nil }
+        guard flattened.count > Self.noteDisplayLimit else { return flattened }
+        return String(flattened.prefix(Self.noteDisplayLimit - 1)) + "…"
+    }
 }
 
 /// Orchestrates crash restore: plan from cold-boot archives, preflight local
@@ -94,26 +127,84 @@ final class HolyRestoreEngine: ObservableObject {
 
     var olderRows: [HolyRestoreRow] { rows.filter { !$0.isFresh } }
 
-    /// The honest headline count: only this boot's interruptions.
-    var interruptedCount: Int { freshRows.count }
+    /// Fresh rows split by provenance. Parents render first; helpers group
+    /// under their own disclosure so a swarm's scaffolding never buries the
+    /// three sessions the human actually lost.
+    var freshParentRows: [HolyRestoreRow] { freshRows.filter { !$0.isHelperSession } }
 
+    var freshHelperRows: [HolyRestoreRow] { freshRows.filter(\.isHelperSession) }
+
+    var olderParentRows: [HolyRestoreRow] { olderRows.filter { !$0.isHelperSession } }
+
+    var olderHelperRows: [HolyRestoreRow] { olderRows.filter(\.isHelperSession) }
+
+    /// The honest headline count: this boot's interruptions, parents only.
+    ///
+    /// A helper shell is scaffolding a sub-agent run created and the crash
+    /// took with it; counting forty of them as "forty sessions interrupted"
+    /// makes a stressed human brace for work that was never theirs. Same
+    /// dishonesty the fresh/older split already removed once. Helpers stay
+    /// restorable — by explicit selection, never by a bulk button.
+    var interruptedCount: Int { freshParentRows.count }
+
+    /// Named separately so the header can itemize instead of hiding them.
+    var freshHelperCount: Int { freshHelperRows.count }
+
+    /// Every older row, parents and helpers. Unlike the fresh count this one
+    /// labels a container ("Older interruptions (51)") whose contents are
+    /// itemized one level down, so the total is the honest number here.
     var olderCount: Int { olderRows.count }
 
     var selectedCount: Int { rows.filter(\.isSelected).count }
 
+    /// The ids Select All / Select None may touch, given which disclosures
+    /// the sheet currently has open.
+    ///
+    /// The law lives here, not in the view, so it can be checked without
+    /// rendering anything: a bulk button acts on exactly what the user can
+    /// see. Rows behind a shut disclosure — older interruptions, helper
+    /// shells — are not selectable by a button the user cannot see them
+    /// under.
+    func visibleRowIDs(
+        olderExpanded: Bool,
+        freshHelpersExpanded: Bool,
+        olderHelpersExpanded: Bool
+    ) -> [UUID] {
+        var ids = freshParentRows.map(\.id)
+        if freshHelpersExpanded {
+            ids += freshHelperRows.map(\.id)
+        }
+        if olderExpanded {
+            ids += olderParentRows.map(\.id)
+            if olderHelpersExpanded {
+                ids += olderHelperRows.map(\.id)
+            }
+        }
+        return ids
+    }
+
     // MARK: - Plan
 
     /// Rebuilds rows from the adapter's candidate batch: fresh rows first,
-    /// older after. Fresh rows preselect only when the batch is small
-    /// (`freshPreselectionLimit`); older rows never preselect. Records
-    /// without a complete tmux identity get one generated and persisted
-    /// immediately, so the identity is stable for idempotent retries and
-    /// later cold boots.
+    /// older after. Fresh PARENT rows preselect only when there are few of
+    /// them (`freshPreselectionLimit`); helper shells and older rows never
+    /// preselect at any batch size. Records without a complete tmux identity
+    /// get one generated and persisted immediately, so the identity is
+    /// stable for idempotent retries and later cold boots.
+    ///
+    /// The limit counts parents because parents are the only rows it can be
+    /// about: it exists so nobody opens this sheet facing
+    /// "Restore Selected (54)", and helpers contribute zero to that number.
     func buildPlan() {
         let batch = adapter.restoreCandidateBatch
-        let preselectFresh = batch.fresh.count <= Self.freshPreselectionLimit
+        let preselectFresh = batch.freshParentCount <= Self.freshPreselectionLimit
         rows = batch.fresh.map {
-            plannedRow(from: $0, isFresh: true, isSelected: preselectFresh)
+            let isHelper = HolyRestoreProvenance.isHelperSessionTitle($0.title)
+            return plannedRow(
+                from: $0,
+                isFresh: true,
+                isSelected: preselectFresh && !isHelper
+            )
         } + batch.older.map {
             plannedRow(from: $0, isFresh: false, isSelected: false)
         }
@@ -421,13 +512,15 @@ final class HolyRestoreEngine: ObservableObject {
 
     // MARK: - Restore
 
-    /// Restores every fresh-batch row headless. Older interruptions restore
-    /// only through explicit selection or per-row action — a bulk button
-    /// must never quietly recreate weeks of history. Attach stays lazy:
-    /// selected flows attach explicitly, everything else is adopted by
-    /// converge or by the user when they are ready.
+    /// Restores every fresh-batch PARENT row headless. Older interruptions
+    /// and helper shells restore only through explicit selection or a
+    /// per-row action — a bulk button must never quietly recreate weeks of
+    /// history, nor forty empty scaffolding shells whose scrollback is gone
+    /// either way. Attach stays lazy: selected flows attach explicitly,
+    /// everything else is adopted by converge or by the user when they are
+    /// ready.
     func restoreAll() async {
-        await restore(rowIDs: freshRows.map(\.id), attach: false)
+        await restore(rowIDs: freshParentRows.map(\.id), attach: false)
     }
 
     /// Restores the selected rows and attaches each one as it verifies.
@@ -447,6 +540,23 @@ final class HolyRestoreEngine: ObservableObject {
 
     func setSelected(_ selected: Bool, rowID: UUID) {
         updateRow(rowID) { $0.isSelected = selected }
+    }
+
+    /// Deletes every older archived record and drops those rows from the
+    /// sheet. This boot's interruptions are untouched — the one thing the
+    /// surface exists to protect is never in range of this button.
+    ///
+    /// Deletion goes through the adapter's archive-removal path, the same
+    /// one Session History uses; nothing here knows how records are stored.
+    /// Returns how many records were removed, so the caller can confirm what
+    /// it just did rather than assume.
+    @discardableResult
+    func clearOlderInterruptions() -> Int {
+        let archiveIDs = olderRows.map(\.id)
+        guard !archiveIDs.isEmpty else { return 0 }
+        adapter.deleteArchives(archiveIDs: archiveIDs)
+        rows.removeAll { !$0.isFresh }
+        return archiveIDs.count
     }
 
     /// Bulk selection for Select All / Select None. The caller passes the
