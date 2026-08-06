@@ -190,3 +190,22 @@ struct HolyGhosttyActionButtonStyle: ButtonStyle {
             .foregroundStyle(HolyGhosttyTheme.textPrimary)
     }
 }
+
+// MARK: - Prominent Button (the one primary action on a surface)
+
+/// Filled halo-gold button for the single primary action of a surface.
+/// Everything else on the same surface stays in the quiet action style, so
+/// under stress the eye lands here first.
+struct HolyGhosttyProminentButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(HolyGhosttyTheme.halo.opacity(configuration.isPressed ? 0.72 : 0.92))
+            )
+            .foregroundStyle(Color.black.opacity(0.85))
+    }
+}

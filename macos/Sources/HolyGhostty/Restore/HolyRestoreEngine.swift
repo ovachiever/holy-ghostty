@@ -20,7 +20,9 @@ protocol HolyRestoreEnvironmentProbing: Sendable {
 /// readopt path so Holy UUIDs, notes, titles, and pins survive restore.
 @MainActor
 protocol HolyRestoreWorkspaceAdapting: AnyObject {
-    var restoreCandidateArchives: [HolyArchivedSession] { get }
+    /// Cold-boot candidates split into the most recent boot event (`fresh`)
+    /// and every earlier unrestored interruption (`older`).
+    var restoreCandidateBatch: HolyCrashRestoreBatch { get }
     func rosterOwnsSession(withHolyID id: UUID) -> Bool
     func rosterOwnsTmuxSessionName(_ name: String) -> Bool
     /// Persists a planned or restored launch spec back onto the archived
@@ -43,6 +45,10 @@ struct HolyRestoreRow: Identifiable, Equatable {
     var phase: HolyRestoreRowPhase
     var confirmation: HolyRestoreIdentityConfirmation
     var isSelected: Bool
+    /// True when the row belongs to the most recent cold-boot batch. Older
+    /// rows render collapsed, are never preselected, and are excluded from
+    /// Restore All and the interrupted count.
+    let isFresh: Bool
 }
 
 /// Orchestrates crash restore: plan from cold-boot archives, preflight each
@@ -52,6 +58,10 @@ struct HolyRestoreRow: Identifiable, Equatable {
 @MainActor
 final class HolyRestoreEngine: ObservableObject {
     static let maxConcurrentRestores = 4
+    /// Fresh batches at or under this size open fully selected — one glance,
+    /// one click. Bigger batches open with nothing selected, so no stressed
+    /// human ever faces "Restore Selected (54)" as the default.
+    static let freshPreselectionLimit = 12
 
     @Published private(set) var rows: [HolyRestoreRow] = []
     @Published private(set) var isPreflighting = false
@@ -76,36 +86,59 @@ final class HolyRestoreEngine: ObservableObject {
         self.adapter = adapter
     }
 
-    var interruptedCount: Int { rows.count }
+    var freshRows: [HolyRestoreRow] { rows.filter(\.isFresh) }
+
+    var olderRows: [HolyRestoreRow] { rows.filter { !$0.isFresh } }
+
+    /// The honest headline count: only this boot's interruptions.
+    var interruptedCount: Int { freshRows.count }
+
+    var olderCount: Int { olderRows.count }
 
     var selectedCount: Int { rows.filter(\.isSelected).count }
 
     // MARK: - Plan
 
-    /// Rebuilds rows from the adapter's candidate archives. Records without
-    /// a complete tmux identity get one generated and persisted immediately,
-    /// so the identity is stable for idempotent retries and later cold boots.
+    /// Rebuilds rows from the adapter's candidate batch: fresh rows first,
+    /// older after. Fresh rows preselect only when the batch is small
+    /// (`freshPreselectionLimit`); older rows never preselect. Records
+    /// without a complete tmux identity get one generated and persisted
+    /// immediately, so the identity is stable for idempotent retries and
+    /// later cold boots.
     func buildPlan() {
-        rows = adapter.restoreCandidateArchives.map { archived in
-            var planned = archived.record.launchSpec
-            if planned.tmux == nil {
-                planned.tmux = .holyManagedDefault
-            }
-            if planned.tmux?.normalized.sessionName == nil {
-                planned = HolyTmuxCommandBuilder.realizedLaunchSpec(planned)
-                adapter.persistPlannedLaunchSpec(archiveID: archived.id, launchSpec: planned)
-            }
-
-            return HolyRestoreRow(
-                id: archived.id,
-                archived: archived,
-                plannedLaunchSpec: planned,
-                state: .blocked("Preflight has not run yet."),
-                phase: .pending,
-                confirmation: .notApplicable,
-                isSelected: true
-            )
+        let batch = adapter.restoreCandidateBatch
+        let preselectFresh = batch.fresh.count <= Self.freshPreselectionLimit
+        rows = batch.fresh.map {
+            plannedRow(from: $0, isFresh: true, isSelected: preselectFresh)
+        } + batch.older.map {
+            plannedRow(from: $0, isFresh: false, isSelected: false)
         }
+    }
+
+    private func plannedRow(
+        from archived: HolyArchivedSession,
+        isFresh: Bool,
+        isSelected: Bool
+    ) -> HolyRestoreRow {
+        var planned = archived.record.launchSpec
+        if planned.tmux == nil {
+            planned.tmux = .holyManagedDefault
+        }
+        if planned.tmux?.normalized.sessionName == nil {
+            planned = HolyTmuxCommandBuilder.realizedLaunchSpec(planned)
+            adapter.persistPlannedLaunchSpec(archiveID: archived.id, launchSpec: planned)
+        }
+
+        return HolyRestoreRow(
+            id: archived.id,
+            archived: archived,
+            plannedLaunchSpec: planned,
+            state: .blocked("Preflight has not run yet."),
+            phase: .pending,
+            confirmation: .notApplicable,
+            isSelected: isSelected,
+            isFresh: isFresh
+        )
     }
 
     // MARK: - Preflight
@@ -204,11 +237,13 @@ final class HolyRestoreEngine: ObservableObject {
 
     // MARK: - Restore
 
-    /// Restores every actionable row headless. Attach stays lazy: selected
-    /// flows attach explicitly, everything else is adopted by converge or by
-    /// the user when they are ready.
+    /// Restores every fresh-batch row headless. Older interruptions restore
+    /// only through explicit selection or per-row action — a bulk button
+    /// must never quietly recreate weeks of history. Attach stays lazy:
+    /// selected flows attach explicitly, everything else is adopted by
+    /// converge or by the user when they are ready.
     func restoreAll() async {
-        await restore(rowIDs: rows.map(\.id), attach: false)
+        await restore(rowIDs: freshRows.map(\.id), attach: false)
     }
 
     /// Restores the selected rows and attaches each one as it verifies.
@@ -228,6 +263,16 @@ final class HolyRestoreEngine: ObservableObject {
 
     func setSelected(_ selected: Bool, rowID: UUID) {
         updateRow(rowID) { $0.isSelected = selected }
+    }
+
+    /// Bulk selection for Select All / Select None. The caller passes the
+    /// row ids currently visible (fresh, plus older when expanded), so the
+    /// buttons act on what the user can see and nothing hidden.
+    func setSelection(_ selected: Bool, rowIDs: [UUID]) {
+        let targets = Set(rowIDs)
+        for index in rows.indices where targets.contains(rows[index].id) {
+            rows[index].isSelected = selected
+        }
     }
 
     /// Resolves an ambiguous row to the candidate the user picked.

@@ -1669,12 +1669,64 @@ final class HolyWorkspaceStore: ObservableObject {
             .hasPrefix(HolySessionSupervisor.coldBootRecoveryReasonPrefix) == true
     }
 
-    var crashRestoreCandidates: [HolyArchivedSession] {
-        archivedSessions.filter(Self.isCrashRestoreCandidate)
+    /// Rows persisted before the boot-batch marker existed carry no batch id.
+    /// One supervisor cold-boot pass writes its rows within seconds, and
+    /// distinct reboots sit hours apart, so for those legacy rows proximity
+    /// to the newest candidate is the only available batch boundary.
+    nonisolated static let legacyColdBootClusterWindow: TimeInterval = 10 * 60
+
+    /// Splits cold-boot candidates into the most recent boot event (`fresh`)
+    /// and everything earlier (`older`), newest first in both. Batch-stamped
+    /// rows scope by exact id; legacy nil-id rows fall back to clustering
+    /// within `legacyColdBootClusterWindow` of the newest candidate.
+    nonisolated static func crashRestoreBatch(
+        from archivedSessions: [HolyArchivedSession]
+    ) -> HolyCrashRestoreBatch {
+        let candidates = archivedSessions
+            .filter(isCrashRestoreCandidate)
+            .sorted { $0.archivedAt > $1.archivedAt }
+        guard let newest = candidates.first else { return .empty }
+
+        let isInNewestBootBatch: (HolyArchivedSession) -> Bool
+        if let batchID = newest.recoveryBootBatchID {
+            isInNewestBootBatch = { $0.recoveryBootBatchID == batchID }
+        } else {
+            let horizon = newest.archivedAt.addingTimeInterval(-legacyColdBootClusterWindow)
+            isInNewestBootBatch = { $0.recoveryBootBatchID == nil && $0.archivedAt >= horizon }
+        }
+
+        var fresh: [HolyArchivedSession] = []
+        var older: [HolyArchivedSession] = []
+        for candidate in candidates {
+            if isInNewestBootBatch(candidate) {
+                fresh.append(candidate)
+            } else {
+                older.append(candidate)
+            }
+        }
+        return .init(fresh: fresh, older: older)
+    }
+
+    var crashRestoreBatch: HolyCrashRestoreBatch {
+        Self.crashRestoreBatch(from: archivedSessions)
+    }
+
+    /// The banner speaks only for the freshest boot batch: older unrestored
+    /// interruptions never inflate its count or summon it on their own.
+    nonisolated static func shouldOfferCrashRestore(
+        bannerDismissed: Bool,
+        restorePresented: Bool,
+        freshBatchCount: Int
+    ) -> Bool {
+        !bannerDismissed && !restorePresented && freshBatchCount > 0
     }
 
     var shouldOfferCrashRestore: Bool {
-        !restoreBannerDismissed && !restorePresented && !crashRestoreCandidates.isEmpty
+        Self.shouldOfferCrashRestore(
+            bannerDismissed: restoreBannerDismissed,
+            restorePresented: restorePresented,
+            freshBatchCount: crashRestoreBatch.fresh.count
+        )
     }
 
     func presentRestore() {

@@ -110,6 +110,7 @@ private final class FakeEnvironment: HolyRestoreEnvironmentProbing, @unchecked S
 @MainActor
 private final class FakeAdapter: HolyRestoreWorkspaceAdapting {
     var archives: [HolyArchivedSession]
+    var olderArchives: [HolyArchivedSession] = []
     var rosterHolyIDs: Set<UUID> = []
     var rosterTmuxSessionNames: Set<String> = []
     private(set) var persistedSpecsByArchiveID: [UUID: [HolySessionLaunchSpec]] = [:]
@@ -120,7 +121,9 @@ private final class FakeAdapter: HolyRestoreWorkspaceAdapting {
         self.archives = archives
     }
 
-    var restoreCandidateArchives: [HolyArchivedSession] { archives }
+    var restoreCandidateBatch: HolyCrashRestoreBatch {
+        .init(fresh: archives, older: olderArchives)
+    }
 
     func rosterOwnsSession(withHolyID id: UUID) -> Bool {
         rosterHolyIDs.contains(id)
@@ -134,6 +137,9 @@ private final class FakeAdapter: HolyRestoreWorkspaceAdapting {
         persistedSpecsByArchiveID[archiveID, default: []].append(launchSpec)
         if let index = archives.firstIndex(where: { $0.id == archiveID }) {
             archives[index].record.launchSpec = launchSpec
+        }
+        if let index = olderArchives.firstIndex(where: { $0.id == archiveID }) {
+            olderArchives[index].record.launchSpec = launchSpec
         }
     }
 
