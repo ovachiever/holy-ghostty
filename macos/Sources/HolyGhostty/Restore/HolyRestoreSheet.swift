@@ -783,10 +783,10 @@ private struct CandidatePicker: View {
 
 /// Bar above the workspace after a cold boot: states this reboot's
 /// interrupted count and offers the restore sheet as its one primary
-/// action. Never launches anything itself. The warning tint and accent
-/// edge exist because this bar renders in the titlebar strip, where a
-/// chrome-colored bar disappears — the first human contact after a crash
-/// must survive a stressed glance.
+/// action. Never launches anything itself. The mount pads below the
+/// transparent-titlebar strip (mn-9a6145 D5a: flush to the top, the native
+/// tab bar covered everything but the trailing button); the warning tint
+/// and accent edge keep it findable in a stressed glance.
 struct HolyRestoreBanner: View {
     let interruptedCount: Int
     let interruptedAt: Date?

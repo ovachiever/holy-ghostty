@@ -1450,6 +1450,17 @@ class AppDelegate: NSObject,
         quickController.toggle()
     }
 
+    /// App-level fallback for View ▸ Restore Sessions…. The menu item
+    /// targets the first responder; when the key window's chain misses the
+    /// workspace controller (an open sheet, a plain terminal window), the
+    /// chain still ends at this delegate — without this the "durable" entry
+    /// greys out and reads as gone (mn-9a6145 D5b).
+    @IBAction func presentCrashRestore(_ sender: Any?) {
+        guard let workspace = preferredWorkspace(createIfNeeded: false) else { return }
+        workspace.showAndActivate()
+        workspace.workspaceStore.presentRestore()
+    }
+
     @MainActor
     private func handleHolyAutomationURL(_ url: URL) {
         guard let launchSpec = HolyAutomationURLParser.launchSpec(from: url) else {
@@ -1753,6 +1764,12 @@ extension AppDelegate: NSMenuItemValidation {
         switch item.action {
         case #selector(setAsDefaultTerminal(_:)):
             return NSWorkspace.shared.defaultTerminal != Bundle.main.bundleURL
+
+        case #selector(presentCrashRestore(_:)):
+            // Same rule the workspace controller applies: anything to
+            // restore, fresh or older, keeps the durable entry alive.
+            guard let workspace = HolyWorkspaceWindowController.preferred else { return false }
+            return !workspace.workspaceStore.crashRestoreBatch.isEmpty
 
         case #selector(floatOnTop(_:)),
             #selector(useAsDefault(_:)):

@@ -313,6 +313,11 @@ struct HolyWorkspaceRootView: View {
                     onRestore: { store.presentRestore() },
                     onDismiss: { store.dismissRestoreBanner() }
                 )
+                // Below the transparent-titlebar strip, where the native tab
+                // bar draws: mounted flush to the top, only the banner's
+                // trailing button peeked past the tabs (Erik found restore by
+                // clicking an unlabeled box — mn-9a6145 D5a).
+                .padding(.top, HolyWorkspaceLayout.titlebarControlInset)
             }
 
             primaryWorkspaceContent
