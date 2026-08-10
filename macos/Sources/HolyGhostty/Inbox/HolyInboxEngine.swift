@@ -5,9 +5,14 @@ import AppKit
 
 /// The pane's metronome. Polls every registered source on a cadence — 75s
 /// while the panel is visible, 5min hidden so the unread badge cannot lie —
-/// plus immediately on panel open, app foreground, and manual refresh. Polls
-/// are serialized: a poll in flight absorbs every request that arrives during
-/// it into exactly one follow-up.
+/// plus immediately on panel open, app foreground, and manual refresh.
+///
+/// Each source refreshes INDEPENDENTLY: a 30-second GitHub sweep must never
+/// hold local manna rows hostage (mn-b2e2e9 — Erik watched the panel sit
+/// empty for a minute after a session switch). Sections always render in
+/// source REGISTRATION order regardless of completion order, and per-source
+/// refreshes stay serialized: a request that lands while that source is in
+/// flight coalesces into exactly one follow-up.
 @MainActor
 final class HolyInboxEngine: ObservableObject {
     @Published private(set) var sections: [HolyInboxSection] = []
@@ -22,10 +27,15 @@ final class HolyInboxEngine: ObservableObject {
     private let sources: [any HolyInboxRowSource]
     private let focusedRepoSlugProvider: @Sendable () async -> String?
     private var panelVisible = false
-    private var refreshTask: Task<Void, Never>?
-    private var pendingRefreshRequested = false
     private var pollTask: Task<Void, Never>?
     private var foregroundObserver: NSObjectProtocol?
+
+    /// Per-source state, indexed by registration order — which is also the
+    /// panel's section order. A slot stays nil until its source completes
+    /// its first refresh; the panel simply doesn't show that source yet.
+    private var snapshotsBySourceIndex: [HolyInboxSourceSnapshot?]
+    private var runningSourceIndices: Set<Int> = []
+    private var pendingSourceIndices: Set<Int> = []
 
     /// `autostart: false` keeps tests in control of every poll; production
     /// starts polling at init so the badge is honest soon after launch.
@@ -36,6 +46,7 @@ final class HolyInboxEngine: ObservableObject {
     ) {
         self.sources = sources
         self.focusedRepoSlugProvider = focusedRepoSlugProvider
+        self.snapshotsBySourceIndex = Array(repeating: nil, count: sources.count)
 
         if autostart {
             requestRefresh()
@@ -83,59 +94,67 @@ final class HolyInboxEngine: ObservableObject {
         }
     }
 
-    /// Serialized: at most one poll runs; requests during it coalesce into
-    /// one follow-up poll.
+    /// Refresh every source. Each proceeds independently; see
+    /// `refreshSource(at:)` for the per-source serialization rule.
     func requestRefresh() {
-        guard refreshTask == nil else {
-            pendingRefreshRequested = true
-            return
-        }
-
-        isRefreshing = true
-        refreshTask = Task { [weak self] in
-            await self?.runRefresh()
-            guard let self else { return }
-            self.refreshTask = nil
-            if self.pendingRefreshRequested {
-                self.pendingRefreshRequested = false
-                self.requestRefresh()
-            } else {
-                self.isRefreshing = false
-            }
+        for index in sources.indices {
+            refreshSource(at: index)
         }
     }
 
+    /// Refresh exactly one source — the session-switch path: focus changed,
+    /// so the manna board scope changed, and re-reading local files must not
+    /// wait on (or trigger) a GitHub sweep.
+    func requestRefresh(sourceID: String) {
+        guard let index = sources.firstIndex(where: { $0.sourceID == sourceID }) else { return }
+        refreshSource(at: index)
+    }
+
     /// Routes a row's acknowledge affordance to the source that owns its
-    /// section, then re-polls so the row's disappearance is truth, not hope.
+    /// section, then re-polls THAT source so the row's disappearance is
+    /// truth, not hope — without dragging every other source along.
     func acknowledge(rowID: String, inSectionID sectionID: String) async {
         guard let section = sections.first(where: { $0.id == sectionID }),
               let source = sources.first(where: { $0.sourceID == section.sourceID }) else {
             return
         }
         await source.acknowledge(rowID: rowID)
-        requestRefresh()
+        requestRefresh(sourceID: source.sourceID)
     }
 
     // MARK: - Internals
 
-    private func runRefresh() async {
-        let context = HolyInboxRefreshContext(
-            focusedRepoSlug: await focusedRepoSlugProvider()
-        )
+    private func refreshSource(at index: Int) {
+        if runningSourceIndices.contains(index) {
+            pendingSourceIndices.insert(index)
+            return
+        }
+        runningSourceIndices.insert(index)
+        isRefreshing = true
 
-        var assembled: [HolyInboxSection] = []
-        var notes: [String] = []
-        for source in sources {
+        let source = sources[index]
+        Task { [weak self] in
+            guard let self else { return }
+            let context = HolyInboxRefreshContext(
+                focusedRepoSlug: await self.focusedRepoSlugProvider()
+            )
             let snapshot = await source.refresh(context: context)
-            assembled.append(contentsOf: snapshot.sections)
-            if let footnote = snapshot.footnote {
-                notes.append(footnote)
+            self.apply(snapshot, at: index)
+            self.runningSourceIndices.remove(index)
+            if self.pendingSourceIndices.remove(index) != nil {
+                self.refreshSource(at: index)
+            } else if self.runningSourceIndices.isEmpty {
+                self.isRefreshing = false
             }
         }
+    }
 
-        sections = assembled
-        footnotes = notes
-        badgeCount = Self.badgeCount(for: assembled)
+    private func apply(_ snapshot: HolyInboxSourceSnapshot, at index: Int) {
+        snapshotsBySourceIndex[index] = snapshot
+        let landed = snapshotsBySourceIndex.compactMap { $0 }
+        sections = landed.flatMap(\.sections)
+        footnotes = landed.compactMap(\.footnote)
+        badgeCount = Self.badgeCount(for: sections)
         lastRefreshedAt = .now
     }
 

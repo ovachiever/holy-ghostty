@@ -81,6 +81,10 @@ final class HolyWorkspaceStore: ObservableObject {
             refreshSessionPresentationState()
             scheduleSelectedSessionSeenMark()
             persist(pendingEvents: selectionEvents(from: oldValue, to: selectedSessionID))
+            // Focus decides the manna board scope, so a switch re-reads the
+            // board immediately — local files, sub-second — while GitHub and
+            // alerts keep their own cadence (mn-b2e2e9).
+            inboxEngine.requestRefresh(sourceID: HolyMannaInboxSectioner.sourceID)
         }
     }
     @Published var soloSessionID: UUID? {

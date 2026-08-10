@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 // MARK: - Pinned payload
 
@@ -328,6 +329,10 @@ enum HolyGitHubInboxSectioner {
 /// mode collapses into one quiet degraded row — never a crash, never
 /// invented emptiness.
 final class HolyGitHubInboxSource: HolyInboxRowSource {
+    static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.mitchellh.ghostty",
+        category: "HolyGitHubInboxSource"
+    )
     static let binaryName = "agent-do"
     /// `gh inbox` sweeps every watched repo through the GitHub API; give it
     /// room on cold caches before declaring it broken.
@@ -384,13 +389,25 @@ final class HolyGitHubInboxSource: HolyInboxRowSource {
 
         switch result {
         case let .failure(reason):
+            Self.logger.error("gh inbox subprocess failed: \(reason, privacy: .public)")
             return Self.degradedSnapshot(detail: reason)
         case let .success(output):
             guard output.exitCode == 0 else {
-                let detail = output.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                // The panel truncates the row's subtitle, which has already
+                // cost two diagnosis rounds — log the WHOLE failure, and put
+                // the LAST stderr line in the row (gh's verdict line), not
+                // the head of a traceback.
+                let stderr = output.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                Self.logger.error(
+                    "gh inbox exited \(output.exitCode): \(stderr, privacy: .public)"
+                )
+                let lastLine = stderr
+                    .components(separatedBy: .newlines)
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .last { !$0.isEmpty }
                 return Self.degradedSnapshot(
                     detail: "\(Self.binaryName) gh inbox exited with status \(output.exitCode)."
-                        + (detail.isEmpty ? "" : " \(detail)")
+                        + (lastLine.map { " \($0)" } ?? "")
                 )
             }
             guard let payload = HolyGitHubInboxPayload.parse(Data(output.stdout.utf8)) else {

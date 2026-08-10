@@ -51,9 +51,14 @@ struct HolyInboxEngineTests {
     /// Blocks inside refresh until the test releases the gate.
     private final class GatedSource: HolyInboxRowSource, @unchecked Sendable {
         let sourceID = "gated"
+        private let snapshot: HolyInboxSourceSnapshot
         private let lock = NSLock()
         private var _refreshCount = 0
         private var continuations: [CheckedContinuation<Void, Never>] = []
+
+        init(snapshot: HolyInboxSourceSnapshot = .empty) {
+            self.snapshot = snapshot
+        }
 
         var refreshCount: Int {
             lock.lock()
@@ -70,7 +75,7 @@ struct HolyInboxEngineTests {
                 continuations.append(continuation)
                 lock.unlock()
             }
-            return .empty
+            return snapshot
         }
 
         func release() {
@@ -188,6 +193,53 @@ struct HolyInboxEngineTests {
             section(id: "gh.authored", sourceID: "gh", rows: [row("gh:c")]),
         ]
         #expect(HolyInboxEngine.badgeCount(for: sections) == 3)
+    }
+
+    // MARK: - Per-source independence (mn-b2e2e9)
+
+    @Test @MainActor func aSlowSourceNeverDelaysAFastOnesSections() async {
+        let slow = GatedSource(snapshot: HolyInboxSourceSnapshot(sections: [
+            section(id: "gh.review", sourceID: "gated", rows: [row("gh:a")], countsTowardBadge: true),
+        ]))
+        let fast = StaticSource(
+            sourceID: "manna",
+            snapshot: HolyInboxSourceSnapshot(sections: [
+                section(id: "manna", sourceID: "manna", rows: [row("mn:1")], countsTowardBadge: true),
+            ])
+        )
+        let engine = HolyInboxEngine(sources: [slow, fast], autostart: false)
+        engine.requestRefresh()
+
+        // The fast source's rows land while the slow one is still in flight.
+        #expect(await waitUntil { engine.sections.map(\.id) == ["manna"] })
+        #expect(engine.isRefreshing)
+        #expect(engine.badgeCount == 1)
+
+        slow.release()
+        // The slow source's sections take their REGISTERED slot, first in
+        // the panel, despite finishing last.
+        #expect(await waitUntil { engine.sections.map(\.id) == ["gh.review", "manna"] })
+        #expect(await waitUntil { !engine.isRefreshing })
+        #expect(engine.badgeCount == 2)
+    }
+
+    @Test @MainActor func targetedRefreshTouchesOnlyThatSource() async {
+        let github = StaticSource(sourceID: "gh", snapshot: .empty)
+        let manna = StaticSource(
+            sourceID: "manna",
+            snapshot: HolyInboxSourceSnapshot(sections: [
+                section(id: "manna", sourceID: "manna", rows: [row("mn:1")]),
+            ])
+        )
+        let engine = HolyInboxEngine(sources: [github, manna], autostart: false)
+
+        engine.requestRefresh(sourceID: "manna")
+        #expect(await waitUntil { manna.refreshCount == 1 && engine.sections.map(\.id) == ["manna"] })
+
+        // The other source was never touched — a session switch must not
+        // fire a 30-second GitHub sweep.
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(github.refreshCount == 0)
     }
 
     // MARK: - Acknowledge routing

@@ -448,14 +448,23 @@ enum HolyRestoreProcessRunner {
         return await withCheckedContinuation { continuation in
             resumeBox.store(continuation)
 
+            // Drain both pipes from launch, not after termination: a child
+            // that writes more than the pipe buffer (~64KB) before exiting
+            // would block forever against a post-exit read and die as a
+            // fake timeout. `readDataToEndOfFile` on background queues
+            // consumes continuously and returns at EOF.
+            let collectedStdout = DataBox()
+            let collectedStderr = DataBox()
+            let drainGroup = DispatchGroup()
+
             process.terminationHandler = { finishedProcess in
-                let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
-                resumeBox.resume(returning: .success(.init(
-                    stdout: String(bytes: stdoutData, encoding: .utf8) ?? "",
-                    stderr: String(bytes: stderrData, encoding: .utf8) ?? "",
-                    exitCode: finishedProcess.terminationStatus
-                )))
+                drainGroup.notify(queue: .global(qos: .utility)) {
+                    resumeBox.resume(returning: .success(.init(
+                        stdout: String(bytes: collectedStdout.take(), encoding: .utf8) ?? "",
+                        stderr: String(bytes: collectedStderr.take(), encoding: .utf8) ?? "",
+                        exitCode: finishedProcess.terminationStatus
+                    )))
+                }
             }
 
             do {
@@ -465,6 +474,17 @@ enum HolyRestoreProcessRunner {
                     holyDetailedProcessLaunchErrorDescription(error)
                 ))
                 return
+            }
+
+            drainGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                collectedStdout.store(stdout.fileHandleForReading.readDataToEndOfFile())
+                drainGroup.leave()
+            }
+            drainGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                collectedStderr.store(stderr.fileHandleForReading.readDataToEndOfFile())
+                drainGroup.leave()
             }
 
             if let stdin, let stdinData {
@@ -484,6 +504,23 @@ enum HolyRestoreProcessRunner {
                     process.terminate()
                 }
             }
+        }
+    }
+
+    private final class DataBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func store(_ newData: Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            data = newData
+        }
+
+        func take() -> Data {
+            lock.lock()
+            defer { lock.unlock() }
+            return data
         }
     }
 
