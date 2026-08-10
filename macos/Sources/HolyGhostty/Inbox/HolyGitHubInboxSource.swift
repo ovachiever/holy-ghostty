@@ -9,7 +9,10 @@ import OSLog
 /// memory; re-run the CLI. Top-level `sweep`/`total` keys are ignored.
 struct HolyGitHubInboxItem: Equatable, Sendable {
     let author: String
-    let comments: Int
+    /// Ceremony-search rows carry a count. The maintainer REST sweep cannot
+    /// obtain that field without another request per PR, so its live contract
+    /// is `null`, meaning unknown rather than zero.
+    let comments: Int?
     let draft: Bool
     let labels: [String]
     let number: Int
@@ -45,7 +48,16 @@ extension HolyGitHubInboxItem: Decodable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         author = try container.decode(String.self, forKey: .author)
-        comments = try container.decode(Int.self, forKey: .comments)
+        guard container.contains(.comments) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.comments,
+                .init(
+                    codingPath: container.codingPath,
+                    debugDescription: "Expected comments to be present as a count or null."
+                )
+            )
+        }
+        comments = try container.decodeIfPresent(Int.self, forKey: .comments)
         draft = try container.decode(Bool.self, forKey: .draft)
         // Live rows always showed `[]`; if the CLI ever ships label objects
         // instead of strings, the row survives without them.
@@ -148,6 +160,7 @@ enum HolyGitHubInboxSectioner {
         items: [HolyGitHubInboxItem],
         focusedRepoSlug: String?
     ) -> [HolyInboxSection] {
+        var authoredChanges: [HolyGitHubInboxItem] = []
         var review: [HolyGitHubInboxItem] = []
         var maintainer: [HolyGitHubInboxItem] = []
         var authored: [HolyGitHubInboxItem] = []
@@ -158,6 +171,11 @@ enum HolyGitHubInboxSectioner {
             let reasons = Set(item.reasons)
             if reasons.contains("bot_author") {
                 bots.append(item)
+            } else if reasons.contains("authored_changes_requested") {
+                // Another human has acted on Erik's work and handed the ball
+                // back. This is direct attention, not generic authored-open
+                // inventory, so it must not hide in a collapsed section.
+                authoredChanges.append(item)
             } else if reasons.contains("review_requested") {
                 review.append(item)
             } else if reasons.contains("maintainer_unreviewed")
@@ -190,6 +208,12 @@ enum HolyGitHubInboxSectioner {
             ))
         }
 
+        append(
+            id: "gh.authored_changes",
+            title: "Changes requested on yours",
+            items: authoredChanges,
+            countsTowardBadge: true
+        )
         append(
             id: "gh.review",
             title: "Needs your review",
@@ -248,6 +272,8 @@ enum HolyGitHubInboxSectioner {
         case "authored_open":
             // The section already says "Yours, open"; a chip would repeat it.
             return nil
+        case "authored_changes_requested":
+            return HolyInboxChip("changes requested", emphasis: .attention)
         case "bot_author":
             return HolyInboxChip("bot", emphasis: .neutral)
         default:

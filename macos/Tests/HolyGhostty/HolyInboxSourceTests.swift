@@ -108,6 +108,35 @@ struct HolyInboxSourceTests {
         #expect(payload.items[0].labels.isEmpty)
     }
 
+    @Test func maintainerSweepNullCommentCountDecodesAsUnknown() throws {
+        // Live 2026-08-10 maintainer rows come from REST and intentionally
+        // carry `comments: null`; rejecting one used to blank all 38 rows as
+        // "outside the pinned contract".
+        let json = """
+        {"count": 1, "items": [{
+          "author": "alice", "comments": null, "draft": false,
+          "labels": [], "number": 27,
+          "reasons": ["maintainer_unreviewed"],
+          "ref": "o/r#27", "repo": "o/r", "state": "open", "title": "t",
+          "updated_at": "2026-08-10T00:00:00Z", "url": "https://github.com/o/r/pull/27"
+        }]}
+        """
+        let payload = try #require(HolyGitHubInboxPayload.parse(Data(json.utf8)))
+        #expect(payload.items[0].comments == nil)
+    }
+
+    @Test func missingCommentFieldStillViolatesThePinnedContract() {
+        let json = """
+        {"count": 1, "items": [{
+          "author": "alice", "draft": false, "labels": [], "number": 27,
+          "reasons": ["maintainer_unreviewed"],
+          "ref": "o/r#27", "repo": "o/r", "state": "open", "title": "t",
+          "updated_at": "2026-08-10T00:00:00Z", "url": "https://github.com/o/r/pull/27"
+        }]}
+        """
+        #expect(HolyGitHubInboxPayload.parse(Data(json.utf8)) == nil)
+    }
+
     // MARK: - Invocation contract
 
     @Test func inboxArgumentsMatchPinnedInvocation() {

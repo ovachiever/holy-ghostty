@@ -210,10 +210,9 @@ struct HolyMannaReconcilePayload: Decodable, Equatable, Sendable {
 
 // MARK: - Board discovery
 
-/// Which boards the pane reads. Scope is the same spirit as the GitHub
-/// source: every repository with a live Holy session, plus the umbrella
-/// workspace board those repos sit inside — discovered by probing for
-/// `.manna`, never hardcoded.
+/// Which boards the pane reads. The caller supplies one focused-project
+/// anchor; this locator admits that project's board plus its nearest umbrella
+/// board, discovered by probing for `.manna`, never hardcoded.
 enum HolyMannaBoardLocator {
     /// Each board costs two subprocesses per refresh tick.
     static let maxBoards = 8
@@ -316,9 +315,9 @@ final class HolyMannaInboxSource: HolyInboxRowSource {
 
     let sourceID = HolyMannaInboxSectioner.sourceID
 
-    /// Repository roots of live Holy sessions, focused session first. The
-    /// shared refresh context carries only a GitHub slug, and a board is a
-    /// path, so board scope arrives through the store instead.
+    /// A filesystem anchor for the focused Holy session. The shared refresh
+    /// context carries only a GitHub slug, and a board is a path, so board
+    /// scope arrives through the store instead.
     private let repositoryRootsProvider: @Sendable () async -> [String]
     private let homeDirectory: String
     private let boardReader: (@Sendable (String) async -> HolyMannaBoardReading)?
@@ -495,16 +494,39 @@ final class HolyMannaInboxSource: HolyInboxRowSource {
 }
 
 extension HolyMannaInboxSource {
-    /// Repository roots of the live sessions, focused session first — the
-    /// priority order the board locator reads. Focus reorders, never filters.
     @MainActor
     /// The focused session's repository only (Erik 2026-08-10: "I should not
-    /// be seeing manna from other projects"). Other live sessions' boards
-    /// stay out of the panel; the umbrella climb in `boardRoots` still
-    /// covers a focused project whose board lives one level up.
+    /// be seeing manna from other projects"). Git ownership arrives
+    /// asynchronously after focus, so fall back to the focused worktree/cwd
+    /// immediately instead of blanking the panel until `gitSnapshot` lands.
+    /// Other live sessions' boards stay out; the umbrella climb in
+    /// `boardRoots` still covers a focused project whose board lives above it.
     static func repositoryRoots(focused: HolySession?) -> [String] {
-        guard let focusedRoot = focused?.ownership.repositoryRoot else { return [] }
-        return [focusedRoot]
+        guard let focused else { return [] }
+        let ownership = focused.ownership
+        return repositoryRoots(
+            repositoryRoot: ownership.repositoryRoot,
+            worktreePath: ownership.worktreePath,
+            workingDirectory: focused.workingDirectory
+        )
+    }
+
+    /// Pure form of focused-project resolution, kept testable without a live
+    /// terminal surface. Take exactly one anchor: authoritative repository
+    /// root first, then the observed worktree, then cwd while git is loading.
+    nonisolated static func repositoryRoots(
+        repositoryRoot: String?,
+        worktreePath: String?,
+        workingDirectory: String?
+    ) -> [String] {
+        for candidate in [repositoryRoot, worktreePath, workingDirectory] {
+            guard let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  trimmed.hasPrefix("/") else {
+                continue
+            }
+            return [URL(fileURLWithPath: trimmed).standardizedFileURL.path]
+        }
+        return []
     }
 }
 

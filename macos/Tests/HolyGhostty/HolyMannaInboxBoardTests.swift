@@ -2,10 +2,8 @@ import Foundation
 import Testing
 @testable import Ghostty
 
-/// Board scope and the refresh tick. Boards are discovered by probing
-/// `<repository_root>/.manna` for every live Holy session, plus the nearest
-/// umbrella board above them (that is how `/Users/erik/Custom-Coding/.manna`
-/// joins a session running in `/Users/erik/Custom-Coding/holy-ghostty`).
+/// Board scope and the refresh tick. Boards are discovered from the focused
+/// session only, plus its nearest umbrella board.
 struct HolyMannaInboxBoardTests {
     static func locate(
         _ roots: [String],
@@ -123,6 +121,42 @@ struct HolyMannaInboxBoardTests {
     @Test func emptyAndRelativeRootsAreIgnored() {
         #expect(Self.locate([], boards: ["/Users/erik/Custom-Coding"]).isEmpty)
         #expect(Self.locate(["", "  ", "relative/path"], boards: ["/Users/erik"]).isEmpty)
+    }
+
+    // MARK: - Focused project anchor
+
+    @Test func authoritativeRepositoryRootWinsWhenGitIsReady() {
+        #expect(HolyMannaInboxSource.repositoryRoots(
+            repositoryRoot: "/Users/erik/Custom-Coding/aldebaran-group",
+            worktreePath: "/Users/erik/.worktrees/aldebaran",
+            workingDirectory: "/Users/erik/.worktrees/aldebaran/research"
+        ) == ["/Users/erik/Custom-Coding/aldebaran-group"])
+    }
+
+    @Test func worktreeThenWorkingDirectoryKeepMannaVisibleBeforeGitIsReady() {
+        #expect(HolyMannaInboxSource.repositoryRoots(
+            repositoryRoot: nil,
+            worktreePath: "/Users/erik/Custom-Coding/aldebaran-group",
+            workingDirectory: "/Users/erik/Custom-Coding/aldebaran-group/research"
+        ) == ["/Users/erik/Custom-Coding/aldebaran-group"])
+        #expect(HolyMannaInboxSource.repositoryRoots(
+            repositoryRoot: nil,
+            worktreePath: nil,
+            workingDirectory: "/Users/erik/Custom-Coding/aldebaran-group/research"
+        ) == ["/Users/erik/Custom-Coding/aldebaran-group/research"])
+    }
+
+    @Test func invalidEarlyCandidatesFallThroughWithoutWideningScope() {
+        #expect(HolyMannaInboxSource.repositoryRoots(
+            repositoryRoot: "relative/repo",
+            worktreePath: "   ",
+            workingDirectory: "/Users/erik/Custom-Coding/holy-ghostty/../aldebaran-group"
+        ) == ["/Users/erik/Custom-Coding/aldebaran-group"])
+        #expect(HolyMannaInboxSource.repositoryRoots(
+            repositoryRoot: nil,
+            worktreePath: nil,
+            workingDirectory: nil
+        ).isEmpty)
     }
 
     // MARK: - Refresh

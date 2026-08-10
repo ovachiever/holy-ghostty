@@ -84,7 +84,7 @@ final class HolyWorkspaceStore: ObservableObject {
             // Focus decides the manna board scope, so a switch re-reads the
             // board immediately — local files, sub-second — while GitHub and
             // alerts keep their own cadence (mn-b2e2e9).
-            inboxEngine.requestRefresh(sourceID: HolyMannaInboxSectioner.sourceID)
+            refreshFocusedManna(force: true)
         }
     }
     @Published var soloSessionID: UUID? {
@@ -162,6 +162,11 @@ final class HolyWorkspaceStore: ObservableObject {
     private var refreshCoordinator: HolySessionRefreshCoordinator?
     private var paneLayoutMemo: (key: PaneLayoutMemoKey, layout: HolyPaneLayout, labels: [UUID: String])?
     private var sessionObservationCancellables: Set<AnyCancellable> = []
+    /// Session mutation is noisy (terminal frames, telemetry, activity), but
+    /// manna only cares when the selected session's project anchor changes.
+    /// This fingerprint lets the late git snapshot trigger exactly one fresh
+    /// read without turning every pane repaint into two subprocesses.
+    private var lastFocusedMannaRoots: [String]?
     private var cancellables: Set<AnyCancellable> = []
     private var repairBackoff = HolyRepairBackoff()
     private var activeTmuxMetadataRefreshCancellable: AnyCancellable?
@@ -224,6 +229,13 @@ final class HolyWorkspaceStore: ObservableObject {
     var selectedSession: HolySession? {
         guard let selectedSessionID else { return sessions.first }
         return sessions.first(where: { $0.id == selectedSessionID }) ?? sessions.first
+    }
+
+    private func refreshFocusedManna(force: Bool = false) {
+        let roots = HolyMannaInboxSource.repositoryRoots(focused: selectedSession)
+        guard force || roots != lastFocusedMannaRoots else { return }
+        lastFocusedMannaRoots = roots
+        inboxEngine.requestRefresh(sourceID: HolyMannaInboxSectioner.sourceID)
     }
 
     var soloSession: HolySession? {
@@ -3876,6 +3888,12 @@ final class HolyWorkspaceStore: ObservableObject {
         recomputeCoordination()
         if session.id == selectedSessionID {
             scheduleSelectedSessionSeenMark()
+        }
+        if session.id == selectedSession?.id {
+            // A nil selectedSessionID still focuses `sessions.first`.
+            // `objectWillChange` is bridged onto a fresh MainActor task by
+            // `bindSessions`, so this observes the newly applied git/cwd fact.
+            refreshFocusedManna()
         }
         sessionSupervisor.sessionDidMutate(
             session,

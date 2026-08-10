@@ -30,6 +30,10 @@ Inbox panel shows what waits on the human — nothing else.
 
 ### Fixed
 
+- The human inbox accepts GitHub maintainer-sweep rows whose comment count is
+  unknown, promotes changes requested on your PRs to direct attention, and
+  resolves the focused Manna board from cwd immediately while git ownership is
+  still loading instead of letting the local section vanish and return later.
 - Session Restore now survives first human contact: the sheet scopes to the
   most recent boot batch (a durable per-sweep batch id; legacy rows cluster
   by archive time) with older interruptions collapsed, unselected, and

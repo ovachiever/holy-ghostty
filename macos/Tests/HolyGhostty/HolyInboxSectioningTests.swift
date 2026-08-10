@@ -81,6 +81,21 @@ struct HolyInboxSectioningTests {
         #expect(yours?.countsTowardBadge == false)
     }
 
+    @Test func changesRequestedOnAuthoredWorkIsDirectAttention() {
+        let all = sections([item(
+            reasons: ["authored_open", "authored_changes_requested"],
+            author: "ovachiever"
+        )])
+        let changes = section("gh.authored_changes", in: all)
+        #expect(changes?.rows.count == 1)
+        #expect(changes?.collapsedByDefault == false)
+        #expect(changes?.countsTowardBadge == true)
+        #expect(changes?.rows[0].chips.contains(
+            HolyInboxChip("changes requested", emphasis: .attention)
+        ) == true)
+        #expect(section("gh.authored", in: all) == nil)
+    }
+
     @Test func unknownReasonsLandInOtherSectionNotDropped() {
         // A future CLI reason must surface honestly, not vanish.
         let all = sections([item(reasons: ["mystery_reason"])])
