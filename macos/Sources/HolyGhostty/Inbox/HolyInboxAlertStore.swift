@@ -115,4 +115,25 @@ struct HolyInboxAlertStore: Sendable {
             ]
         )
     }
+
+    /// Bulk-acknowledge every unacknowledged delivery of one retired alert
+    /// type. Records stay (this store never deletes history); they just stop
+    /// rendering. Best-effort like recordDelivery: a failure logs and the
+    /// sweep retries on the next launch.
+    func acknowledgeAll(ofType alertType: String, at date: Date = .now) {
+        do {
+            let database = try HolyDatabase.open(at: databaseURL)
+            try database.execute(
+                "UPDATE alerts SET acknowledged_at = ? WHERE alert_type = ? AND acknowledged_at IS NULL;",
+                bindings: [
+                    .text(HolyPersistenceCoders.string(from: date)),
+                    .text(alertType),
+                ]
+            )
+        } catch {
+            Self.logger.error(
+                "Alert backlog sweep for \(alertType, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
 }

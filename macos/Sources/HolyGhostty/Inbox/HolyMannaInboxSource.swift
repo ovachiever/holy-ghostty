@@ -498,15 +498,13 @@ extension HolyMannaInboxSource {
     /// Repository roots of the live sessions, focused session first — the
     /// priority order the board locator reads. Focus reorders, never filters.
     @MainActor
-    static func repositoryRoots(sessions: [HolySession], focused: HolySession?) -> [String] {
-        var roots: [String] = []
-        if let focusedRoot = focused?.ownership.repositoryRoot {
-            roots.append(focusedRoot)
-        }
-        roots.append(contentsOf: sessions.compactMap { session in
-            session.id == focused?.id ? nil : session.ownership.repositoryRoot
-        })
-        return roots
+    /// The focused session's repository only (Erik 2026-08-10: "I should not
+    /// be seeing manna from other projects"). Other live sessions' boards
+    /// stay out of the panel; the umbrella climb in `boardRoots` still
+    /// covers a focused project whose board lives one level up.
+    static func repositoryRoots(focused: HolySession?) -> [String] {
+        guard let focusedRoot = focused?.ownership.repositoryRoot else { return [] }
+        return [focusedRoot]
     }
 }
 

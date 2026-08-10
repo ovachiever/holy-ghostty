@@ -52,6 +52,30 @@ struct HolyInboxRowLifecycleTests {
         #expect(abs(records[1].deliveredAt.timeIntervalSince(earlier)) < 0.01)
     }
 
+    @Test func retiredTypeSweepAcknowledgesOnlyThatTypeAndKeepsHistory() throws {
+        let store = try makeMigratedStore()
+        for (index, type) in ["collision", "collision", "budget_warning"].enumerated() {
+            #expect(store.recordDelivery(
+                sessionID: nil,
+                alertType: type,
+                severity: "warning",
+                title: "\(type) \(index)",
+                body: "",
+                deliveredAt: Date(timeIntervalSince1970: 1_785_000_000 + Double(index))
+            ))
+        }
+
+        store.acknowledgeAll(ofType: "collision")
+
+        let remaining = try store.unacknowledged()
+        #expect(remaining.count == 1)
+        #expect(remaining[0].alertType == "budget_warning")
+
+        // Idempotent: a second sweep changes nothing.
+        store.acknowledgeAll(ofType: "collision")
+        #expect(try store.unacknowledged().count == 1)
+    }
+
     @Test func acknowledgeClearsTheRowAndWritesAcknowledgedAt() throws {
         let store = try makeMigratedStore()
         #expect(store.recordDelivery(

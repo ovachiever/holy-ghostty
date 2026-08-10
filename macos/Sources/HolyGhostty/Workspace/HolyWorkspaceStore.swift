@@ -130,18 +130,20 @@ final class HolyWorkspaceStore: ObservableObject {
         let resolver = inboxRepoSlugResolver
         return HolyInboxEngine(
             sources: [
-                HolyAlertInboxSource(),
+                // Panel order is source order. GitHub first (Erik 2026-08-10):
+                // cross-repo attention outranks local housekeeping.
                 HolyGitHubInboxSource(),
                 // A manna board is a path, not a GitHub slug, so board scope
-                // comes from the sessions rather than the refresh context.
+                // comes from the focused session rather than the refresh
+                // context — and ONLY the focused session's project.
                 HolyMannaInboxSource(repositoryRootsProvider: { [weak self] in
                     await MainActor.run {
                         HolyMannaInboxSource.repositoryRoots(
-                            sessions: self?.sessions ?? [],
                             focused: self?.selectedSession
                         )
                     }
                 }),
+                HolyAlertInboxSource(),
             ],
             focusedRepoSlugProvider: { [weak self] in
                 let root = await MainActor.run { self?.selectedSession?.ownership.repositoryRoot }

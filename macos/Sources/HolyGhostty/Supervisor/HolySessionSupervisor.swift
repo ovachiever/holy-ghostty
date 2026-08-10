@@ -1374,12 +1374,26 @@ private final class HolySessionAlertCoordinator {
     /// Delivery also lands in the alerts table so the human inbox can render
     /// and acknowledge it; the notification path itself is unchanged.
     private let inboxAlertStore = HolyInboxAlertStore()
+    private var collisionBacklogRetired = false
+
+    /// One launch-time sweep: collision alerts are retired (2026-08-10), and
+    /// the accumulated backlog would otherwise sit unacknowledged in the
+    /// inbox forever. Acknowledge, never delete — history stays queryable.
+    private func retireCollisionAlertBacklogIfNeeded() {
+        guard !collisionBacklogRetired else { return }
+        collisionBacklogRetired = true
+        let store = inboxAlertStore
+        Task.detached(priority: .utility) {
+            store.acknowledgeAll(ofType: "collision")
+        }
+    }
 
     func reconcile(
         sessions: [HolySession],
         coordinationBySessionID: [UUID: HolySessionCoordination]
     ) {
         requestAuthorizationIfNeeded()
+        retireCollisionAlertBacklogIfNeeded()
 
         let nextStates = Dictionary(
             uniqueKeysWithValues: sessions.map { session in
@@ -1438,17 +1452,12 @@ private final class HolySessionAlertCoordinator {
         // Priority chain: one alert per session per poll. Each branch returns
         // so the first evaluation after a long gap doesn't stack banners and
         // repeated critical dock bounces for one session.
-        if !previous.hasBlockingConflict && current.hasBlockingConflict {
-            deliver(
-                for: session,
-                alertType: "collision",
-                title: "Session collision detected",
-                body: coordination.summary,
-                requestAttention: true
-            )
-            return
-        }
-
+        //
+        // Collision alerts are RETIRED (Erik 2026-08-10: 105 of them, "pure
+        // noise"). A swarm working one repo collides by design; the
+        // coordination surfaces (bottom-rail count, pane chrome) carry that
+        // state without an alert per flare-up. The startup sweep in
+        // `retireCollisionAlertBacklog` clears the persisted backlog.
         if !previous.hasBranchOwnershipDrift && current.hasBranchOwnershipDrift {
             deliver(
                 for: session,
