@@ -40,7 +40,7 @@ private final class RecordingTmux: HolyRestoreTmuxControlling, @unchecked Sendab
 
 private struct StubEnvironment: HolyRestoreEnvironmentProbing {
     func directoryExists(_ path: String) -> Bool { true }
-    func executableExists(_ name: String) async -> Bool { true }
+    func resolveExecutable(_ name: String) async -> String? { name }
 }
 
 @MainActor

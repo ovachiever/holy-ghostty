@@ -22,10 +22,14 @@ enum HolyRestoreCommandBuilder {
     }
 
     /// The exact resume argv per runtime, or nil when no exact resume exists
-    /// (shell runtime, or an id that fails validation).
+    /// (shell runtime, or an id that fails validation). `executablePath`
+    /// replaces argv[0] with a resolved absolute path: the command executes
+    /// under a login-shell PATH that misses .zshrc-initialized managers
+    /// (nvm, ~/.opencode/bin), so a bare name may not resolve in the pane.
     static func resumeArguments(
         runtime: HolySessionRuntime,
-        providerSessionID: String
+        providerSessionID: String,
+        executablePath: String? = nil
     ) -> [String]? {
         guard isSafeProviderSessionID(providerSessionID) else { return nil }
 
@@ -33,11 +37,11 @@ enum HolyRestoreCommandBuilder {
         case .shell:
             return nil
         case .claude:
-            return ["claude", "--resume", providerSessionID]
+            return [executablePath ?? "claude", "--resume", providerSessionID]
         case .codex:
-            return ["codex", "resume", providerSessionID]
+            return [executablePath ?? "codex", "resume", providerSessionID]
         case .opencode:
-            return ["opencode", "--session", providerSessionID]
+            return [executablePath ?? "opencode", "--session", providerSessionID]
         }
     }
 
@@ -52,10 +56,15 @@ enum HolyRestoreCommandBuilder {
     /// the runtime has no exact resume.
     static func renderedResumeCommand(
         runtime: HolySessionRuntime,
-        providerSessionID: String
+        providerSessionID: String,
+        executablePath: String? = nil
     ) -> String? {
-        resumeArguments(runtime: runtime, providerSessionID: providerSessionID)
-            .map(shellCommand(fromArguments:))
+        resumeArguments(
+            runtime: runtime,
+            providerSessionID: providerSessionID,
+            executablePath: executablePath
+        )
+        .map(shellCommand(fromArguments:))
     }
 
     private static func posixQuote(_ value: String) -> String {

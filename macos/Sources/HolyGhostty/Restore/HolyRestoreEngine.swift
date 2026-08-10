@@ -12,7 +12,10 @@ protocol HolyRestoreTmuxControlling: Sendable {
 
 protocol HolyRestoreEnvironmentProbing: Sendable {
     func directoryExists(_ path: String) -> Bool
-    func executableExists(_ name: String) async -> Bool
+    /// An invocable path for the named executable, or nil when none exists.
+    /// Production returns an absolute path so the resume command survives the
+    /// login-shell PATH of a Dock launch; tests may return the bare name.
+    func resolveExecutable(_ name: String) async -> String?
 }
 
 /// The slice of workspace state the engine reads and writes. The store
@@ -455,7 +458,7 @@ final class HolyRestoreEngine: ObservableObject {
         }
 
         if runtime != .shell {
-            context.executableAvailable = await environment.executableExists(runtime.rawValue)
+            context.executableAvailable = await environment.resolveExecutable(runtime.rawValue) != nil
         }
 
         // Only provider rows that pass every local gate go to the resolver;
@@ -759,9 +762,18 @@ final class HolyRestoreEngine: ObservableObject {
         guard let row = rows.first(where: { $0.id == rowID }) else { return }
         updateRow(rowID) { $0.phase = .restoring }
 
+        // Re-resolve at launch time: the command executes under the same
+        // login-shell PATH that blinds the preflight probe, so the argv must
+        // carry the absolute path, not a name the pane's shell may not find.
+        // A nil here after preflight passed is a race; the bare name keeps
+        // the failure visible in the pane instead of inventing a block.
+        let executablePath = await environment.resolveExecutable(
+            row.plannedLaunchSpec.runtime.rawValue
+        )
         guard let resumeCommand = HolyRestoreCommandBuilder.renderedResumeCommand(
             runtime: row.plannedLaunchSpec.runtime,
-            providerSessionID: providerSessionID
+            providerSessionID: providerSessionID,
+            executablePath: executablePath
         ) else {
             updateRow(rowID) {
                 $0.phase = .failed("No exact resume command exists for this runtime and id.")
@@ -963,18 +975,76 @@ struct HolyRestoreEnvironmentProbe: HolyRestoreEnvironmentProbing {
             && isDirectory.boolValue
     }
 
-    func executableExists(_ name: String) async -> Bool {
+    /// Same bound the resolver client's PATH probe uses: a login shell that
+    /// hasn't produced `command -v` output in 15s is wedged on rc files or a
+    /// network mount, and preflight must not hang the sheet behind it.
+    private static let pathProbeTimeoutSeconds: TimeInterval = 15
+
+    func resolveExecutable(_ name: String) async -> String? {
         // Names come from HolySessionRuntime raw values, but stay defensive:
         // this string lands inside a login-shell command line.
         guard name.range(of: "^[a-z0-9-]{1,32}$", options: .regularExpression) != nil else {
-            return false
+            return nil
         }
+        // A Dock launch gets a login non-interactive shell: .zprofile loads,
+        // .zshrc never does. `command -v` here sees homebrew (claude) but not
+        // nvm-installed codex or the ~/.opencode/bin opencode, and the same
+        // PATH governs the restored pane — hence absolute paths everywhere.
         let result = await HolyRestoreProcessRunner.run(
             executablePath: "/bin/zsh",
             arguments: ["-lc", "command -v \(name)"],
-            timeout: 15
+            timeout: Self.pathProbeTimeoutSeconds
         )
-        guard case let .success(output) = result else { return false }
-        return output.exitCode == 0
+        if case let .success(output) = result, output.exitCode == 0 {
+            let path = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Builtins/aliases can answer `command -v` with a non-path word;
+            // only an absolute executable path is worth baking into argv.
+            if path.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+        return Self.wellKnownExecutablePath(name)
+    }
+
+    /// The install locations of the managers that only initialize in .zshrc,
+    /// plus the resolver client's original four. Each entry names the real
+    /// installer that produces it; extend only with a concrete sighting.
+    static func wellKnownExecutablePath(_ name: String) -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var candidates = [
+            "\(home)/.pyenv/shims/\(name)",     // pyenv
+            "\(home)/.local/bin/\(name)",       // pipx / uv / user installs
+            "/opt/homebrew/bin/\(name)",        // homebrew (Apple Silicon)
+            "/usr/local/bin/\(name)",           // homebrew (Intel) / manual
+            "\(home)/.opencode/bin/\(name)",    // opencode self-installer
+            "\(home)/.bun/bin/\(name)",         // bun global installs
+            "\(home)/.volta/bin/\(name)",       // volta shims
+        ]
+        if let nvmBin = newestNvmBinDirectory(home: home) {
+            candidates.append("\(nvmBin)/\(name)")
+        }
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// nvm keeps one bin directory per node version and selects between them
+    /// in .zshrc, which a login shell never runs. The newest version is the
+    /// best stand-in for "what nvm would have picked".
+    private static func newestNvmBinDirectory(home: String) -> String? {
+        let versionsRoot = "\(home)/.nvm/versions/node"
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: versionsRoot) else {
+            return nil
+        }
+        let best = entries
+            .filter { $0.hasPrefix("v") }
+            .compactMap { entry -> (components: [Int], name: String)? in
+                let numbers = entry.dropFirst().split(separator: ".").compactMap { Int($0) }
+                guard !numbers.isEmpty else { return nil }
+                return (numbers, entry)
+            }
+            .max { lhs, rhs in
+                lhs.components.lexicographicallyPrecedes(rhs.components)
+            }
+        guard let best else { return nil }
+        return "\(versionsRoot)/\(best.name)/bin"
     }
 }

@@ -146,8 +146,10 @@ private final class FakeEnvironment: HolyRestoreEnvironmentProbing, @unchecked S
         existingDirectories.contains(path)
     }
 
-    func executableExists(_ name: String) async -> Bool {
-        availableExecutables.contains(name)
+    // Returns the bare name so command assertions stay readable; production
+    // resolves an absolute path (see HolyRestoreEnvironmentProbe).
+    func resolveExecutable(_ name: String) async -> String? {
+        availableExecutables.contains(name) ? name : nil
     }
 }
 

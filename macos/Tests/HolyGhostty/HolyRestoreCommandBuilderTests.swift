@@ -83,6 +83,54 @@ struct HolyRestoreCommandBuilderTests {
         ) == nil)
     }
 
+    // MARK: - Absolute executable paths (login-shell PATH blindness)
+
+    @Test func executablePathOverrideReplacesArgvZeroForEveryProviderRuntime() {
+        #expect(HolyRestoreCommandBuilder.resumeArguments(
+            runtime: .codex,
+            providerSessionID: "0198c5c1-a2b3",
+            executablePath: "/Users/u/.nvm/versions/node/v22.16.0/bin/codex"
+        ) == ["/Users/u/.nvm/versions/node/v22.16.0/bin/codex", "resume", "0198c5c1-a2b3"])
+        #expect(HolyRestoreCommandBuilder.resumeArguments(
+            runtime: .opencode,
+            providerSessionID: "ses_4f2",
+            executablePath: "/Users/u/.opencode/bin/opencode"
+        ) == ["/Users/u/.opencode/bin/opencode", "--session", "ses_4f2"])
+        #expect(HolyRestoreCommandBuilder.resumeArguments(
+            runtime: .claude,
+            providerSessionID: claudeID,
+            executablePath: "/opt/homebrew/bin/claude"
+        ) == ["/opt/homebrew/bin/claude", "--resume", claudeID])
+    }
+
+    @Test func renderedCommandQuotesAnExecutablePathWithSpacesAsOneToken() throws {
+        let rendered = try #require(HolyRestoreCommandBuilder.renderedResumeCommand(
+            runtime: .claude,
+            providerSessionID: claudeID,
+            executablePath: "/Users/u/My Tools/claude"
+        ))
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-c", "printf '%s\\n' \(rendered)"]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        try process.run()
+        process.waitUntilExit()
+        let output = String(
+            bytes: stdout.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? ""
+        #expect(output == "/Users/u/My Tools/claude\n--resume\n\(claudeID)\n")
+    }
+
+    @Test func unsafeProviderIDStillRefusesWithAnExecutablePath() {
+        #expect(HolyRestoreCommandBuilder.resumeArguments(
+            runtime: .codex,
+            providerSessionID: "bad; rm -rf ~",
+            executablePath: "/opt/homebrew/bin/codex"
+        ) == nil)
+    }
+
     // MARK: - Shell rendering for tmux bootstrap
 
     @Test func shellCommandQuotesEveryArgumentAsOneToken() {
