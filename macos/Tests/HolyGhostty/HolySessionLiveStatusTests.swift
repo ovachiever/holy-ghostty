@@ -268,4 +268,66 @@ struct HolySessionLiveStatusTests {
         ].joined(separator: "\n")
         #expect(HolySession.backgroundShellCountForTesting(fromActiveContents: pane) == 1)
     }
+
+    // MARK: - Codex background-terminal census (footer pinned 2026-08-10)
+
+    @Test func codexCensusReadsTheLiveBackgroundTerminalFooter() {
+        let pane = [
+            "• The test run remains green and is now in the slow gate.",
+            "Waiting for background terminal (1m 15s · esc to interrupt) · 1 background terminal running · /ps to view · /stop to close",
+            "❯ find and fix a bug in @filename",
+            "gpt-5.6-sol xhigh fast · ~/Custom-Coding/aldebaran-group",
+        ].joined(separator: "\n")
+        #expect(HolySession.backgroundShellCountForTesting(
+            fromActiveContents: pane, runtime: .codex
+        ) == 1)
+    }
+
+    @Test func codexCensusCountsPluralTerminalsAndIgnoresTranscriptMentions() {
+        let pane = [
+            "At one point the footer said · 5 background terminals running · but that is prose",
+            "More transcript history",
+            "Working (2m 03s · esc to interrupt) · 3 background terminals running · /ps to view",
+            "❯",
+            "gpt-5.6-sol xhigh · ~/Custom-Coding/aldebaran-group",
+        ].joined(separator: "\n")
+        #expect(HolySession.backgroundShellCountForTesting(
+            fromActiveContents: pane, runtime: .codex
+        ) == 3)
+    }
+
+    @Test func codexCensusIgnoresPastTenseAndUnfencedPhrases() {
+        let pane = [
+            "• Waited for background terminal · EPHEM_PATH=... cargo test --workspace",
+            "❯",
+            "gpt-5.6-sol xhigh · ~/Custom-Coding/aldebaran-group",
+        ].joined(separator: "\n")
+        #expect(HolySession.backgroundShellCountForTesting(
+            fromActiveContents: pane, runtime: .codex
+        ) == 0)
+    }
+
+    @Test func censusVocabulariesDoNotCrossRuntimes() {
+        // Claude's footer read by a codex census (and vice versa) is silence,
+        // not a miscount: each runtime speaks only its own chrome.
+        let claudeFooter = [
+            "❯",
+            "Model · Fable 5 · xhigh",
+            "⏵⏵ auto mode on · 2 shells · ← for agents",
+        ].joined(separator: "\n")
+        let codexFooter = [
+            "Working (10s · esc to interrupt) · 2 background terminals running · /ps to view",
+            "❯",
+            "gpt-5.6-sol xhigh · ~/Custom-Coding/aldebaran-group",
+        ].joined(separator: "\n")
+        #expect(HolySession.backgroundShellCountForTesting(
+            fromActiveContents: claudeFooter, runtime: .codex
+        ) == 0)
+        #expect(HolySession.backgroundShellCountForTesting(
+            fromActiveContents: codexFooter, runtime: .claude
+        ) == 0)
+        #expect(HolySession.backgroundShellCountForTesting(
+            fromActiveContents: codexFooter, runtime: .opencode
+        ) == 0)
+    }
 }

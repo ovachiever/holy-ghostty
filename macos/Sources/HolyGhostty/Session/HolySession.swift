@@ -906,9 +906,10 @@ final class HolySession: ObservableObject, Identifiable {
             ),
             current: runtimeTelemetry
         )
-        let nextBackgroundShellCount = effectiveRuntime == .claude
-            ? Self.backgroundShellCount(fromActiveContents: activeContents)
-            : 0
+        let nextBackgroundShellCount = Self.backgroundShellCount(
+            fromActiveContents: activeContents,
+            runtime: effectiveRuntime
+        )
         if backgroundShellCount != nextBackgroundShellCount {
             backgroundShellCount = nextBackgroundShellCount
         }
@@ -1329,13 +1330,33 @@ final class HolySession: ObservableObject, Identifiable {
         pattern: #"·\s*([0-9]{1,2})\s+shells?(?=\s*·|\s*$)"#
     )
 
-    /// Census of live Claude Code background shells from the input-box
-    /// footer. Only the last three non-empty screen rows qualify — the
-    /// footer is live chrome that Claude Code retracts when shells finish,
-    /// while transcript text above the input box is history and must never
-    /// arm the watcher eye.
-    private static func backgroundShellCount(fromActiveContents contents: String) -> Int {
-        guard let pattern = backgroundShellCensusPattern else { return 0 }
+    // Codex's live footer says "· 1 background terminal running · /ps to
+    // view ·" where Claude's says "· 2 shells ·" — same fencepost discipline,
+    // different vocabulary. Pinned against Erik's screenshot 2026-08-10.
+    private static let codexBackgroundTerminalCensusPattern = try? NSRegularExpression(
+        pattern: #"·\s*([0-9]{1,2})\s+background terminals?\s+running(?=\s*·|\s*$)"#
+    )
+
+    /// Census of live background shells (Claude) or background terminals
+    /// (Codex) from the input-box footer. Only the last three non-empty
+    /// screen rows qualify — the footer is live chrome the harness retracts
+    /// when the work finishes, while transcript text above the input box is
+    /// history and must never arm the roster glyph. Runtimes whose footer
+    /// vocabulary is unsighted (opencode, shell) always census zero.
+    private static func backgroundShellCount(
+        fromActiveContents contents: String,
+        runtime: HolySessionRuntime
+    ) -> Int {
+        let pattern: NSRegularExpression?
+        switch runtime {
+        case .claude:
+            pattern = backgroundShellCensusPattern
+        case .codex:
+            pattern = codexBackgroundTerminalCensusPattern
+        case .opencode, .shell:
+            pattern = nil
+        }
+        guard let pattern else { return 0 }
         let liveChromeLines = contents
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -2332,8 +2353,11 @@ final class HolySession: ObservableObject, Identifiable {
         normalizedVisibleActivitySignature(from: preview, surfaceTitle: surfaceTitle)
     }
 
-    static func backgroundShellCountForTesting(fromActiveContents contents: String) -> Int {
-        backgroundShellCount(fromActiveContents: contents)
+    static func backgroundShellCountForTesting(
+        fromActiveContents contents: String,
+        runtime: HolySessionRuntime = .claude
+    ) -> Int {
+        backgroundShellCount(fromActiveContents: contents, runtime: runtime)
     }
 #endif
 

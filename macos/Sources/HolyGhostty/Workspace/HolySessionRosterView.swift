@@ -788,6 +788,7 @@ private struct HolyRosterRow: View {
 
             if !isRenaming && !isEditingNote {
                 watcherEye
+                backgroundWorkShell
                 ageLabel
             }
 
@@ -1144,6 +1145,9 @@ private struct HolyRosterRow: View {
         return formatter
     }()
 
+    /// Armed-wakeup glyph only. Background shells/terminals moved to their
+    /// own seashell mark (`backgroundWorkShell`) so an armed loop can no
+    /// longer hide the fact that background work is burning.
     @ViewBuilder
     private var watcherEye: some View {
         if let watcherFireAt {
@@ -1152,30 +1156,39 @@ private struct HolyRosterRow: View {
                 // and the loop's next turn rescheduling it; a loop that truly
                 // died stops earning the eye once the grace lapses.
                 if context.date < watcherFireAt.addingTimeInterval(Self.watcherGrace) {
-                    watcherEyeMark(help: watcherHelpText(asOf: context.date))
-                } else if session.backgroundShellCount > 0 {
-                    watcherEyeMark(help: backgroundShellHelpText)
+                    trailingMark("eye.fill", help: watcherHelpText(asOf: context.date))
+                        .accessibilityLabel("Watching")
                 }
             }
-        } else if session.backgroundShellCount > 0 {
-            watcherEyeMark(help: backgroundShellHelpText)
         }
     }
 
-    private func watcherEyeMark(help: String) -> some View {
-        Image(systemName: "eye.fill")
-            .font(.system(size: 8.5, weight: .semibold))
-            .foregroundStyle(HolyGhosttyTheme.textTertiary)
-            .opacity(isSelected ? 0.9 : 0.65)
+    /// A literal seashell for live background shells (Claude) or background
+    /// terminals (Codex). Renders beside the eye, never instead of it.
+    @ViewBuilder
+    private var backgroundWorkShell: some View {
+        if session.backgroundShellCount > 0 {
+            trailingMark("fossil.shell.fill", help: backgroundShellHelpText)
+                .accessibilityLabel("Background work")
+        }
+    }
+
+    /// Erik 2026-08-10: the old 8.5pt textTertiary mark at 0.65 opacity was
+    /// invisible in practice. These glyphs exist to be noticed.
+    private func trailingMark(_ systemName: String, help: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(HolyGhosttyTheme.textPrimary)
+            .opacity(isSelected ? 1.0 : 0.85)
             .help(help)
-            .accessibilityLabel("Watching")
     }
 
     private var backgroundShellHelpText: String {
         let count = session.backgroundShellCount
+        let noun = session.runtime == .codex ? "background terminal" : "background shell"
         return count == 1
-            ? "Watching: 1 background shell running"
-            : "Watching: \(count) background shells running"
+            ? "1 \(noun) running"
+            : "\(count) \(noun)s running"
     }
 
     private func watcherHelpText(asOf now: Date) -> String {
