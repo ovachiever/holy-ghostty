@@ -1461,6 +1461,15 @@ class AppDelegate: NSObject,
         workspace.workspaceStore.presentRestore()
     }
 
+    /// Same fallback for View ▸ Inbox Panel: a greyed item also deadens its
+    /// ⌘P key equivalent, which reads as "the shortcut is broken" (Erik
+    /// 2026-08-10, one item below the Restore case).
+    @IBAction func toggleInboxPanel(_ sender: Any?) {
+        guard let workspace = preferredWorkspace(createIfNeeded: false) else { return }
+        workspace.showAndActivate()
+        workspace.workspaceStore.toggleInboxPanel()
+    }
+
     @MainActor
     private func handleHolyAutomationURL(_ url: URL) {
         guard let launchSpec = HolyAutomationURLParser.launchSpec(from: url) else {
@@ -1770,6 +1779,10 @@ extension AppDelegate: NSMenuItemValidation {
             // restore, fresh or older, keeps the durable entry alive.
             guard let workspace = HolyWorkspaceWindowController.preferred else { return false }
             return !workspace.workspaceStore.crashRestoreBatch.isEmpty
+
+        case #selector(toggleInboxPanel(_:)):
+            // The panel can always toggle while a workspace exists.
+            return HolyWorkspaceWindowController.preferred != nil
 
         case #selector(floatOnTop(_:)),
             #selector(useAsDefault(_:)):
