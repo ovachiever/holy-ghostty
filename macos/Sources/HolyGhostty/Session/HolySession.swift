@@ -1337,33 +1337,58 @@ final class HolySession: ObservableObject, Identifiable {
         pattern: #"·\s*([0-9]{1,2})\s+background terminals?\s+running(?=\s*·|\s*$)"#
     )
 
+    // Codex's census line carries live-only chrome on the same row ("esc to
+    // interrupt" while waiting, "/ps to view" always); the past-tense
+    // transcript form ("Waited for background terminal · EPHEM_PATH=…")
+    // carries neither. Requiring one makes the wider window safe.
+    private static let codexLiveChromeMarkerPattern = try? NSRegularExpression(
+        pattern: #"esc to interrupt|/ps to view"#
+    )
+
     /// Census of live background shells (Claude) or background terminals
-    /// (Codex) from the input-box footer. Only the last three non-empty
-    /// screen rows qualify — the footer is live chrome the harness retracts
-    /// when the work finishes, while transcript text above the input box is
-    /// history and must never arm the roster glyph. Runtimes whose footer
-    /// vocabulary is unsighted (opencode, shell) always census zero.
+    /// (Codex) from the input-box footer. Only the trailing live-chrome rows
+    /// qualify — the footer is chrome the harness retracts when the work
+    /// finishes, while transcript text above the input box is history and
+    /// must never arm the roster glyph. The window is per-runtime: Claude's
+    /// census rides the last footer row (3 covers input + status), while
+    /// Codex's sits above a command continuation, the input box, and the
+    /// status line (captured live 2026-08-10: 4th from the bottom, more when
+    /// the composer grows — 8 gives headroom, the same-line marker keeps it
+    /// honest). Runtimes whose footer vocabulary is unsighted (opencode,
+    /// shell) always census zero.
     private static func backgroundShellCount(
         fromActiveContents contents: String,
         runtime: HolySessionRuntime
     ) -> Int {
         let pattern: NSRegularExpression?
+        let window: Int
+        let requiredMarker: NSRegularExpression?
         switch runtime {
         case .claude:
             pattern = backgroundShellCensusPattern
+            window = 3
+            requiredMarker = nil
         case .codex:
             pattern = codexBackgroundTerminalCensusPattern
+            window = 8
+            requiredMarker = codexLiveChromeMarkerPattern
         case .opencode, .shell:
             pattern = nil
+            window = 0
+            requiredMarker = nil
         }
         guard let pattern else { return 0 }
         let liveChromeLines = contents
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-            .suffix(3)
+            .suffix(window)
         for line in liveChromeLines.reversed() {
             let range = NSRange(line.startIndex..., in: line)
+            if let requiredMarker,
+               requiredMarker.firstMatch(in: line, range: range) == nil {
+                continue
+            }
             guard let match = pattern.firstMatch(in: line, range: range),
                   let countRange = Range(match.range(at: 1), in: line),
                   let count = Int(line[countRange]) else { continue }

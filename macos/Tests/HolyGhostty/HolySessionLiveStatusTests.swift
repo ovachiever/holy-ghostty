@@ -271,11 +271,16 @@ struct HolySessionLiveStatusTests {
 
     // MARK: - Codex background-terminal census (footer pinned 2026-08-10)
 
+    // Fixture captured verbatim from the live pane 2026-08-10: the census
+    // line sits FOURTH from the bottom, above the command continuation, the
+    // input box, and the status line — a three-line window never reaches it.
     @Test func codexCensusReadsTheLiveBackgroundTerminalFooter() {
         let pane = [
-            "• The test run remains green and is now in the slow gate.",
-            "Waiting for background terminal (1m 15s · esc to interrupt) · 1 background terminal running · /ps to view · /stop to close",
-            "❯ find and fix a bug in @filename",
+            "─────────────────────────────",
+            "• No error has surfaced. The promise verifier is a silent all-in-one gate.",
+            "• Waiting for background terminal (1m 50s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close",
+            "└ EPHEM_PATH=/Users/erik/.local/share/aldebaran-group/ephemeris cargo run --locked --offline -p dm-ephemeris-oracle --bin verify-promise",
+            "› Find and fix a bug in @filename",
             "gpt-5.6-sol xhigh fast · ~/Custom-Coding/aldebaran-group",
         ].joined(separator: "\n")
         #expect(HolySession.backgroundShellCountForTesting(
@@ -284,10 +289,12 @@ struct HolySessionLiveStatusTests {
     }
 
     @Test func codexCensusCountsPluralTerminalsAndIgnoresTranscriptMentions() {
+        // The prose line quotes the fenced count phrase inside the window but
+        // carries no same-line live-chrome marker, so it cannot poison.
         let pane = [
             "At one point the footer said · 5 background terminals running · but that is prose",
             "More transcript history",
-            "Working (2m 03s · esc to interrupt) · 3 background terminals running · /ps to view",
+            "Working (2m 03s • esc to interrupt) · 3 background terminals running · /ps to view",
             "❯",
             "gpt-5.6-sol xhigh · ~/Custom-Coding/aldebaran-group",
         ].joined(separator: "\n")
