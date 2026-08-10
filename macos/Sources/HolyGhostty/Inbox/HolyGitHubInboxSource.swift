@@ -332,6 +332,10 @@ final class HolyGitHubInboxSource: HolyInboxRowSource {
     /// `gh inbox` sweeps every watched repo through the GitHub API; give it
     /// room on cold caches before declaring it broken.
     static let commandTimeout: TimeInterval = 120
+    /// Same bound as the restore probes: a login shell that hasn't answered
+    /// in 15s is wedged on rc files or a network mount, and inbox refresh
+    /// must not hang behind it.
+    static let loginShellProbeTimeout: TimeInterval = 15
     static let rowLimit = 50
 
     let sourceID = HolyGitHubInboxSectioner.sourceID
@@ -374,7 +378,8 @@ final class HolyGitHubInboxSource: HolyInboxRowSource {
         let result = await HolyRestoreProcessRunner.run(
             executablePath: binaryPath,
             arguments: Self.inboxArguments(limit: Self.rowLimit),
-            timeout: Self.commandTimeout
+            timeout: Self.commandTimeout,
+            environment: await Self.sharedSubprocessEnvironment.value
         )
 
         switch result {
@@ -411,6 +416,28 @@ final class HolyGitHubInboxSource: HolyInboxRowSource {
         return await Self.sharedBinaryPath.value
     }
 
+    /// The subprocess environment is launch-context roulette without this: a
+    /// Dock launch has no /opt/homebrew/bin, so agent-gh cannot find the gh
+    /// CLI it drives; an app relaunched from a terminal inherits that shell's
+    /// whole world. Capture the login-shell PATH once and overlay it, so the
+    /// sweep behaves identically however the app was started. HOME rides
+    /// along untouched — gh reads its token from ~/.config/gh/hosts.yml.
+    static let sharedSubprocessEnvironment = Task<[String: String], Never> {
+        var environment = ProcessInfo.processInfo.environment
+        let result = await HolyRestoreProcessRunner.run(
+            executablePath: "/bin/zsh",
+            arguments: ["-lc", #"printf %s "$PATH""#],
+            timeout: loginShellProbeTimeout
+        )
+        if case let .success(output) = result, output.exitCode == 0 {
+            let path = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !path.isEmpty {
+                environment["PATH"] = path
+            }
+        }
+        return environment
+    }
+
     /// One PATH lookup per app lifetime, matching the resolve client: a Dock
     /// launch inherits a login (non-interactive) shell PATH, so probe through
     /// `/bin/zsh -lc` and fall back to well-known install locations.
@@ -418,7 +445,7 @@ final class HolyGitHubInboxSource: HolyInboxRowSource {
         let result = await HolyRestoreProcessRunner.run(
             executablePath: "/bin/zsh",
             arguments: ["-lc", "command -v \(binaryName)"],
-            timeout: 15
+            timeout: loginShellProbeTimeout
         )
         if case let .success(output) = result, output.exitCode == 0 {
             let path = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
