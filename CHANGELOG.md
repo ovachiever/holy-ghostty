@@ -24,12 +24,17 @@ Inbox panel shows what waits on the human — nothing else.
   target, and stderr instead of an opaque Cocoa error.
 - The human inbox (⌘P, View ▸ Inbox Panel): GitHub PRs needing review or
   maintainer attention (bot PRs collapsed to per-repo digests), in-app
-  alerts with acknowledge, and manna triage rows limited to genuinely human
-  decisions — untriaged dreams, unblocked-but-unclaimed work, dead-session
-  claims. Rows clear themselves when reality changes.
+  alerts with acknowledge, and the focused project's incomplete Manna board.
+  Human decisions stay prominent; in-progress, ready, blocked, and track
+  inventory stays compact and out of the unread badge. Rows clear themselves
+  when reality changes.
 
 ### Fixed
 
+- Manna no longer hides ordinary project work or waits on a repository-wide
+  reconcile audit before showing it. The pane reads the focused board's fast
+  list contract, exposes every incomplete state in bounded sections, and
+  drains large command output while the child is running.
 - The human inbox accepts GitHub maintainer-sweep rows whose comment count is
   unknown, promotes changes requested on your PRs to direct attention, and
   resolves the focused Manna board from cwd immediately while git ownership is

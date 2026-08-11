@@ -301,17 +301,13 @@ enum HolyMannaBoardLocator {
 /// board — never a crash, never invented emptiness.
 final class HolyMannaInboxSource: HolyInboxRowSource {
     static let binaryName = "agent-do"
-    /// `reconcile` shells out to git and to coord; give it room before
-    /// declaring it broken.
-    static let commandTimeout: TimeInterval = 45
+    /// `list` reads one local JSONL board. A stuck read must fail closed
+    /// without making a project switch look like an empty board for a minute.
+    static let commandTimeout: TimeInterval = 10
 
-    /// Both commands read `./.manna` from the child's working directory —
-    /// manna exposes no board flag (`manna-core list --help`,
-    /// `manna-core reconcile --help`, 2026-08-03) — so the board root is
-    /// passed as the process cwd, never as an argument.
+    /// `list` reads `./.manna` from the child's working directory; manna
+    /// exposes no board flag, so the board root is the process cwd.
     static let listArguments = ["manna", "list", "--json"]
-    /// `reconcile` without `--fix`: the inbox reads drift, it never repairs it.
-    static let reconcileArguments = ["manna", "reconcile", "--json"]
 
     let sourceID = HolyMannaInboxSectioner.sourceID
 
@@ -390,12 +386,12 @@ final class HolyMannaInboxSource: HolyInboxRowSource {
 
     // MARK: - Reading one board
 
-    /// `list` first: without it there is nothing to name, so a failure there
-    /// degrades the whole board. `reconcile` failing on its own only blinds
-    /// the drift half — the dreams `list` already returned still stand, and
-    /// the pane still says the rest is missing.
+    /// The pane is a view of the focused project's board, not a board-health
+    /// auditor. `manna reconcile` can walk git, coord, and thousands of doc
+    /// references; making that audit a prerequisite caused a valid local list
+    /// to remain invisible for seconds or deadlock behind a full stdout pipe.
+    /// `list` is the complete production dependency for this glance surface.
     private static func readBoard(root: String, binaryPath: String) async -> HolyMannaBoardReading {
-        let list: HolyMannaListPayload
         switch await run(binaryPath: binaryPath, arguments: listArguments, boardRoot: root) {
         case let .failure(reason):
             return HolyMannaBoardReading(root: root, degradedDetail: reason)
@@ -406,25 +402,7 @@ final class HolyMannaInboxSource: HolyInboxRowSource {
                     degradedDetail: "\(binaryName) manna list returned a payload outside the pinned contract."
                 )
             }
-            list = parsed
-        }
-
-        switch await run(binaryPath: binaryPath, arguments: reconcileArguments, boardRoot: root) {
-        case let .failure(reason):
-            return HolyMannaBoardReading(root: root, issues: list.issues, degradedDetail: reason)
-        case let .success(output):
-            guard let reconcile = HolyMannaReconcilePayload.parse(Data(output.utf8)) else {
-                return HolyMannaBoardReading(
-                    root: root,
-                    issues: list.issues,
-                    degradedDetail: "\(binaryName) manna reconcile returned a payload outside the pinned contract."
-                )
-            }
-            return HolyMannaBoardReading(
-                root: root,
-                issues: list.issues,
-                findings: reconcile.findings
-            )
+            return HolyMannaBoardReading(root: root, issues: parsed.issues)
         }
     }
 
@@ -562,14 +540,21 @@ enum HolyMannaProcessRunner {
         return await withCheckedContinuation { continuation in
             resumeBox.store(continuation)
 
+            // Drain from launch. Waiting for termination before reading lets
+            // a large board fill the pipe and block the child before it can
+            // exit, which presents as a false timeout and an empty pane.
+            let collectedStdout = DataBox()
+            let collectedStderr = DataBox()
+            let drainGroup = DispatchGroup()
+
             process.terminationHandler = { finishedProcess in
-                let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
-                resumeBox.resume(returning: .success(.init(
-                    stdout: String(bytes: stdoutData, encoding: .utf8) ?? "",
-                    stderr: String(bytes: stderrData, encoding: .utf8) ?? "",
-                    exitCode: finishedProcess.terminationStatus
-                )))
+                drainGroup.notify(queue: .global(qos: .utility)) {
+                    resumeBox.resume(returning: .success(.init(
+                        stdout: String(bytes: collectedStdout.take(), encoding: .utf8) ?? "",
+                        stderr: String(bytes: collectedStderr.take(), encoding: .utf8) ?? "",
+                        exitCode: finishedProcess.terminationStatus
+                    )))
+                }
             }
 
             do {
@@ -581,6 +566,17 @@ enum HolyMannaProcessRunner {
                 return
             }
 
+            drainGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                collectedStdout.store(stdout.fileHandleForReading.readDataToEndOfFile())
+                drainGroup.leave()
+            }
+            drainGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                collectedStderr.store(stderr.fileHandleForReading.readDataToEndOfFile())
+                drainGroup.leave()
+            }
+
             Task.detached {
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 resumeBox.resume(returning: .failure(
@@ -590,6 +586,23 @@ enum HolyMannaProcessRunner {
                     process.terminate()
                 }
             }
+        }
+    }
+
+    private final class DataBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func store(_ newData: Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            data = newData
+        }
+
+        func take() -> Data {
+            lock.lock()
+            defer { lock.unlock() }
+            return data
         }
     }
 
@@ -619,9 +632,8 @@ enum HolyMannaProcessRunner {
 }
 
 /// Everything one board answered on one refresh tick. `degradedDetail` is set
-/// when either command failed: a whole-board failure carries no issues, a
-/// reconcile-only failure still carries the `list` half, and both still owe
-/// the human one honest degraded row.
+/// when the board read failed; injected adapters may still attach findings,
+/// but the production glance path depends only on the list payload.
 struct HolyMannaBoardReading: Equatable, Sendable {
     /// Absolute path of the directory containing `.manna`.
     let root: String
@@ -649,14 +661,15 @@ struct HolyMannaBoardReading: Equatable, Sendable {
 /// The admission law for manna rows, kept out of the source so it is a pure
 /// function of board data (same shape as HolyGitHubInboxSectioner).
 ///
-/// Most manna traffic is agent-to-agent and never belongs here. Exactly three
-/// board states are a decision only the human can make, and each clears when
-/// the board moves — never by dismissal:
+/// The focused project's incomplete board belongs here because Manna is the
+/// user's local, self-addressed work. That does not make every row an alert:
+/// decision states stay expanded and badge-counting, while ordinary active,
+/// ready, blocked, and track inventory lives in compact secondary sections.
+/// Every row clears when the board moves — never by dismissal.
 ///
 ///   1. **Dreams awaiting triage.** The grammar says a dream is converted or
 ///      closed with a written reason; until then it waits on Erik. Converting
-///      moves its type off `dream`; closing sets it done. Either way the row
-///      leaves on the next tick.
+///      moves it into the ready backlog; closing removes it on the next tick.
 ///   2. **Unblocked but unclaimed.** `done` never auto-unblocks dependents, so
 ///      work whose blockers are all resolved sits invisibly blocked with
 ///      nobody on it. Reconcile calls this `blocker_desync`. A claim or a
@@ -664,10 +677,9 @@ struct HolyMannaBoardReading: Equatable, Sendable {
 ///   3. **Stale claims.** A claim held by a session that is provably gone
 ///      (`dead_claim`). A reclaim or an abandon clears it.
 ///
-/// Open backlogs, in_progress work, and tracks stay out: the inbox is not a
-/// board mirror. So does the rest of reconcile's drift (`landed_open`,
-/// `dangling_track`, `doc_reference`, `prompt_pairing`, `skipped`) — that is
-/// agent bookkeeping, addressed to the swarm and not to Erik.
+/// The production source intentionally uses `manna list`, not `reconcile`;
+/// injected findings remain supported for tests and adapters, but board-health
+/// bookkeeping (`landed_open`, `doc_reference`, and friends) never earns rows.
 enum HolyMannaInboxSectioner {
     static let sourceID = "manna"
 
@@ -678,11 +690,16 @@ enum HolyMannaInboxSectioner {
         var dreams: [HolyInboxRow] = []
         var unblocked: [HolyInboxRow] = []
         var staleClaims: [HolyInboxRow] = []
+        var active: [HolyInboxRow] = []
+        var ready: [HolyInboxRow] = []
+        var blocked: [HolyInboxRow] = []
+        var tracks: [HolyInboxRow] = []
         var degraded: [HolyInboxRow] = []
 
         for board in boards {
             let byID = Dictionary(board.issues.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             let staleDreamIDs = Set(findingIssueIDs(board.findings, kind: .staleDream))
+            var dedicatedIssueIDs: Set<String> = []
 
             // 1. Dreams awaiting triage.
             for issue in board.issues where issue.type == .dream && issue.status != .done {
@@ -708,6 +725,7 @@ enum HolyMannaInboxSectioner {
                     chips: [HolyInboxChip("unblocked", emphasis: .attention)],
                     evidence: finding.evidence
                 ))
+                dedicatedIssueIDs.insert(issue.id)
             }
 
             // 3. Stale claims.
@@ -724,6 +742,34 @@ enum HolyMannaInboxSectioner {
                     chips: [HolyInboxChip("stale claim", emphasis: .warning)],
                     evidence: finding.evidence ?? finding.detail
                 ))
+                dedicatedIssueIDs.insert(issue.id)
+            }
+
+            // The rest of the focused board is useful local context, not an
+            // unread alert. Keep each issue in exactly one status section and
+            // hide only completed or future-schema rows we cannot classify.
+            for issue in board.issues where !dedicatedIssueIDs.contains(issue.id) {
+                switch issue.type {
+                case .dream:
+                    // Already admitted above when incomplete.
+                    continue
+                case .track:
+                    guard issue.status != .done, issue.status != .unknown else { continue }
+                    tracks.append(row(board: board, issue: issue, chips: [], evidence: nil))
+                case .item:
+                    switch issue.status {
+                    case .inProgress:
+                        active.append(row(board: board, issue: issue, chips: [], evidence: nil))
+                    case .open:
+                        ready.append(row(board: board, issue: issue, chips: [], evidence: nil))
+                    case .blocked:
+                        blocked.append(row(board: board, issue: issue, chips: [], evidence: nil))
+                    case .done, .unknown:
+                        continue
+                    }
+                case .unknown:
+                    continue
+                }
             }
 
             if let detail = board.degradedDetail {
@@ -758,13 +804,13 @@ enum HolyMannaInboxSectioner {
 
         append(
             id: "manna.dreams",
-            title: "Dreams awaiting triage",
+            title: "Manna · Dreams to triage",
             rows: dreams,
             countsTowardBadge: true
         )
         append(
             id: "manna.unblocked",
-            title: "Unblocked, nobody on it",
+            title: "Manna · Unblocked, nobody on it",
             rows: unblocked,
             countsTowardBadge: true
         )
@@ -772,8 +818,27 @@ enum HolyMannaInboxSectioner {
         // it stays collapsed and out of the badge so the badge cannot lie.
         append(
             id: "manna.staleclaims",
-            title: "Stale claims",
+            title: "Manna · Stale claims",
             rows: staleClaims,
+            collapsedByDefault: true
+        )
+        append(id: "manna.active", title: "Manna · In progress", rows: active)
+        append(
+            id: "manna.ready",
+            title: "Manna · Ready backlog",
+            rows: ready,
+            collapsedByDefault: true
+        )
+        append(
+            id: "manna.blocked",
+            title: "Manna · Blocked",
+            rows: blocked,
+            collapsedByDefault: true
+        )
+        append(
+            id: "manna.tracks",
+            title: "Manna · Tracks",
+            rows: tracks,
             collapsedByDefault: true
         )
         append(id: "manna.degraded", title: "manna", rows: degraded)
@@ -872,8 +937,8 @@ enum HolyMannaInboxSectioner {
     // MARK: Ordering
 
     /// Focused board first, then newest activity first, then id for a stable
-    /// order across ticks. Focus reorders, never filters — what waits on Erik
-    /// on another board still waits on Erik.
+    /// order across ticks. The source supplies only the focused project and
+    /// its nearest umbrella board; this ordering never widens that scope.
     private static func sorted(
         _ rows: [HolyInboxRow],
         focusedBoardRoot: String?

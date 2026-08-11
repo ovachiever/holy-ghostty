@@ -2,20 +2,21 @@ import Foundation
 import Testing
 @testable import Ghostty
 
-/// The manna admission law. Most manna traffic is agent-to-agent and must
-/// never reach the pane; exactly three states are a human decision:
+/// The Manna admission law. Every incomplete issue from the focused project
+/// remains visible, but only decision states feed the unread badge:
 ///
 ///   1. dreams awaiting triage      — cleared by conversion (type moves off
-///                                    dream) or closure (status done)
+///                                    dream into ready) or closure (done)
 ///   2. unblocked but unclaimed     — reconcile `blocker_desync` on an issue
 ///                                    nobody claimed; cleared by a claim or a
 ///                                    blocker-state change
 ///   3. stale claims                — reconcile `dead_claim`; cleared by a
 ///                                    reclaim or an abandon
 ///
-/// Everything else — open backlogs, in_progress work, tracks, landed_open,
-/// dangling_track, doc_reference, prompt_pairing, skipped — stays out. The
-/// inbox is not a board mirror.
+/// Ordinary in-progress, ready, blocked, and track rows are secondary local
+/// context: visible in compact sections, never counted as unread attention.
+/// Reconcile bookkeeping that does not name one of the decision states stays
+/// out entirely.
 struct HolyMannaInboxAdmissionTests {
     static let holyBoard = "/Users/erik/Custom-Coding/holy-ghostty"
     static let workspaceBoard = "/Users/erik/Custom-Coding"
@@ -98,8 +99,8 @@ struct HolyMannaInboxAdmissionTests {
         ])
     }
 
-    /// The two clear conditions the grammar names: converted, or closed.
-    @Test func aConvertedDreamLeavesThePaneBecauseItsTypeMoved() {
+    /// Conversion keeps the work visible and moves it into the ready backlog.
+    @Test func aConvertedDreamMovesFromTriageIntoTheReadyBacklog() {
         let before = Self.sections([Self.board(
             root: Self.holyBoard,
             issues: [Self.issue("mn-aaa111", type: .dream, status: .open)]
@@ -112,6 +113,7 @@ struct HolyMannaInboxAdmissionTests {
             issues: [Self.issue("mn-aaa111", type: .item, status: .open)]
         )])
         #expect(after.contains { $0.id == "manna.dreams" } == false)
+        #expect(Self.rowIDs(after, "manna.ready") == ["manna:\(Self.holyBoard):mn-aaa111"])
     }
 
     @Test func aStaleDreamFindingChipsTheDreamRowInsteadOfAddingASecondOne() throws {
@@ -162,12 +164,13 @@ struct HolyMannaInboxAdmissionTests {
             findings: [Self.finding(.blockerDesync, "mn-bbb111")]
         )])
         #expect(result.contains { $0.id == "manna.unblocked" } == false)
+        #expect(Self.rowIDs(result, "manna.active") == ["manna:\(Self.holyBoard):mn-bbb111"])
     }
 
     @Test func aFindingNamingAnIssueTheBoardDoesNotListProducesNoRow() {
         let result = Self.sections([Self.board(
             root: Self.holyBoard,
-            issues: [Self.issue("mn-bbb111")],
+            issues: [Self.issue("mn-bbb111", status: .done)],
             findings: [
                 Self.finding(.blockerDesync, "mn-ghost1"),
                 Self.finding(.deadClaim, "mn-ghost2"),
@@ -206,11 +209,12 @@ struct HolyMannaInboxAdmissionTests {
             findings: [Self.finding(.deadClaim, "mn-ccc111")]
         )])
         #expect(result.contains { $0.id == "manna.staleclaims" } == false)
+        #expect(Self.rowIDs(result, "manna.ready") == ["manna:\(Self.holyBoard):mn-ccc111"])
     }
 
-    // MARK: - Everything else stays out
+    // MARK: - Local board inventory
 
-    @Test func ordinaryBoardTrafficNeverReachesThePane() {
+    @Test func everyIncompleteBoardStateGetsOneCompactSection() throws {
         let result = Self.sections([Self.board(
             root: Self.holyBoard,
             issues: [
@@ -222,7 +226,20 @@ struct HolyMannaInboxAdmissionTests {
                 Self.issue("mn-ddd666", type: .unknown, status: .unknown),
             ]
         )])
-        #expect(result.isEmpty)
+        #expect(result.map(\.id) == [
+            "manna.active", "manna.ready", "manna.blocked", "manna.tracks",
+        ])
+        #expect(Self.rowIDs(result, "manna.active") == ["manna:\(Self.holyBoard):mn-ddd222"])
+        #expect(Self.rowIDs(result, "manna.ready") == ["manna:\(Self.holyBoard):mn-ddd111"])
+        #expect(Self.rowIDs(result, "manna.blocked") == ["manna:\(Self.holyBoard):mn-ddd333"])
+        #expect(Self.rowIDs(result, "manna.tracks") == ["manna:\(Self.holyBoard):mn-ddd555"])
+
+        let active = try #require(result.first { $0.id == "manna.active" })
+        #expect(active.collapsedByDefault == false)
+        for section in result where section.id != "manna.active" {
+            #expect(section.collapsedByDefault)
+        }
+        #expect(HolyInboxEngine.badgeCount(for: result) == 0)
     }
 
     @Test func agentBookkeepingFindingsNeverBecomeRows() {
@@ -234,7 +251,8 @@ struct HolyMannaInboxAdmissionTests {
             issues: [Self.issue("mn-eee111", status: .blocked)],
             findings: ignored.map { Self.finding($0, "mn-eee111") }
         )])
-        #expect(result.isEmpty)
+        #expect(result.map(\.id) == ["manna.blocked"])
+        #expect(Self.rowIDs(result, "manna.blocked") == ["manna:\(Self.holyBoard):mn-eee111"])
     }
 
     /// A track is a grouping, never a human decision; and a dream is never
@@ -252,7 +270,8 @@ struct HolyMannaInboxAdmissionTests {
             ]
         )])
         #expect(result.contains { $0.id == "manna.unblocked" } == false)
-        // The dream is still a dream row — admitted by rule 1, once.
+        #expect(Self.rowIDs(result, "manna.tracks") == ["manna:\(Self.holyBoard):mn-fff111"])
+        // The dream is still a dream row, admitted by rule 1 exactly once.
         #expect(Self.rowIDs(result, "manna.dreams") == ["manna:\(Self.holyBoard):mn-fff222"])
     }
 
@@ -371,9 +390,9 @@ struct HolyMannaInboxAdmissionTests {
         #expect(Self.rowIDs(result, "manna.degraded").count == 1)
     }
 
-    /// Half a board is still honest: dreams come from `list`, so they survive
-    /// a `reconcile` failure — but the pane must say the drift half is blind.
-    @Test func aFailedReconcileKeepsDreamRowsAndStillReportsTheGap() {
+    /// An adapter can return useful list data with a degraded detail; keep the
+    /// rows and report the blind spot instead of inventing emptiness.
+    @Test func aPartialBoardKeepsListRowsAndStillReportsTheGap() {
         let result = Self.sections([Self.board(
             root: Self.holyBoard,
             issues: [Self.issue("mn-aaa111", type: .dream)],
@@ -420,6 +439,10 @@ struct HolyMannaInboxAdmissionTests {
                 Self.issue("mn-aaa111", type: .dream),
                 Self.issue("mn-bbb111", status: .blocked),
                 Self.issue("mn-ccc111", status: .inProgress, claimedBy: "ses_dead"),
+                Self.issue("mn-ddd111", status: .inProgress, claimedBy: "ses_live"),
+                Self.issue("mn-ddd222", status: .open),
+                Self.issue("mn-ddd333", status: .blocked),
+                Self.issue("mn-ddd444", type: .track, status: .open),
             ],
             findings: [
                 Self.finding(.blockerDesync, "mn-bbb111"),
@@ -431,7 +454,7 @@ struct HolyMannaInboxAdmissionTests {
             guard case let .openURL(url) = row.action else { return nil }
             return HolyAutomationURLParser.launchSpec(from: url)?.initialInput
         }
-        #expect(inputs.count == 3)
+        #expect(inputs.count == 7)
         #expect(inputs.allSatisfy { $0.hasPrefix("agent-do manna show mn-") })
         // No claim, abandon, done, or reconcile --fix ever rides a click.
         #expect(inputs.allSatisfy { !$0.contains("claim") && !$0.contains("abandon") })

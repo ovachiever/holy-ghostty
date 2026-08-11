@@ -2,9 +2,9 @@ import Foundation
 import Testing
 @testable import Ghostty
 
-/// The `agent-do manna list --json` / `agent-do manna reconcile --json`
-/// contract, pinned from live read-only invocations on 2026-08-03 (this
-/// machine) against two real boards:
+/// Manna's read-only JSON contracts, pinned from live invocations on
+/// 2026-08-03. The inbox production path invokes only `list`; reconcile
+/// fixtures remain here for adapters that inject explicit decision findings.
 ///
 ///   cd /Users/erik/Custom-Coding/holy-ghostty && agent-do manna list --json
 ///   cd /Users/erik/Custom-Coding/holy-ghostty && agent-do manna reconcile --json
@@ -174,20 +174,18 @@ struct HolyMannaInboxContractTests {
 
     // MARK: - Invocation contract
 
-    /// Both commands read `./.manna` from the process working directory —
-    /// manna has no board flag (verified: `manna-core list --help`,
-    /// `manna-core reconcile --help`, 2026-08-03), so the board root must be
-    /// the child process's cwd.
-    @Test func invocationArgumentsMatchThePinnedCommands() {
+    /// The production read resolves `./.manna` from the process working
+    /// directory. It deliberately does not run the much heavier reconcile
+    /// audit before making the local backlog visible.
+    @Test func productionInvocationIsTheFastListContractOnly() {
         #expect(HolyMannaInboxSource.listArguments == ["manna", "list", "--json"])
-        #expect(HolyMannaInboxSource.reconcileArguments == ["manna", "reconcile", "--json"])
     }
 
-    /// `reconcile --fix` mutates the board. The inbox reads; it never fixes.
-    @Test func invocationsNeverMutateTheBoard() {
+    @Test func productionInvocationNeverMutatesTheBoard() {
         let mutating = ["--fix", "--write-drift", "claim", "done", "abandon", "update", "delete"]
-        for argument in HolyMannaInboxSource.listArguments + HolyMannaInboxSource.reconcileArguments {
+        for argument in HolyMannaInboxSource.listArguments {
             #expect(!mutating.contains(argument))
         }
+        #expect(!HolyMannaInboxSource.listArguments.contains("reconcile"))
     }
 }

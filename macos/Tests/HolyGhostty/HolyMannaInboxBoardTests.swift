@@ -101,8 +101,7 @@ struct HolyMannaInboxBoardTests {
         #expect(Self.locate(["/opt/a/b/c/d/e/f"], boards: ["/opt"]).isEmpty)
     }
 
-    /// Each board costs two subprocesses per tick; a workspace full of
-    /// sessions must not turn the inbox into a fork bomb.
+    /// Even at one list subprocess per board, discovery stays bounded.
     @Test func theBoardCountIsCapped() {
         let roots = (1...20).map { "/Users/erik/Custom-Coding/repo\($0)" }
         let found = Self.locate(roots, boards: Set(roots), maxBoards: 4)
@@ -281,6 +280,26 @@ struct HolyMannaInboxBoardTests {
         #expect(await source.refresh(context: HolyInboxRefreshContext()).sections.isEmpty == false)
         board.issues = []
         #expect(await source.refresh(context: HolyInboxRefreshContext()) == .empty)
+    }
+}
+
+struct HolyMannaProcessRunnerTests {
+    @Test func drainsLargeStdoutAndStderrWhileTheChildIsRunning() async {
+        let result = await HolyMannaProcessRunner.run(
+            executablePath: "/usr/bin/awk",
+            arguments: [#"BEGIN { for (i = 0; i < 70000; i++) { printf "x"; printf "e" > "/dev/stderr" } }"#],
+            workingDirectory: nil,
+            timeout: 5
+        )
+
+        switch result {
+        case let .success(output):
+            #expect(output.exitCode == 0)
+            #expect(output.stdout.utf8.count == 70_000)
+            #expect(output.stderr.utf8.count == 70_000)
+        case let .failure(reason):
+            Issue.record("large-output process should not fake a timeout: \(reason)")
+        }
     }
 }
 
