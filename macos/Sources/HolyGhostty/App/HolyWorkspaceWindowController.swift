@@ -265,12 +265,19 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
             return false
         }
 
+        // Plain Tab and Shift-Tab belong to the PANE: shell completion,
+        // and Claude Code's own Shift-Tab mode cycle. The original plain-Tab
+        // binding was a zombie — written in July against a controller that
+        // deallocated at launch, it never fired until the retention fix
+        // (b5825fac0) resurrected it and Tab stopped completing (Erik,
+        // 2026-08-11). Session cycling is ⌃Tab / ⌃⇧Tab, the tab-strip
+        // convention, which no terminal program expects to receive.
         let relevantFlags = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        if relevantFlags.isEmpty {
+        if relevantFlags == .control {
             return workspaceStore.cycleSelectedSession(.next)
         }
 
-        if relevantFlags == .shift {
+        if relevantFlags == [.control, .shift] {
             return workspaceStore.cycleSelectedSession(.previous)
         }
 
