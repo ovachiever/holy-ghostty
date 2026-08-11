@@ -77,6 +77,8 @@ struct HolyInboxPanelView: View {
     @State private var libraryExpanded = false
     /// Suggestion groups the user opened past their preview rows.
     @State private var expandedSuggestionKinds: Set<String> = []
+    /// The attention overflow ("N more waiting") opened by hand.
+    @State private var attentionOverflowExpanded = false
     /// The lens. Text filters every rendered row; Enter routes mn-ids to the
     /// board, #N to the focused repo's PR, prose to `brief ask`.
     @State private var lensText = ""
@@ -115,7 +117,7 @@ struct HolyInboxPanelView: View {
     // MARK: Brief (answer line + attention)
 
     private var triaged: HolyBriefTriage.Triaged? {
-        brief.payload.map(HolyBriefTriage.triage)
+        brief.payload.map { HolyBriefTriage.triage($0, now: .now) }
     }
 
     private var focusedBoardPath: String? {
@@ -177,6 +179,38 @@ struct HolyInboxPanelView: View {
                     isNewSinceLastLook: triaged.deltaThreadIDs.contains(thread.id),
                     onOpen: openAction(for: thread)
                 )
+            }
+
+            let overflow = triaged.needsMeOverflow.filter { lensMatches($0.title, lens) }
+            if !overflow.isEmpty {
+                Button {
+                    attentionOverflowExpanded.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .semibold))
+                            .rotationEffect(attentionOverflowExpanded ? .zero : .degrees(-90))
+                            .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                        Text("\(overflow.count) more waiting — older or lower rank")
+                            .font(.system(size: 10))
+                            .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(height: 24)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                if attentionOverflowExpanded {
+                    ForEach(overflow, id: \.id) { thread in
+                        HolyBriefThreadRowView(
+                            thread: thread,
+                            density: .compact,
+                            isNewSinceLastLook: triaged.deltaThreadIDs.contains(thread.id),
+                            onOpen: openAction(for: thread)
+                        )
+                    }
+                }
             }
 
             let activity = triaged.activity.filter { lensMatches($0.title, lens) }

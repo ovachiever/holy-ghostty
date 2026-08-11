@@ -132,6 +132,62 @@ struct HolyBriefTriageTests {
         #expect(triaged.hero == nil)
     }
 
+    // MARK: Attention cap and quiet aging (first live contact, 2026-08-11)
+
+    /// A payload with `count` needs_me PR threads, descending rank; those in
+    /// `staleIndices` are a month old, the rest an hour old.
+    private func floodPayload(count: Int, staleIndices: Set<Int> = [], pinnedIndices: Set<Int> = []) throws -> HolyBriefPayload {
+        let now = Date(timeIntervalSince1970: 1_786_500_000)
+        let threads = (0..<count).map { index -> String in
+            let age: TimeInterval = staleIndices.contains(index) ? 30 * 24 * 3600 : 3600
+            let updated = ISO8601DateFormatter().string(from: now.addingTimeInterval(-age))
+            return """
+            {"claimable": false, "fingerprint": "f\(index)", "id": "pr-\(index)", "kind": "pr", "last_commit": null, "manna": null, "needs_me": true, "pinned": \(pinnedIndices.contains(index)), "pr": {"number": \(index)}, "rank": {"reasons": ["r"], "score": \(Double(count - index))}, "receipts": [], "session": null, "snoozed": false, "title": "PR \(index)", "updated_at": "\(updated)", "why": []}
+            """
+        }.joined(separator: ",")
+        let json = """
+        {"annotations": [], "caller": null, "contract": 1,
+         "delta": {"count": 0, "mode": "read_state", "since": null, "thread_ids": []},
+         "generated_at": "2026-08-11T15:56:29Z",
+         "paragraph": {"mode": "deterministic", "model": null, "receipts": [], "text": "t"},
+         "ranking": {"journal_observations": 0, "mode": "heuristic"},
+         "read_state": {"last_brief_at": null, "pins": 0, "snoozes": 0},
+         "receipts": {}, "sources": {},
+         "suggestions": [], "suggestions_total": 0,
+         "threads": [\(threads)], "threads_total": \(count)}
+        """
+        return try #require(HolyBriefPayload.parse(Data(json.utf8)))
+    }
+
+    private static let fixedNow = Date(timeIntervalSince1970: 1_786_500_000)
+
+    @Test func attentionFloodCapsAtTheDisplayLimitWithOverflow() throws {
+        let payload = try floodPayload(count: 30)
+        let triaged = HolyBriefTriage.triage(payload, now: Self.fixedNow)
+        let visible = (triaged.hero.map { [$0] } ?? []) + triaged.needsMe
+        #expect(visible.count == HolyBriefTriage.attentionDisplayLimit)
+        #expect(triaged.needsMeOverflow.count == 30 - HolyBriefTriage.attentionDisplayLimit)
+        // Rank decides survivors: the visible set is the top-ranked slice.
+        #expect(visible.map(\.id) == (0..<HolyBriefTriage.attentionDisplayLimit).map { "pr-\($0)" })
+    }
+
+    @Test func staleAttentionDemotesToOverflowEvenUnderTheCap() throws {
+        let payload = try floodPayload(count: 4, staleIndices: [1])
+        let triaged = HolyBriefTriage.triage(payload, now: Self.fixedNow)
+        let visible = (triaged.hero.map { [$0] } ?? []) + triaged.needsMe
+        #expect(visible.map(\.id) == ["pr-0", "pr-2", "pr-3"])
+        #expect(triaged.needsMeOverflow.map(\.id) == ["pr-1"])
+    }
+
+    @Test func pinnedAttentionSurvivesBothCapAndAge() throws {
+        let payload = try floodPayload(count: 10, staleIndices: [9], pinnedIndices: [9])
+        let triaged = HolyBriefTriage.triage(payload, now: Self.fixedNow)
+        let visible = (triaged.hero.map { [$0] } ?? []) + triaged.needsMe
+        // The stale-but-pinned thread renders despite cap and age.
+        #expect(visible.contains { $0.id == "pr-9" })
+        #expect(!triaged.needsMeOverflow.contains { $0.id == "pr-9" })
+    }
+
     // MARK: Covenant fences
 
     @Test func typedCommandsLoseEveryControlCharacter() {

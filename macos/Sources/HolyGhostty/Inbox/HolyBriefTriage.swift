@@ -11,12 +11,28 @@ enum HolyBriefTriage {
     struct Triaged: Equatable, Sendable {
         var hero: HolyBriefThread?
         var needsMe: [HolyBriefThread]
+        /// Attention the drawer does NOT show by default: beyond the display
+        /// cap, or stale. One expandable count-row; never deleted, never
+        /// silently dropped.
+        var needsMeOverflow: [HolyBriefThread]
         var activity: [HolyBriefThread]
         var libraryThreadCount: Int
         var suggestionGroups: [SuggestionGroup]
         var sourceNotes: [SourceNote]
         var deltaThreadIDs: Set<String>
     }
+
+    /// A stressed glance reads about six things (hero + five). The engine
+    /// admitted 30 "needs you" PRs on first live contact (2026-08-11,
+    /// Erik: "an absolute mess") — rank decides which few earn pixels;
+    /// the rest are one count-row away, not gone.
+    static let attentionDisplayLimit = 6
+
+    /// Quiet aging: unpinned attention untouched this long stops occupying
+    /// the drawer — a PR idle for over a week is inventory wearing an
+    /// attention costume. Pins are exempt: explicit human curation outranks
+    /// every automatic rule.
+    static let staleAttentionAge: TimeInterval = 7 * 24 * 3600
 
     struct SuggestionGroup: Equatable, Sendable, Identifiable {
         let kind: String
@@ -45,7 +61,7 @@ enum HolyBriefTriage {
         "prompt_pairing": "Prompt pairing",
     ]
 
-    static func triage(_ payload: HolyBriefPayload) -> Triaged {
+    static func triage(_ payload: HolyBriefPayload, now: Date = .now) -> Triaged {
         let ranked = payload.threads.sorted { $0.rank.score > $1.rank.score }
         let attention = ranked.filter { $0.needsMe && !$0.snoozed }
         let pinnedExtras = ranked.filter { $0.pinned && !$0.needsMe }
@@ -59,8 +75,31 @@ enum HolyBriefTriage {
             deltaIDs.contains($0.id) && !attentionIDs.contains($0.id)
         }
 
-        let needsMe = attention + pinnedExtras
-        let libraryCount = max(0, payload.threadsTotal - needsMe.count - activity.count)
+        // The drawer shows pins unconditionally, then fresh attention by
+        // rank up to the cap; stale or over-cap attention becomes the
+        // overflow count-row.
+        var visible: [HolyBriefThread] = []
+        var overflow: [HolyBriefThread] = []
+        for thread in attention + pinnedExtras {
+            if thread.pinned {
+                visible.append(thread)
+                continue
+            }
+            let isStale = thread.updatedAt.map {
+                now.timeIntervalSince($0) > staleAttentionAge
+            } ?? false
+            if !isStale, visible.count < attentionDisplayLimit {
+                visible.append(thread)
+            } else {
+                overflow.append(thread)
+            }
+        }
+
+        let needsMe = visible
+        let libraryCount = max(
+            0,
+            payload.threadsTotal - visible.count - overflow.count - activity.count
+        )
 
         var groups: [SuggestionGroup] = []
         var byKind: [String: [HolyBriefSuggestion]] = [:]
@@ -89,6 +128,7 @@ enum HolyBriefTriage {
         return Triaged(
             hero: needsMe.first,
             needsMe: Array(needsMe.dropFirst()),
+            needsMeOverflow: overflow,
             activity: activity,
             libraryThreadCount: libraryCount,
             suggestionGroups: groups,
