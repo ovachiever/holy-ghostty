@@ -77,12 +77,16 @@ struct HolyBriefAnswerLineView: View {
                         .font(.system(size: 9))
                         .foregroundStyle(HolyGhosttyTheme.textTertiary)
                 }
-                ForEach(sourceNotes) { note in
-                    Text("· \(note.source) \(note.status)")
+                // One quiet line, never a wrapping chip pile: "3 sources
+                // impaired", full detail on hover.
+                if !sourceNotes.isEmpty {
+                    Text("· \(sourceNotes.count) source\(sourceNotes.count == 1 ? "" : "s") impaired")
                         .font(.system(size: 9))
                         .foregroundStyle(HolyGhosttyTheme.warning.opacity(0.85))
-                        .help(note.reason)
+                        .lineLimit(1)
+                        .help(sourceNotes.map { "\($0.source): \($0.reason)" }.joined(separator: "\n"))
                 }
+                Spacer(minLength: 0)
             }
 
             if let failureReason {

@@ -167,16 +167,11 @@ final class HolyWorkspaceStore: ObservableObject {
     /// brief holy` through this feed; the engine's sections above become the
     /// Library beneath it (mn-5dc58b).
     private(set) lazy var briefFeed: HolyBriefFeed = {
-        let resolver = inboxRepoSlugResolver
-        return HolyBriefFeed(contextProvider: { [weak self] in
+        HolyBriefFeed(contextProvider: { [weak self] in
             let root = await MainActor.run {
                 HolyMannaInboxSource.repositoryRoots(focused: self?.selectedSession).first
             }
-            var slug: String?
-            if let root {
-                slug = await resolver.slug(forRepositoryRoot: root)
-            }
-            return .init(focusedRepoSlug: slug, focusedBoardPath: root)
+            return .init(focusedRepoPath: root, focusedBoardPath: root)
         })
     }()
     private let agentStateMonitor = HolyTmuxAgentStateMonitor()

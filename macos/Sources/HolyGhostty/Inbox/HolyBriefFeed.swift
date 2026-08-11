@@ -31,9 +31,12 @@ final class HolyBriefFeed: ObservableObject {
     /// panel-open cannot double the subprocess load between polls.
     static let staleAfter: TimeInterval = HolyInboxEngine.visiblePollInterval
 
-    /// Caller context resolved at refresh time by the store.
+    /// Caller context resolved at refresh time by the store. Both values are
+    /// PATHS: the engine resolves --focused-repo as a filesystem path (a
+    /// slug like "org/repo" gets treated as relative and dies — verified
+    /// live 2026-08-11, every source degraded from the app's "/" cwd).
     struct Context: Equatable, Sendable {
-        var focusedRepoSlug: String?
+        var focusedRepoPath: String?
         var focusedBoardPath: String?
     }
 
@@ -82,8 +85,8 @@ final class HolyBriefFeed: ObservableObject {
         }
 
         var arguments = ["brief", "holy", "--json"]
-        if let slug = context.focusedRepoSlug {
-            arguments += ["--focused-repo", slug]
+        if let repo = context.focusedRepoPath {
+            arguments += ["--focused-repo", repo]
         }
         if let board = context.focusedBoardPath {
             arguments += ["--focused-board", board]
@@ -93,7 +96,9 @@ final class HolyBriefFeed: ObservableObject {
             executablePath: binaryPath,
             arguments: arguments,
             timeout: Self.commandTimeout,
-            environment: await HolyGitHubInboxSource.sharedSubprocessEnvironment.value
+            environment: await HolyGitHubInboxSource.sharedSubprocessEnvironment.value,
+            currentDirectoryPath: context.focusedRepoPath
+                ?? FileManager.default.homeDirectoryForCurrentUser.path
         )
 
         switch result {

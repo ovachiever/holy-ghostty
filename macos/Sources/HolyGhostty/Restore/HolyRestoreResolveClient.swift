@@ -426,13 +426,20 @@ enum HolyRestoreProcessRunner {
         arguments: [String],
         timeout: TimeInterval,
         environment: [String: String]? = nil,
-        stdinData: Data? = nil
+        stdinData: Data? = nil,
+        currentDirectoryPath: String? = nil
     ) async -> HolyRestoreProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         if let environment {
             process.environment = environment
+        }
+        // A Dock-launched app's cwd is "/", and estate tools (agent-do
+        // brief/coord/git) anchor on the working directory — verified live
+        // 2026-08-11: from "/" every relative resolution dies.
+        if let currentDirectoryPath {
+            process.currentDirectoryURL = URL(fileURLWithPath: currentDirectoryPath)
         }
         let stdout = Pipe()
         let stderr = Pipe()
