@@ -50,18 +50,16 @@ enum HolyBriefSpawn {
 
 // MARK: - Answer line
 
-/// The panel's headline: ONE mechanically honest state sentence, dominant.
-/// The voiced paragraph is secondary detail beneath it — grounded prose,
-/// citations de-emphasized, expandable past three lines. Degradation lives
-/// inside the sentence itself ("GitHub is currently unreadable."), never
-/// as chip decoration.
+/// The panel's headline: ONE mechanically honest state sentence, dominant,
+/// with room. The voiced paragraph was removed from the resting surface —
+/// it restated the headline's counts in system vocabulary (critique round
+/// 2); it returns only when the engine's v2 insight field carries meaning
+/// beyond the counts (mn-43932b). Degradation lives inside the sentence
+/// itself; the full source detail rides hover.
 struct HolyBriefStateHeaderView: View {
     let sentence: String
-    let paragraph: HolyBriefParagraph?
     let failureReason: String?
     let sourceNotes: [HolyBriefTriage.SourceNote]
-
-    @State private var paragraphExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -75,17 +73,6 @@ struct HolyBriefStateHeaderView: View {
                     ? ""
                     : sourceNotes.map { "\($0.source): \($0.reason)" }.joined(separator: "\n"))
 
-            if let paragraph, !paragraph.text.isEmpty {
-                paragraphText(paragraph)
-                    .font(.system(size: 11))
-                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                    .lineSpacing(2)
-                    .lineLimit(paragraphExpanded ? nil : 3)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .onTapGesture { paragraphExpanded.toggle() }
-            }
-
             if let failureReason {
                 Text(failureReason)
                     .font(.system(size: 10))
@@ -98,19 +85,6 @@ struct HolyBriefStateHeaderView: View {
         .padding(.horizontal, 12)
         .padding(.top, 12)
         .padding(.bottom, 8)
-    }
-
-    private func paragraphText(_ paragraph: HolyBriefParagraph) -> Text {
-        HolyBriefTriage.paragraphRuns(paragraph.text).reduce(Text("")) { total, run in
-            switch run {
-            case let .text(value):
-                return total + Text(value)
-            case let .citation(value):
-                return total + Text(value)
-                    .font(.system(size: 8.5))
-                    .foregroundColor(HolyGhosttyTheme.textTertiary)
-            }
-        }
     }
 }
 
@@ -197,20 +171,23 @@ struct HolyBriefThreadRowView: View {
                 Spacer(minLength: 4)
 
                 if let updatedAt = thread.updatedAt {
-                    Text(HolyInboxRowView.relativeTime(from: updatedAt))
-                        .font(.system(size: 11))
-                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                    Text(HolyBriefTriage.compactAge(
+                        HolyInboxRowView.relativeTime(from: updatedAt)
+                    ))
+                    .font(.system(size: 11))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
                 }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, density == .hero ? 8 : (density == .compact ? 3 : 5))
             .background(isHovering ? HolyGhosttyTheme.bg.opacity(0.6) : Color.clear)
-            // The amber keyline REINFORCES focused-project scope; the scope
-            // word carries the meaning, so color is never the only signal.
+            // The amber rail marks RANK, not scope (critique round 2: as a
+            // scope cue it read as selection). Exactly one row in the panel
+            // carries it — the NEXT item. Scope lives in words.
             .overlay(alignment: .leading) {
-                if scope == .here, density != .compact {
+                if density == .hero {
                     Rectangle()
-                        .fill(HolyGhosttyTheme.halo.opacity(0.65))
+                        .fill(HolyGhosttyTheme.halo.opacity(0.75))
                         .frame(width: 2)
                 }
             }
@@ -220,11 +197,11 @@ struct HolyBriefThreadRowView: View {
         .onHover { isHovering = $0 }
     }
 
-    /// Row anatomy line two: [scope] · [why it waits].
+    /// Row anatomy line two: [scope] · [why it waits], in operator words.
     private var metadataLine: String {
         var parts = [scopeWord]
         if let why = thread.why.first {
-            parts.append(why)
+            parts.append(HolyBriefTriage.humanizedReason(why))
         } else if let session = thread.session {
             if session.status == "active", session.phase != nil {
                 parts.append("Agent \(session.phase ?? "active")")
@@ -234,7 +211,7 @@ struct HolyBriefThreadRowView: View {
                 parts.append(status)
             }
         } else if let reason = thread.rank.reasons.first {
-            parts.append(reason)
+            parts.append(HolyBriefTriage.humanizedReason(reason))
         }
         return parts.joined(separator: " · ")
     }

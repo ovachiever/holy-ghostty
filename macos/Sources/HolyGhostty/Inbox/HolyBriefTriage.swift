@@ -72,8 +72,42 @@ enum HolyBriefTriage {
         case here
     }
 
+    /// INTERIM rule until contract 2: scope is really repo-membership (a PR
+    /// on the focused repo is HERE), but only the engine knows each PR's
+    /// repo — client-side, PR threads read as elsewhere and everything
+    /// board/session-anchored as here. Corrected engine-side in mn-43932b.
     static func scope(of thread: HolyBriefThread) -> Scope {
         thread.kind == "pr" || thread.hasPR ? .everywhere : .here
+    }
+
+    /// Engine states are not interface language: translate the classifier
+    /// vocabulary that leaks through `why`/reasons into operator phrases.
+    /// Unknown strings pass through untouched — mistranslation is worse
+    /// than jargon.
+    static func humanizedReason(_ raw: String) -> String {
+        let lowered = raw.lowercased()
+        if lowered.contains("claimed"), lowered.contains("no live session") {
+            return "Claimed, but no agent is active"
+        }
+        if lowered.contains("review_requested") || lowered.contains("maintainer_unreview")
+            || lowered.contains("maintainer_review_stale") {
+            return "Review requested"
+        }
+        if lowered.contains("authored_changes_requested") {
+            return "Changes requested on your work"
+        }
+        if lowered.contains("landed_open") {
+            return "Its code already landed"
+        }
+        if lowered.contains("blocker_desync") {
+            return "Its blocker is resolved"
+        }
+        return raw
+    }
+
+    /// "18h", never "18h ago" — the age column already communicates time.
+    static func compactAge(_ relative: String) -> String {
+        relative.hasSuffix(" ago") ? String(relative.dropLast(4)) : relative
     }
 
     /// Deterministic client-side cleanup of machine titles: leading bracket

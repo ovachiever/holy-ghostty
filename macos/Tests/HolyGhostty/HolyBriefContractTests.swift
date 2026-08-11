@@ -266,6 +266,24 @@ struct HolyBriefTriageTests {
             == "2 mystery_kind items")
     }
 
+    @Test func engineVocabularyTranslatesToOperatorWords() {
+        #expect(HolyBriefTriage.humanizedReason(
+            "needs you: claimed in_progress with no live session (stranded)"
+        ) == "Claimed, but no agent is active")
+        #expect(HolyBriefTriage.humanizedReason("pr: maintainer_unreviewed")
+            == "Review requested")
+        #expect(HolyBriefTriage.humanizedReason("review_requested")
+            == "Review requested")
+        // Unknown strings pass through — mistranslation beats jargon never.
+        #expect(HolyBriefTriage.humanizedReason("updated 0h ago (+1.00)")
+            == "updated 0h ago (+1.00)")
+    }
+
+    @Test func agesCompactByDroppingAgo() {
+        #expect(HolyBriefTriage.compactAge("18h ago") == "18h")
+        #expect(HolyBriefTriage.compactAge("now") == "now")
+    }
+
     @Test func scopeSplitsGitHubFromTheFocusedProject() throws {
         let payload = try #require(HolyBriefPayload.parse(Data(HolyBriefContractTests.fixture.utf8)))
         #expect(HolyBriefTriage.scope(of: payload.threads[0]) == .everywhere)

@@ -152,7 +152,6 @@ struct HolyInboxPanelView: View {
                     elsewhereCount: counts.elsewhere,
                     impairedSources: (triaged?.sourceNotes ?? []).map(\.source)
                 ),
-                paragraph: brief.payload?.paragraph,
                 failureReason: brief.failureReason,
                 sourceNotes: triaged?.sourceNotes ?? []
             )
@@ -196,14 +195,18 @@ struct HolyInboxPanelView: View {
                     onOpen: openAction(for: hero)
                 )
             }
-            ForEach(triaged.needsMe.filter { lensMatches($0.title, lens) }, id: \.id) { thread in
-                HolyBriefThreadRowView(
-                    thread: thread,
-                    density: .standard,
-                    isNewSinceLastLook: triaged.deltaThreadIDs.contains(thread.id),
-                    focusedProjectName: focusedProjectName,
-                    onOpen: openAction(for: thread)
-                )
+            let runnersUp = triaged.needsMe.filter { lensMatches($0.title, lens) }
+            if !runnersUp.isEmpty {
+                drawerLabel("Also waiting")
+                ForEach(runnersUp, id: \.id) { thread in
+                    HolyBriefThreadRowView(
+                        thread: thread,
+                        density: .standard,
+                        isNewSinceLastLook: triaged.deltaThreadIDs.contains(thread.id),
+                        focusedProjectName: focusedProjectName,
+                        onOpen: openAction(for: thread)
+                    )
+                }
             }
 
             let overflow = triaged.needsMeOverflow.filter { lensMatches($0.title, lens) }
