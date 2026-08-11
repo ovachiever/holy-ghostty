@@ -466,31 +466,38 @@ final class HolyGitHubInboxSource: HolyInboxRowSource {
     /// sweep behaves identically however the app was started. HOME rides
     /// along untouched — gh reads its token from ~/.config/gh/hosts.yml.
     ///
-    /// ANTHROPIC_API_KEY rides the same probe: agent-do's creds resolution
-    /// reads the environment before its store, and the macOS keychain store
-    /// refuses headless writes after a reboot — the login shell (Erik's
-    /// .zshenv) is the durable source that works in every context. The value
-    /// enters child process environments only; nothing logs it.
     static let sharedSubprocessEnvironment = Task<[String: String], Never> {
         var environment = ProcessInfo.processInfo.environment
         let result = await HolyRestoreProcessRunner.run(
             executablePath: "/bin/zsh",
-            arguments: ["-lc", #"printf '%s\n%s' "$PATH" "$ANTHROPIC_API_KEY""#],
+            arguments: ["-lc", #"printf %s "$PATH""#],
             timeout: loginShellProbeTimeout
         )
         if case let .success(output) = result, output.exitCode == 0 {
-            let lines = output.stdout.components(separatedBy: "\n")
-            if let path = lines.first?.trimmingCharacters(in: .whitespaces), !path.isEmpty {
+            let path = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !path.isEmpty {
                 environment["PATH"] = path
-            }
-            if lines.count > 1 {
-                let key = lines[1].trimmingCharacters(in: .whitespacesAndNewlines)
-                if !key.isEmpty {
-                    environment["ANTHROPIC_API_KEY"] = key
-                }
             }
         }
         return environment
+    }
+
+    /// The voice key, captured from the login shell (Erik's .zshenv) because
+    /// the macOS keychain refuses headless writes after a reboot and
+    /// agent-do's creds resolution reads the environment before its store.
+    /// Deliberately NOT part of `sharedSubprocessEnvironment`: only the
+    /// brief invocation needs it, and the gh sweep's process tree must not
+    /// inherit a credential it never uses (security review 2026-08-11).
+    /// The value enters that one child environment; nothing logs it.
+    static let anthropicKeyFromLoginShell = Task<String?, Never> {
+        let result = await HolyRestoreProcessRunner.run(
+            executablePath: "/bin/zsh",
+            arguments: ["-lc", #"printf %s "$ANTHROPIC_API_KEY""#],
+            timeout: loginShellProbeTimeout
+        )
+        guard case let .success(output) = result, output.exitCode == 0 else { return nil }
+        let key = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return key.isEmpty ? nil : key
     }
 
     /// One PATH lookup per app lifetime, matching the resolve client: a Dock

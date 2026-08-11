@@ -92,11 +92,18 @@ final class HolyBriefFeed: ObservableObject {
             arguments += ["--focused-board", board]
         }
 
+        // The voice key overlays HERE and nowhere else — the brief is the
+        // one subprocess that needs it (security review 2026-08-11).
+        var environment = await HolyGitHubInboxSource.sharedSubprocessEnvironment.value
+        if let voiceKey = await HolyGitHubInboxSource.anthropicKeyFromLoginShell.value {
+            environment["ANTHROPIC_API_KEY"] = voiceKey
+        }
+
         let result = await HolyRestoreProcessRunner.run(
             executablePath: binaryPath,
             arguments: arguments,
             timeout: Self.commandTimeout,
-            environment: await HolyGitHubInboxSource.sharedSubprocessEnvironment.value,
+            environment: environment,
             currentDirectoryPath: context.focusedRepoPath
                 ?? FileManager.default.homeDirectoryForCurrentUser.path
         )
