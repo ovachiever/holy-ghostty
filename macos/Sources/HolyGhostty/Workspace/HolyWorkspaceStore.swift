@@ -2601,7 +2601,7 @@ final class HolyWorkspaceStore: ObservableObject {
            attentionContradictionLoggedSessionIDs.insert(session.id).inserted {
             let envelopeAge = eventOccurredAt.map { attentionClock.timeIntervalSince($0) } ?? -1
             Self.attentionDebugLogger.error(
-                "attention contradiction \(session.id, privacy: .public) [\(session.record.title, privacy: .public)]: kind=\(String(describing: kind), privacy: .public) envelopeAge=\(Int(envelopeAge))s processExited=\(session.surfaceView.processProvablyExited) producerAlive=\(String(describing: self.producerProcessAliveBySessionID[session.id]), privacy: .public) producerOutAge=\(String(describing: self.producerLastOutputAtBySessionID[session.id].map { Int(self.attentionClock.timeIntervalSince($0)) }), privacy: .public)"
+                "attention contradiction \(session.id, privacy: .public) [\(session.title, privacy: .public)]: kind=\(String(describing: kind), privacy: .public) envelopeAge=\(Int(envelopeAge))s processExited=\(session.surfaceView.processProvablyExited) producerAlive=\(String(describing: self.producerProcessAliveBySessionID[session.id]), privacy: .public) producerOutAge=\(String(describing: self.producerLastOutputAtBySessionID[session.id].map { Int(self.attentionClock.timeIntervalSince($0)) }), privacy: .public)"
             )
         }
 
