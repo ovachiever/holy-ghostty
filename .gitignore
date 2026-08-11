@@ -44,3 +44,4 @@ GhosttyKit.xcframework.debug-backup/
 /.superpowers/
 /.manna/board.lock
 /.manna/drift.yaml
+/.local/
