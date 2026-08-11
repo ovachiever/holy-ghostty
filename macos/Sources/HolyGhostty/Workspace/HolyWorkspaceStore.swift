@@ -85,6 +85,10 @@ final class HolyWorkspaceStore: ObservableObject {
             // board immediately — local files, sub-second — while GitHub and
             // alerts keep their own cadence (mn-b2e2e9).
             refreshFocusedManna(force: true)
+            // The brief's context changed too, but its call is expensive
+            // (gh sweep + model voice) — the feed's own staleness throttle
+            // decides whether a flap becomes a subprocess.
+            briefFeed.requestRefresh()
         }
     }
     @Published var soloSessionID: UUID? {
@@ -149,12 +153,31 @@ final class HolyWorkspaceStore: ObservableObject {
                 }),
                 HolyAlertInboxSource(),
             ],
+            // The brief renders above these; the engine's sections are the
+            // Library (manna backlog, gh browse) plus the alerts drawer.
             focusedRepoSlugProvider: { [weak self] in
                 let root = await MainActor.run { self?.selectedSession?.ownership.repositoryRoot }
                 guard let root else { return nil }
                 return await resolver.slug(forRepositoryRoot: root)
             }
         )
+    }()
+
+    /// The panel's answer line and attention drawer come from `agent-do
+    /// brief holy` through this feed; the engine's sections above become the
+    /// Library beneath it (mn-5dc58b).
+    private(set) lazy var briefFeed: HolyBriefFeed = {
+        let resolver = inboxRepoSlugResolver
+        return HolyBriefFeed(contextProvider: { [weak self] in
+            let root = await MainActor.run {
+                HolyMannaInboxSource.repositoryRoots(focused: self?.selectedSession).first
+            }
+            var slug: String?
+            if let root {
+                slug = await resolver.slug(forRepositoryRoot: root)
+            }
+            return .init(focusedRepoSlug: slug, focusedBoardPath: root)
+        })
     }()
     private let agentStateMonitor = HolyTmuxAgentStateMonitor()
     private let workspaceStartedAt = Date()

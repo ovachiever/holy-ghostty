@@ -484,7 +484,8 @@ final class HolyGitHubInboxSource: HolyInboxRowSource {
     /// One PATH lookup per app lifetime, matching the resolve client: a Dock
     /// launch inherits a login (non-interactive) shell PATH, so probe through
     /// `/bin/zsh -lc` and fall back to well-known install locations.
-    private static let sharedBinaryPath = Task<String?, Never> {
+    /// Internal, not private: HolyBriefFeed runs the same binary.
+    static let sharedBinaryPath = Task<String?, Never> {
         let result = await HolyRestoreProcessRunner.run(
             executablePath: "/bin/zsh",
             arguments: ["-lc", "command -v \(binaryName)"],
