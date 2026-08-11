@@ -50,62 +50,57 @@ enum HolyBriefSpawn {
 
 // MARK: - Answer line
 
-/// The panel's first element: the paragraph, grounded. Citations render
-/// de-emphasized; the grounding mode and age are visible so a model voice is
-/// never mistaken for ground truth, nor counts for a voice.
-struct HolyBriefAnswerLineView: View {
-    let paragraph: HolyBriefParagraph
-    let generatedAt: Date?
+/// The panel's headline: ONE mechanically honest state sentence, dominant.
+/// The voiced paragraph is secondary detail beneath it — grounded prose,
+/// citations de-emphasized, expandable past three lines. Degradation lives
+/// inside the sentence itself ("GitHub is currently unreadable."), never
+/// as chip decoration.
+struct HolyBriefStateHeaderView: View {
+    let sentence: String
+    let paragraph: HolyBriefParagraph?
     let failureReason: String?
     let sourceNotes: [HolyBriefTriage.SourceNote]
 
+    @State private var paragraphExpanded = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            paragraphText
-                .font(.system(size: 11.5))
+        VStack(alignment: .leading, spacing: 7) {
+            Text(sentence)
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(HolyGhosttyTheme.textPrimary)
-                .lineSpacing(2.5)
+                .lineSpacing(2)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
+                .help(sourceNotes.isEmpty
+                    ? ""
+                    : sourceNotes.map { "\($0.source): \($0.reason)" }.joined(separator: "\n"))
 
-            HStack(spacing: 6) {
-                Text(groundingLabel)
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                if let generatedAt {
-                    Text("· \(HolyInboxRowView.relativeTime(from: generatedAt))")
-                        .font(.system(size: 9))
-                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                }
-                // One quiet line, never a wrapping chip pile: "3 sources
-                // impaired", full detail on hover.
-                if !sourceNotes.isEmpty {
-                    Text("· \(sourceNotes.count) source\(sourceNotes.count == 1 ? "" : "s") impaired")
-                        .font(.system(size: 9))
-                        .foregroundStyle(HolyGhosttyTheme.warning.opacity(0.85))
-                        .lineLimit(1)
-                        .help(sourceNotes.map { "\($0.source): \($0.reason)" }.joined(separator: "\n"))
-                }
-                Spacer(minLength: 0)
+            if let paragraph, !paragraph.text.isEmpty {
+                paragraphText(paragraph)
+                    .font(.system(size: 11))
+                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                    .lineSpacing(2)
+                    .lineLimit(paragraphExpanded ? nil : 3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .onTapGesture { paragraphExpanded.toggle() }
             }
 
             if let failureReason {
                 Text(failureReason)
-                    .font(.system(size: 9))
+                    .font(.system(size: 10))
                     .foregroundStyle(HolyGhosttyTheme.warning)
                     .lineLimit(2)
                     .help(failureReason)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
     }
 
-    private var groundingLabel: String {
-        paragraph.mode == "model" ? "voiced" : "counts"
-    }
-
-    private var paragraphText: Text {
+    private func paragraphText(_ paragraph: HolyBriefParagraph) -> Text {
         HolyBriefTriage.paragraphRuns(paragraph.text).reduce(Text("")) { total, run in
             switch run {
             case let .text(value):
@@ -133,15 +128,45 @@ struct HolyBriefThreadRowView: View {
     let thread: HolyBriefThread
     let density: HolyBriefThreadDensity
     let isNewSinceLastLook: Bool
+    /// The focused project's display name — the scope word for `.here` rows.
+    let focusedProjectName: String?
     let onOpen: (() -> Void)?
 
     @State private var isHovering = false
+
+    /// One monochrome glyph lane, differentiating by KIND once, quietly.
+    private var glyphName: String {
+        if thread.hasPR { return "arrow.triangle.branch" }
+        if thread.kind == "session" { return "terminal" }
+        if thread.hasManna { return "checkmark.circle" }
+        return "circle.dotted"
+    }
+
+    private var scope: HolyBriefTriage.Scope { HolyBriefTriage.scope(of: thread) }
+
+    private var scopeWord: String {
+        scope == .everywhere ? "Everywhere" : (focusedProjectName ?? "This project")
+    }
+
+    private var titleSize: CGFloat {
+        switch density {
+        case .hero: return 14
+        case .standard: return 13
+        case .compact: return 12
+        }
+    }
 
     var body: some View {
         Button {
             onOpen?()
         } label: {
             HStack(alignment: .top, spacing: 8) {
+                Image(systemName: glyphName)
+                    .font(.system(size: density == .hero ? 12 : 10, weight: .medium))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                    .frame(width: 16, alignment: .center)
+                    .padding(.top, 1)
+
                 VStack(alignment: .leading, spacing: density == .hero ? 4 : 2) {
                     HStack(spacing: 6) {
                         if isNewSinceLastLook {
@@ -150,31 +175,22 @@ struct HolyBriefThreadRowView: View {
                                 .frame(width: 5, height: 5)
                                 .help("Moved since you last looked")
                         }
-                        Text(thread.title)
+                        Text(HolyBriefTriage.sanitizedTitle(thread.title))
                             .font(.system(
-                                size: density == .hero ? 12.5 : 11,
+                                size: titleSize,
                                 weight: density == .hero ? .semibold : .medium
                             ))
                             .foregroundStyle(HolyGhosttyTheme.textPrimary)
                             .lineLimit(density == .compact ? 1 : 2)
+                            .help(thread.title)
                     }
 
                     if density != .compact {
-                        HStack(spacing: 6) {
-                            if let session = thread.session {
-                                Text(sessionLine(session))
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                                    .lineLimit(1)
-                            }
-                            if density == .hero, let reason = thread.rank.reasons.first {
-                                Text(reason)
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                                    .lineLimit(1)
-                                    .help(thread.rank.reasons.joined(separator: "\n"))
-                            }
-                        }
+                        Text(metadataLine)
+                            .font(.system(size: 11))
+                            .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                            .lineLimit(1)
+                            .help(thread.rank.reasons.joined(separator: "\n"))
                     }
                 }
 
@@ -182,25 +198,44 @@ struct HolyBriefThreadRowView: View {
 
                 if let updatedAt = thread.updatedAt {
                     Text(HolyInboxRowView.relativeTime(from: updatedAt))
-                        .font(.system(size: 9))
+                        .font(.system(size: 11))
                         .foregroundStyle(HolyGhosttyTheme.textTertiary)
                 }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, density == .hero ? 8 : (density == .compact ? 3 : 5))
-            .background(
-                isHovering ? HolyGhosttyTheme.bg.opacity(0.6) : Color.clear
-            )
+            .background(isHovering ? HolyGhosttyTheme.bg.opacity(0.6) : Color.clear)
+            // The amber keyline REINFORCES focused-project scope; the scope
+            // word carries the meaning, so color is never the only signal.
+            .overlay(alignment: .leading) {
+                if scope == .here, density != .compact {
+                    Rectangle()
+                        .fill(HolyGhosttyTheme.halo.opacity(0.65))
+                        .frame(width: 2)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
     }
 
-    private func sessionLine(_ session: HolyBriefThreadSession) -> String {
-        var parts: [String] = []
-        if let status = session.status { parts.append(status) }
-        if let phase = session.phase, phase != session.status { parts.append(phase) }
+    /// Row anatomy line two: [scope] · [why it waits].
+    private var metadataLine: String {
+        var parts = [scopeWord]
+        if let why = thread.why.first {
+            parts.append(why)
+        } else if let session = thread.session {
+            if session.status == "active", session.phase != nil {
+                parts.append("Agent \(session.phase ?? "active")")
+            } else if thread.needsMe {
+                parts.append("Claimed, but no agent is active")
+            } else if let status = session.status {
+                parts.append(status)
+            }
+        } else if let reason = thread.rank.reasons.first {
+            parts.append(reason)
+        }
         return parts.joined(separator: " · ")
     }
 }

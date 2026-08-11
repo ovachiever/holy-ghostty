@@ -79,6 +79,10 @@ struct HolyInboxPanelView: View {
     @State private var expandedSuggestionKinds: Set<String> = []
     /// The attention overflow ("N more waiting") opened by hand.
     @State private var attentionOverflowExpanded = false
+    /// The change-log and housekeeping disclosures; the resting panel keeps
+    /// them closed so it never scrolls.
+    @State private var activityExpanded = false
+    @State private var housekeepingExpanded = false
     /// The lens. Text filters every rendered row; Enter routes mn-ids to the
     /// board, #N to the focused repo's PR, prose to `brief ask`.
     @State private var lensText = ""
@@ -124,12 +128,31 @@ struct HolyInboxPanelView: View {
         HolyMannaInboxSource.repositoryRoots(focused: store.selectedSession).first
     }
 
+    private var focusedProjectName: String? {
+        focusedBoardPath.map { URL(fileURLWithPath: $0).lastPathComponent }
+    }
+
+    /// Attention split by scope for the state sentence: decisions "here"
+    /// (the focused project) vs reviews "elsewhere" (cross-project GitHub).
+    private var scopeCounts: (here: Int, elsewhere: Int) {
+        guard let triaged else { return (0, 0) }
+        let attention = (triaged.hero.map { [$0] } ?? [])
+            + triaged.needsMe + triaged.needsMeOverflow
+        let elsewhere = attention.filter { HolyBriefTriage.scope(of: $0) == .everywhere }.count
+        return (attention.count - elsewhere, elsewhere)
+    }
+
     @ViewBuilder
     private var briefBlock: some View {
-        if let payload = brief.payload {
-            HolyBriefAnswerLineView(
-                paragraph: payload.paragraph,
-                generatedAt: payload.generatedAt,
+        if brief.payload != nil {
+            let counts = scopeCounts
+            HolyBriefStateHeaderView(
+                sentence: HolyBriefTriage.stateSentence(
+                    hereCount: counts.here,
+                    elsewhereCount: counts.elsewhere,
+                    impairedSources: (triaged?.sourceNotes ?? []).map(\.source)
+                ),
+                paragraph: brief.payload?.paragraph,
                 failureReason: brief.failureReason,
                 sourceNotes: triaged?.sourceNotes ?? []
             )
@@ -164,11 +187,12 @@ struct HolyInboxPanelView: View {
             let lens = lensText.trimmingCharacters(in: .whitespaces).lowercased()
 
             if let hero = triaged.hero, lensMatches(hero.title, lens) {
-                drawerLabel("Needs you")
+                drawerLabel("Next")
                 HolyBriefThreadRowView(
                     thread: hero,
                     density: .hero,
                     isNewSinceLastLook: triaged.deltaThreadIDs.contains(hero.id),
+                    focusedProjectName: focusedProjectName,
                     onOpen: openAction(for: hero)
                 )
             }
@@ -177,36 +201,24 @@ struct HolyInboxPanelView: View {
                     thread: thread,
                     density: .standard,
                     isNewSinceLastLook: triaged.deltaThreadIDs.contains(thread.id),
+                    focusedProjectName: focusedProjectName,
                     onOpen: openAction(for: thread)
                 )
             }
 
             let overflow = triaged.needsMeOverflow.filter { lensMatches($0.title, lens) }
             if !overflow.isEmpty {
-                Button {
-                    attentionOverflowExpanded.toggle()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 8, weight: .semibold))
-                            .rotationEffect(attentionOverflowExpanded ? .zero : .degrees(-90))
-                            .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                        Text("\(overflow.count) more waiting — older or lower rank")
-                            .font(.system(size: 10))
-                            .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 12)
-                    .frame(height: 24)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+                disclosureLine(
+                    "\(overflow.count) more waiting",
+                    expanded: attentionOverflowExpanded
+                ) { attentionOverflowExpanded.toggle() }
                 if attentionOverflowExpanded {
                     ForEach(overflow, id: \.id) { thread in
                         HolyBriefThreadRowView(
                             thread: thread,
                             density: .compact,
                             isNewSinceLastLook: triaged.deltaThreadIDs.contains(thread.id),
+                            focusedProjectName: focusedProjectName,
                             onOpen: openAction(for: thread)
                         )
                     }
@@ -215,31 +227,56 @@ struct HolyInboxPanelView: View {
 
             let activity = triaged.activity.filter { lensMatches($0.title, lens) }
             if !activity.isEmpty {
-                drawerLabel("Since you last looked")
-                ForEach(activity, id: \.id) { thread in
-                    HolyBriefThreadRowView(
-                        thread: thread,
-                        density: .compact,
-                        isNewSinceLastLook: true,
-                        onOpen: openAction(for: thread)
-                    )
+                disclosureLine(
+                    "\(activity.count) change\(activity.count == 1 ? "" : "s") since your last look",
+                    expanded: activityExpanded
+                ) { activityExpanded.toggle() }
+                if activityExpanded {
+                    ForEach(activity, id: \.id) { thread in
+                        HolyBriefThreadRowView(
+                            thread: thread,
+                            density: .compact,
+                            isNewSinceLastLook: true,
+                            focusedProjectName: focusedProjectName,
+                            onOpen: openAction(for: thread)
+                        )
+                    }
                 }
             }
 
-            ForEach(triaged.suggestionGroups) { group in
-                let matching = group.suggestions.filter {
-                    lensMatches($0.label + " " + $0.command, lens)
-                }
-                if !matching.isEmpty {
-                    suggestionGroupHeader(group, visible: matching.count)
-                    let limit = expandedSuggestionKinds.contains(group.kind)
-                        ? matching.count
-                        : min(matching.count, Self.suggestionPreviewCount)
-                    ForEach(matching.prefix(limit), id: \.id) { suggestion in
-                        HolyBriefSuggestionRowView(
-                            suggestion: suggestion,
-                            workingDirectory: focusedBoardPath
-                        )
+            let totalSuggestions = triaged.suggestionGroups
+                .reduce(0) { $0 + $1.suggestions.count }
+            if totalSuggestions > 0 {
+                disclosureLine(
+                    "Housekeeping \(totalSuggestions)",
+                    expanded: housekeepingExpanded
+                ) { housekeepingExpanded.toggle() }
+                if housekeepingExpanded {
+                    ForEach(triaged.suggestionGroups) { group in
+                        let matching = group.suggestions.filter {
+                            lensMatches($0.label + " " + $0.command, lens)
+                        }
+                        if !matching.isEmpty {
+                            disclosureLine(
+                                HolyBriefTriage.bundleLabel(kind: group.kind, count: matching.count),
+                                expanded: expandedSuggestionKinds.contains(group.kind),
+                                indented: true
+                            ) {
+                                if expandedSuggestionKinds.contains(group.kind) {
+                                    expandedSuggestionKinds.remove(group.kind)
+                                } else {
+                                    expandedSuggestionKinds.insert(group.kind)
+                                }
+                            }
+                            if expandedSuggestionKinds.contains(group.kind) {
+                                ForEach(matching, id: \.id) { suggestion in
+                                    HolyBriefSuggestionRowView(
+                                        suggestion: suggestion,
+                                        workingDirectory: focusedBoardPath
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -257,54 +294,41 @@ struct HolyInboxPanelView: View {
         }
     }
 
-    /// Preview depth for a suggestion group before "show all" expands it:
-    /// enough to act on the top of a category without ceding the panel to it.
-    private static let suggestionPreviewCount = 3
-
-    private func suggestionGroupHeader(
-        _ group: HolyBriefTriage.SuggestionGroup,
-        visible: Int
-    ) -> some View {
-        Button {
-            if expandedSuggestionKinds.contains(group.kind) {
-                expandedSuggestionKinds.remove(group.kind)
-            } else {
-                expandedSuggestionKinds.insert(group.kind)
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Text(group.title)
-                    .font(.system(size: 10, weight: .semibold))
-                    .textCase(.uppercase)
-                    .tracking(0.6)
-                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                Text("\(visible)")
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                Spacer()
-                if visible > Self.suggestionPreviewCount {
-                    Text(expandedSuggestionKinds.contains(group.kind) ? "less" : "all")
-                        .font(.system(size: 9))
-                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                }
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 26)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .padding(.top, 6)
-    }
-
     private func drawerLabel(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 10, weight: .semibold))
+            .font(.system(size: 10, weight: .medium))
             .textCase(.uppercase)
-            .tracking(0.6)
+            .tracking(0.8)
             .foregroundStyle(HolyGhosttyTheme.textSecondary)
             .padding(.horizontal, 12)
             .frame(height: 26, alignment: .leading)
             .padding(.top, 6)
+    }
+
+    /// The panel's recede gesture: one quiet chevron line per closed drawer.
+    private func disclosureLine(
+        _ title: String,
+        expanded: Bool,
+        indented: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .rotationEffect(expanded ? .zero : .degrees(-90))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                Text(title)
+                    .font(.system(size: 11))
+                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                Spacer()
+            }
+            .padding(.leading, indented ? 24 : 12)
+            .padding(.trailing, 12)
+            .frame(height: 24)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func openAction(for thread: HolyBriefThread) -> (() -> Void)? {
@@ -393,7 +417,7 @@ struct HolyInboxPanelView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(HolyGhosttyTheme.textTertiary)
-            TextField("Filter — or mn-id, #PR, a question…", text: $lensText)
+            TextField("Search or ask…", text: $lensText)
                 .textFieldStyle(.plain)
                 .font(.system(size: 10.5))
                 .foregroundStyle(HolyGhosttyTheme.textPrimary)

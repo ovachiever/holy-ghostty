@@ -220,6 +220,58 @@ struct HolyBriefTriageTests {
         #expect(spec.command == nil)
     }
 
+    // MARK: Panel-v2 language (adopted critique, 2026-08-11)
+
+    @Test func stateSentenceSpeaksTheAdoptedTable() {
+        #expect(HolyBriefTriage.stateSentence(
+            hereCount: 0, elsewhereCount: 0, impairedSources: []
+        ) == "Nothing needs you.")
+        #expect(HolyBriefTriage.stateSentence(
+            hereCount: 0, elsewhereCount: 0, impairedSources: ["github"]
+        ) == "Nothing known needs you. GitHub is currently unreadable.")
+        #expect(HolyBriefTriage.stateSentence(
+            hereCount: 2, elsewhereCount: 30, impairedSources: []
+        ) == "2 decisions here. 30 reviews elsewhere.")
+        #expect(HolyBriefTriage.stateSentence(
+            hereCount: 2, elsewhereCount: 0, impairedSources: ["github"]
+        ) == "2 known decisions here. GitHub is currently unreadable.")
+        #expect(HolyBriefTriage.stateSentence(
+            hereCount: 1, elsewhereCount: 1, impairedSources: []
+        ) == "1 decision here. 1 review elsewhere.")
+    }
+
+    @Test func sanitizedTitlesShedTagsAndPrefixesButNeverContent() {
+        #expect(HolyBriefTriage.sanitizedTitle(
+            "[INBOX] Focus-instant manna, per-source refresh"
+        ) == "Focus-instant manna, per-source refresh")
+        #expect(HolyBriefTriage.sanitizedTitle(
+            "[P1][UX][KEYS] ⌘P dead: panel toggle"
+        ) == "⌘P dead: panel toggle")
+        #expect(HolyBriefTriage.sanitizedTitle(
+            "chore(deps): bump the radix-ui group with 19 updates"
+        ) == "bump the radix-ui group with 19 updates")
+        #expect(HolyBriefTriage.sanitizedTitle("plain title") == "plain title")
+        // All-tag titles fall back to the raw original, never to emptiness.
+        #expect(HolyBriefTriage.sanitizedTitle("[ONLY][TAGS]") == "[ONLY][TAGS]")
+    }
+
+    @Test func bundleLabelsSpeakOperatorNotClassifier() {
+        #expect(HolyBriefTriage.bundleLabel(kind: "landed_open", count: 11)
+            == "11 finished tasks ready to close")
+        #expect(HolyBriefTriage.bundleLabel(kind: "dead_claim", count: 1)
+            == "1 abandoned claim ready to release")
+        #expect(HolyBriefTriage.bundleLabel(kind: "blocker_desync", count: 1)
+            == "1 resolved blocker ready to clear")
+        #expect(HolyBriefTriage.bundleLabel(kind: "mystery_kind", count: 2)
+            == "2 mystery_kind items")
+    }
+
+    @Test func scopeSplitsGitHubFromTheFocusedProject() throws {
+        let payload = try #require(HolyBriefPayload.parse(Data(HolyBriefContractTests.fixture.utf8)))
+        #expect(HolyBriefTriage.scope(of: payload.threads[0]) == .everywhere)
+        #expect(HolyBriefTriage.scope(of: payload.threads[1]) == .here)
+    }
+
     // MARK: Remote estates (mn-7fbb07) — the brief runs where the session lives
 
     @Test func localContextInvokesTheLocalBinaryWithTheKey() {

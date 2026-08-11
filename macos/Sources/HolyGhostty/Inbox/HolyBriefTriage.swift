@@ -61,6 +61,110 @@ enum HolyBriefTriage {
         "prompt_pairing": "Prompt pairing",
     ]
 
+    // MARK: Panel-v2 language (adopted critique, 2026-08-11)
+
+    /// Scope in words, never color alone. "Everywhere" = cross-project
+    /// GitHub attention; anything else belongs to the focused project.
+    /// The words Global/Local/Session are banned — they already mean other
+    /// things in a multi-machine terminal.
+    enum Scope: Equatable, Sendable {
+        case everywhere
+        case here
+    }
+
+    static func scope(of thread: HolyBriefThread) -> Scope {
+        thread.kind == "pr" || thread.hasPR ? .everywhere : .here
+    }
+
+    /// Deterministic client-side cleanup of machine titles: leading bracket
+    /// tags and conventional-commit prefixes carry zero decision value on a
+    /// row surface (rule: strip [TAGS], `chore(deps):` and kin; never touch
+    /// the remaining words — noun compression is the engine's job, with the
+    /// original preserved in disclosure).
+    static func sanitizedTitle(_ raw: String) -> String {
+        var title = raw.trimmingCharacters(in: .whitespaces)
+        while title.hasPrefix("["), let close = title.firstIndex(of: "]") {
+            title = String(title[title.index(after: close)...])
+                .trimmingCharacters(in: .whitespaces)
+        }
+        let commitPrefix = #"^(feat|fix|chore|docs|refactor|perf|test|build|ci|style|release|merge|debug)(\([^)]*\))?!?:\s*"#
+        if let range = title.range(of: commitPrefix, options: .regularExpression) {
+            title = String(title[range.upperBound...])
+        }
+        let cleaned = title.trimmingCharacters(in: .whitespaces)
+        // A title that was ALL tags falls back to the raw original —
+        // an empty row surface would hide work.
+        return cleaned.isEmpty ? raw : cleaned
+    }
+
+    /// The one state sentence, mechanically honest per the adopted table:
+    /// healthy+empty, degraded+empty, healthy+attention, degraded+attention
+    /// each get their own truthful shape.
+    static func stateSentence(
+        hereCount: Int,
+        elsewhereCount: Int,
+        impairedSources: [String]
+    ) -> String {
+        let impaired = impairedSources.map(displayName(forSource:))
+        let degradedSuffix: String
+        switch impaired.count {
+        case 0: degradedSuffix = ""
+        case 1: degradedSuffix = " \(impaired[0]) is currently unreadable."
+        default:
+            degradedSuffix = " \(impaired.joined(separator: " and ")) are currently unreadable."
+        }
+
+        if hereCount == 0, elsewhereCount == 0 {
+            return impaired.isEmpty
+                ? "Nothing needs you."
+                : "Nothing known needs you." + degradedSuffix
+        }
+
+        var parts: [String] = []
+        if hereCount > 0 {
+            let known = impaired.isEmpty ? "" : "known "
+            parts.append("\(hereCount) \(known)decision\(hereCount == 1 ? "" : "s") here.")
+        }
+        if elsewhereCount > 0 {
+            parts.append("\(elsewhereCount) review\(elsewhereCount == 1 ? "" : "s") elsewhere.")
+        }
+        return parts.joined(separator: " ") + degradedSuffix
+    }
+
+    private static func displayName(forSource source: String) -> String {
+        switch source {
+        case "github": return "GitHub"
+        case "manna": return "The board"
+        case "coord": return "Coordination"
+        case "sessions": return "The session index"
+        case "reconcile": return "Board reconcile"
+        case "git": return "Git"
+        default: return source
+        }
+    }
+
+    /// Housekeeping bundles speak operator, not classifier: "11 finished
+    /// tasks ready to close", never "LANDED_OPEN".
+    static func bundleLabel(kind: String, count: Int) -> String {
+        let plural = count == 1 ? "" : "s"
+        switch kind {
+        case "landed_open":
+            return "\(count) finished task\(plural) ready to close"
+        case "dead_claim":
+            return "\(count) abandoned claim\(plural) ready to release"
+        case "blocker_desync":
+            return "\(count) resolved blocker\(plural) ready to clear"
+        case "stale_dream":
+            return "\(count) parked dream\(plural) awaiting a decision"
+        case "doc_reference":
+            return "\(count) dangling reference\(plural) to tidy"
+        case "prompt_pairing":
+            return "\(count) prompt link\(plural) to repair"
+        default:
+            return "\(count) \(kind) item\(plural)"
+        }
+    }
+
     static func triage(_ payload: HolyBriefPayload, now: Date = .now) -> Triaged {
         let ranked = payload.threads.sorted { $0.rank.score > $1.rank.score }
         let attention = ranked.filter { $0.needsMe && !$0.snoozed }
