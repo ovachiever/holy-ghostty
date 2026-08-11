@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import SwiftUI
 import GhosttyKit
 
@@ -10,8 +11,22 @@ private enum HolyWorkspaceKeyCode {
 private final class HolyWorkspaceWindow: NSWindow {
     weak var holyWorkspaceController: HolyWorkspaceWindowController?
 
+    /// mn-7afa94: ⌘P "has never worked" while its handler exists and is
+    /// wired. Log every ⌘-key that reaches this override so a single press
+    /// answers whether the event arrives at all and who consumed it.
+    static let keyDebugLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.mitchellh.ghostty",
+        category: "HolyKeyDebug"
+    )
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if holyWorkspaceController?.handleWorkspaceKeyEquivalent(event) == true {
+        let handled = holyWorkspaceController?.handleWorkspaceKeyEquivalent(event) == true
+        if event.modifierFlags.contains(.command) {
+            Self.keyDebugLogger.error(
+                "performKeyEquivalent key=\(event.charactersIgnoringModifiers ?? "?", privacy: .public) flags=\(event.modifierFlags.rawValue) handledByWorkspace=\(handled) controllerWired=\(self.holyWorkspaceController != nil)"
+            )
+        }
+        if handled {
             return true
         }
 

@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Darwin
 import Foundation
+import OSLog
 import SwiftUI
 import UserNotifications
 
@@ -56,6 +57,12 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var draftOwnershipPreview: HolySessionOwnership?
     @Published private(set) var draftLaunchGuardrailRefreshing: Bool = false
     @Published private(set) var attentionClock: Date = .now
+    /// mn-81331d: one contradiction log per session per launch.
+    private var attentionContradictionLoggedSessionIDs: Set<UUID> = []
+    static let attentionDebugLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.mitchellh.ghostty",
+        category: "HolyAttentionDebug"
+    )
     @Published private(set) var isConverging = false
     private var lastConvergeStartedAt: Date?
     /// Per-host wall-clock cap on the converge discovery sweep (spec's 5s/host).
@@ -2585,6 +2592,18 @@ final class HolyWorkspaceStore: ObservableObject {
             lastActivityAt: lastActivityAt,
             now: attentionClock
         ))
+
+        // mn-81331d instrumentation: a working envelope that does not render
+        // a working orb is the exact contradiction Erik reported, with every
+        // layer outside the app already exonerated. Log the policy inputs
+        // once per session per launch so the guilty one names itself.
+        if envelope?.lifecycle == .working, kind != .working,
+           attentionContradictionLoggedSessionIDs.insert(session.id).inserted {
+            let envelopeAge = eventOccurredAt.map { attentionClock.timeIntervalSince($0) } ?? -1
+            Self.attentionDebugLogger.error(
+                "attention contradiction \(session.id, privacy: .public) [\(session.record.title, privacy: .public)]: kind=\(String(describing: kind), privacy: .public) envelopeAge=\(Int(envelopeAge))s processExited=\(session.surfaceView.processProvablyExited) producerAlive=\(String(describing: self.producerProcessAliveBySessionID[session.id]), privacy: .public) producerOutAge=\(String(describing: self.producerLastOutputAtBySessionID[session.id].map { Int(self.attentionClock.timeIntervalSince($0)) }), privacy: .public)"
+            )
+        }
 
         switch kind {
         case .working:
