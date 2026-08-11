@@ -34,7 +34,7 @@ drift cost three diagnosis rounds — version the contract explicitly).
   git log, board ledgers, zpc lessons); every claim carries a receipt id.
 - `brief holy --json` — composite contract for the Holy panel: threads,
   delta-since-timestamp, suggestions, paragraph. Caller passes context:
-  `--focused-repo <slug>` `--focused-board <path>` `--since <iso8601>`.
+  `--focused-repo <repo root PATH>` `--focused-board <path>` `--since <iso8601>` — PATHS, not slugs (engine resolves relative; verified 2026-08-11).
 
 ## The honesty covenant (non-negotiable)
 
@@ -129,3 +129,20 @@ payload (`"contract": 1`) so drift degrades honestly.
   the bar loads actions, the human fires them).
 - Widening manna scope beyond the focused project (ratified).
 - Collision alerts in any form (retired 2026-08-10).
+
+## Remote estates (mn-7fbb07, added 2026-08-11)
+
+The estate is host-local by nature: boards, coord, the sessions index, and
+repos live where the tmux session lives. So the brief EXECUTES on the
+focused session's host, resolved from the session's existing transport
+descriptor — local transport runs the local agent-do; ssh transport wraps
+the identical arguments in the same BatchMode SSH rail the remote
+discovery service rides, with one `zsh -lc` so the REMOTE login shell
+resolves agent-do and its own voice key. Generalization rules (public
+repos): no hardcoded hosts; credentials never cross the wire (each host
+owns its secrets); a host without agent-do degrades honestly, naming the
+host; path context is host-local by construction (it derives from the
+remote session's discovered cwd). Documented requirement: install
+agent-do on any host whose sessions you want briefed. Suggestion rows for
+a remote estate spawn their shells on that host via the automation URL's
+existing host/transport params (follow-up slice if not yet wired).

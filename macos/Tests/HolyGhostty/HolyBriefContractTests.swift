@@ -220,6 +220,65 @@ struct HolyBriefTriageTests {
         #expect(spec.command == nil)
     }
 
+    // MARK: Remote estates (mn-7fbb07) — the brief runs where the session lives
+
+    @Test func localContextInvokesTheLocalBinaryWithTheKey() {
+        let invocation = HolyBriefFeed.invocation(
+            for: .init(
+                focusedRepoPath: "/Users/u/repo",
+                focusedBoardPath: "/Users/u/repo",
+                remoteHost: nil
+            ),
+            localBinaryPath: "/opt/agent-do"
+        )
+        #expect(invocation.executablePath == "/opt/agent-do")
+        #expect(invocation.arguments == [
+            "brief", "holy", "--json",
+            "--focused-repo", "/Users/u/repo",
+            "--focused-board", "/Users/u/repo",
+        ])
+        #expect(invocation.usesLocalKey)
+    }
+
+    @Test func remoteContextRidesSSHAndNeverTheLocalKey() {
+        let invocation = HolyBriefFeed.invocation(
+            for: .init(
+                focusedRepoPath: "/Users/erik/Custom-Coding/holy-ghostty",
+                focusedBoardPath: "/Users/erik/Custom-Coding/holy-ghostty",
+                remoteHost: "studio.tail-net.ts.net"
+            ),
+            localBinaryPath: ""
+        )
+        #expect(invocation.executablePath == "/usr/bin/ssh")
+        // BatchMode so a missing key can never hang the panel on a prompt.
+        #expect(invocation.arguments.contains("BatchMode=yes"))
+        #expect(invocation.arguments.contains("studio.tail-net.ts.net"))
+        // The remote login shell resolves agent-do; the command is one
+        // quoted zsh -lc payload.
+        let payload = invocation.arguments.last ?? ""
+        #expect(payload.hasPrefix("zsh -lc "))
+        #expect(payload.contains("agent-do"))
+        #expect(payload.contains("brief"))
+        // The local voice key must never cross the wire.
+        #expect(!invocation.usesLocalKey)
+    }
+
+    @Test func remotePathsWithSpacesSurviveDoubleQuoting() {
+        let invocation = HolyBriefFeed.invocation(
+            for: .init(
+                focusedRepoPath: "/Users/u/My Repos/holy",
+                focusedBoardPath: nil,
+                remoteHost: "host"
+            ),
+            localBinaryPath: ""
+        )
+        // The path is quoted inside the remote command, which is itself
+        // quoted inside zsh -lc — both layers must hold.
+        let payload = invocation.arguments.last ?? ""
+        #expect(payload.contains("My Repos"))
+        #expect(!invocation.arguments.contains("/Users/u/My Repos/holy"))
+    }
+
     // MARK: Paragraph citations
 
     @Test func citationRunsSplitFromProse() {

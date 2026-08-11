@@ -35,9 +35,61 @@ final class HolyBriefFeed: ObservableObject {
     /// PATHS: the engine resolves --focused-repo as a filesystem path (a
     /// slug like "org/repo" gets treated as relative and dies — verified
     /// live 2026-08-11, every source degraded from the app's "/" cwd).
+    /// For a remote session the paths are HOST-LOCAL by construction (they
+    /// derive from the session's discovered cwd on that host).
     struct Context: Equatable, Sendable {
         var focusedRepoPath: String?
         var focusedBoardPath: String?
+        /// SSH destination when the focused session's transport is remote:
+        /// the estate (board, coord, sessions index, repos) lives where the
+        /// session lives, so the brief executes THERE (mn-7fbb07). Nil for
+        /// local sessions.
+        var remoteHost: String?
+    }
+
+    /// The exact invocation for a context — pure, so the local/remote split
+    /// is testable without a subprocess. Remote rides the same SSH shape as
+    /// HolyRemoteTmuxDiscoveryService: BatchMode (never an interactive
+    /// prompt), tight connect timeout, one `zsh -lc` so the REMOTE login
+    /// shell resolves agent-do and its own ANTHROPIC_API_KEY. Credentials
+    /// are never forwarded — each host owns its secrets.
+    nonisolated static func invocation(
+        for context: Context,
+        localBinaryPath: String
+    ) -> (executablePath: String, arguments: [String], usesLocalKey: Bool) {
+        var briefArguments = ["brief", "holy", "--json"]
+        if let repo = context.focusedRepoPath {
+            briefArguments += ["--focused-repo", repo]
+        }
+        if let board = context.focusedBoardPath {
+            briefArguments += ["--focused-board", board]
+        }
+
+        guard let remoteHost = context.remoteHost else {
+            return (localBinaryPath, briefArguments, usesLocalKey: true)
+        }
+
+        let remoteCommand = (["agent-do"] + briefArguments.dropFirst(0))
+            .map(posixQuote)
+            .joined(separator: " ")
+        return (
+            "/usr/bin/ssh",
+            [
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                "-o", "ServerAliveInterval=5",
+                "-o", "ServerAliveCountMax=1",
+                remoteHost,
+                "zsh -lc \(posixQuote(remoteCommand))",
+            ],
+            usesLocalKey: false
+        )
+    }
+
+    private nonisolated static func posixQuote(_ value: String) -> String {
+        value.isEmpty
+            ? "''"
+            : "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
 
     private let contextProvider: @Sendable () async -> Context
@@ -79,39 +131,47 @@ final class HolyBriefFeed: ObservableObject {
 
     private func runOnce() async {
         let context = await contextProvider()
-        guard let binaryPath = await resolvedBinaryPath() else {
-            applyFailure("The \(HolyGitHubInboxSource.binaryName) CLI was not found on PATH.")
-            return
+
+        // A remote brief needs no local agent-do; the remote login shell
+        // resolves its own. Only the local path needs the binary probe.
+        var localBinaryPath = ""
+        if context.remoteHost == nil {
+            guard let resolved = await resolvedBinaryPath() else {
+                applyFailure("The \(HolyGitHubInboxSource.binaryName) CLI was not found on PATH.")
+                return
+            }
+            localBinaryPath = resolved
         }
 
-        var arguments = ["brief", "holy", "--json"]
-        if let repo = context.focusedRepoPath {
-            arguments += ["--focused-repo", repo]
-        }
-        if let board = context.focusedBoardPath {
-            arguments += ["--focused-board", board]
-        }
+        let invocation = Self.invocation(for: context, localBinaryPath: localBinaryPath)
 
         // The voice key overlays HERE and nowhere else — the brief is the
-        // one subprocess that needs it (security review 2026-08-11).
+        // one subprocess that needs it (security review 2026-08-11). Local
+        // runs only: a remote host resolves its own key from its own shell
+        // or creds store; forwarding a local secret over SSH would leak it
+        // to a machine that never asked for it.
         var environment = await HolyGitHubInboxSource.sharedSubprocessEnvironment.value
-        if let voiceKey = await HolyGitHubInboxSource.anthropicKeyFromLoginShell.value {
+        if invocation.usesLocalKey,
+           let voiceKey = await HolyGitHubInboxSource.anthropicKeyFromLoginShell.value {
             environment["ANTHROPIC_API_KEY"] = voiceKey
         }
 
         let result = await HolyRestoreProcessRunner.run(
-            executablePath: binaryPath,
-            arguments: arguments,
+            executablePath: invocation.executablePath,
+            arguments: invocation.arguments,
             timeout: Self.commandTimeout,
             environment: environment,
-            currentDirectoryPath: context.focusedRepoPath
-                ?? FileManager.default.homeDirectoryForCurrentUser.path
+            currentDirectoryPath: context.remoteHost == nil
+                ? (context.focusedRepoPath
+                    ?? FileManager.default.homeDirectoryForCurrentUser.path)
+                : nil
         )
 
         switch result {
         case let .failure(reason):
-            Self.logger.error("brief holy failed: \(reason, privacy: .public)")
-            applyFailure(reason)
+            let located = context.remoteHost.map { "via \($0): \(reason)" } ?? reason
+            Self.logger.error("brief holy failed \(located, privacy: .public)")
+            applyFailure(located)
         case let .success(output):
             guard output.exitCode == 0 else {
                 let stderr = output.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -122,8 +182,9 @@ final class HolyBriefFeed: ObservableObject {
                     .components(separatedBy: .newlines)
                     .map { $0.trimmingCharacters(in: .whitespaces) }
                     .last { !$0.isEmpty }
+                let hostPrefix = context.remoteHost.map { "via \($0) " } ?? ""
                 applyFailure(
-                    "brief holy exited with status \(output.exitCode)."
+                    "brief holy \(hostPrefix)exited with status \(output.exitCode)."
                         + (lastLine.map { " \($0)" } ?? "")
                 )
                 return

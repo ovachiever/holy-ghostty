@@ -175,10 +175,21 @@ final class HolyWorkspaceStore: ObservableObject {
     /// Library beneath it (mn-5dc58b).
     private(set) lazy var briefFeed: HolyBriefFeed = {
         HolyBriefFeed(contextProvider: { [weak self] in
-            let root = await MainActor.run {
-                HolyMannaInboxSource.repositoryRoots(focused: self?.selectedSession).first
+            await MainActor.run {
+                let session = self?.selectedSession
+                let root = HolyMannaInboxSource.repositoryRoots(focused: session).first
+                // The estate lives where the session lives: a remote
+                // session's brief runs on its host over SSH (mn-7fbb07).
+                let transport = session?.record.launchSpec.transport.normalized
+                let remoteHost = (transport?.isRemote == true)
+                    ? transport?.sshDestination?.nilIfBlank
+                    : nil
+                return .init(
+                    focusedRepoPath: root,
+                    focusedBoardPath: root,
+                    remoteHost: remoteHost
+                )
             }
-            return .init(focusedRepoPath: root, focusedBoardPath: root)
         })
     }()
     private let agentStateMonitor = HolyTmuxAgentStateMonitor()
