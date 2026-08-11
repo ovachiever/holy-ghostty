@@ -493,6 +493,17 @@ extension HolyTmuxAgentStateMonitor {
                 continue
             }
 
+            // The wire's second field is the source runtime ("v1|claude|…").
+            // Cheap peek without a full parse: the producer-evidence rule
+            // needs only the runtime, and a malformed wire yields nil, which
+            // downgrades evidence to unknown — fail-closed as everywhere.
+            func envelopeSource(fromRawWireValue raw: String?) -> String? {
+                guard let raw else { return nil }
+                let fields = raw.split(separator: "|", omittingEmptySubsequences: false)
+                guard fields.count > 1 else { return nil }
+                return String(fields[1])
+            }
+
             // Process evidence is meaningful only when exactly one pane owns
             // the latest-state register; ambiguity fails closed to unknown.
             let producerPanes = paneValues.filter { $0.rawWireValue != nil }
@@ -502,7 +513,22 @@ extension HolyTmuxAgentStateMonitor {
                 if producer.isDead {
                     producerHasLiveProcess = false
                 } else if let command = producer.currentCommand {
-                    producerHasLiveProcess = !shellCommandNames.contains(command.lowercased())
+                    if shellCommandNames.contains(command.lowercased()) {
+                        // A visible shell means DEAD only for runtimes that
+                        // never put one in the foreground. Claude runs its
+                        // tool calls AS bash/zsh children, so a hard-working
+                        // Claude session samples as "shell" mid-tool and was
+                        // being declared dead — the exact mn-81331d
+                        // contradiction (working envelope, producerAlive=
+                        // false, output 0s old). Unknown neither extends nor
+                        // invalidates; the envelope lease carries the claim.
+                        producerHasLiveProcess =
+                            envelopeSource(fromRawWireValue: producer.rawWireValue) == "claude"
+                                ? nil
+                                : false
+                    } else {
+                        producerHasLiveProcess = true
+                    }
                 } else {
                     producerHasLiveProcess = nil
                 }

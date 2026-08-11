@@ -83,6 +83,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         super.init(window: window)
         window.holyWorkspaceController = self
         window.delegate = self
+        Self.retain(self)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(ghosttyDidNewSplit(_:)),
@@ -290,6 +291,10 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         Ghostty.moveFocus(to: selected.surfaceView)
     }
 
+    func windowWillClose(_ notification: Notification) {
+        Self.release(self)
+    }
+
     func findSurface(id: UUID) -> Ghostty.SurfaceView? {
         workspaceStore.sessions.first(where: { $0.id == id })?.surfaceView
     }
@@ -318,6 +323,22 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         default:
             return
         }
+    }
+
+    /// NSWindow.windowController is an ASSIGN property and nothing else held
+    /// these controllers, so every instance deallocated moments after launch
+    /// — silently killing the workspace key family (⌘P, ⌘W, ⌘1-9), both
+    /// View-menu entries, and every `.preferred` lookup. Found via the
+    /// mn-7afa94 instrumentation: `controllerWired=false` on every ⌘-key.
+    /// The registry holds them for their window's lifetime.
+    private static var strongRegistry: [HolyWorkspaceWindowController] = []
+
+    static func retain(_ controller: HolyWorkspaceWindowController) {
+        strongRegistry.append(controller)
+    }
+
+    static func release(_ controller: HolyWorkspaceWindowController) {
+        strongRegistry.removeAll { $0 === controller }
     }
 
     static var all: [HolyWorkspaceWindowController] {
