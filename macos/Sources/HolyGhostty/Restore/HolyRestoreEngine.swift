@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 /// tmux side effects the engine needs, behind a seam so the orchestration
 /// logic is testable without a server. The production implementation defers
@@ -97,6 +98,11 @@ struct HolyRestoreRow: Identifiable, Equatable {
 /// session file can only lie in both directions.
 @MainActor
 final class HolyRestoreEngine: ObservableObject {
+    /// Every silent decision — a skipped row, a guard rejection, a resolver
+    /// verdict — leaves a line here, because "clicking Restore does nothing"
+    /// must never again be undiagnosable from the outside.
+    static let logger = Logger(subsystem: "org.holyghostty.app", category: "HolyRestoreEngine")
+
     static let maxConcurrentRestores = 4
     /// Fresh batches at or under this size open fully selected — one glance,
     /// one click. Bigger batches open with nothing selected, so no stressed
@@ -324,6 +330,9 @@ final class HolyRestoreEngine: ObservableObject {
     func buildPlan() {
         lastRestoreSkippedCount = 0
         let batch = adapter.restoreCandidateBatch
+        Self.logger.error(
+            "plan: fresh=\(batch.fresh.count) parents=\(batch.freshParentCount) older=\(batch.older.count)"
+        )
         let preselectFresh = batch.freshParentCount <= Self.freshPreselectionLimit
         rows = batch.fresh.map {
             let isHelper = HolyRestoreProvenance.isHelperSessionTitle($0.title)
@@ -372,9 +381,20 @@ final class HolyRestoreEngine: ObservableObject {
     /// resolve-batch subprocess call and assigns candidates to rows
     /// globally, each conversation id spent at most once.
     func runPreflight() async {
-        guard !isPreflighting else { return }
+        guard !isPreflighting else {
+            Self.logger.error("preflight: REJECTED — a previous preflight is still in flight")
+            return
+        }
         isPreflighting = true
-        defer { isPreflighting = false }
+        Self.logger.error("preflight: start rows=\(self.rows.count)")
+        defer {
+            isPreflighting = false
+            let ready = rows.filter { $0.phase == .ready }.count
+            let actionable = rows.filter { $0.state.isActionable }.count
+            Self.logger.error(
+                "preflight: end ready=\(ready) actionable=\(actionable) of \(self.rows.count)"
+            )
+        }
 
         pendingResolutions.removeAll()
         let conflictReasons = planConflictReasons()
@@ -507,6 +527,9 @@ final class HolyRestoreEngine: ObservableObject {
 
         switch outcome {
         case let .resolverUnavailable(reason):
+            Self.logger.error(
+                "preflight: resolver unavailable for \(pending.count) rows: \(reason, privacy: .public)"
+            )
             for item in pending {
                 finalizePendingRow(item, resolveOutcome: .resolverUnavailable(reason))
             }
@@ -647,11 +670,17 @@ final class HolyRestoreEngine: ObservableObject {
     /// everything else is adopted by converge or by the user when they are
     /// ready.
     func restoreAll() async {
+        Self.logger.error(
+            "restoreAll: parents=\(self.freshParentRows.count) preflighting=\(self.isPreflighting) restoring=\(self.isRestoring)"
+        )
         await restore(rowIDs: freshParentRows.map(\.id), attach: false)
     }
 
     /// Restores the selected rows and attaches each one as it verifies.
     func restoreSelected() async {
+        Self.logger.error(
+            "restoreSelected: selected=\(self.rows.filter(\.isSelected).count) preflighting=\(self.isPreflighting) restoring=\(self.isRestoring)"
+        )
         await restore(rowIDs: rows.filter(\.isSelected).map(\.id), attach: true)
     }
 
@@ -741,7 +770,10 @@ final class HolyRestoreEngine: ObservableObject {
     @Published private(set) var lastRestoreSkippedCount = 0
 
     private func restore(rowIDs: [UUID], attach: Bool) async {
-        guard !isRestoring else { return }
+        guard !isRestoring else {
+            Self.logger.error("restore: REJECTED — a previous restore pass is still running")
+            return
+        }
         isRestoring = true
         defer { isRestoring = false }
 
@@ -760,6 +792,9 @@ final class HolyRestoreEngine: ObservableObject {
 
         switch row.state {
         case .ambiguous, .conflict, .blocked, .wrongHost:
+            Self.logger.error(
+                "restore: skipped '\(row.archived.title, privacy: .public)' state=\(String(describing: row.state), privacy: .public)"
+            )
             return
         case .alreadyRestored:
             adopt(rowID: rowID, attach: attach)
@@ -858,6 +893,9 @@ final class HolyRestoreEngine: ObservableObject {
         }
 
         if let createFailure = await tmux.createDetached(for: spec) {
+            Self.logger.error(
+                "restore: createDetached failed for \(identity.sessionName, privacy: .public): \(createFailure, privacy: .public)"
+            )
             updateRow(rowID) { $0.phase = .failed(createFailure) }
             return false
         }
