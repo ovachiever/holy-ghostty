@@ -322,6 +322,7 @@ final class HolyRestoreEngine: ObservableObject {
     /// about: it exists so nobody opens this sheet facing
     /// "Restore Selected (54)", and helpers contribute zero to that number.
     func buildPlan() {
+        lastRestoreSkippedCount = 0
         let batch = adapter.restoreCandidateBatch
         let preselectFresh = batch.freshParentCount <= Self.freshPreselectionLimit
         rows = batch.fresh.map {
@@ -734,10 +735,20 @@ final class HolyRestoreEngine: ObservableObject {
         assertUniqueExactAssignments()
     }
 
+    /// Rows a restore pass skipped because they were not actionable
+    /// (blocked, ambiguous, conflicted, wrong host). Without this count a
+    /// sheet full of blocked rows makes the restore buttons silent no-ops.
+    @Published private(set) var lastRestoreSkippedCount = 0
+
     private func restore(rowIDs: [UUID], attach: Bool) async {
         guard !isRestoring else { return }
         isRestoring = true
         defer { isRestoring = false }
+
+        lastRestoreSkippedCount = rowIDs.reduce(into: 0) { count, rowID in
+            guard let row = rows.first(where: { $0.id == rowID }) else { return }
+            if !row.state.isActionable { count += 1 }
+        }
 
         await runBounded(rowIDs: rowIDs) { [weak self] rowID in
             await self?.restoreOne(rowID: rowID, attach: attach)

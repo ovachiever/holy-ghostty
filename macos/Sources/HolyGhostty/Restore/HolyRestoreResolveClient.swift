@@ -260,10 +260,15 @@ struct HolyAgentSessionsResolveClient: HolyRestoreResolving {
     /// lookups; this ceiling is generous headroom, not reindex budget.
     static let commandTimeout: TimeInterval = 90
     /// One batch call covers the whole sheet including the CLI's own scoped
-    /// reindex; the sheet must reach an actionable state in seconds, so a
-    /// batch that cannot finish inside this window is declared broken and
-    /// every pending row degrades to a retryable blocked state.
-    static let batchTimeout: TimeInterval = 30
+    /// reindex, and that reindex is the dominant cost: measured live
+    /// 2026-08-12 with the sheet's exact 12-request payload, a cold batch
+    /// took 48.1s wall (codex/opencode requests walk ~74k OpenCode dirs)
+    /// and a warm rerun 0.89s. The ceiling is ~3x the measured cold cost
+    /// because the directory walk only grows; a batch that cannot finish
+    /// inside it is declared broken and every pending row degrades to a
+    /// retryable blocked state. Rows already verified are never held
+    /// hostage — the sheet's buttons stay live throughout.
+    static let batchTimeout: TimeInterval = 150
 
     private let binaryPathOverride: String?
 

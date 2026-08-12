@@ -501,6 +501,12 @@ struct HolyRestoreEngineTests {
 
         await engine.restoreAll()
         #expect(tmux.createdSpecs.isEmpty)
+        // The skip must be spoken, not silent: a sheet of blocked rows once
+        // made the restore buttons do nothing with no feedback at all.
+        #expect(engine.lastRestoreSkippedCount == 1)
+
+        engine.buildPlan()
+        #expect(engine.lastRestoreSkippedCount == 0)
     }
 
     @Test func perRequestResolverErrorBlocksOnlyItsOwnRow() async throws {

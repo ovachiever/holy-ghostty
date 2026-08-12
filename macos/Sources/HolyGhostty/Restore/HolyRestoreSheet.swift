@@ -458,6 +458,11 @@ struct HolyRestoreSheet: View {
         var parts: [String] = []
         if restored > 0 { parts.append("\(restored) restored") }
         if failed > 0 { parts.append("\(failed) failed — retry available") }
+        if engine.lastRestoreSkippedCount > 0 {
+            parts.append(
+                "\(engine.lastRestoreSkippedCount) skipped — not restorable until their checks pass"
+            )
+        }
         if parts.isEmpty {
             return "Selected sessions attach; Restore All recreates them headless."
         }
