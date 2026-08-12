@@ -216,6 +216,7 @@ struct HolyRestoreEngineTests {
         workingDirectory: String? = "/tmp/lane-a",
         command: String? = "claude",
         sessionName: String? = "holy-lane-claude-11111111",
+        createIfMissing: Bool = true,
         lastActivityAt: Date = Date(timeIntervalSince1970: TimeInterval(lastActivity))
     ) -> HolyArchivedSession {
         var spec = HolySessionLaunchSpec.interactiveTmuxShell(title: title)
@@ -223,7 +224,7 @@ struct HolyRestoreEngineTests {
         spec.command = command
         spec.workingDirectory = workingDirectory
         spec.initialInput = "stale initial input"
-        spec.tmux = .init(socketName: "holy", sessionName: sessionName, createIfMissing: true)
+        spec.tmux = .init(socketName: "holy", sessionName: sessionName, createIfMissing: createIfMissing)
 
         return .init(
             sourceSessionID: UUID(),
@@ -624,6 +625,27 @@ struct HolyRestoreEngineTests {
         #expect(adapter.attachedArchiveIDs.isEmpty)
         let persisted = adapter.persistedSpecsByArchiveID[(try #require(engine.rows.first)).id]?.last
         #expect(persisted?.command == "'claude' '--resume' 'aaa-111'")
+    }
+
+    @Test func adoptedAttachOnlyArchiveStillPlansACreateSpec() async throws {
+        // Adoption stamps createIfMissing false onto every discovered
+        // session's spec, so a cold boot full of adopted lanes archives
+        // nothing but attach-only identities. Restore's plan must flip them
+        // to create specs — the create guard rightly refuses attach-only —
+        // or an entire sheet fails with "no complete local tmux identity".
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]])
+        let (engine, _, tmux) = makeEngine(
+            archives: [archived(createIfMissing: false)],
+            resolver: resolver
+        )
+
+        engine.buildPlan()
+        await engine.runPreflight()
+        await engine.restoreAll()
+
+        #expect(tmux.createdSpecs.count == 1)
+        #expect(tmux.createdSpecs[0].tmux?.createIfMissing == true)
+        #expect((try #require(engine.rows.first)).phase == .restored(attached: false))
     }
 
     @Test func restoreNeverReResolvesAfterLaunching() async throws {

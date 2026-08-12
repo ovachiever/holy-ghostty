@@ -355,6 +355,12 @@ final class HolyRestoreEngine: ObservableObject {
         if planned.tmux == nil {
             planned.tmux = .holyManagedDefault
         }
+        // Restore exists because the session is dead, so the plan is always
+        // a CREATE spec. Adopted archives carry attach-only identities
+        // (createIfMissing false) that the create guard rightly refuses —
+        // an entire sheet of adopted rows once failed on it. Adoption
+        // re-normalizes to attach-only after the create (see adopt()).
+        planned.tmux?.createIfMissing = true
         if planned.tmux?.normalized.sessionName == nil {
             planned = HolyTmuxCommandBuilder.realizedLaunchSpec(planned)
             adapter.persistPlannedLaunchSpec(archiveID: archived.id, launchSpec: planned)
