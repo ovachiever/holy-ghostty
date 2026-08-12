@@ -46,11 +46,7 @@ struct HolyWorkspaceRightPanelHost: View {
     var body: some View {
         switch store.rightPanelSelection {
         case .inbox:
-            HolyInboxPanelView(
-                store: store,
-                engine: store.inboxEngine,
-                brief: store.briefFeed
-            )
+            HolyInboxPanelView(store: store, engine: store.inboxEngine)
         case nil:
             EmptyView()
         }
@@ -65,31 +61,33 @@ struct HolyWorkspaceRightPanelHost: View {
 struct HolyInboxPanelView: View {
     @ObservedObject var store: HolyWorkspaceStore
     @ObservedObject var engine: HolyInboxEngine
-    @ObservedObject var brief: HolyBriefFeed
 
     /// User overrides of per-section collapse; unset sections follow their
     /// snapshot default.
     @State private var expandedOverrides: [String: Bool] = [:]
     /// Expanded digest rows (bot PRs per repo).
     @State private var expandedDigestRowIDs: Set<String> = []
-    /// The Library drawer: everything browsable, collapsed by default so
-    /// attention is the panel's resting state.
-    @State private var libraryExpanded = false
-    /// Suggestion groups the user opened past their preview rows.
-    @State private var expandedSuggestionKinds: Set<String> = []
-    /// The attention overflow ("N more waiting") opened by hand.
-    @State private var attentionOverflowExpanded = false
-    /// The change-log and housekeeping disclosures; the resting panel keeps
-    /// them closed so it never scrolls.
-    @State private var activityExpanded = false
-    @State private var housekeepingExpanded = false
     /// The lens. Text filters every rendered row; Enter routes mn-ids to the
     /// board, #N to the focused repo's PR, prose to `brief ask`.
     @State private var lensText = ""
 
+    /// Erik's spec, 2026-08-12, replacing the brief-instrument experiment:
+    /// the default view is THIS PROJECT (its GitHub attention + its manna +
+    /// alerts); one tab away is ALL GITHUB (every PR needing him anywhere).
+    enum Tab: String, CaseIterable {
+        case project
+        case githubAll
+    }
+
+    @State private var tab: Tab = .project
+    /// The focused session's GitHub slug, resolved async per selection.
+    @State private var focusedSlug: String?
+
     var body: some View {
         VStack(spacing: 0) {
             header
+
+            tabPicker
 
             lensField
 
@@ -99,9 +97,12 @@ struct HolyInboxPanelView: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    briefBlock
-                    needsMeDrawer
-                    libraryDrawer
+                    switch tab {
+                    case .project:
+                        projectSections
+                    case .githubAll:
+                        globalGitHubSections
+                    }
                 }
                 .padding(.bottom, 8)
             }
@@ -111,17 +112,127 @@ struct HolyInboxPanelView: View {
         }
         .frame(maxHeight: .infinity)
         .background(HolyGhosttyTheme.bgElevated)
-        .onAppear {
-            engine.setPanelVisible(true)
-            brief.requestRefresh()
-        }
+        .onAppear { engine.setPanelVisible(true) }
         .onDisappear { engine.setPanelVisible(false) }
+        .task(id: store.selectedSessionID) {
+            focusedSlug = await store.focusedRepoSlug()
+        }
     }
 
-    // MARK: Brief (answer line + attention)
+    private var tabPicker: some View {
+        HStack(spacing: 2) {
+            tabButton(.project, title: focusedProjectName ?? "This project")
+            tabButton(.githubAll, title: "All GitHub")
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+    }
 
-    private var triaged: HolyBriefTriage.Triaged? {
-        brief.payload.map { HolyBriefTriage.triage($0, now: .now) }
+    private func tabButton(_ target: Tab, title: String) -> some View {
+        Button {
+            tab = target
+        } label: {
+            Text(title)
+                .font(.system(size: 10.5, weight: tab == target ? .semibold : .regular))
+                .foregroundStyle(tab == target
+                    ? HolyGhosttyTheme.textPrimary
+                    : HolyGhosttyTheme.textSecondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(tab == target ? HolyGhosttyTheme.bg : Color.clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: This project
+
+    /// A gh row belongs to the focused repo when its subtitle starts with
+    /// the slug followed by a boundary ("org/repo#7 · author" or the digest
+    /// row's bare "org/repo") — a bare prefix match would also claim
+    /// "org/repo-sibling".
+    private func rowBelongsToFocusedRepo(_ row: HolyInboxRow) -> Bool {
+        guard let slug = focusedSlug, let subtitle = row.subtitle else { return false }
+        if subtitle == slug { return true }
+        if subtitle.hasPrefix(slug + "#") { return true }
+        if subtitle.hasPrefix(slug + " ") { return true }
+        return row.children.contains { rowBelongsToFocusedRepo($0) }
+    }
+
+    @ViewBuilder
+    private var projectSections: some View {
+        let lens = lensText.trimmingCharacters(in: .whitespaces).lowercased()
+
+        // The focused repo's GitHub attention. No slug (no remote, detached
+        // session) renders no GitHub here — All GitHub is one tab away.
+        ForEach(engine.sections.filter { $0.sourceID == HolyGitHubInboxSectioner.sourceID }) { section in
+            let rows = section.rows.filter {
+                rowBelongsToFocusedRepo($0) && lensMatches($0.title + " " + ($0.subtitle ?? ""), lens)
+            }
+            if !rows.isEmpty {
+                sectionHeader(section)
+                if isExpanded(section) {
+                    ForEach(rows) { row in
+                        rowView(row, in: section)
+                        if expandedDigestRowIDs.contains(row.id) {
+                            ForEach(row.children.filter { rowBelongsToFocusedRepo($0) }) { child in
+                                rowView(child, in: section, indented: true)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // The focused project's board, whole.
+        ForEach(engine.sections.filter { $0.sourceID == HolyMannaInboxSectioner.sourceID }) { section in
+            sectionHeader(section)
+            if isExpanded(section) {
+                ForEach(section.rows.filter { lensMatches($0.title + " " + ($0.subtitle ?? ""), lens) }) { row in
+                    rowView(row, in: section)
+                }
+            }
+        }
+
+        // Alerts are already scoped to this machine's sessions.
+        ForEach(engine.sections.filter { $0.sourceID == "alerts" }) { section in
+            sectionHeader(section)
+            if isExpanded(section) {
+                ForEach(section.rows.filter { lensMatches($0.title, lens) }) { row in
+                    rowView(row, in: section)
+                }
+            }
+        }
+    }
+
+    // MARK: All GitHub
+
+    @ViewBuilder
+    private var globalGitHubSections: some View {
+        let lens = lensText.trimmingCharacters(in: .whitespaces).lowercased()
+        ForEach(engine.sections.filter { $0.sourceID == HolyGitHubInboxSectioner.sourceID }) { section in
+            sectionHeader(section)
+            if isExpanded(section) {
+                ForEach(section.rows.filter { lensMatches($0.title + " " + ($0.subtitle ?? ""), lens) }) { row in
+                    rowView(row, in: section)
+                    if expandedDigestRowIDs.contains(row.id) {
+                        ForEach(row.children) { child in
+                            rowView(child, in: section, indented: true)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Shared context
+
+    private func lensMatches(_ haystack: String, _ lens: String) -> Bool {
+        lens.isEmpty || haystack.lowercased().contains(lens)
     }
 
     private var focusedBoardPath: String? {
@@ -130,287 +241,6 @@ struct HolyInboxPanelView: View {
 
     private var focusedProjectName: String? {
         focusedBoardPath.map { URL(fileURLWithPath: $0).lastPathComponent }
-    }
-
-    /// Attention split by scope for the state sentence: decisions "here"
-    /// (the focused project) vs reviews "elsewhere" (cross-project GitHub).
-    private var scopeCounts: (here: Int, elsewhere: Int) {
-        guard let triaged else { return (0, 0) }
-        let attention = (triaged.hero.map { [$0] } ?? [])
-            + triaged.needsMe + triaged.needsMeOverflow
-        let elsewhere = attention.filter { HolyBriefTriage.scope(of: $0) == .everywhere }.count
-        return (attention.count - elsewhere, elsewhere)
-    }
-
-    @ViewBuilder
-    private var briefBlock: some View {
-        if brief.payload != nil {
-            let counts = scopeCounts
-            HolyBriefStateHeaderView(
-                sentence: HolyBriefTriage.stateSentence(
-                    hereCount: counts.here,
-                    elsewhereCount: counts.elsewhere,
-                    impairedSources: (triaged?.sourceNotes ?? []).map(\.source)
-                ),
-                failureReason: brief.failureReason,
-                sourceNotes: triaged?.sourceNotes ?? []
-            )
-        } else if let failureReason = brief.failureReason {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Brief unavailable")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(HolyGhosttyTheme.textPrimary)
-                Text(failureReason)
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                    .lineLimit(3)
-                    .help(failureReason)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-        } else if brief.isRefreshing {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small).scaleEffect(0.55)
-                Text("Reading the estate…")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-        }
-    }
-
-    @ViewBuilder
-    private var needsMeDrawer: some View {
-        if let triaged {
-            let lens = lensText.trimmingCharacters(in: .whitespaces).lowercased()
-
-            if let hero = triaged.hero, lensMatches(hero.title, lens) {
-                drawerLabel("Next")
-                HolyBriefThreadRowView(
-                    thread: hero,
-                    density: .hero,
-                    isNewSinceLastLook: triaged.deltaThreadIDs.contains(hero.id),
-                    focusedProjectName: focusedProjectName,
-                    onOpen: openAction(for: hero)
-                )
-            }
-            let runnersUp = triaged.needsMe.filter { lensMatches($0.title, lens) }
-            if !runnersUp.isEmpty {
-                drawerLabel("Also waiting")
-                ForEach(runnersUp, id: \.id) { thread in
-                    HolyBriefThreadRowView(
-                        thread: thread,
-                        density: .standard,
-                        isNewSinceLastLook: triaged.deltaThreadIDs.contains(thread.id),
-                        focusedProjectName: focusedProjectName,
-                        onOpen: openAction(for: thread)
-                    )
-                }
-            }
-
-            let overflow = triaged.needsMeOverflow.filter { lensMatches($0.title, lens) }
-            if !overflow.isEmpty {
-                disclosureLine(
-                    "\(overflow.count) more waiting",
-                    expanded: attentionOverflowExpanded
-                ) { attentionOverflowExpanded.toggle() }
-                if attentionOverflowExpanded {
-                    ForEach(overflow, id: \.id) { thread in
-                        HolyBriefThreadRowView(
-                            thread: thread,
-                            density: .compact,
-                            isNewSinceLastLook: triaged.deltaThreadIDs.contains(thread.id),
-                            focusedProjectName: focusedProjectName,
-                            onOpen: openAction(for: thread)
-                        )
-                    }
-                }
-            }
-
-            let activity = triaged.activity.filter { lensMatches($0.title, lens) }
-            if !activity.isEmpty {
-                disclosureLine(
-                    "\(activity.count) change\(activity.count == 1 ? "" : "s") since your last look",
-                    expanded: activityExpanded
-                ) { activityExpanded.toggle() }
-                if activityExpanded {
-                    ForEach(activity, id: \.id) { thread in
-                        HolyBriefThreadRowView(
-                            thread: thread,
-                            density: .compact,
-                            isNewSinceLastLook: true,
-                            focusedProjectName: focusedProjectName,
-                            onOpen: openAction(for: thread)
-                        )
-                    }
-                }
-            }
-
-            let totalSuggestions = triaged.suggestionGroups
-                .reduce(0) { $0 + $1.suggestions.count }
-            if totalSuggestions > 0 {
-                disclosureLine(
-                    "Housekeeping \(totalSuggestions)",
-                    expanded: housekeepingExpanded
-                ) { housekeepingExpanded.toggle() }
-                if housekeepingExpanded {
-                    ForEach(triaged.suggestionGroups) { group in
-                        let matching = group.suggestions.filter {
-                            lensMatches($0.label + " " + $0.command, lens)
-                        }
-                        if !matching.isEmpty {
-                            disclosureLine(
-                                HolyBriefTriage.bundleLabel(kind: group.kind, count: matching.count),
-                                expanded: expandedSuggestionKinds.contains(group.kind),
-                                indented: true
-                            ) {
-                                if expandedSuggestionKinds.contains(group.kind) {
-                                    expandedSuggestionKinds.remove(group.kind)
-                                } else {
-                                    expandedSuggestionKinds.insert(group.kind)
-                                }
-                            }
-                            if expandedSuggestionKinds.contains(group.kind) {
-                                ForEach(matching, id: \.id) { suggestion in
-                                    HolyBriefSuggestionRowView(
-                                        suggestion: suggestion,
-                                        workingDirectory: focusedBoardPath
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Alerts are local deliveries needing acknowledgement — genuine
-            // attention, rendered from the engine's alert source.
-            ForEach(engine.sections.filter { $0.sourceID == "alerts" }) { section in
-                sectionHeader(section)
-                if isExpanded(section) {
-                    ForEach(section.rows.filter { lensMatches($0.title, lens) }) { row in
-                        rowView(row, in: section)
-                    }
-                }
-            }
-        }
-    }
-
-    private func drawerLabel(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 10, weight: .medium))
-            .textCase(.uppercase)
-            .tracking(0.8)
-            .foregroundStyle(HolyGhosttyTheme.textSecondary)
-            .padding(.horizontal, 12)
-            .frame(height: 26, alignment: .leading)
-            .padding(.top, 6)
-    }
-
-    /// The panel's recede gesture: one quiet chevron line per closed drawer.
-    private func disclosureLine(
-        _ title: String,
-        expanded: Bool,
-        indented: Bool = false,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .rotationEffect(expanded ? .zero : .degrees(-90))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                Text(title)
-                    .font(.system(size: 11))
-                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                Spacer()
-            }
-            .padding(.leading, indented ? 24 : 12)
-            .padding(.trailing, 12)
-            .frame(height: 24)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func openAction(for thread: HolyBriefThread) -> (() -> Void)? {
-        guard thread.kind == "session" else { return nil }
-        // Thread ids for sessions are coord agent ids ("session-<12 hex>");
-        // match against the roster's session UUID prefixes.
-        let suffix = thread.id.replacingOccurrences(of: "session-", with: "").lowercased()
-        guard let match = store.sessions.first(where: {
-            $0.id.uuidString.replacingOccurrences(of: "-", with: "").lowercased().hasPrefix(suffix)
-        }) else { return nil }
-        return { store.selectSession(match.id) }
-    }
-
-    private func lensMatches(_ haystack: String, _ lens: String) -> Bool {
-        lens.isEmpty || haystack.lowercased().contains(lens)
-    }
-
-    // MARK: Library
-
-    @ViewBuilder
-    private var libraryDrawer: some View {
-        let librarySections = engine.sections.filter { $0.sourceID != "alerts" }
-        Button {
-            libraryExpanded.toggle()
-            if libraryExpanded {
-                // The gh browse refreshes lazily — expanding is the request.
-                engine.requestRefresh(sourceID: HolyGitHubInboxSectioner.sourceID)
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .rotationEffect(libraryExpanded ? .zero : .degrees(-90))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                Text("Library")
-                    .font(.system(size: 10, weight: .semibold))
-                    .textCase(.uppercase)
-                    .tracking(0.6)
-                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                Text(libraryCountLabel(sections: librarySections))
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 28)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .padding(.top, 10)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(HolyGhosttyTheme.border)
-                .frame(height: 0.5)
-                .padding(.horizontal, 12)
-        }
-
-        if libraryExpanded {
-            let lens = lensText.trimmingCharacters(in: .whitespaces).lowercased()
-            ForEach(librarySections) { section in
-                sectionHeader(section)
-                if isExpanded(section) {
-                    ForEach(section.rows.filter { lensMatches($0.title + " " + ($0.subtitle ?? ""), lens) }) { row in
-                        rowView(row, in: section)
-                        if expandedDigestRowIDs.contains(row.id) {
-                            ForEach(row.children) { child in
-                                rowView(child, in: section, indented: true)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func libraryCountLabel(sections: [HolyInboxSection]) -> String {
-        let rows = sections.reduce(0) { $0 + rowCount(for: $1) }
-        let threads = triaged?.libraryThreadCount ?? 0
-        return "\(rows + threads)"
     }
 
     // MARK: Lens
@@ -455,10 +285,7 @@ struct HolyInboxPanelView: View {
             return
         }
         if input.hasPrefix("#"), let number = Int(input.dropFirst()), number > 0 {
-            // PR jumps ride the brief's caller echo when it carries a real
-            // slug; a path echo (observed 2026-08-11) makes this a no-op.
-            if let repo = brief.payload?.caller?.focusedRepo,
-               repo.contains("/"), !repo.hasPrefix("/"),
+            if let repo = focusedSlug,
                let url = URL(string: "https://github.com/\(repo)/pull/\(number)") {
                 openURL(url)
             }

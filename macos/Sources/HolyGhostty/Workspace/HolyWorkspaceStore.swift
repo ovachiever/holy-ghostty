@@ -92,10 +92,10 @@ final class HolyWorkspaceStore: ObservableObject {
             // board immediately — local files, sub-second — while GitHub and
             // alerts keep their own cadence (mn-b2e2e9).
             refreshFocusedManna(force: true)
-            // The brief's context changed too, but its call is expensive
-            // (gh sweep + model voice) — the feed's own staleness throttle
-            // decides whether a flap becomes a subprocess.
-            briefFeed.requestRefresh()
+            // The brief feed is dormant in the panel (Erik 2026-08-12: the
+            // panel is project GH + project manna + an All-GitHub tab). The
+            // engine and contract stay live for CLI consumers; no panel
+            // refresh means no idle subprocess or model spend.
         }
     }
     @Published var soloSessionID: UUID? {
@@ -139,6 +139,15 @@ final class HolyWorkspaceStore: ObservableObject {
         adapter: HolyWorkspaceRestoreAdapter(store: self)
     )
     private let inboxRepoSlugResolver = HolyGitHubRepoSlugResolver()
+
+    /// The focused session's GitHub slug, for the panel's project-scoped
+    /// GitHub view (Erik 2026-08-12: "GH notifications for the project I'm
+    /// in, manna for the project I'm in, and a gh-global tab").
+    func focusedRepoSlug() async -> String? {
+        let root = selectedSession?.ownership.repositoryRoot
+        guard let root else { return nil }
+        return await inboxRepoSlugResolver.slug(forRepositoryRoot: root)
+    }
     /// The human inbox engine: GitHub PR attention, DB alerts, and manna
     /// triage. Sources conform to HolyInboxRowSource.
     private(set) lazy var inboxEngine: HolyInboxEngine = {
