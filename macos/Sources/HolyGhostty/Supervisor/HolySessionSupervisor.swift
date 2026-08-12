@@ -153,8 +153,10 @@ final class HolySessionSupervisor {
         var presentRecords: [HolySessionRecord] = []
         var dormantRecords: [HolySessionRecord] = []
         for record in recovery.restorableRecords {
-            if Self.isLocalManagedHolySession(record.launchSpec),
-               liveLocalHolySessions.isUnavailable {
+            if Self.belongsToColdBootSweep(
+                record.launchSpec,
+                localServerUnavailable: liveLocalHolySessions.isUnavailable
+            ) {
                 if let sessionName = Self.localManagedTmuxSessionName(for: record) {
                     AppDelegate.logger.notice(
                         "Holy Ghostty restore archived dormant local tmux session \(sessionName, privacy: .public): server unavailable"
@@ -366,9 +368,23 @@ final class HolySessionSupervisor {
         """
     }
 
-    private static func isLocalManagedHolySession(_ launchSpec: HolySessionLaunchSpec) -> Bool {
+    nonisolated private static func isLocalManagedHolySession(_ launchSpec: HolySessionLaunchSpec) -> Bool {
         launchSpec.transport.kind == .local
             && launchSpec.tmux?.socketName == HolySessionTmuxSpec.defaultSocketName
+    }
+
+    /// A dead local server makes every session on it look individually
+    /// missing, so the per-session recovery validator must not judge these
+    /// records — they belong to the cold-boot sweep, which archives them
+    /// restorably under one boot-batch id. `recoverActiveRecords` and
+    /// `restoreWorkspace` must share this predicate: the two sites deciding
+    /// differently is what strands real sessions in the unrestorable
+    /// graveyard while the batch holds only helper shells.
+    nonisolated static func belongsToColdBootSweep(
+        _ launchSpec: HolySessionLaunchSpec,
+        localServerUnavailable: Bool
+    ) -> Bool {
+        localServerUnavailable && isLocalManagedHolySession(launchSpec)
     }
 
     private static func localManagedTmuxSessionName(for record: HolySessionRecord) -> String? {
@@ -894,6 +910,14 @@ final class HolySessionSupervisor {
                 continue
             }
 
+            if Self.belongsToColdBootSweep(
+                record.launchSpec,
+                localServerUnavailable: localTmuxProbe.isUnavailable
+            ) {
+                restorableRecords.append(record)
+                continue
+            }
+
             let evaluation = recoveryEvaluation(for: record)
             guard let reason = evaluation.issue else {
                 restorableRecords.append(record)
@@ -1326,13 +1350,15 @@ private final class HolyTmuxRecoveryValidator {
           tmux_cmd+=(-L "$socket_name")
         fi
 
-        output=$("${tmux_cmd[@]}" list-sessions -F '#{session_name}' 2>/dev/null)
+        # Exit 1 means the server is unreachable ("no server running…"), never
+        # an empty list — a tmux server exits with its last session, so an
+        # alive server always lists at least one. Propagate the failure with
+        # tmux's own message; remapping it to an empty list once misfiled
+        # every session on a dead server as individually vanished.
+        output=$("${tmux_cmd[@]}" list-sessions -F '#{session_name}' 2>&1)
         tmux_status=$?
-        if [[ $tmux_status -eq 1 ]]; then
-          exit 0
-        fi
         if [[ $tmux_status -ne 0 ]]; then
-          printf 'tmux list-sessions failed with exit code %s\\n' "$tmux_status" >&2
+          printf '%s\\n' "$output" >&2
           exit $tmux_status
         fi
 
