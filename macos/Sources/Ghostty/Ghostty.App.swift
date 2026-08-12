@@ -689,6 +689,7 @@ extension Ghostty {
 
             #if os(macOS)
             // We want to quit, start that process
+            Ghostty.logger.error("lifecycle: core requested QUIT — terminating app")
             NSApplication.shared.terminate(nil)
             #endif
         }

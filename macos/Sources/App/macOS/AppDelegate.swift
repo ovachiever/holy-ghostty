@@ -509,6 +509,9 @@ class AppDelegate: NSObject,
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        AppDelegate.logger.error(
+            "lifecycle: applicationShouldTerminate — windows=\(NSApplication.shared.windows.count) visible=\(NSApplication.shared.windows.filter(\.isVisible).count)"
+        )
         let windows = NSApplication.shared.windows
         if windows.isEmpty { return .terminateNow }
 
