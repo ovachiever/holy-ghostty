@@ -174,7 +174,11 @@ struct HolyInboxPanelView: View {
                 rowBelongsToFocusedRepo($0) && lensMatches($0.title + " " + ($0.subtitle ?? ""), lens)
             }
             if !rows.isEmpty {
-                sectionHeader(section)
+                let visible = rows.reduce(0) { total, row in
+                    let children = row.children.filter { rowBelongsToFocusedRepo($0) }
+                    return total + (children.isEmpty ? 1 : children.count)
+                }
+                sectionHeader(section, visibleCount: visible)
                 if isExpanded(section) {
                     ForEach(rows) { row in
                         rowView(row, in: section)
@@ -190,9 +194,10 @@ struct HolyInboxPanelView: View {
 
         // The focused project's board, whole.
         ForEach(engine.sections.filter { $0.sourceID == HolyMannaInboxSectioner.sourceID }) { section in
-            sectionHeader(section)
+            let rows = section.rows.filter { lensMatches($0.title + " " + ($0.subtitle ?? ""), lens) }
+            sectionHeader(section, visibleCount: rows.count)
             if isExpanded(section) {
-                ForEach(section.rows.filter { lensMatches($0.title + " " + ($0.subtitle ?? ""), lens) }) { row in
+                ForEach(rows) { row in
                     rowView(row, in: section)
                 }
             }
@@ -200,9 +205,10 @@ struct HolyInboxPanelView: View {
 
         // Alerts are already scoped to this machine's sessions.
         ForEach(engine.sections.filter { $0.sourceID == "alerts" }) { section in
-            sectionHeader(section)
+            let rows = section.rows.filter { lensMatches($0.title, lens) }
+            sectionHeader(section, visibleCount: rows.count)
             if isExpanded(section) {
-                ForEach(section.rows.filter { lensMatches($0.title, lens) }) { row in
+                ForEach(rows) { row in
                     rowView(row, in: section)
                 }
             }
@@ -215,9 +221,13 @@ struct HolyInboxPanelView: View {
     private var globalGitHubSections: some View {
         let lens = lensText.trimmingCharacters(in: .whitespaces).lowercased()
         ForEach(engine.sections.filter { $0.sourceID == HolyGitHubInboxSectioner.sourceID }) { section in
-            sectionHeader(section)
+            let rows = section.rows.filter { lensMatches($0.title + " " + ($0.subtitle ?? ""), lens) }
+            let visible = rows.reduce(0) { total, row in
+                total + (row.children.isEmpty ? 1 : row.children.count)
+            }
+            sectionHeader(section, visibleCount: visible)
             if isExpanded(section) {
-                ForEach(section.rows.filter { lensMatches($0.title + " " + ($0.subtitle ?? ""), lens) }) { row in
+                ForEach(rows) { row in
                     rowView(row, in: section)
                     if expandedDigestRowIDs.contains(row.id) {
                         ForEach(row.children) { child in
@@ -378,7 +388,14 @@ struct HolyInboxPanelView: View {
         .scrollIndicators(.hidden)
     }
 
-    private func sectionHeader(_ section: HolyInboxSection) -> some View {
+    /// `visibleCount` is the count of what THIS TAB will actually render —
+    /// a header must never advertise rows its body filters away (Erik
+    /// 2026-08-12: "Yours, open" said 10 globally while the vms.io tab
+    /// showed its 2).
+    private func sectionHeader(
+        _ section: HolyInboxSection,
+        visibleCount: Int? = nil
+    ) -> some View {
         Button {
             expandedOverrides[section.id] = !isExpanded(section)
         } label: {
@@ -389,7 +406,7 @@ struct HolyInboxPanelView: View {
                     .tracking(0.6)
                     .foregroundStyle(HolyGhosttyTheme.textSecondary)
 
-                Text("\(rowCount(for: section))")
+                Text("\(visibleCount ?? rowCount(for: section))")
                     .font(.system(size: 10, weight: .medium, design: .rounded))
                     .foregroundStyle(HolyGhosttyTheme.textTertiary)
 
