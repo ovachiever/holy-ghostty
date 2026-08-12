@@ -144,6 +144,13 @@ final class HolyBriefFeed: ObservableObject {
         }
 
         let invocation = Self.invocation(for: context, localBinaryPath: localBinaryPath)
+        // One line per refresh naming the rail: reading this beats guessing
+        // which machine computed the estate (mn-7fbb07 diagnosis, 2026-08-11:
+        // a local run with remote paths degrades exactly git+board+reconcile
+        // while the machine-global sources survive).
+        Self.logger.error(
+            "brief invocation: \(context.remoteHost.map { "remote via \($0)" } ?? "local", privacy: .public) repo=\(context.focusedRepoPath ?? "none", privacy: .public)"
+        )
 
         // The voice key overlays HERE and nowhere else — the brief is the
         // one subprocess that needs it (security review 2026-08-11). Local
