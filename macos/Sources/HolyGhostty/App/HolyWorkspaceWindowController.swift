@@ -163,6 +163,9 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     }
 
     func closeWorkspaceWindow() {
+        HolyWorkspaceWindow.keyDebugLogger.error(
+            "lifecycle: closeWorkspaceWindow() — whole-window close requested"
+        )
         close()
     }
 
@@ -299,6 +302,9 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     }
 
     func windowWillClose(_ notification: Notification) {
+        HolyWorkspaceWindow.keyDebugLogger.error(
+            "lifecycle: workspace windowWillClose — sessions=\(self.workspaceStore.sessions.count)"
+        )
         Self.release(self)
     }
 

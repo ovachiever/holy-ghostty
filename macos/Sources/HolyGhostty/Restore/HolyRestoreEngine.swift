@@ -698,6 +698,9 @@ final class HolyRestoreEngine: ObservableObject {
     func clearOlderInterruptions() -> Int {
         let archiveIDs = olderRows.map(\.id)
         guard !archiveIDs.isEmpty else { return 0 }
+        HolyGitHubInboxSource.logger.error(
+            "lifecycle: clearOlderInterruptions (restore-sheet Clear) deleting \(archiveIDs.count) archives"
+        )
         adapter.deleteArchives(archiveIDs: archiveIDs)
         rows.removeAll { !$0.isFresh }
         return archiveIDs.count

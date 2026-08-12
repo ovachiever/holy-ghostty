@@ -700,6 +700,9 @@ final class HolyWorkspaceStore: ObservableObject {
 
     func detachAllSessions() {
         guard !sessions.isEmpty else { return }
+        Self.attentionDebugLogger.error(
+            "lifecycle: detachAllSessions (Clear) archiving \(self.sessions.count) sessions"
+        )
 
         let previousSelectedSessionID = selectedSessionID
         var nextState = currentSessionStoreState
@@ -1779,11 +1782,34 @@ final class HolyWorkspaceStore: ObservableObject {
         !bannerDismissed && !restorePresented && freshParentCount > 0
     }
 
+    /// A stable name for the CURRENT fresh batch, so a dismissal can outlive
+    /// relaunches (Erik 2026-08-12: the same "2 sessions interrupted" banner
+    /// haunted four days of daily installs — X only silenced one launch).
+    /// Batch-stamped rows use their boot id; legacy rows use the newest
+    /// archive timestamp. A NEW crash produces a new fingerprint, so the
+    /// banner correctly returns for it.
+    nonisolated static func crashRestoreBatchFingerprint(
+        _ batch: HolyCrashRestoreBatch
+    ) -> String? {
+        guard let newest = batch.fresh.first else { return nil }
+        if let batchID = newest.recoveryBootBatchID {
+            return "batch:\(batchID)"
+        }
+        return "legacy:\(Int(newest.archivedAt.timeIntervalSince1970))"
+    }
+
+    private static let dismissedRestoreBatchDefaultsKey =
+        "holy.restore.dismissedBatchFingerprint.v1"
+
     var shouldOfferCrashRestore: Bool {
-        Self.shouldOfferCrashRestore(
-            bannerDismissed: restoreBannerDismissed,
+        let batch = crashRestoreBatch
+        let durablyDismissed = Self.crashRestoreBatchFingerprint(batch) != nil
+            && Self.crashRestoreBatchFingerprint(batch)
+                == UserDefaults.standard.string(forKey: Self.dismissedRestoreBatchDefaultsKey)
+        return Self.shouldOfferCrashRestore(
+            bannerDismissed: restoreBannerDismissed || durablyDismissed,
             restorePresented: restorePresented,
-            freshParentCount: crashRestoreBatch.freshParentCount
+            freshParentCount: batch.freshParentCount
         )
     }
 
@@ -1797,6 +1823,15 @@ final class HolyWorkspaceStore: ObservableObject {
 
     func dismissRestoreBanner() {
         restoreBannerDismissed = true
+        // Durable: this batch stays dismissed across relaunches; the durable
+        // View ▸ Restore Sessions… entry remains the road back, and a NEW
+        // crash batch re-arms the banner by fingerprint.
+        if let fingerprint = Self.crashRestoreBatchFingerprint(crashRestoreBatch) {
+            UserDefaults.standard.set(
+                fingerprint,
+                forKey: Self.dismissedRestoreBatchDefaultsKey
+            )
+        }
     }
 
     /// Restore persists identities and resume commands onto the archived
