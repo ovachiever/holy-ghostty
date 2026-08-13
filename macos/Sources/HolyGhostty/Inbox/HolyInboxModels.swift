@@ -33,6 +33,15 @@ enum HolyInboxRowAction: Equatable, Sendable {
     case none
 }
 
+/// A PR row's next move, computed by the engine (agent-do gh sweep) from
+/// verified state — never re-derived client-side. `yours` means the ball is
+/// in the viewing human's court; only your-move rows may tint or badge.
+struct HolyInboxStage: Equatable, Hashable, Sendable {
+    let verb: String
+    let detail: String
+    let yours: Bool
+}
+
 /// One admission-tested row: addressed to the human, actionable, and cleared
 /// by its source when reality changes (the Row Law). Rows never linger after
 /// Erik acted — a source that cannot self-clear does not get rows.
@@ -53,6 +62,12 @@ struct HolyInboxRow: Equatable, Sendable, Identifiable {
     /// A degraded row reports a broken source ("GitHub inbox unavailable").
     /// It renders quietly and never counts toward the unread badge.
     let isDegraded: Bool
+    /// Engine-computed next move ("Merge — approved, checks green").
+    let stage: HolyInboxStage?
+    /// Spawns a shell with the stage's exact command TYPED, never executed —
+    /// the human's Enter fires it. Present only when an honest working
+    /// directory exists (the row's repo is the focused session's repo).
+    let commandSpawnURL: URL?
 
     init(
         id: String,
@@ -63,7 +78,9 @@ struct HolyInboxRow: Equatable, Sendable, Identifiable {
         action: HolyInboxRowAction = .none,
         acknowledgeable: Bool = false,
         children: [HolyInboxRow] = [],
-        isDegraded: Bool = false
+        isDegraded: Bool = false,
+        stage: HolyInboxStage? = nil,
+        commandSpawnURL: URL? = nil
     ) {
         self.id = id
         self.title = title
@@ -74,6 +91,8 @@ struct HolyInboxRow: Equatable, Sendable, Identifiable {
         self.acknowledgeable = acknowledgeable
         self.children = children
         self.isDegraded = isDegraded
+        self.stage = stage
+        self.commandSpawnURL = commandSpawnURL
     }
 }
 
@@ -128,9 +147,13 @@ struct HolyInboxRefreshContext: Equatable, Sendable {
     /// "org/repo" of the focused session's repository, for
     /// focused-repo-first ordering. Nil when no session or no GitHub remote.
     let focusedRepoSlug: String?
+    /// Absolute repository root of the focused session — the only honest
+    /// working directory for a row's loaded shell command. Nil = no button.
+    let focusedRepoPath: String?
 
-    init(focusedRepoSlug: String? = nil) {
+    init(focusedRepoSlug: String? = nil, focusedRepoPath: String? = nil) {
         self.focusedRepoSlug = focusedRepoSlug
+        self.focusedRepoPath = focusedRepoPath
     }
 }
 

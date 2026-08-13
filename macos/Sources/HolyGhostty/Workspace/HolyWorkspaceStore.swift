@@ -175,6 +175,9 @@ final class HolyWorkspaceStore: ObservableObject {
                 let root = await MainActor.run { self?.selectedSession?.ownership.repositoryRoot }
                 guard let root else { return nil }
                 return await resolver.slug(forRepositoryRoot: root)
+            },
+            focusedRepoPathProvider: { [weak self] in
+                await MainActor.run { self?.selectedSession?.ownership.repositoryRoot }
             }
         )
     }()

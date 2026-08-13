@@ -578,6 +578,21 @@ struct HolyInboxRowView: View {
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
 
+                    // The stage line: whose move it is, in words. Verb
+                    // leads; tint reinforces only when the ball is Erik's
+                    // (words + position law — color never carries alone).
+                    if let stage = row.stage {
+                        (Text(stage.verb).fontWeight(.semibold)
+                            + Text(" — \(stage.detail)"))
+                            .font(.system(size: 10))
+                            .foregroundStyle(
+                                stage.yours
+                                    ? HolyGhosttyTheme.warning
+                                    : HolyGhosttyTheme.textSecondary
+                            )
+                            .lineLimit(1)
+                    }
+
                     if row.subtitle != nil || !row.chips.isEmpty {
                         HStack(spacing: 6) {
                             if let subtitle = row.subtitle {
@@ -612,6 +627,21 @@ struct HolyInboxRowView: View {
                         .buttonStyle(.plain)
                         .foregroundStyle(HolyGhosttyTheme.success)
                         .help("Acknowledge")
+                    }
+
+                    // Spawns a shell with the stage's command TYPED; the
+                    // human's Enter fires it (never auto-executed).
+                    if let spawnURL = row.commandSpawnURL, isHovering {
+                        Button {
+                            NSWorkspace.shared.open(spawnURL)
+                        } label: {
+                            Image(systemName: "terminal")
+                                .font(.system(size: 9, weight: .semibold))
+                                .frame(width: 20, height: 16)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(HolyGhosttyTheme.accent)
+                        .help("Open a shell with the command typed")
                     }
                 }
             }

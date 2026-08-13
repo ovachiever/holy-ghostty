@@ -26,6 +26,7 @@ final class HolyInboxEngine: ObservableObject {
 
     private let sources: [any HolyInboxRowSource]
     private let focusedRepoSlugProvider: @Sendable () async -> String?
+    private let focusedRepoPathProvider: @Sendable () async -> String?
     private var panelVisible = false
     private var pollTask: Task<Void, Never>?
     private var foregroundObserver: NSObjectProtocol?
@@ -42,10 +43,12 @@ final class HolyInboxEngine: ObservableObject {
     init(
         sources: [any HolyInboxRowSource],
         focusedRepoSlugProvider: @escaping @Sendable () async -> String? = { nil },
+        focusedRepoPathProvider: @escaping @Sendable () async -> String? = { nil },
         autostart: Bool = true
     ) {
         self.sources = sources
         self.focusedRepoSlugProvider = focusedRepoSlugProvider
+        self.focusedRepoPathProvider = focusedRepoPathProvider
         self.snapshotsBySourceIndex = Array(repeating: nil, count: sources.count)
 
         if autostart {
@@ -136,7 +139,8 @@ final class HolyInboxEngine: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             let context = HolyInboxRefreshContext(
-                focusedRepoSlug: await self.focusedRepoSlugProvider()
+                focusedRepoSlug: await self.focusedRepoSlugProvider(),
+                focusedRepoPath: await self.focusedRepoPathProvider()
             )
             let snapshot = await source.refresh(context: context)
             self.apply(snapshot, at: index)

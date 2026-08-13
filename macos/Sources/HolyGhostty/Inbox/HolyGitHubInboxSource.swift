@@ -27,6 +27,73 @@ struct HolyGitHubInboxItem: Equatable, Sendable {
     let title: String
     let updatedAt: Date?
     let url: String
+    /// Stage enrichment (sweep stage_contract 1, spec in
+    /// .dev/session-prompts/11-GH-STAGE-AWARENESS.md). All optional and
+    /// decoded tolerantly: an old CLI or a REST-fallback sweep simply omits
+    /// them and the row renders exactly as before — honest degradation,
+    /// never an error. The verb mapping lives in the ENGINE; Holy renders
+    /// `nextAction` verbatim and never re-derives it from the raw fields.
+    let reviewDecision: String?
+    let mergeState: String?
+    let checks: HolyGitHubChecks?
+    let reviewRequests: Int?
+    let nextAction: HolyGitHubNextAction?
+
+    init(
+        author: String,
+        comments: Int?,
+        draft: Bool,
+        labels: [String],
+        number: Int,
+        reasons: [String],
+        ref: String,
+        repo: String,
+        state: String,
+        title: String,
+        updatedAt: Date?,
+        url: String,
+        reviewDecision: String? = nil,
+        mergeState: String? = nil,
+        checks: HolyGitHubChecks? = nil,
+        reviewRequests: Int? = nil,
+        nextAction: HolyGitHubNextAction? = nil
+    ) {
+        self.author = author
+        self.comments = comments
+        self.draft = draft
+        self.labels = labels
+        self.number = number
+        self.reasons = reasons
+        self.ref = ref
+        self.repo = repo
+        self.state = state
+        self.title = title
+        self.updatedAt = updatedAt
+        self.url = url
+        self.reviewDecision = reviewDecision
+        self.mergeState = mergeState
+        self.checks = checks
+        self.reviewRequests = reviewRequests
+        self.nextAction = nextAction
+    }
+}
+
+/// Check rollup counts from the sweep. Absent (`null`) means the PR has no
+/// checks — never rendered as zeros.
+struct HolyGitHubChecks: Equatable, Sendable, Decodable {
+    let passed: Int
+    let failed: Int
+    let pending: Int
+    let total: Int
+}
+
+/// The engine's deterministic next move for a PR. `command`, when present,
+/// is data for a typed shell — nothing in Holy ever executes it.
+struct HolyGitHubNextAction: Equatable, Sendable, Decodable {
+    let verb: String
+    let detail: String
+    let yours: Bool
+    let command: String?
 }
 
 extension HolyGitHubInboxItem: Decodable {
@@ -43,6 +110,11 @@ extension HolyGitHubInboxItem: Decodable {
         case title
         case updatedAt = "updated_at"
         case url
+        case reviewDecision = "review_decision"
+        case mergeState = "merge_state"
+        case checks
+        case reviewRequests = "review_requests"
+        case nextAction = "next_action"
     }
 
     init(from decoder: Decoder) throws {
@@ -71,6 +143,15 @@ extension HolyGitHubInboxItem: Decodable {
         let rawDate = try container.decodeIfPresent(String.self, forKey: .updatedAt)
         updatedAt = rawDate.flatMap { ISO8601DateFormatter().date(from: $0) }
         url = try container.decode(String.self, forKey: .url)
+        // Stage enrichment is additive and tolerant: a malformed or missing
+        // stage field degrades that field to nil, never the whole payload —
+        // the core contract above stays fail-closed, the enhancement fails
+        // soft. (try? decodeIfPresent covers both absent and wrong-shape.)
+        reviewDecision = (try? container.decodeIfPresent(String.self, forKey: .reviewDecision)) ?? nil
+        mergeState = (try? container.decodeIfPresent(String.self, forKey: .mergeState)) ?? nil
+        checks = (try? container.decodeIfPresent(HolyGitHubChecks.self, forKey: .checks)) ?? nil
+        reviewRequests = (try? container.decodeIfPresent(Int.self, forKey: .reviewRequests)) ?? nil
+        nextAction = (try? container.decodeIfPresent(HolyGitHubNextAction.self, forKey: .nextAction)) ?? nil
     }
 }
 
@@ -158,7 +239,102 @@ enum HolyGitHubInboxSectioner {
 
     static func sections(
         items: [HolyGitHubInboxItem],
-        focusedRepoSlug: String?
+        focusedRepoSlug: String?,
+        focusedRepoPath: String? = nil
+    ) -> [HolyInboxSection] {
+        // Stage mode: when the sweep carries engine-computed next actions
+        // (stage_contract 1), rows group by whose move it is — the badge
+        // then counts exactly what waits on Erik. A legacy sweep (no
+        // next_action anywhere) keeps the reason-based sections unchanged.
+        let stageMode = items.contains {
+            $0.nextAction != nil && !Set($0.reasons).contains("bot_author")
+        }
+        if stageMode {
+            return stageSections(
+                items: items,
+                focusedRepoSlug: focusedRepoSlug,
+                focusedRepoPath: focusedRepoPath
+            )
+        }
+        return legacySections(
+            items: items,
+            focusedRepoSlug: focusedRepoSlug,
+            focusedRepoPath: focusedRepoPath
+        )
+    }
+
+    private static func stageSections(
+        items: [HolyGitHubInboxItem],
+        focusedRepoSlug: String?,
+        focusedRepoPath: String?
+    ) -> [HolyInboxSection] {
+        var yourMove: [HolyGitHubInboxItem] = []
+        var waiting: [HolyGitHubInboxItem] = []
+        var bots: [HolyGitHubInboxItem] = []
+        var other: [HolyGitHubInboxItem] = []
+
+        for item in items {
+            if Set(item.reasons).contains("bot_author") {
+                bots.append(item)
+            } else if let action = item.nextAction {
+                if action.yours {
+                    yourMove.append(item)
+                } else {
+                    waiting.append(item)
+                }
+            } else {
+                other.append(item)
+            }
+        }
+
+        var sections: [HolyInboxSection] = []
+        func append(
+            id: String,
+            title: String,
+            items sectionItems: [HolyGitHubInboxItem],
+            collapsedByDefault: Bool = false,
+            countsTowardBadge: Bool = false
+        ) {
+            guard !sectionItems.isEmpty else { return }
+            sections.append(HolyInboxSection(
+                id: id,
+                sourceID: sourceID,
+                title: title,
+                rows: sorted(sectionItems, focusedRepoSlug: focusedRepoSlug).map {
+                    row(for: $0, focusedRepoSlug: focusedRepoSlug, focusedRepoPath: focusedRepoPath)
+                },
+                collapsedByDefault: collapsedByDefault,
+                countsTowardBadge: countsTowardBadge
+            ))
+        }
+
+        append(
+            id: "gh.your_move",
+            title: "Your move",
+            items: yourMove,
+            countsTowardBadge: true
+        )
+        append(
+            id: "gh.waiting",
+            title: "Waiting on others",
+            items: waiting,
+            collapsedByDefault: true
+        )
+        if !bots.isEmpty {
+            sections.append(botSection(bots, focusedRepoSlug: focusedRepoSlug))
+        }
+        append(
+            id: "gh.other",
+            title: "Other attention",
+            items: other
+        )
+        return sections
+    }
+
+    private static func legacySections(
+        items: [HolyGitHubInboxItem],
+        focusedRepoSlug: String?,
+        focusedRepoPath: String?
     ) -> [HolyInboxSection] {
         var authoredChanges: [HolyGitHubInboxItem] = []
         var review: [HolyGitHubInboxItem] = []
@@ -202,7 +378,9 @@ enum HolyGitHubInboxSectioner {
                 id: id,
                 sourceID: sourceID,
                 title: title,
-                rows: sorted(sectionItems, focusedRepoSlug: focusedRepoSlug).map(row(for:)),
+                rows: sorted(sectionItems, focusedRepoSlug: focusedRepoSlug).map {
+                    row(for: $0, focusedRepoSlug: focusedRepoSlug, focusedRepoPath: focusedRepoPath)
+                },
                 collapsedByDefault: collapsedByDefault,
                 countsTowardBadge: countsTowardBadge
             ))
@@ -245,10 +423,45 @@ enum HolyGitHubInboxSectioner {
 
     // MARK: Rows
 
-    private static func row(for item: HolyGitHubInboxItem) -> HolyInboxRow {
-        var chips = item.reasons.compactMap(chip(forReason:))
-        if item.draft {
-            chips.append(HolyInboxChip("draft", emphasis: .neutral))
+    /// Reasons the stage line restates; their chips would say it twice.
+    private static let stageRedundantReasons: Set<String> = [
+        "review_requested", "authored_changes_requested",
+    ]
+
+    private static func row(
+        for item: HolyGitHubInboxItem,
+        focusedRepoSlug: String? = nil,
+        focusedRepoPath: String? = nil
+    ) -> HolyInboxRow {
+        let stage = item.nextAction.map {
+            HolyInboxStage(verb: $0.verb, detail: $0.detail, yours: $0.yours)
+        }
+
+        var chips: [HolyInboxChip]
+        if stage != nil {
+            chips = item.reasons
+                .filter { !Self.stageRedundantReasons.contains($0) }
+                .compactMap(chip(forReason:))
+            // The "Draft" verb already says it; any other verb outranks it.
+        } else {
+            chips = item.reasons.compactMap(chip(forReason:))
+            if item.draft {
+                chips.append(HolyInboxChip("draft", emphasis: .neutral))
+            }
+        }
+
+        // The loaded command spawns only where an honest cwd exists: the
+        // row's repo IS the focused session's repo. Typed, never executed.
+        var commandSpawnURL: URL?
+        if let command = item.nextAction?.command,
+           let path = focusedRepoPath,
+           let slug = focusedRepoSlug,
+           item.repo == slug {
+            commandSpawnURL = HolyBriefSpawn.typedCommandURL(
+                command: command,
+                title: "\(item.nextAction?.verb ?? "PR") #\(item.number)",
+                workingDirectory: path
+            )
         }
 
         return HolyInboxRow(
@@ -257,7 +470,9 @@ enum HolyGitHubInboxSectioner {
             subtitle: "\(item.ref) · \(item.author)",
             updatedAt: item.updatedAt,
             chips: chips,
-            action: URL(string: item.url).map(HolyInboxRowAction.openURL) ?? .none
+            action: URL(string: item.url).map(HolyInboxRowAction.openURL) ?? .none,
+            stage: stage,
+            commandSpawnURL: commandSpawnURL
         )
     }
 
@@ -290,7 +505,7 @@ enum HolyGitHubInboxSectioner {
         let byRepo = Dictionary(grouping: items, by: \.repo)
 
         var digests: [HolyInboxRow] = byRepo.map { repo, repoItems in
-            let children = sorted(repoItems, focusedRepoSlug: nil).map(row(for:))
+            let children = sorted(repoItems, focusedRepoSlug: nil).map { row(for: $0) }
             let botNames = Set(repoItems.map { botName(fromAuthor: $0.author) })
             let name = botNames.count == 1 ? botNames.first! : "bot"
             let shortRepo = repo.split(separator: "/").last.map(String.init) ?? repo
@@ -444,7 +659,8 @@ final class HolyGitHubInboxSource: HolyInboxRowSource {
             return HolyInboxSourceSnapshot(
                 sections: HolyGitHubInboxSectioner.sections(
                     items: payload.items,
-                    focusedRepoSlug: context.focusedRepoSlug
+                    focusedRepoSlug: context.focusedRepoSlug,
+                    focusedRepoPath: context.focusedRepoPath
                 )
             )
         }
