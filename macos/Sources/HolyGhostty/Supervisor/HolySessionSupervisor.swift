@@ -37,17 +37,30 @@ private struct LocalHolyTmuxProbe {
 
     var metadataBySessionName: [String: LocalHolyTmuxSessionMetadata]
     var unavailableReason: String?
+    /// When the live server was born (`#{start_time}`). A roster session
+    /// absent from a server YOUNGER than the session's last activity died
+    /// with a previous server — cold-boot semantics, never "no longer
+    /// available". Nil when the probe could not read it (conservative:
+    /// the validator decides).
+    var serverStartedAt: Date?
 
     var isUnavailable: Bool {
         unavailableReason != nil
     }
 
-    static func available(_ metadataBySessionName: [String: LocalHolyTmuxSessionMetadata]) -> Self {
-        .init(metadataBySessionName: metadataBySessionName, unavailableReason: nil)
+    static func available(
+        _ metadataBySessionName: [String: LocalHolyTmuxSessionMetadata],
+        serverStartedAt: Date? = nil
+    ) -> Self {
+        .init(
+            metadataBySessionName: metadataBySessionName,
+            unavailableReason: nil,
+            serverStartedAt: serverStartedAt
+        )
     }
 
     static func unavailable(_ reason: String) -> Self {
-        .init(metadataBySessionName: [:], unavailableReason: reason)
+        .init(metadataBySessionName: [:], unavailableReason: reason, serverStartedAt: nil)
     }
 
     var discoveredSessions: [HolyDiscoveredTmuxSession] {
@@ -153,11 +166,16 @@ final class HolySessionSupervisor {
         var presentRecords: [HolySessionRecord] = []
         var dormantRecords: [HolySessionRecord] = []
         for record in recovery.restorableRecords {
+            let sessionName = Self.localManagedTmuxSessionName(for: record)
             if Self.belongsToColdBootSweep(
-                record.launchSpec,
-                localServerUnavailable: liveLocalHolySessions.isUnavailable
+                record: record,
+                localServerUnavailable: liveLocalHolySessions.isUnavailable,
+                sessionPresentOnServer: sessionName.map {
+                    liveLocalHolySessions.metadataBySessionName[$0] != nil
+                } ?? false,
+                serverStartedAt: liveLocalHolySessions.serverStartedAt
             ) {
-                if let sessionName = Self.localManagedTmuxSessionName(for: record) {
+                if let sessionName {
                     AppDelegate.logger.notice(
                         "Holy Ghostty restore archived dormant local tmux session \(sessionName, privacy: .public): server unavailable"
                     )
@@ -308,9 +326,17 @@ final class HolySessionSupervisor {
 
         let text = String(data: data, encoding: .utf8) ?? ""
         let fieldSeparator = Character(UnicodeScalar(0x1F)!)
+        var serverStartedAt: Date?
         let metadata = text
             .split(separator: "\n", omittingEmptySubsequences: true)
             .compactMap { line -> LocalHolyTmuxSessionMetadata? in
+                if line.hasPrefix("__HOLY_SERVER_START__") {
+                    let raw = line.dropFirst("__HOLY_SERVER_START__".count)
+                    if let epoch = TimeInterval(raw.trimmingCharacters(in: .whitespaces)) {
+                        serverStartedAt = Date(timeIntervalSince1970: epoch)
+                    }
+                    return nil
+                }
                 let fields = line.split(separator: fieldSeparator, omittingEmptySubsequences: false)
                     .map(String.init)
                 guard fields.count >= 6,
@@ -327,7 +353,10 @@ final class HolySessionSupervisor {
                     command: normalizedMetadataString(fields[5])
                 )
             }
-        return .available(Dictionary(uniqueKeysWithValues: metadata.map { ($0.sessionName, $0) }))
+        return .available(
+            Dictionary(uniqueKeysWithValues: metadata.map { ($0.sessionName, $0) }),
+            serverStartedAt: serverStartedAt
+        )
     }
 
     private static func localHolyTmuxProbeScript() -> String {
@@ -355,6 +384,9 @@ final class HolySessionSupervisor {
           exit "$exit_status"
         fi
 
+        server_start=$("${tmux_cmd[@]}" display-message -p '#{start_time}' 2>/dev/null)
+        printf '__HOLY_SERVER_START__%s\\n' "$server_start"
+
         while IFS= read -r session_name; do
           [[ -z "$session_name" ]] && continue
           printf '%s%s%s%s%s%s%s%s%s%s%s\\n' \
@@ -373,18 +405,36 @@ final class HolySessionSupervisor {
             && launchSpec.tmux?.socketName == HolySessionTmuxSpec.defaultSocketName
     }
 
-    /// A dead local server makes every session on it look individually
-    /// missing, so the per-session recovery validator must not judge these
-    /// records — they belong to the cold-boot sweep, which archives them
-    /// restorably under one boot-batch id. `recoverActiveRecords` and
-    /// `restoreWorkspace` must share this predicate: the two sites deciding
-    /// differently is what strands real sessions in the unrestorable
-    /// graveyard while the batch holds only helper shells.
+    /// Which local-managed records belong to the cold-boot sweep (archived
+    /// restorably under one boot-batch id) instead of the per-session
+    /// validator. Two doors lead there, both proven by real losses:
+    ///
+    /// 1. The server is DEAD — every session merely looks individually
+    ///    missing (`tmux list-sessions` exits 1 either way; 2026-08-12
+    ///    drill).
+    /// 2. The server is ALIVE but YOUNGER than the record's last activity —
+    ///    the session died with a PREVIOUS server; something (a manual
+    ///    resume, a remote spawn) rebooted the server before Holy's first
+    ///    launch. Asking a 13-minute-old server about yesterday's sessions
+    ///    and filing them "no longer available" lost all 12 sessions after
+    ///    the real crash of 2026-08-14.
+    ///
+    /// An unknown server birth stays with the validator (conservative), and
+    /// a session PRESENT on the live server is never swept regardless.
+    /// `recoverActiveRecords` and `restoreWorkspace` must share this
+    /// predicate — the two sites deciding differently is what strands real
+    /// sessions in the graveyard while the batch holds only helper shells.
     nonisolated static func belongsToColdBootSweep(
-        _ launchSpec: HolySessionLaunchSpec,
-        localServerUnavailable: Bool
+        record: HolySessionRecord,
+        localServerUnavailable: Bool,
+        sessionPresentOnServer: Bool,
+        serverStartedAt: Date?
     ) -> Bool {
-        localServerUnavailable && isLocalManagedHolySession(launchSpec)
+        guard isLocalManagedHolySession(record.launchSpec) else { return false }
+        if localServerUnavailable { return true }
+        guard !sessionPresentOnServer else { return false }
+        guard let serverStartedAt else { return false }
+        return record.updatedAt < serverStartedAt
     }
 
     private static func localManagedTmuxSessionName(for record: HolySessionRecord) -> String? {
@@ -910,9 +960,14 @@ final class HolySessionSupervisor {
                 continue
             }
 
+            // The metadata-present branch above already adopted live
+            // sessions, so any local-managed record here is absent from
+            // the server (or the server is gone entirely).
             if Self.belongsToColdBootSweep(
-                record.launchSpec,
-                localServerUnavailable: localTmuxProbe.isUnavailable
+                record: record,
+                localServerUnavailable: localTmuxProbe.isUnavailable,
+                sessionPresentOnServer: false,
+                serverStartedAt: localTmuxProbe.serverStartedAt
             ) {
                 restorableRecords.append(record)
                 continue
