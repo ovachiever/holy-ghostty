@@ -231,6 +231,11 @@ actor HolyGitHubRepoSlugResolver {
         ]
     }
 
+    private static let logger = Logger(
+        subsystem: "org.holyghostty.app",
+        category: "HolyRepoSlug"
+    )
+
     func slug(forRepositoryRoot root: String, sshDestination: String? = nil) async -> String? {
         let key = Key(sshDestination: sshDestination, root: root)
         if let cached = cache[key] {
@@ -252,12 +257,29 @@ actor HolyGitHubRepoSlugResolver {
             )
         }
 
-        var slug: String?
-        if case let .success(output) = result, output.exitCode == 0 {
-            slug = HolyGitHubRemoteParser.slug(fromRemoteURL: output.stdout)
+        // Only success is cached. A laptop's first attempt can fail for
+        // reasons that heal themselves (post-wake network, Tailscale DNS
+        // still settling) — a cached nil would blank the project tab for
+        // the whole app run. Failures log loudly and retry on next ask.
+        switch result {
+        case let .success(output) where output.exitCode == 0:
+            let slug = HolyGitHubRemoteParser.slug(fromRemoteURL: output.stdout)
+            cache[key] = slug
+            Self.logger.log(
+                "slug resolved: \(root, privacy: .public) via \(sshDestination ?? "local", privacy: .public) -> \(slug ?? "unparseable", privacy: .public)"
+            )
+            return slug
+        case let .success(output):
+            Self.logger.error(
+                "slug query exited \(output.exitCode) for \(root, privacy: .public) via \(sshDestination ?? "local", privacy: .public): \(output.stderr.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)"
+            )
+            return nil
+        case let .failure(reason):
+            Self.logger.error(
+                "slug query failed for \(root, privacy: .public) via \(sshDestination ?? "local", privacy: .public): \(reason, privacy: .public)"
+            )
+            return nil
         }
-        cache[key] = slug
-        return slug
     }
 }
 
