@@ -177,6 +177,21 @@ struct HolyGitHubStageTests {
         #expect(pathless.first?.rows.first?.commandSpawnURL == nil)
     }
 
+    // MARK: - Remote slug rail
+
+    @Test func remoteSlugQueryRidesTheBatchModeRailWithAQuotedRoot() {
+        let arguments = HolyGitHubRepoSlugResolver.sshArguments(
+            destination: "erik@studio",
+            root: "/Users/erik/Custom Coding/vms.io"
+        )
+        #expect(arguments == [
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=3",
+            "erik@studio",
+            "git -C '/Users/erik/Custom Coding/vms.io' remote get-url origin",
+        ])
+    }
+
     // MARK: - Pinned live capture (2026-08-13)
 
     static let pinnedLiveFixture = """

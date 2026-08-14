@@ -148,12 +148,17 @@ final class HolyWorkspaceStore: ObservableObject {
     /// the 2026-08-12 restore left ownership_json NULL on every row, which
     /// silently emptied the project tab's GitHub section for every
     /// session). The working directory is the honest fallback — `git -C`
-    /// resolves the repo from any subdirectory.
+    /// resolves the repo from any subdirectory. A remote session's root is
+    /// a path on ITS host, so the query rides the SSH rail (mn-7fbb07).
     func focusedRepoSlug() async -> String? {
-        let root = selectedSession?.ownership.repositoryRoot
-            ?? selectedSession?.workingDirectory
+        guard let session = selectedSession else { return nil }
+        let root = session.ownership.repositoryRoot ?? session.workingDirectory
         guard let root else { return nil }
-        return await inboxRepoSlugResolver.slug(forRepositoryRoot: root)
+        let transport = session.record.launchSpec.transport.normalized
+        return await inboxRepoSlugResolver.slug(
+            forRepositoryRoot: root,
+            sshDestination: transport.isRemote ? transport.sshDestination : nil
+        )
     }
     /// The human inbox engine: GitHub PR attention, DB alerts, and manna
     /// triage. Sources conform to HolyInboxRowSource.
@@ -178,20 +183,29 @@ final class HolyWorkspaceStore: ObservableObject {
             ],
             // The brief renders above these; the engine's sections are the
             // Library (manna backlog, gh browse) plus the alerts drawer.
-            // Same ownership-or-cwd fallback as focusedRepoSlug() — adopted
-            // and restored sessions can lack ownership (mn-938022).
+            // Same ownership-or-cwd fallback and host awareness as
+            // focusedRepoSlug() — adopted/restored sessions can lack
+            // ownership (mn-938022); remote sessions resolve on their host.
             focusedRepoSlugProvider: { [weak self] in
-                let root = await MainActor.run {
-                    self?.selectedSession?.ownership.repositoryRoot
-                        ?? self?.selectedSession?.workingDirectory
+                let context = await MainActor.run { () -> (String, String?)? in
+                    guard let session = self?.selectedSession,
+                          let root = session.ownership.repositoryRoot
+                              ?? session.workingDirectory else { return nil }
+                    let transport = session.record.launchSpec.transport.normalized
+                    return (root, transport.isRemote ? transport.sshDestination : nil)
                 }
-                guard let root else { return nil }
-                return await resolver.slug(forRepositoryRoot: root)
+                guard let (root, destination) = context else { return nil }
+                return await resolver.slug(forRepositoryRoot: root, sshDestination: destination)
             },
+            // The shell button's cwd must exist on THIS machine: remote
+            // sessions get no path (and no button) until spawn-on-host
+            // lands — a button with a foreign cwd would lie.
             focusedRepoPathProvider: { [weak self] in
                 await MainActor.run {
-                    self?.selectedSession?.ownership.repositoryRoot
-                        ?? self?.selectedSession?.workingDirectory
+                    guard let session = self?.selectedSession,
+                          !session.record.launchSpec.transport.normalized.isRemote
+                    else { return nil }
+                    return session.ownership.repositoryRoot ?? session.workingDirectory
                 }
             }
         )

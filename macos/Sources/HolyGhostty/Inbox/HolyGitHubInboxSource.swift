@@ -203,27 +203,60 @@ enum HolyGitHubRemoteParser {
     }
 }
 
-/// One `git remote get-url origin` per repository root per app lifetime;
-/// remotes do not churn while a session runs.
+/// One `git remote get-url origin` per (host, repository root) per app
+/// lifetime; remotes do not churn while a session runs.
+///
+/// The estate is host-local (mn-7fbb07): a remote session's repository
+/// root is a path on ITS host, so the git query rides the same BatchMode
+/// SSH rail remote discovery uses. Resolving a remote session's path
+/// against the local disk silently emptied the project tab on the
+/// MacBook — the path simply does not exist there.
 actor HolyGitHubRepoSlugResolver {
-    private var cache: [String: String?] = [:]
+    private struct Key: Hashable {
+        let sshDestination: String?
+        let root: String
+    }
 
-    func slug(forRepositoryRoot root: String) async -> String? {
-        if let cached = cache[root] {
+    private var cache: [Key: String?] = [:]
+
+    /// The exact remote invocation, pure for tests: single-quoted root
+    /// survives spaces; BatchMode never prompts; a dead host fails in 3s.
+    nonisolated static func sshArguments(destination: String, root: String) -> [String] {
+        let quotedRoot = "'" + root.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+        return [
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=3",
+            destination,
+            "git -C \(quotedRoot) remote get-url origin",
+        ]
+    }
+
+    func slug(forRepositoryRoot root: String, sshDestination: String? = nil) async -> String? {
+        let key = Key(sshDestination: sshDestination, root: root)
+        if let cached = cache[key] {
             return cached
         }
 
-        let result = await HolyRestoreProcessRunner.run(
-            executablePath: "/usr/bin/git",
-            arguments: ["-C", root, "remote", "get-url", "origin"],
-            timeout: 10
-        )
+        let result: HolyRestoreProcessResult
+        if let sshDestination {
+            result = await HolyRestoreProcessRunner.run(
+                executablePath: "/usr/bin/ssh",
+                arguments: Self.sshArguments(destination: sshDestination, root: root),
+                timeout: 10
+            )
+        } else {
+            result = await HolyRestoreProcessRunner.run(
+                executablePath: "/usr/bin/git",
+                arguments: ["-C", root, "remote", "get-url", "origin"],
+                timeout: 10
+            )
+        }
 
         var slug: String?
         if case let .success(output) = result, output.exitCode == 0 {
             slug = HolyGitHubRemoteParser.slug(fromRemoteURL: output.stdout)
         }
-        cache[root] = slug
+        cache[key] = slug
         return slug
     }
 }
