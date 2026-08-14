@@ -143,8 +143,15 @@ final class HolyWorkspaceStore: ObservableObject {
     /// The focused session's GitHub slug, for the panel's project-scoped
     /// GitHub view (Erik 2026-08-12: "GH notifications for the project I'm
     /// in, manna for the project I'm in, and a gh-global tab").
+    ///
+    /// Ownership can be missing on adopted/restored sessions (mn-938022:
+    /// the 2026-08-12 restore left ownership_json NULL on every row, which
+    /// silently emptied the project tab's GitHub section for every
+    /// session). The working directory is the honest fallback — `git -C`
+    /// resolves the repo from any subdirectory.
     func focusedRepoSlug() async -> String? {
         let root = selectedSession?.ownership.repositoryRoot
+            ?? selectedSession?.workingDirectory
         guard let root else { return nil }
         return await inboxRepoSlugResolver.slug(forRepositoryRoot: root)
     }
@@ -171,13 +178,21 @@ final class HolyWorkspaceStore: ObservableObject {
             ],
             // The brief renders above these; the engine's sections are the
             // Library (manna backlog, gh browse) plus the alerts drawer.
+            // Same ownership-or-cwd fallback as focusedRepoSlug() — adopted
+            // and restored sessions can lack ownership (mn-938022).
             focusedRepoSlugProvider: { [weak self] in
-                let root = await MainActor.run { self?.selectedSession?.ownership.repositoryRoot }
+                let root = await MainActor.run {
+                    self?.selectedSession?.ownership.repositoryRoot
+                        ?? self?.selectedSession?.workingDirectory
+                }
                 guard let root else { return nil }
                 return await resolver.slug(forRepositoryRoot: root)
             },
             focusedRepoPathProvider: { [weak self] in
-                await MainActor.run { self?.selectedSession?.ownership.repositoryRoot }
+                await MainActor.run {
+                    self?.selectedSession?.ownership.repositoryRoot
+                        ?? self?.selectedSession?.workingDirectory
+                }
             }
         )
     }()
