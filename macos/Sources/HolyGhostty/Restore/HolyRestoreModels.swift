@@ -116,9 +116,11 @@ struct HolyRestorePreflightContext: Equatable, Sendable {
     /// record carries no working directory at all.
     var workingDirectoryExists: Bool?
     var workingDirectory: String?
-    /// Whether the provider executable resolves on PATH. Nil for shell rows,
-    /// which use the login shell and need no provider binary.
-    var executableAvailable: Bool?
+    /// How the provider executable was discovered — and therefore whether the
+    /// restored argv may carry its bare name. `.missing` means every layer
+    /// missed. Nil for shell rows, which use the login shell and need no
+    /// provider binary.
+    var executable: HolyRestoreExecutableDiscovery?
     /// Resolve outcome for provider rows; nil for shell rows.
     var resolveOutcome: HolyRestoreResolveOutcome?
     /// Live probe of the exact persisted tmux identity; nil when the record

@@ -11,7 +11,7 @@ struct HolyRestorePreflightTests {
         hostSupported: Bool = true,
         workingDirectoryExists: Bool? = true,
         workingDirectory: String? = "/tmp/project",
-        executableAvailable: Bool? = true,
+        executable: HolyRestoreExecutableDiscovery? = .tmuxServerPath("/opt/homebrew/bin/claude"),
         resolveOutcome: HolyRestoreResolveOutcome? = nil,
         liveness: HolyTmuxLiveness? = .absent,
         conflictReason: String? = nil
@@ -20,7 +20,7 @@ struct HolyRestorePreflightTests {
             hostSupported: hostSupported,
             workingDirectoryExists: workingDirectoryExists,
             workingDirectory: workingDirectory,
-            executableAvailable: executableAvailable,
+            executable: executable,
             resolveOutcome: resolveOutcome,
             liveness: liveness,
             conflictReason: conflictReason
@@ -113,7 +113,7 @@ struct HolyRestorePreflightTests {
     @Test func shellRuntimeIsShellOnlyWithoutTouchingTheResolver() {
         let state = HolyRestorePreflight.rowState(
             runtime: .shell,
-            context: context(executableAvailable: nil, resolveOutcome: nil)
+            context: context(executable: nil, resolveOutcome: nil)
         )
         #expect(state == .shellOnly)
     }
@@ -124,7 +124,7 @@ struct HolyRestorePreflightTests {
             context: context(
                 workingDirectoryExists: nil,
                 workingDirectory: nil,
-                executableAvailable: nil,
+                executable: nil,
                 resolveOutcome: nil
             )
         )
@@ -138,7 +138,7 @@ struct HolyRestorePreflightTests {
             runtime: .claude,
             context: context(
                 workingDirectoryExists: false,
-                executableAvailable: false,
+                executable: .missing,
                 resolveOutcome: .resolverUnavailable("down"),
                 liveness: .present
             )
@@ -221,11 +221,11 @@ struct HolyRestorePreflightTests {
         }
     }
 
-    @Test func missingProviderExecutableBlocks() {
+    @Test func missingProviderExecutableBlocksNamingEveryPlaceSearched() {
         let state = HolyRestorePreflight.rowState(
             runtime: .codex,
             context: context(
-                executableAvailable: false,
+                executable: .missing,
                 resolveOutcome: exactOutcome()
             )
         )
@@ -234,6 +234,27 @@ struct HolyRestorePreflightTests {
             return
         }
         #expect(reason.contains("codex"))
+        // The old message said "on PATH", which named neither the PATH the
+        // restored pane runs under nor the directories a version manager uses.
+        #expect(reason.contains("tmux server's PATH"))
+        #expect(reason.contains("known tool directories"))
+        #expect(!reason.hasSuffix("was not found on PATH."))
+    }
+
+    // A hit anywhere — including one that must be pinned into argv — is not a
+    // block. Only `.missing` is.
+    @Test func executableFoundOutsideTheServerPathStillReachesTheResolver() {
+        for discovery: HolyRestoreExecutableDiscovery in [
+            .tmuxServerPath("/opt/homebrew/bin/codex"),
+            .wellKnownDirectory("/Users/u/.nvm/versions/node/v22.16.0/bin/codex"),
+            .loginShell("/usr/local/bin/codex"),
+        ] {
+            let state = HolyRestorePreflight.rowState(
+                runtime: .codex,
+                context: context(executable: discovery, resolveOutcome: exactOutcome())
+            )
+            #expect(state == .exactResume(providerSessionID: "ae3d63af-1111"))
+        }
     }
 
     @Test func remoteTransportIsWrongHost() {
