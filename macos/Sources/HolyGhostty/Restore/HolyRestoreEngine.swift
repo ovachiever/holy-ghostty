@@ -9,14 +9,22 @@ protocol HolyRestoreTmuxControlling: Sendable {
     /// Creates the session detached. Returns nil on success, or a
     /// human-readable failure reason.
     func createDetached(for launchSpec: HolySessionLaunchSpec) async -> String?
+    /// The global PATH of the live tmux server behind `socketName` — the PATH
+    /// every session created on it inherits, and therefore the PATH a restored
+    /// command actually runs under. Nil when the server is not running or the
+    /// query failed; absence is a fall-through, never a verdict.
+    func serverGlobalPath(socketName: String?) async -> String?
 }
 
 protocol HolyRestoreEnvironmentProbing: Sendable {
     func directoryExists(_ path: String) -> Bool
-    /// An invocable path for the named executable, or nil when none exists.
-    /// Production returns an absolute path so the resume command survives the
-    /// login-shell PATH of a Dock launch; tests may return the bare name.
-    func resolveExecutable(_ name: String) async -> String?
+    /// Layered discovery for a provider executable, recording *where* the hit
+    /// came from so the caller knows whether argv may keep the bare name.
+    /// `tmuxServerPath` is the live server's PATH when it could be read.
+    func discoverExecutable(
+        _ name: String,
+        tmuxServerPath: String?
+    ) async -> HolyRestoreExecutableDiscovery
 }
 
 /// The slice of workspace state the engine reads and writes. The store
@@ -403,6 +411,9 @@ final class HolyRestoreEngine: ObservableObject {
         }
 
         pendingResolutions.removeAll()
+        // A fresh pass re-asks the server: it may have been restarted, or
+        // started for the first time, since the last preflight.
+        serverGlobalPathTasks.removeAll()
         let conflictReasons = planConflictReasons()
         await runBounded(rowIDs: rows.map(\.id)) { [weak self] rowID in
             await self?.preflightLocalFacts(rowID: rowID, conflictReasons: conflictReasons)
@@ -451,6 +462,37 @@ final class HolyRestoreEngine: ObservableObject {
 
     private var pendingResolutions: [UUID: PendingResolution] = [:]
 
+    /// The in-flight or finished query for one tmux server's global PATH,
+    /// memoized per socket for one preflight pass. Every row in a batch shares
+    /// one server and the answer costs a subprocess, so 54 rows must not mean
+    /// 54 identical queries. Storing the *task* rather than the value makes
+    /// this true under the bounded concurrency preflight runs with: rows race
+    /// to the cache, but the lookup and the insert both happen on the main
+    /// actor with no await between them, so only the first row spawns a query
+    /// and the rest await its result.
+    /// Keyed by socket name; "" stands for the default socket.
+    private var serverGlobalPathTasks: [String: Task<String?, Never>] = [:]
+
+    /// One discovery path for both the check and the launch, so a row can
+    /// never pass preflight on evidence the runtime does not share. The
+    /// verdict carries where the hit came from, which decides argv.
+    private func discoverExecutable(
+        _ name: String,
+        spec: HolySessionLaunchSpec
+    ) async -> HolyRestoreExecutableDiscovery {
+        let socketName = spec.tmux?.normalized.socketName
+        let cacheKey = socketName ?? ""
+        let query: Task<String?, Never>
+        if let existing = serverGlobalPathTasks[cacheKey] {
+            query = existing
+        } else {
+            let tmux = self.tmux
+            query = Task { await tmux.serverGlobalPath(socketName: socketName) }
+            serverGlobalPathTasks[cacheKey] = query
+        }
+        return await environment.discoverExecutable(name, tmuxServerPath: query.value)
+    }
+
     private func preflightLocalFacts(rowID: UUID, conflictReasons: [UUID: String]) async {
         guard let index = rows.firstIndex(where: { $0.id == rowID }) else { return }
         let row = rows[index]
@@ -474,7 +516,7 @@ final class HolyRestoreEngine: ObservableObject {
             hostSupported: !spec.transport.normalized.isRemote,
             workingDirectoryExists: workingDirectory.map(environment.directoryExists),
             workingDirectory: workingDirectory,
-            executableAvailable: nil,
+            executable: nil,
             resolveOutcome: nil,
             liveness: nil,
             conflictReason: conflictReasons[rowID]
@@ -485,7 +527,7 @@ final class HolyRestoreEngine: ObservableObject {
         }
 
         if runtime != .shell {
-            context.executableAvailable = await environment.resolveExecutable(runtime.rawValue) != nil
+            context.executable = await discoverExecutable(runtime.rawValue, spec: spec)
         }
 
         // Only provider rows that pass every local gate go to the resolver;
@@ -495,7 +537,7 @@ final class HolyRestoreEngine: ObservableObject {
             && context.conflictReason == nil
             && (context.liveness == .absent || context.liveness == nil)
             && context.workingDirectoryExists == true
-            && context.executableAvailable == true
+            && context.executable?.isFound == true
             && workingDirectory != nil
 
         if needsResolution, let workingDirectory {
@@ -817,18 +859,21 @@ final class HolyRestoreEngine: ObservableObject {
         guard let row = rows.first(where: { $0.id == rowID }) else { return }
         updateRow(rowID) { $0.phase = .restoring }
 
-        // Re-resolve at launch time: the command executes under the same
-        // login-shell PATH that blinds the preflight probe, so the argv must
-        // carry the absolute path, not a name the pane's shell may not find.
-        // A nil here after preflight passed is a race; the bare name keeps
-        // the failure visible in the pane instead of inventing a block.
-        let executablePath = await environment.resolveExecutable(
-            row.plannedLaunchSpec.runtime.rawValue
+        // Re-run the same layered discovery preflight ran — one function, so
+        // the check and the runtime cannot disagree. Only a hit on the tmux
+        // server's own PATH earns a bare name; anything found elsewhere is
+        // pinned absolute, because the pane's PATH may not carry that
+        // directory. A miss here after preflight passed is a race; the bare
+        // name keeps the failure visible in the pane instead of inventing a
+        // block.
+        let discovery = await discoverExecutable(
+            row.plannedLaunchSpec.runtime.rawValue,
+            spec: row.plannedLaunchSpec
         )
         guard let resumeCommand = HolyRestoreCommandBuilder.renderedResumeCommand(
             runtime: row.plannedLaunchSpec.runtime,
             providerSessionID: providerSessionID,
-            executablePath: executablePath
+            executablePath: discovery.pinnedArgvPath
         ) else {
             updateRow(rowID) {
                 $0.phase = .failed("No exact resume command exists for this runtime and id.")
@@ -997,6 +1042,10 @@ struct HolyRestoreTmuxService: HolyRestoreTmuxControlling {
         await HolyTmuxLifecycleService.verifyLiveIdentity(identity)
     }
 
+    func serverGlobalPath(socketName: String?) async -> String? {
+        await HolyTmuxServerEnvironment.globalPath(socketName: socketName)
+    }
+
     func createDetached(for launchSpec: HolySessionLaunchSpec) async -> String? {
         guard let command = HolyTmuxCommandBuilder.detachedCreateCommand(for: launchSpec) else {
             return "The session has no complete local tmux identity to create."
@@ -1038,16 +1087,48 @@ struct HolyRestoreEnvironmentProbe: HolyRestoreEnvironmentProbing {
     /// network mount, and preflight must not hang the sheet behind it.
     private static let pathProbeTimeoutSeconds: TimeInterval = 15
 
-    func resolveExecutable(_ name: String) async -> String? {
+    /// Layered discovery, strongest evidence first:
+    ///
+    /// 1. The live tmux server's own PATH. A hit here is the runtime's own
+    ///    answer, so the bare name is kept in argv.
+    /// 2. Known tool directories — nvm (every installed version, newest
+    ///    first), volta, bun, the opencode installer, pyenv, ~/.local/bin,
+    ///    homebrew. These initialize in `.zshrc`, which neither a Dock launch
+    ///    nor a login shell ever sources, so a hit must be pinned absolute.
+    /// 3. A login-shell `command -v`. Its PATH is the app's, not the pane's,
+    ///    so a hit is pinned absolute too.
+    ///
+    /// Only when all three miss does the row fail — and then it fails naming
+    /// what was searched.
+    func discoverExecutable(
+        _ name: String,
+        tmuxServerPath: String?
+    ) async -> HolyRestoreExecutableDiscovery {
         // Names come from HolySessionRuntime raw values, but stay defensive:
         // this string lands inside a login-shell command line.
-        guard name.range(of: "^[a-z0-9-]{1,32}$", options: .regularExpression) != nil else {
-            return nil
+        guard HolyRestoreExecutableSearch.isSafeExecutableName(name) else { return .missing }
+
+        let isExecutable = { FileManager.default.isExecutableFile(atPath: $0) }
+
+        if let tmuxServerPath,
+           let path = HolyRestoreExecutableSearch.resolve(
+               name: name,
+               inSearchPath: tmuxServerPath,
+               isExecutable: isExecutable
+           ) {
+            return .tmuxServerPath(path)
         }
-        // A Dock launch gets a login non-interactive shell: .zprofile loads,
-        // .zshrc never does. `command -v` here sees homebrew (claude) but not
-        // nvm-installed codex or the ~/.opencode/bin opencode, and the same
-        // PATH governs the restored pane — hence absolute paths everywhere.
+
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let candidates = HolyRestoreExecutableSearch.wellKnownCandidates(
+            name: name,
+            home: home,
+            nvmVersionDirectoryNames: Self.nvmVersionDirectoryNames(home: home)
+        )
+        if let path = candidates.first(where: isExecutable) {
+            return .wellKnownDirectory(path)
+        }
+
         let result = await HolyRestoreProcessRunner.run(
             executablePath: "/bin/zsh",
             arguments: ["-lc", "command -v \(name)"],
@@ -1057,52 +1138,19 @@ struct HolyRestoreEnvironmentProbe: HolyRestoreEnvironmentProbing {
             let path = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
             // Builtins/aliases can answer `command -v` with a non-path word;
             // only an absolute executable path is worth baking into argv.
-            if path.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: path) {
-                return path
+            if path.hasPrefix("/"), isExecutable(path) {
+                return .loginShell(path)
             }
         }
-        return Self.wellKnownExecutablePath(name)
+        return .missing
     }
 
-    /// The install locations of the managers that only initialize in .zshrc,
-    /// plus the resolver client's original four. Each entry names the real
-    /// installer that produces it; extend only with a concrete sighting.
-    static func wellKnownExecutablePath(_ name: String) -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        var candidates = [
-            "\(home)/.pyenv/shims/\(name)",     // pyenv
-            "\(home)/.local/bin/\(name)",       // pipx / uv / user installs
-            "/opt/homebrew/bin/\(name)",        // homebrew (Apple Silicon)
-            "/usr/local/bin/\(name)",           // homebrew (Intel) / manual
-            "\(home)/.opencode/bin/\(name)",    // opencode self-installer
-            "\(home)/.bun/bin/\(name)",         // bun global installs
-            "\(home)/.volta/bin/\(name)",       // volta shims
-        ]
-        if let nvmBin = newestNvmBinDirectory(home: home) {
-            candidates.append("\(nvmBin)/\(name)")
-        }
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
-
-    /// nvm keeps one bin directory per node version and selects between them
-    /// in .zshrc, which a login shell never runs. The newest version is the
-    /// best stand-in for "what nvm would have picked".
-    private static func newestNvmBinDirectory(home: String) -> String? {
-        let versionsRoot = "\(home)/.nvm/versions/node"
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: versionsRoot) else {
-            return nil
-        }
-        let best = entries
-            .filter { $0.hasPrefix("v") }
-            .compactMap { entry -> (components: [Int], name: String)? in
-                let numbers = entry.dropFirst().split(separator: ".").compactMap { Int($0) }
-                guard !numbers.isEmpty else { return nil }
-                return (numbers, entry)
-            }
-            .max { lhs, rhs in
-                lhs.components.lexicographicallyPrecedes(rhs.components)
-            }
-        guard let best else { return nil }
-        return "\(versionsRoot)/\(best.name)/bin"
+    /// Every node version nvm has installed. Unordered here; the search orders
+    /// them newest-first and searches all of them, because probing only the
+    /// newest hides a tool installed under an older one.
+    private static func nvmVersionDirectoryNames(home: String) -> [String] {
+        (try? FileManager.default.contentsOfDirectory(
+            atPath: "\(home)/.nvm/versions/node"
+        )) ?? []
     }
 }

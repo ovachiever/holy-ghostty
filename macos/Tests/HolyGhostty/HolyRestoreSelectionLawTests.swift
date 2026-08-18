@@ -36,11 +36,21 @@ private final class RecordingTmux: HolyRestoreTmuxControlling, @unchecked Sendab
         }
         return nil
     }
+
+    func serverGlobalPath(socketName: String?) async -> String? { nil }
 }
 
 private struct StubEnvironment: HolyRestoreEnvironmentProbing {
     func directoryExists(_ path: String) -> Bool { true }
-    func resolveExecutable(_ name: String) async -> String? { name }
+
+    // Reports a server-PATH hit carrying the bare name: `.tmuxServerPath`
+    // pins nothing into argv, so command assertions stay readable.
+    func discoverExecutable(
+        _ name: String,
+        tmuxServerPath: String?
+    ) async -> HolyRestoreExecutableDiscovery {
+        .tmuxServerPath(name)
+    }
 }
 
 @MainActor

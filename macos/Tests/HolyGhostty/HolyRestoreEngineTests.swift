@@ -84,6 +84,10 @@ private final class FakeTmux: HolyRestoreTmuxControlling, @unchecked Sendable {
     private var currentConcurrentCreates = 0
     var undeterminedSessionNames: Set<String> = []
     var createDelayNanoseconds: UInt64 = 0
+    /// The global PATH the fake server reports, and a tally of how often it
+    /// was asked — the engine memoizes one query per socket per pass.
+    var serverGlobalPathValue: String?
+    private(set) var serverGlobalPathQueryCount = 0
 
     func markLive(_ sessionName: String) {
         lock.lock()
@@ -131,25 +135,63 @@ private final class FakeTmux: HolyRestoreTmuxControlling, @unchecked Sendable {
         }
         return nil
     }
+
+    func serverGlobalPath(socketName: String?) async -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        serverGlobalPathQueryCount += 1
+        return serverGlobalPathValue
+    }
 }
 
 private final class FakeEnvironment: HolyRestoreEnvironmentProbing, @unchecked Sendable {
     var existingDirectories: Set<String>
+    /// Names discovered on the tmux server's PATH. Reported as
+    /// `.tmuxServerPath(name)` — bare, because that layer pins nothing — so
+    /// command assertions stay readable.
     var availableExecutables: Set<String>
+    /// Names found only in a well-known tool directory, mapped to the absolute
+    /// path discovery must pin into argv.
+    var wellKnownExecutablePaths: [String: String] = [:]
+    /// Server PATHs handed to `discoverExecutable`, in call order.
+    private let lock = NSLock()
+    private var observedServerPaths: [String?] = []
 
-    init(existingDirectories: Set<String>, availableExecutables: Set<String>) {
+    init(
+        existingDirectories: Set<String>,
+        availableExecutables: Set<String>,
+        wellKnownExecutablePaths: [String: String] = [:]
+    ) {
         self.existingDirectories = existingDirectories
         self.availableExecutables = availableExecutables
+        self.wellKnownExecutablePaths = wellKnownExecutablePaths
+    }
+
+    var serverPathObservations: [String?] {
+        lock.lock()
+        defer { lock.unlock() }
+        return observedServerPaths
     }
 
     func directoryExists(_ path: String) -> Bool {
         existingDirectories.contains(path)
     }
 
-    // Returns the bare name so command assertions stay readable; production
-    // resolves an absolute path (see HolyRestoreEnvironmentProbe).
-    func resolveExecutable(_ name: String) async -> String? {
-        availableExecutables.contains(name) ? name : nil
+    func discoverExecutable(
+        _ name: String,
+        tmuxServerPath: String?
+    ) async -> HolyRestoreExecutableDiscovery {
+        lock.lock()
+        observedServerPaths.append(tmuxServerPath)
+        lock.unlock()
+
+        if availableExecutables.contains(name) {
+            return .tmuxServerPath(name)
+        }
+        if let path = wellKnownExecutablePaths[name] {
+            return .wellKnownDirectory(path)
+        }
+        return .missing
     }
 }
 
@@ -313,6 +355,191 @@ struct HolyRestoreEngineTests {
         #expect(requests.count == 2)
         #expect(requests[0] == .init(cwd: "/tmp/lane-a", harness: "claude", near: Self.lastActivity))
         #expect(requests[1] == .init(cwd: "/tmp/lane-b", harness: "codex", near: Self.lastActivity))
+    }
+
+    // MARK: - Executable discovery reaches the runtime's own PATH
+
+    @Test func theTmuxServerPathIsQueriedOncePerPassAndHandedToDiscovery() async throws {
+        let resolver = FakeBatchResolver(candidatesByCwd: [
+            "/tmp/lane-a": [candidate("aaa-111")],
+            "/tmp/lane-b": [candidate("bbb-222")],
+        ])
+        let tmux = FakeTmux()
+        tmux.serverGlobalPathValue = "/opt/homebrew/bin:/usr/bin:/bin"
+        let environment = FakeEnvironment(
+            existingDirectories: ["/tmp/lane-a", "/tmp/lane-b"],
+            availableExecutables: ["claude", "codex"]
+        )
+        let (engine, _, _) = makeEngine(
+            archives: [
+                archived(workingDirectory: "/tmp/lane-a", sessionName: "holy-one"),
+                archived(
+                    runtime: .codex,
+                    workingDirectory: "/tmp/lane-b",
+                    command: "codex",
+                    sessionName: "holy-two"
+                ),
+            ],
+            resolver: resolver,
+            tmux: tmux,
+            environment: environment
+        )
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        // Both rows share one server; asking it twice would be the same
+        // subprocess answer twice.
+        #expect(tmux.serverGlobalPathQueryCount == 1)
+        #expect(environment.serverPathObservations.count == 2)
+        #expect(environment.serverPathObservations.allSatisfy {
+            $0 == "/opt/homebrew/bin:/usr/bin:/bin"
+        })
+    }
+
+    @Test func aServerPathHitRestoresWithTheBareName() async throws {
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("aaa-111")]])
+        let tmux = FakeTmux()
+        tmux.serverGlobalPathValue = "/opt/homebrew/bin"
+        let (engine, _, _) = makeEngine(
+            archives: [archived()],
+            resolver: resolver,
+            tmux: tmux,
+            environment: FakeEnvironment(
+                existingDirectories: ["/tmp/lane-a"],
+                availableExecutables: ["claude"]
+            )
+        )
+
+        engine.buildPlan()
+        await engine.runPreflight()
+        await engine.restoreAll()
+
+        // The server PATH is the pane's PATH, so the bare name resolves there.
+        #expect(tmux.createdSpecs.compactMap(\.command) == ["'claude' '--resume' 'aaa-111'"])
+    }
+
+    @Test func anExecutableFoundOnlyInAToolDirectoryIsPinnedIntoTheRestoredCommand() async throws {
+        // Erik's field failure, end to end: codex is absent from the tmux
+        // server's PATH and lives under nvm. The row must still restore, and
+        // the command must carry the absolute path — a bare `codex` would die
+        // in the pane with "command not found" after a green preflight.
+        let codexPath = "/Users/erik/.nvm/versions/node/v22.16.0/bin/codex"
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-b": [candidate("ccc-333")]])
+        let tmux = FakeTmux()
+        tmux.serverGlobalPathValue = "/opt/homebrew/bin:/usr/bin:/bin"
+        let (engine, _, _) = makeEngine(
+            archives: [archived(
+                runtime: .codex,
+                workingDirectory: "/tmp/lane-b",
+                command: "codex",
+                sessionName: "holy-codex"
+            )],
+            resolver: resolver,
+            tmux: tmux,
+            environment: FakeEnvironment(
+                existingDirectories: ["/tmp/lane-b"],
+                availableExecutables: [],
+                wellKnownExecutablePaths: ["codex": codexPath]
+            )
+        )
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        #expect(try row(engine, sessionName: "holy-codex").state
+            == .exactResume(providerSessionID: "ccc-333"))
+
+        await engine.restoreAll()
+
+        #expect(tmux.createdSpecs.compactMap(\.command)
+            == ["'\(codexPath)' 'resume' 'ccc-333'"])
+    }
+
+    @Test func onlyATotalMissBlocksTheRowAndItNamesWhatWasSearched() async throws {
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-b": [candidate("ccc-333")]])
+        let tmux = FakeTmux()
+        tmux.serverGlobalPathValue = "/opt/homebrew/bin"
+        let (engine, _, _) = makeEngine(
+            archives: [archived(
+                runtime: .codex,
+                workingDirectory: "/tmp/lane-b",
+                command: "codex",
+                sessionName: "holy-codex"
+            )],
+            resolver: resolver,
+            tmux: tmux,
+            environment: FakeEnvironment(
+                existingDirectories: ["/tmp/lane-b"],
+                availableExecutables: []
+            )
+        )
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        guard case let .blocked(reason) = try row(engine, sessionName: "holy-codex").state else {
+            Issue.record("Expected blocked, got \(try row(engine, sessionName: "holy-codex").state)")
+            return
+        }
+        #expect(reason.contains("codex"))
+        #expect(reason.contains("tmux server's PATH"))
+        #expect(reason.contains("known tool directories"))
+
+        // A blocked row is never launched.
+        await engine.restoreAll()
+        #expect(tmux.createdSpecs.isEmpty)
+    }
+
+    @Test func anUnreachableServerFallsThroughInsteadOfBlocking() async throws {
+        // No server running yet (a cold boot restores before anything exists).
+        // A nil server PATH is a fall-through, never a verdict.
+        let codexPath = "/Users/erik/.nvm/versions/node/v22.16.0/bin/codex"
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-b": [candidate("ccc-333")]])
+        let tmux = FakeTmux()
+        tmux.serverGlobalPathValue = nil
+        let environment = FakeEnvironment(
+            existingDirectories: ["/tmp/lane-b"],
+            availableExecutables: [],
+            wellKnownExecutablePaths: ["codex": codexPath]
+        )
+        let (engine, _, _) = makeEngine(
+            archives: [archived(
+                runtime: .codex,
+                workingDirectory: "/tmp/lane-b",
+                command: "codex",
+                sessionName: "holy-codex"
+            )],
+            resolver: resolver,
+            tmux: tmux,
+            environment: environment
+        )
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        #expect(environment.serverPathObservations == [nil])
+        #expect(try row(engine, sessionName: "holy-codex").state
+            == .exactResume(providerSessionID: "ccc-333"))
+    }
+
+    @Test func shellRowsNeverProbeForAProviderExecutable() async throws {
+        let resolver = FakeBatchResolver(candidatesByCwd: [:])
+        let environment = FakeEnvironment(
+            existingDirectories: ["/tmp/lane-a"],
+            availableExecutables: []
+        )
+        let (engine, _, _) = makeEngine(
+            archives: [archived(runtime: .shell, command: nil)],
+            resolver: resolver,
+            environment: environment
+        )
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        #expect((try #require(engine.rows.first)).state == .shellOnly)
+        #expect(environment.serverPathObservations.isEmpty)
     }
 
     @Test func planGeneratesAndPersistsAMissingTmuxIdentityOnce() async throws {

@@ -50,9 +50,13 @@ enum HolyRestorePreflight {
                 "No working directory was recorded for this session, so its conversation cannot be resolved."
             )
         }
-        if context.executableAvailable == false {
+        if context.executable == .missing {
+            // Name what was searched. The old message said "on PATH" and meant
+            // the app's login-shell PATH, which is neither the PATH the
+            // restored pane runs under nor anywhere a version manager installs.
             return .blocked(
-                "The \(runtime.rawValue) executable was not found on PATH."
+                "The \(runtime.rawValue) executable was not found on the tmux server's PATH "
+                    + "or in known tool directories."
             )
         }
 
