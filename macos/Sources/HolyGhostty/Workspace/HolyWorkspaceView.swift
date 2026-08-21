@@ -1171,42 +1171,18 @@ struct HolyWorkspaceRootView: View {
     private func sessionRiskStatusItems(
         for session: HolySession
     ) -> [(symbol: String, text: String, color: Color)] {
-        let coordination = store.coordination(for: session)
-        var items: [(symbol: String, text: String, color: Color)] = []
+        store
+            .coordination(for: session)
+            .riskStatusItems(hasBranchOwnershipDrift: session.hasBranchOwnershipDrift)
+            .map { (symbol: $0.symbol, text: $0.text, color: color(for: $0.emphasis)) }
+    }
 
-        if !coordination.overlappingFiles.isEmpty {
-            items.append((
-                "exclamationmark.triangle.fill",
-                pluralized(count: coordination.overlappingFiles.count, singular: "overlapping file"),
-                HolyGhosttyTheme.danger
-            ))
+    private func color(for emphasis: HolyCoordinationRiskItem.Emphasis) -> Color {
+        switch emphasis {
+        case .danger: HolyGhosttyTheme.danger
+        case .warning: HolyGhosttyTheme.warning
+        case .secondary: HolyGhosttyTheme.textSecondary
         }
-
-        if !coordination.sharedWorktreeSessionIDs.isEmpty {
-            items.append((
-                "link",
-                "Same worktree with \(pluralized(count: coordination.sharedWorktreeSessionIDs.count, singular: "session"))",
-                HolyGhosttyTheme.textSecondary
-            ))
-        }
-
-        if coordination.hasSharedBranch {
-            items.append((
-                "arrow.triangle.branch",
-                "Same branch with \(pluralized(count: coordination.sharedBranchSessionIDs.count, singular: "session"))",
-                HolyGhosttyTheme.textSecondary
-            ))
-        }
-
-        if session.hasBranchOwnershipDrift {
-            items.append((
-                "arrow.triangle.2.circlepath",
-                "Branch drift",
-                HolyGhosttyTheme.warning
-            ))
-        }
-
-        return items
     }
 
     private func statusRailPill(symbol: String, text: String, color: Color) -> some View {
@@ -1279,10 +1255,6 @@ struct HolyWorkspaceRootView: View {
         if seconds < 3_600 { return "\(seconds / 60)m" }
         if seconds < 86_400 { return "\(seconds / 3_600)h" }
         return "\(seconds / 86_400)d"
-    }
-
-    private func pluralized(count: Int, singular: String) -> String {
-        count == 1 ? "1 \(singular)" : "\(count) \(singular)s"
     }
 
     private var focusSummaryText: String {

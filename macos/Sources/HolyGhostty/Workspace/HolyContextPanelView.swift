@@ -215,6 +215,18 @@ struct HolyContextPanelView: View {
                         contextRow("Shared worktree", coordination.sharedWorktreeSessionTitles.joined(separator: ", "))
                     }
 
+                    if !coordination.sharedWorktreeChangedFiles.isEmpty {
+                        // A property of the checkout, listed apart from
+                        // "Overlapping files" because nothing here says who
+                        // touched which path.
+                        contextRow(
+                            "Shared checkout",
+                            HolyCoordinationPhrase.sharedCheckoutFiles(
+                                count: coordination.sharedWorktreeChangedFiles.count
+                            )
+                        )
+                    }
+
                     if !coordination.sharedBranchSessionTitles.isEmpty {
                         contextRow("Shared branch", coordination.sharedBranchSessionTitles.joined(separator: ", "))
                     }

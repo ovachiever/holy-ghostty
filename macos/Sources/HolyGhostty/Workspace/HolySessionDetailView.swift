@@ -134,13 +134,15 @@ struct HolySessionDetailView: View {
 
     private func coordinationStatusText(for session: HolySession) -> String? {
         if !coordination.overlappingFiles.isEmpty {
-            let count = coordination.overlappingFiles.count
-            return count == 1 ? "1 overlapping file" : "\(count) overlapping files"
+            return HolyCoordinationPhrase.overlappingFiles(count: coordination.overlappingFiles.count)
         }
 
         if !coordination.sharedWorktreeSessionIDs.isEmpty {
             let count = coordination.sharedWorktreeSessionIDs.count
-            return count == 1 ? "same worktree as 1 session" : "same worktree as \(count) sessions"
+            let colocation = count == 1 ? "same worktree as 1 session" : "same worktree as \(count) sessions"
+            let changedFileCount = coordination.sharedWorktreeChangedFiles.count
+            guard changedFileCount > 0 else { return colocation }
+            return "\(colocation) · \(HolyCoordinationPhrase.uncommittedFiles(count: changedFileCount))"
         }
 
         if coordination.hasSharedBranch {
@@ -156,7 +158,9 @@ struct HolySessionDetailView: View {
     }
 
     private func coordinationStatusColor(for session: HolySession) -> Color {
-        if !coordination.overlappingFiles.isEmpty || session.hasBranchOwnershipDrift {
+        // Asks the model what counts as blocking rather than reading the
+        // overlap list, which no longer carries shared-checkout co-location.
+        if coordination.hasBlockingConflict || session.hasBranchOwnershipDrift {
             return HolyGhosttyTheme.warning
         }
 
