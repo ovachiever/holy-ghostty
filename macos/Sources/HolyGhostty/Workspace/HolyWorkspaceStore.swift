@@ -4298,8 +4298,7 @@ final class HolyWorkspaceStore: ObservableObject {
 
         var sharedWorktreeSessionIDs: Set<UUID> = []
         var sharedBranchSessionIDs: Set<UUID> = []
-        var overlappingSessionIDs: Set<UUID> = []
-        var overlappingFiles: Set<String> = []
+        var attributionPeers: [HolyCoordinationFileAttribution.Peer] = []
 
         let sessionFiles = Set(session.gitSnapshot?.changedFiles.map(\.path) ?? [])
 
@@ -4314,10 +4313,12 @@ final class HolyWorkspaceStore: ObservableObject {
             let otherWorktreePath = normalizedPath(otherOwnership.worktreePath)
             let otherBranchName = otherOwnership.branchName
 
+            var sharesWorktree = false
             if let sessionWorktreePath,
                let otherWorktreePath,
                otherWorktreePath == sessionWorktreePath {
                 sharedWorktreeSessionIDs.insert(other.id)
+                sharesWorktree = true
             }
 
             if let sessionRepositoryRoot,
@@ -4329,18 +4330,28 @@ final class HolyWorkspaceStore: ObservableObject {
                 sharedBranchSessionIDs.insert(other.id)
             }
 
-            guard let otherSnapshot = other.gitSnapshot,
-                  let sessionRepositoryRoot,
-                  normalizedPath(otherSnapshot.repositoryRoot) == sessionRepositoryRoot else {
-                continue
+            var comparableFiles: [String]?
+            if let otherSnapshot = other.gitSnapshot,
+               let sessionRepositoryRoot,
+               normalizedPath(otherSnapshot.repositoryRoot) == sessionRepositoryRoot {
+                comparableFiles = otherSnapshot.changedFiles.map(\.path)
             }
 
-            let overlap = sessionFiles.intersection(otherSnapshot.changedFiles.map(\.path))
-            if !sessionFiles.isEmpty, !overlap.isEmpty {
-                overlappingSessionIDs.insert(other.id)
-                overlappingFiles.formUnion(overlap)
-            }
+            guard sharesWorktree || comparableFiles != nil else { continue }
+
+            attributionPeers.append(.init(
+                id: other.id,
+                sharesWorktree: sharesWorktree,
+                changedFiles: comparableFiles
+            ))
         }
+
+        let attribution = HolyCoordinationFileAttribution.attribute(
+            sessionFiles: sessionFiles,
+            peers: attributionPeers
+        )
+        let overlappingSessionIDs = attribution.overlappingSessionIDs
+        let overlappingFiles = attribution.overlappingFiles
 
         let orderedSharedWorktreeIDs = sharedWorktreeSessionIDs.sorted { lhs, rhs in
             title(forSessionID: lhs) < title(forSessionID: rhs)
@@ -4352,6 +4363,7 @@ final class HolyWorkspaceStore: ObservableObject {
             title(forSessionID: lhs) < title(forSessionID: rhs)
         }
         let orderedOverlapFiles = overlappingFiles.sorted()
+        let orderedSharedWorktreeFiles = attribution.sharedWorktreeChangedFiles.sorted()
 
         return .init(
             attention: attention(
@@ -4365,6 +4377,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 .init(
                     phase: session.phase,
                     sharedWorktreeCount: orderedSharedWorktreeIDs.count,
+                    sharedWorktreeChangedFileCount: orderedSharedWorktreeFiles.count,
                     sharedBranchCount: orderedSharedBranchIDs.count,
                     overlappingFileCount: orderedOverlapFiles.count,
                     overlappingSessionCount: orderedOverlapIDs.count,
@@ -4375,6 +4388,7 @@ final class HolyWorkspaceStore: ObservableObject {
             ),
             sharedWorktreeSessionIDs: orderedSharedWorktreeIDs,
             sharedWorktreeSessionTitles: orderedSharedWorktreeIDs.map(title(forSessionID:)),
+            sharedWorktreeChangedFiles: orderedSharedWorktreeFiles,
             sharedBranchSessionIDs: orderedSharedBranchIDs,
             sharedBranchSessionTitles: orderedSharedBranchIDs.map(title(forSessionID:)),
             overlappingSessionIDs: orderedOverlapIDs,
@@ -4400,6 +4414,7 @@ final class HolyWorkspaceStore: ObservableObject {
             ),
             sharedWorktreeSessionIDs: [],
             sharedWorktreeSessionTitles: [],
+            sharedWorktreeChangedFiles: [],
             sharedBranchSessionIDs: [],
             sharedBranchSessionTitles: [],
             overlappingSessionIDs: [],
@@ -4434,6 +4449,7 @@ final class HolyWorkspaceStore: ObservableObject {
             .init(
                 phase: phase,
                 sharedWorktreeCount: 0,
+                sharedWorktreeChangedFileCount: 0,
                 sharedBranchCount: 0,
                 overlappingFileCount: 0,
                 overlappingSessionCount: 0,
@@ -4452,9 +4468,10 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         if context.sharedWorktreeCount > 0 {
-            return context.sharedWorktreeCount == 1
-                ? "Shared worktree with 1 session"
-                : "Shared worktree with \(context.sharedWorktreeCount) sessions"
+            return HolyCoordinationPhrase.sharedWorktree(
+                sessionCount: context.sharedWorktreeCount,
+                changedFileCount: context.sharedWorktreeChangedFileCount
+            )
         }
 
         if context.sharedBranchCount > 0 {
@@ -4569,6 +4586,7 @@ private enum HolyTmuxSessionKey: Equatable {
 private struct HolyCoordinationSummaryContext {
     let phase: HolySessionPhase
     let sharedWorktreeCount: Int
+    let sharedWorktreeChangedFileCount: Int
     let sharedBranchCount: Int
     let overlappingFileCount: Int
     let overlappingSessionCount: Int

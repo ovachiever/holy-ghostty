@@ -1147,10 +1147,18 @@ struct HolySessionCoordination: Equatable {
     let summary: String
     let sharedWorktreeSessionIDs: [UUID]
     let sharedWorktreeSessionTitles: [String]
+    /// Dirty paths in a checkout this session shares with another session.
+    ///
+    /// A count of the checkout, never of a pair: see
+    /// `HolyCoordinationFileAttribution` for why `git status` cannot say who
+    /// touched what.
+    let sharedWorktreeChangedFiles: [String]
     let sharedBranchSessionIDs: [UUID]
     let sharedBranchSessionTitles: [String]
     let overlappingSessionIDs: [UUID]
     let overlappingSessionTitles: [String]
+    /// Paths this session and a session in a *different* worktree have both
+    /// modified. Real contention; two independent dirty sets that met.
     let overlappingFiles: [String]
 
     static let empty = Self(
@@ -1158,6 +1166,7 @@ struct HolySessionCoordination: Equatable {
         summary: "No active coordination issues.",
         sharedWorktreeSessionIDs: [],
         sharedWorktreeSessionTitles: [],
+        sharedWorktreeChangedFiles: [],
         sharedBranchSessionIDs: [],
         sharedBranchSessionTitles: [],
         overlappingSessionIDs: [],
@@ -1171,6 +1180,181 @@ struct HolySessionCoordination: Equatable {
 
     var hasSharedBranch: Bool {
         !sharedBranchSessionIDs.isEmpty
+    }
+
+    /// The status-rail chips, in render order.
+    ///
+    /// Lives here rather than in the view so the footer's claims are testable
+    /// and so every surface phrases a shared checkout the same way.
+    func riskStatusItems(hasBranchOwnershipDrift: Bool) -> [HolyCoordinationRiskItem] {
+        var items: [HolyCoordinationRiskItem] = []
+
+        if !overlappingFiles.isEmpty {
+            items.append(.init(
+                symbol: "exclamationmark.triangle.fill",
+                text: HolyCoordinationPhrase.overlappingFiles(count: overlappingFiles.count),
+                emphasis: .danger
+            ))
+        }
+
+        if !sharedWorktreeSessionIDs.isEmpty {
+            // The co-location fact and the checkout's dirty count are one fact
+            // about one checkout, so they ride in one chip instead of two.
+            items.append(.init(
+                symbol: "link",
+                text: HolyCoordinationPhrase.sameWorktree(
+                    sessionCount: sharedWorktreeSessionIDs.count,
+                    changedFileCount: sharedWorktreeChangedFiles.count
+                ),
+                emphasis: .secondary
+            ))
+        }
+
+        if hasSharedBranch {
+            items.append(.init(
+                symbol: "arrow.triangle.branch",
+                text: HolyCoordinationPhrase.sameBranch(sessionCount: sharedBranchSessionIDs.count),
+                emphasis: .secondary
+            ))
+        }
+
+        if hasBranchOwnershipDrift {
+            items.append(.init(
+                symbol: "arrow.triangle.2.circlepath",
+                text: "Branch drift",
+                emphasis: .warning
+            ))
+        }
+
+        return items
+    }
+}
+
+struct HolyCoordinationRiskItem: Equatable {
+    enum Emphasis: Equatable {
+        case danger
+        case warning
+        case secondary
+    }
+
+    let symbol: String
+    let text: String
+    let emphasis: Emphasis
+}
+
+/// The words every surface uses for a coordination fact.
+///
+/// Centralized because the same number used to be described four different
+/// ways, and one of those ways was false.
+enum HolyCoordinationPhrase {
+    static func overlappingFiles(count: Int) -> String {
+        count == 1 ? "1 overlapping file" : "\(count) overlapping files"
+    }
+
+    /// Deliberately says *checkout*, not *session*: `git status` reports a
+    /// directory's dirty state and knows nothing about who dirtied it, so any
+    /// wording implying attribution would be inventing the attribution.
+    static func sharedCheckoutFiles(count: Int) -> String {
+        count == 1
+            ? "1 uncommitted file in the shared checkout"
+            : "\(count) uncommitted files in the shared checkout"
+    }
+
+    /// The bare count, for use only where a shared-checkout clause already
+    /// precedes it and supplies the scope.
+    static func uncommittedFiles(count: Int) -> String {
+        count == 1 ? "1 uncommitted file" : "\(count) uncommitted files"
+    }
+
+    static func sameWorktree(sessionCount: Int, changedFileCount: Int) -> String {
+        let colocation = sessionCount == 1
+            ? "Same worktree with 1 session"
+            : "Same worktree with \(sessionCount) sessions"
+
+        return appendingChangedFiles(to: colocation, count: changedFileCount)
+    }
+
+    static func sharedWorktree(sessionCount: Int, changedFileCount: Int) -> String {
+        let colocation = sessionCount == 1
+            ? "Shared worktree with 1 session"
+            : "Shared worktree with \(sessionCount) sessions"
+
+        return appendingChangedFiles(to: colocation, count: changedFileCount)
+    }
+
+    /// Scoped by the clause it follows, so "uncommitted files" cannot be read
+    /// as "files the two of you both touched".
+    private static func appendingChangedFiles(to colocation: String, count: Int) -> String {
+        guard count > 0 else { return colocation }
+        return "\(colocation) · \(uncommittedFiles(count: count))"
+    }
+
+    static func sameBranch(sessionCount: Int) -> String {
+        sessionCount == 1
+            ? "Same branch with 1 session"
+            : "Same branch with \(sessionCount) sessions"
+    }
+}
+
+/// Splits a session's dirty-file relationships into the two things they can be.
+///
+/// `git status --porcelain` reports a *checkout*, not an author. Two sessions
+/// working in one checkout run that command against the same directory and get
+/// the same set back, so intersecting their sets answers "what is dirty here?"
+/// and never "what are we both touching?" — the sets are identical by
+/// construction and the intersection is the whole dirty tree no matter who
+/// typed what. Only sessions in different worktrees hold independent dirty
+/// sets, and only there does an intersection mean contention.
+///
+/// Keyed on the shared worktree, never on set equality: two sessions in
+/// different worktrees that happen to have edited exactly the same files are
+/// genuinely colliding, and that must still read as overlap.
+enum HolyCoordinationFileAttribution {
+    struct Peer: Equatable {
+        let id: UUID
+        /// True when the peer's working directory is this session's working directory.
+        let sharesWorktree: Bool
+        /// The peer's dirty paths, or `nil` when it holds no snapshot of the
+        /// same repository to compare against.
+        let changedFiles: [String]?
+
+        init(id: UUID, sharesWorktree: Bool, changedFiles: [String]?) {
+            self.id = id
+            self.sharesWorktree = sharesWorktree
+            self.changedFiles = changedFiles
+        }
+    }
+
+    struct Attribution: Equatable {
+        var overlappingSessionIDs: Set<UUID> = []
+        var overlappingFiles: Set<String> = []
+        var sharedWorktreeChangedFiles: Set<String> = []
+    }
+
+    static func attribute(sessionFiles: Set<String>, peers: [Peer]) -> Attribution {
+        var attribution = Attribution()
+
+        for peer in peers {
+            if peer.sharesWorktree {
+                // One checkout, one dirty set. Count the checkout; splitting it
+                // between the two sessions would be invention. This session's
+                // own snapshot is a valid reading of that checkout even when
+                // the peer has none of its own.
+                attribution.sharedWorktreeChangedFiles.formUnion(sessionFiles)
+                attribution.sharedWorktreeChangedFiles.formUnion(peer.changedFiles ?? [])
+                continue
+            }
+
+            guard let peerFiles = peer.changedFiles else { continue }
+
+            let overlap = sessionFiles.intersection(peerFiles)
+            if !sessionFiles.isEmpty, !overlap.isEmpty {
+                attribution.overlappingSessionIDs.insert(peer.id)
+                attribution.overlappingFiles.formUnion(overlap)
+            }
+        }
+
+        return attribution
     }
 }
 
