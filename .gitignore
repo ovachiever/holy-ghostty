@@ -37,7 +37,6 @@ glad.zip
 vgcore.*
 GhosttyKit.xcframework.debug-backup/
 .claude/
-/.handoff/
 # Manna board travels with the repo (issue data only); volatile session
 # state stays local.
 /.manna/sessions.jsonl
@@ -45,3 +44,17 @@ GhosttyKit.xcframework.debug-backup/
 /.manna/board.lock
 /.manna/drift.yaml
 /.local/
+
+# agent-do workflow: .manna and .handoff are durable state
+!.manna/
+.manna/*
+!.manna/issues.jsonl
+!.manna/sessions.jsonl
+!.manna/board.yaml
+!.manna/workflow.yaml
+!.manna/handoff-order.yaml
+!.manna/drift.yaml
+.manna/board.lock
+.manna/transactions/
+!.handoff/
+!.handoff/**

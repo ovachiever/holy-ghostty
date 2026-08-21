@@ -95,3 +95,4 @@ Rules:
 | 63 | `mn-938022` | open | none | `.handoff/63-mn-938022-p0-restore-restored-sessions-carry-wrong-names-and-wrong-notes-i.md` |
 | 64 | `mn-13a213` | open | none | `.handoff/64-mn-13a213-p0-recovery-real-crash-2026-08-14-live-but-younger-server-re-ope.md` |
 | 65 | `mn-eb6b3e` | open | none | `.handoff/65-mn-eb6b3e-pre-existing-test-failure-holybrieftriagetests-needsmethreadslea.md` |
+| 66 | `mn-7c1e31` | open | none | `.handoff/66-mn-7c1e31-holy-panel-same-worktree-sessions-count-co-location-as-file-cont.md` |
