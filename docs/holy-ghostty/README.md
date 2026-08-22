@@ -1,10 +1,10 @@
 # Holy Ghostty Guide
 
-Updated: 2026-07-21
+Updated: 2026-08-22
 
 Holy Ghostty is a macOS workspace for live Ghostty terminal sessions. The app treats a session as the primary unit instead of a terminal tab.
 
-Current release: `0.44`.
+Current release: `0.50`.
 
 ## Session Model
 
@@ -16,6 +16,7 @@ A session contains:
 - Working directory and repository root.
 - Optional task reference.
 - Optional budget policy.
+- Optional session note, edited from the roster row and synced through tmux metadata.
 - Git snapshot.
 - Runtime telemetry snapshot.
 - Append-only event history.
@@ -27,7 +28,7 @@ Sessions are persisted in SQLite and restored on launch.
 
 ### Left Rail
 
-The standard workspace keeps the left rail scoped to tmux sessions so the terminal can own the main surface. `Tasks` and `Inspect` are hidden from the standard workspace for now.
+The standard workspace keeps the left rail scoped to tmux sessions so the terminal can own the main surface. `Tasks` and `Inspect` are hidden from the standard workspace.
 
 Layout controls live at the bottom of the left rail:
 
@@ -38,13 +39,18 @@ Layout controls live at the bottom of the left rail:
 
 Layouts are Holy visual layouts over durable tmux sessions, not tmux panes. When a session is visible in a split layout, the roster adds a pane label such as `Left`, `Right`, `Top`, `Bottom`, or a quadrant label.
 
-The old Diff implementation is preserved in code for a later explicit agent/worktree comparison mode, but it is not exposed in the primary Level 1 chrome.
+A dormant Diff implementation is preserved in code for a later explicit agent/worktree comparison mode; it is not exposed in the primary Level 1 chrome.
 
 The window removes the empty native toolbar band in standard mode. The left rail keeps traffic-light clearance, while the terminal surface starts at the top edge. Holy defaults add top terminal padding so the first prompt row clears macOS window controls without adding a separate app bar. The bundled Holy background image stretches to the live terminal surface size.
 
 ### Left Roster
 
-The roster lists active sessions grouped by runtime.
+The roster lists active sessions. A four-way layout switcher in the roster header chooses how they are arranged, and the choice persists per device:
+
+- `Classic`: grouped by agent runtime with the canonical status vocabulary.
+- `Calm`: the same indicators with less surrounding detail.
+- `Triage`: lanes by status, so what needs you floats up.
+- `Focus`: pinned `Today` sessions on top, the rest dimmed.
 
 TMUX session controls:
 
@@ -60,7 +66,7 @@ The default launch profile is stored in local SQLite state. This keeps personal 
 
 Each session row's `...` menu keeps `Detach From Roster` beside `Kill from Roster`. Detach leaves tmux alive; kill attempts to stop the backing tmux session and always removes Holy's roster attachment.
 
-Section order:
+Runtime section order in `Classic` and `Calm`:
 
 - Claude
 - Codex
@@ -71,6 +77,8 @@ Rows are sorted by project/folder context, then parent folder, then launch ident
 
 Rows show one compact project/folder label, a single activity orb, and quiet risk icons when needed. Selecting a session does not move it.
 
+A row's `...` action menu can add, edit, or clear a session note, and pin or unpin the session for the `Focus` layout's `Today` zone. The note draws with the identity line in the roster and reappears on the session's row in Session Restore.
+
 The roster width defaults to a narrow working size and can be resized by the divider.
 
 ### Center Surface
@@ -79,7 +87,7 @@ The center region embeds one or more live Ghostty surfaces according to the curr
 
 ### Inspector
 
-The inspector remains available in code, but the standard workspace hides its visible toggle for now to reserve space for the terminal.
+The inspector remains available in code, but the standard workspace hides its visible toggle to reserve space for the terminal.
 
 When visible, the inspector shows selected-session state that is not already visible in the terminal.
 
@@ -105,6 +113,7 @@ Layouts:
 Shortcuts:
 
 - `Command-N`: new session from the default launch profile.
+- `Command-P`: toggle the Inbox panel.
 - `Command-Shift-R`: remote hosts.
 - `Command-W`: detach selected session.
 - `Option-Q`: kill selected tmux session when available.
@@ -134,8 +143,8 @@ Two quiet companions sit beside the orb:
 - Risk icons for shared worktree, shared branch, branch drift, and
   overlapping changed files.
 
-`Mark Unread` in a row's context menu restores the green dot for a reply you
-want to revisit.
+`Mark Unread` in a row's `...` action menu restores the green dot for a reply
+you want to revisit.
 
 ### Enabling the indicators
 
@@ -171,6 +180,56 @@ The parser filters tmux status bars, separators, and terminal chrome, treats
 prompt/footer lines as readiness evidence, and clears stale telemetry when
 there is no current structured signal. Phase telemetry never decides the
 roster's six-state vocabulary.
+
+## Session Restore
+
+When a tmux server dies — a crash, a reboot, or a deliberate kill — the
+sessions it carried become restorable. Three doors open the Session Restore
+sheet: a workspace banner, `View ▸ Restore Sessions…`, and a callout at the
+top of Session History.
+
+Inside the sheet, sessions are grouped per shutdown. Each shutdown group
+wears its own recency hue as a wash over its rows, and each group offers a
+per-shutdown restore beside per-row actions.
+
+Restore resumes the exact agent conversation:
+
+- Conversations are resolved through one `agent-sessions resolve-batch` call
+  covering the whole sheet, with a scoped reindex.
+- Assignment is globally unique: no two rows can receive the same
+  conversation.
+- A resolved row resumes with the exact provider argv — `claude --resume`,
+  `codex resume`, or `opencode --session` — and the executable is pinned to
+  an absolute path when discovery came from fallback directories, including
+  every installed nvm node version.
+- An ambiguous match offers a `Pick…` candidate picker instead of guessing.
+- A row with no recoverable history is offered only as a labeled shell-only
+  recreate, never a fake resume.
+- Machine-titled helper shells (`-shell-XXXXXXXX`) are collapsed inside
+  their shutdown group.
+- Rows carry the session's note.
+
+The identity guarantee is the argv itself: once a row restores, nothing
+re-resolves behind it.
+
+## Human Inbox
+
+`Command-P` or `View ▸ Inbox Panel` toggles the Human Inbox: one pane for
+everything waiting on a human.
+
+Sections:
+
+- GitHub attention: needs-review items first, then maintainer sweeps, with
+  bot authors collapsed into one digest per repository.
+- In-app alerts: delivered alerts stay listed until explicitly acknowledged.
+- Manna board triage: rows from the repository's agent-do manna board, with
+  human decisions listed prominently. Ids are validated against manna's own
+  alphabet before any board command runs.
+
+Rows clear themselves when the underlying condition clears. The unread badge
+refreshes on a five-minute cadence while the panel is hidden — and
+immediately on panel open, app foreground, or manual refresh — so it cannot
+lie about what is waiting.
 
 ## Creating Sessions
 
@@ -226,6 +285,8 @@ Guardrails are evaluated for non-shell agent sessions.
 - Branch ownership drift: warning.
 
 Local shell sessions do not receive shared-worktree warnings.
+
+Overlapping changed files are computed only across distinct worktrees. Two sessions attached to the same checkout report their shared uncommitted file count (`N uncommitted files in the shared checkout`) instead of claiming cross-session overlap.
 
 ## Remote Hosts
 

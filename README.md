@@ -26,7 +26,7 @@
 
 Holy Ghostty is a product fork of Ghostty. The terminal core remains Ghostty. The Holy layer adds a native macOS workspace for launching, attaching, supervising, archiving, and restoring terminal-backed coding sessions.
 
-Current Holy Ghostty release: `0.44`.
+Current Holy Ghostty release: `0.50`.
 
 The app currently supports:
 
@@ -39,6 +39,10 @@ The app currently supports:
 - Launch profiles for local and SSH/tmux session starts, including a persisted default target for `New`.
 - Durable SQLite workspace persistence with migrations, WAL, and event history.
 - Session archive, search, relaunch, and recovery context.
+- Session Restore: per-shutdown restore groups after any tmux server death, resuming the exact agent conversation for Claude, Codex, and OpenCode sessions.
+- Human Inbox panel (`⌘P`) joining GitHub attention, in-app alerts, and manna board triage.
+- Per-session notes, shown in the roster and in Session Restore.
+- Four roster layouts: Classic, Calm, Triage, and Focus.
 - Launch templates and external task records.
 - Authoritative six-state agent indicators driven by structured lifecycle hooks for Claude Code, Codex, and OpenCode, with a metadata-only wire contract.
 - A watcher eye marking sessions armed with a scheduled `/loop` wakeup, with the fire time in the tooltip.
@@ -79,8 +83,8 @@ Layout controls:
 - `Single`, `Split Right`, `Split Down`, and `Quad` live at the bottom of the left rail.
 - Layout changes are Holy visual layouts over durable tmux sessions, not tmux panes.
 - Sessions shown in a split layout get `Left` / `Right`, `Top` / `Bottom`, or quadrant labels in the roster.
-- The old Diff implementation is preserved in code for a later explicit agent/worktree comparison mode, but it is not exposed in the primary Level 1 chrome.
-- `Tasks` and `Inspect` are hidden from the standard workspace for now.
+- A dormant Diff implementation is preserved in code for a later explicit agent/worktree comparison mode; it is not exposed in the primary Level 1 chrome.
+- `Tasks` and `Inspect` are hidden from the standard workspace.
 
 The selected session's `...` menu separates cleanup actions:
 
@@ -143,7 +147,39 @@ The heuristic layer supplements this with phase labels (`Ready`, `Working`,
 OSC 133 shell integration, visible output, tmux metadata, and SSH git probes.
 It feeds the bottom status chrome and stall detection; it never decides the
 roster's six-state vocabulary. Shared worktree, shared branch, branch drift,
-and overlapping-file risks use quiet inline icons beside the orb.
+and overlapping-file risks use quiet inline icons beside the orb. Two
+sessions attached to the same checkout report their shared uncommitted file
+count (`N uncommitted files in the shared checkout`) instead of claiming
+cross-session overlap.
+
+## Session Restore
+
+After any tmux server death — a crash, a reboot, or a deliberate kill — a
+workspace banner, `View ▸ Restore Sessions…`, and a callout in Session
+History open Session Restore. Interrupted sessions are grouped per shutdown,
+each group washed in a recency hue, and restorable per shutdown or per row.
+
+Restore resumes the exact conversation, not just a shell. Conversations are
+resolved through one `agent-sessions resolve-batch` call (with a scoped
+reindex), and assignment is globally unique: no two sessions can receive the
+same conversation. Each row resumes with the exact provider argv —
+`claude --resume`, `codex resume`, or `opencode --session` — with the
+executable pinned to an absolute path whenever discovery came from fallback
+directories such as per-version nvm bins. An ambiguous match offers a
+candidate picker; a session with no recoverable history is offered only as a
+labeled shell-only recreate. Machine-titled helper shells are collapsed
+inside their group, and rows carry the session's note. The restored identity
+is the argv itself; nothing re-resolves after restore.
+
+## Human Inbox
+
+`⌘P` or `View ▸ Inbox Panel` opens the Human Inbox: one pane for everything
+waiting on a human. It joins GitHub attention (needs-review first, then
+maintainer sweeps and per-repo bot digests), in-app alerts with explicit
+acknowledge, and manna board triage with human decisions listed prominently,
+for repositories carrying an agent-do manna board. Rows clear themselves
+when the underlying condition clears, and the unread badge stays honest on a
+five-minute hidden refresh cadence.
 
 ## Requirements
 

@@ -1,14 +1,14 @@
 # Holy Ghostty Engineering Spec
 
-Last updated: 2026-07-21
+Last updated: 2026-08-22
 
 This document describes the current repository implementation. It is an as-is engineering spec.
 
-Current release: `0.44`.
+Current release: `0.50`.
 
 ## 1. Purpose
 
-Holy Ghostty is a macOS-native shell built around Ghostty terminal surfaces for running and supervising coding sessions. The Holy layer adds session orchestration, tmux-backed local and SSH launch policy, worktree management, git-aware coordination, runtime heuristics, structured telemetry, budget intelligence, an external task inbox, an append-only event ledger, archive/history, templates, remote host discovery, and native alerts without replacing Ghostty's terminal core.
+Holy Ghostty is a macOS-native shell built around Ghostty terminal surfaces for running and supervising coding sessions. The Holy layer adds session orchestration, tmux-backed local and SSH launch policy, worktree management, git-aware coordination, runtime heuristics, structured telemetry, budget intelligence, an external task inbox, a human inbox, crash restore, an append-only event ledger, archive/history, templates, remote host discovery, and native alerts without replacing Ghostty's terminal core.
 
 ## 2. Scope And Current Boundary
 
@@ -72,7 +72,7 @@ Responsibilities:
 - render the overall Holy shell
 - render the left tmux roster, selected terminal surfaces, and optional inspector
 - compose Holy-owned pane layouts over durable tmux-backed sessions
-- manage sheet presentation for session creation, history, remote hosts, and task inbox
+- manage sheet presentation for session creation, history, remote hosts, task inbox, and Session Restore, plus the restore banner and the Inbox panel
 
 Current exposed workspace layouts:
 
@@ -118,11 +118,11 @@ Important enums:
 
 Important structs:
 
-- `HolySessionLaunchSpec` (now includes transport, tmux spec, optional task reference, and budget)
+- `HolySessionLaunchSpec` (transport, tmux spec, optional task reference, budget, session note with edit timestamp, and the Today pin)
 - `HolySessionRecord`
-- `HolySessionDraft` (now includes linked task, budget fields, budget validation, transport, and tmux fields)
+- `HolySessionDraft` (linked task, budget fields, budget validation, transport, and tmux fields)
 - `HolySessionTemplate`
-- `HolyArchivedSession` (now includes budget telemetry, runtime telemetry, recovery reason, and cleanup summary)
+- `HolyArchivedSession` (budget telemetry, runtime telemetry, recovery reason, and cleanup summary)
 - `HolyWorkspaceSnapshot`
 - `HolySessionOwnership`
 - `HolySessionCoordination`
@@ -391,7 +391,7 @@ The selected default profile is stored in `app_state` under `default_launch_prof
 - `macos/Sources/HolyGhostty/App/HolyPowerAssertionManager.swift`
 - `macos/Sources/HolyGhostty/Workspace/HolyWorkspaceStore.swift`
 
-Remote SSH/tmux sessions used to die silently across sleep and network drops, and the old `Sync` action detached every session serially with no timeout, so one asleep host stalled it for minutes. Three cooperating layers replace that.
+Remote SSH/tmux sessions must survive sleep and network drops without dying silently, and `Sync` must not stall on one asleep host. Three cooperating layers provide that.
 
 Connection hygiene:
 
@@ -423,14 +423,14 @@ Keep-awake:
 
 - `macos/Sources/HolyGhostty/Supervisor/HolySessionSupervisor.swift`
 
-The supervisor owns lifecycle orchestration that was previously embedded in `HolyWorkspaceStore`. It handles:
+The supervisor owns lifecycle orchestration on behalf of `HolyWorkspaceStore`. It handles:
 
 - workspace restore (including worktree recovery evaluation and orphan cleanup)
 - session creation (with event provenance tracking)
 - session archive
 - archive deletion
 - template saving
-- persistence (writing to both database and JSON during the transition period)
+- persistence (dual-write to SQLite and the legacy JSON snapshot)
 - scheduled persistence (debounced)
 - alert coordination
 
@@ -461,6 +461,105 @@ The supervisor evaluates whether worktree-backed sessions can be restored by che
 
 The supervisor scans the managed worktree container and removes orphaned worktrees (those not referenced by any active or archived session) if they are clean.
 
+## 9A. Session Restore (Crash Restore)
+
+- `macos/Sources/HolyGhostty/Restore/HolyRestoreEngine.swift`
+- `macos/Sources/HolyGhostty/Restore/HolyRestoreModels.swift`
+- `macos/Sources/HolyGhostty/Restore/HolyRestoreCrashGroups.swift`
+- `macos/Sources/HolyGhostty/Restore/HolyRestoreAssignment.swift`
+- `macos/Sources/HolyGhostty/Restore/HolyRestoreResolveClient.swift`
+- `macos/Sources/HolyGhostty/Restore/HolyRestoreCommandBuilder.swift`
+- `macos/Sources/HolyGhostty/Restore/HolyRestoreExecutableSearch.swift`
+- `macos/Sources/HolyGhostty/Restore/HolyRestorePreflight.swift`
+- `macos/Sources/HolyGhostty/Restore/HolyRestoreSheet.swift`
+- `macos/Sources/HolyGhostty/Restore/HolyWorkspaceRestoreAdapter.swift`
+
+Session Restore turns any tmux-server death — crash, reboot, or deliberate
+kill — into a restorable batch. Entry points: a workspace banner, the
+`View ▸ Restore Sessions…` menu item, and a callout at the top of Session
+History.
+
+Grouping. `HolyRestoreCrashGroups` splits restorable rows into per-shutdown
+groups; each group carries a recency rank that the sheet renders as a color
+wash, and each offers a per-shutdown restore. Machine-titled helper shells
+(title matching `-shell-[0-9A-F]{8}$`) are collapsed inside their group.
+Rows display the session's note using the roster's note treatment.
+
+Preflight. `HolyRestorePreflight` is a total, pure function mapping
+preflight facts to exactly one row state, with deliberate precedence:
+unsupported host, identity conflict, live identity (adoption), undetermined
+liveness (fail-closed: unknown is never absence), local preconditions (cwd,
+provider executable), then the resolver's confidence verdict.
+
+Conversation resolution. `HolyRestoreResolveClient` ships the whole sheet's
+questions in one `agent-sessions resolve-batch --json` call, which performs
+its own scoped reindex. `HolyRestoreAssignment` assigns candidates to rows
+globally and uniquely: no two rows can receive the same conversation id.
+
+Resume identity. `HolyRestoreCommandBuilder` renders the exact provider
+argv — `claude --resume <id>`, `codex resume <id>`, `opencode --session
+<id>` — after validating the provider session id. `HolyRestoreExecutableSearch`
+pins argv[0] to an absolute executable path when resolution comes from
+fallback directories (including every installed nvm node version, newest
+first), because the pane's login-shell PATH misses `.zshrc`-initialized
+managers. The restored identity is the argv itself; nothing re-resolves
+after restore.
+
+Row outcomes. An exact match restores directly; an ambiguous match offers a
+candidate picker; a row with no recoverable history offers only a labeled
+shell-only recreate (cwd and explicit command). A resolver failure is
+retryable and never silently demoted to shell-only. Bulk restore acts only
+on rows with exact identity; it never quietly recreates ambiguous rows.
+
+Tmux liveness during restore uses the same `HolyTmuxLifecycleService`
+described in section 9, so adoption, conflict, and absence verdicts are
+inventory-proven.
+
+## 9B. Human Inbox
+
+- `macos/Sources/HolyGhostty/Inbox/HolyInboxEngine.swift`
+- `macos/Sources/HolyGhostty/Inbox/HolyInboxModels.swift`
+- `macos/Sources/HolyGhostty/Inbox/HolyInboxPanelView.swift`
+- `macos/Sources/HolyGhostty/Inbox/HolyGitHubInboxSource.swift`
+- `macos/Sources/HolyGhostty/Inbox/HolyAlertInboxSource.swift`
+- `macos/Sources/HolyGhostty/Inbox/HolyInboxAlertStore.swift`
+- `macos/Sources/HolyGhostty/Inbox/HolyMannaInboxSource.swift`
+- `macos/Sources/HolyGhostty/Inbox/HolyBriefContract.swift`
+- `macos/Sources/HolyGhostty/Inbox/HolyBriefFeed.swift`
+- `macos/Sources/HolyGhostty/Inbox/HolyBriefTriage.swift`
+- `macos/Sources/HolyGhostty/Inbox/HolyBriefViews.swift`
+
+The Inbox panel (`⌘P`, `View ▸ Inbox Panel`) is one pane for everything
+waiting on a human.
+
+Engine. `HolyInboxEngine` polls every registered source on a cadence — 75
+seconds while the panel is visible, 5 minutes hidden so the unread badge
+cannot lie — plus immediately on panel open, app foreground, and manual
+refresh. Sources refresh independently (a slow GitHub sweep never holds
+local rows hostage), sections render in registration order regardless of
+completion order, and per-source refreshes are serialized with coalescing.
+
+Sources:
+
+- GitHub attention (`HolyGitHubInboxSource`): needs-review rows first, then
+  maintainer sweeps (`maintainer_unreviewed`, `maintainer_review_stale`);
+  bot authors collapse to one digest per repository.
+- In-app alerts (`HolyAlertInboxSource` over `HolyInboxAlertStore`): alert
+  deliveries are recorded to the `alerts` table; acknowledge writes
+  `acknowledged_at` and the row leaves the pane on the next refresh.
+- Manna board triage (`HolyMannaInboxSource`): rows from the repository's
+  agent-do manna board with human decisions prominent. Manna ids are
+  validated against manna's own id alphabet (`mn-` plus lowercase
+  `[a-z0-9]`) before any id reaches an executed command's stdin, and a
+  glance never mutates the board.
+
+Brief. `HolyBriefFeed` runs `agent-do brief holy --json` as one composite
+call and publishes the parsed payload (answer paragraph, threads,
+suggestions); `HolyBriefContract` parses it fail-closed against contract
+version 1, and `HolyBriefTriage` is a pure mapping deciding which threads
+earn the Needs-me drawer versus Library inventory. The brief is not an
+engine source; the engine keeps carrying the Library sources.
+
 ## 10. Workspace Store And Orchestration
 
 Main orchestration lives in:
@@ -489,7 +588,7 @@ The store delegates lifecycle operations to the `HolySessionSupervisor` and mana
 - external task reconciliation (updating linked session state)
 - coordination recomputation
 
-All launch paths now carry event provenance: origin, source template ID, relaunched-from session ID.
+All launch paths carry event provenance: origin, source template ID, relaunched-from session ID.
 
 ## 11. Database Layer
 
@@ -531,16 +630,16 @@ Also defines the legacy JSON snapshot path for migration discovery.
 
 ### Compatibility views
 
-The schema includes four read-only SQL views for future `agent-sessions` interoperability:
+The schema includes four read-only SQL views forming the `agent-sessions` read-model contract:
 
 - `agent_sessions_sessions_v1`
 - `agent_sessions_resume_targets_v1`
 - `agent_sessions_events_v1`
 - `agent_sessions_annotations_v1`
 
-See `docs/holy-ghostty/agent-sessions-interoperability.md` for the contract.
+All four filter out purge-pending sessions. See `docs/holy-ghostty/agent-sessions-interoperability.md` for the contract and for the reverse direction, where Holy's crash restore consumes the `agent-sessions` `resolve-batch` CLI as its conversation oracle.
 
-Additional persisted tables now include:
+Additional persisted tables:
 
 - `budget_samples`
 - `tasks`
@@ -597,13 +696,13 @@ Retention is bounded and interruption-safe:
 
 - `macos/Sources/HolyGhostty/Persistence/HolyWorkspacePersistence.swift`
 
-JSON snapshot persistence remains for backward compatibility during the transition. The workspace repository writes to both database and JSON on every save.
+JSON snapshot persistence is retained for backward compatibility. The workspace repository writes to both database and JSON on every save and reads database-first.
 
 ### Workspace repository
 
 - `macos/Sources/HolyGhostty/Supervisor/HolyWorkspaceRepository.swift`
 
-Facade that loads from database first, triggers migration from JSON if needed, then falls back to JSON. Saves to both destinations during the transition period.
+Facade that loads from database first, triggers migration from JSON if needed, then falls back to JSON. Saves to both destinations.
 
 ### Migration service
 
@@ -658,11 +757,11 @@ Template catalog:
 Built-in templates:
 
 - Shell Workspace
-- Claude Code
-- Codex
-- OpenCode
-- Managed Claude Worktree
-- Managed Codex Worktree
+- Claude Session
+- Codex Session
+- OpenCode Session
+- Claude Managed Session
+- Codex Managed Session
 
 Templates capture reusable launch state for repeatable session setup.
 
@@ -688,7 +787,7 @@ Tracked git context includes:
 - staged/unstaged/untracked/conflicted counts
 - changed files
 
-`HolyGitClient` now supports both:
+`HolyGitClient` supports both:
 
 - local git inspection
 - SSH-based remote git inspection for SSH-backed Holy sessions
@@ -736,6 +835,8 @@ Current coordination tracks:
 - overlapping changed files
 - overlapping sessions
 
+Overlapping changed files are computed only across distinct worktrees. Session pairs attached to the same checkout are presented as a shared uncommitted file count (`N uncommitted files in the shared checkout`), never as cross-session overlap. Blocking-conflict detection (`hasBlockingConflict`) derives from conflict severity, independent of that presentation.
+
 Attention is derived from phase and coordination. Current rough ordering:
 
 - failure
@@ -769,13 +870,16 @@ through the agent-state gate described in section 6A, with deterministic
 request identities and a persisted watermark so duplicates and restarts never
 re-alert.
 
+Alert deliveries are also recorded to the `alerts` table and surface in the
+Human Inbox (section 9B), where each row stays until explicitly acknowledged.
+
 ## 22. Views And User-Facing Surfaces
 
 ### Session roster
 
 - `macos/Sources/HolyGhostty/Workspace/HolySessionRosterView.swift`
 
-Displays active sessions grouped by runtime and sorted by project/folder context. Each row shows one compact project/folder label, one activity orb, and quiet risk icons when needed.
+Displays active sessions sorted by project/folder context. A four-way layout switcher (persisted via `AppStorage`) selects Classic or Calm (grouped by runtime), Triage (status lanes), or Focus (pinned Today sessions on top, the rest dimmed). Each row shows one compact project/folder label, one activity orb, quiet risk icons when needed, and the session note when set. The row's `...` action menu covers rename, session note editing, Today pinning, Mark Unread, duplicate, detach, and kill.
 
 The roster `New` button launches the current default launch profile. The `More` menu exposes all profiles for direct launch and default selection.
 
@@ -817,8 +921,9 @@ Collects launch state with:
 
 - `macos/Sources/HolyGhostty/Workspace/HolySessionHistorySheet.swift`
 
-Archived session search, inspection, relaunch, and deletion. Now includes:
+Archived session search, inspection, relaunch, and deletion. Includes:
 
+- a Session Restore callout at the top whenever interrupted sessions exist (`Open Session Restore (N interrupted · M older)`)
 - recovery section (recovery reason, cleanup summary, suggested action)
 - runtime telemetry section
 - budget telemetry section
@@ -841,6 +946,18 @@ Provides:
 - `macos/Sources/HolyGhostty/Workspace/HolyTaskInboxSheet.swift`
 
 Split-view task management with search, list, and detail editor. Supports creating, editing, launching into sessions, opening canonical URLs, and deleting tasks.
+
+### Session Restore sheet
+
+- `macos/Sources/HolyGhostty/Restore/HolyRestoreSheet.swift`
+
+Per-shutdown restore groups with recency washes, per-row states, the candidate picker, and per-shutdown restore actions. See section 9A.
+
+### Inbox panel
+
+- `macos/Sources/HolyGhostty/Inbox/HolyInboxPanelView.swift`
+
+The Human Inbox pane: brief answer line, Needs-me drawer, and the Library sections (GitHub attention, alerts, manna triage). See section 9B.
 
 ### Budget intelligence section
 
@@ -876,7 +993,7 @@ Up to four durable Holy sessions are shown at once.
 
 Pane layout state is persisted with the workspace. When a session is visible in a multi-pane layout, the roster shows a small pane-position label such as `Left`, `Right`, `Top`, `Bottom`, or a quadrant label.
 
-The old Diff implementation is intentionally preserved dormant for a future agent/worktree comparison mode. It is not part of the current Level 1 navigation.
+A dormant Diff implementation is intentionally preserved for a future agent/worktree comparison mode. It is not part of the current Level 1 navigation.
 
 ## 24. Integration Into Ghostty Host
 
@@ -950,16 +1067,18 @@ macos/Sources/HolyGhostty/
 ├── Domain/                 # Core data model, indicator policy, attention metadata
 ├── Events/                 # Event model and event repository
 ├── Git/                    # Git snapshot model and client
-├── Persistence/            # JSON persistence, DB persistence, coders
+├── Inbox/                  # Human Inbox engine, sources, brief feed, panel view
+├── Persistence/            # JSON persistence, DB persistence, retention policy, coders
 ├── Profiles/               # Launch profiles and default New target persistence
 ├── Remote/                 # Remote host registry, import, tmux discovery
+├── Restore/                # Crash restore: engine, groups, assignment, resolve client, sheet
 ├── Session/                # Live session model
 ├── Store/                  # In-memory state struct
 ├── Supervisor/             # Lifecycle orchestration, migration, workspace repository
 ├── Tasks/                  # External task models and repository
 ├── Telemetry/              # Runtime telemetry parser
 ├── Templates/              # Built-in and custom template catalog
-├── Tmux/                   # tmux models and launch command builder
+├── Tmux/                   # tmux models, launch command builder, lifecycle service
 ├── Workspace/              # SwiftUI views: roster, pane layouts, detail, inspector, composer, history, task inbox, timeline, budget
 └── Worktree/               # Worktree creation, validation, recovery, cleanup
 ```
