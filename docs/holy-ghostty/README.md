@@ -87,7 +87,7 @@ The center region embeds one or more live Ghostty surfaces according to the curr
 
 ### Inspector
 
-The inspector remains available in code, but the standard workspace hides its visible toggle for now to reserve space for the terminal.
+The inspector remains available in code, but the standard workspace hides its visible toggle to reserve space for the terminal.
 
 When visible, the inspector shows selected-session state that is not already visible in the terminal.
 
