@@ -4,6 +4,10 @@ All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
+No unreleased changes.
+
+## 0.50 (2026-08-22)
+
 A shutdown is no longer a loss, and attention has a home: whenever the tmux
 server goes away — a reboot, a deliberate kill, a crash — Session Restore
 rebuilds every session with its exact conversation, and a new right-hand
