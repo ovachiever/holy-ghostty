@@ -28,8 +28,39 @@ Inbox panel shows what waits on the human — nothing else.
   Human decisions stay prominent; in-progress, ready, blocked, and track
   inventory stays compact and out of the unread badge. Rows clear themselves
   when reality changes.
+- Every shutdown wears its own color: Session Restore groups interrupted
+  sessions by boot batch with recency-ranked washes (blue mist newest, then
+  rose, then mauve, fading to grey), each group carrying a relative
+  timestamp, an honest count, and a one-click "Restore this shutdown"
+  action. Sessions interrupted by more than one shutdown show a lineage
+  tick in the other batch's hue.
+- Restore rows carry their session notes, sub-agent helper shells
+  (machine-titled `…-shell-XXXXXXXX`) group under a collapsed disclosure
+  that never preselects and never inflates the banner count, and a
+  confirmation-gated "Clear older interruptions…" empties the archive of
+  superseded shutdowns. Close buttons are an X, as close buttons are.
 
 ### Fixed
+
+- Restored sessions can no longer receive another session's conversation:
+  all rows resolve through one batched index call and a globally unique
+  assignment — each conversation can be claimed by exactly one row, near
+  ties open the candidate picker instead of guessing, and the post-restore
+  "identity confirmed" ceremony is gone because launching
+  `claude --resume <exact id>` as an argument array is the identity
+  guarantee. The resolver stampede that produced 90-second timeouts is
+  gone with it: reindexing is scoped to the directories a restore actually
+  asks about.
+- Codex sessions restore again when codex lives in a version manager:
+  executable discovery asks the tmux server's own PATH first, then searches
+  every nvm version (plus volta, bun, pyenv, and the usual directories),
+  and pins the absolute path into the launch command whenever the runtime's
+  PATH could not have resolved the bare name — so a passed preflight can
+  never precede a "command not found."
+- Two sessions sharing one checkout no longer read as file contention: the
+  panel counts "N uncommitted files in the shared checkout" without
+  attributing them to anyone, while sessions in genuinely separate
+  worktrees keep real overlap detection unchanged.
 
 - Manna no longer hides ordinary project work or waits on a repository-wide
   reconcile audit before showing it. The pane reads the focused board's fast
