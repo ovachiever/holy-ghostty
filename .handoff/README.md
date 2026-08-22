@@ -9,8 +9,9 @@ Rules:
 - Create work through `agent-do manna create`; do not hand-build parallel
   prompt roots such as `.handoffs/`, `.dev/session-prompts/`, or
   `<campaign>/handoff-prompts/`.
-- The Manna item `prompt` field points to
-  `.handoff/<NN>[b<MM>]-mn-xxxxxx-<slug>.md` after synchronization.
+- The Manna item `prompt` field points to a board-wide fixed-width name,
+  `.handoff/<NN...>[b<MM...>]-mn-xxxxxx-<slug>.md`, after synchronization.
+  Width is at least two digits and expands when the active plan exceeds 99.
 - Frontmatter identifies the item, track, source, base commit, scope, inputs,
   and SHA-256 binding for the complete document.
 - Edit a work order, then run `agent-do manna handoff seal mn-xxxxxx` before
@@ -19,8 +20,9 @@ Rules:
   deliverables, and verification, never a second backlog.
 - Priority lives in `.manna/handoff-order.yaml`. Run `agent-do manna sync`
   after board changes; never hand-maintain numbered filenames or this index.
-- A bare numbered filename is safe to launch. `bMM` means the item is held
-  until priority `MM` closes. The full dependency truth remains `blocked_by`.
+- A bare numbered filename is safe to launch. `bMM...` means the item is held
+  until that numbered priority closes. The full dependency truth remains
+  `blocked_by`.
 - Completed pairs return to unnumbered sealed history on sync, so no numbered
   filename advertises work that is already done.
 - Commit `.manna/workflow.yaml`, `.manna/handoff-order.yaml`,
@@ -33,7 +35,7 @@ Rules:
 | 01 | `mn-211310` | blocked | `mn-56f896` | `.handoff/01b02-mn-211310-roster-drag-to-reorder-sessions-in-left-menu.md` |
 | 02 | `mn-56f896` | open | none | `.handoff/02-mn-56f896-p0-meta-preserve-notes-today-pins-titles-and-identity-across-lif.md` |
 | 03 | `mn-ca1805` | open | none | `.handoff/03-mn-ca1805-p1-db-session-events-retention-unbounded-growth-409-of-443-mb-11.md` |
-| 04 | `mn-569b91` | blocked | `mn-495322` | `.handoff/04-mn-569b91-verify-tmux-reconcile-known-sessions-and-safely-reap-true-orphan.md` |
+| 04 | `mn-569b91` | open | none | `.handoff/04-mn-569b91-verify-tmux-reconcile-known-sessions-and-safely-reap-true-orphan.md` |
 | 05 | `mn-c3b48a` | open | none | `.handoff/05-mn-c3b48a-p0-pty-make-paste-and-injected-input-byte-exact.md` |
 | 06 | `mn-e13961` | open | none | `.handoff/06-mn-e13961-p0-hooks-complete-the-open-harness-identity-lifecycle-and-model-p.md` |
 | 07 | `mn-8179b6` | blocked | `mn-e13961`, `mn-7e8e0d`, `mn-cf5fb6`, `mn-137c79`, `mn-596f61`, `mn-a0406e`, `mn-490160`, `mn-307da2` | `.handoff/07b39-mn-8179b6-accept-state-prove-six-state-indicators-and-reliable-notificatio.md` |
@@ -95,4 +97,3 @@ Rules:
 | 63 | `mn-938022` | open | none | `.handoff/63-mn-938022-p0-restore-restored-sessions-carry-wrong-names-and-wrong-notes-i.md` |
 | 64 | `mn-13a213` | open | none | `.handoff/64-mn-13a213-p0-recovery-real-crash-2026-08-14-live-but-younger-server-re-ope.md` |
 | 65 | `mn-eb6b3e` | open | none | `.handoff/65-mn-eb6b3e-pre-existing-test-failure-holybrieftriagetests-needsmethreadslea.md` |
-| 66 | `mn-7c1e31` | open | none | `.handoff/66-mn-7c1e31-holy-panel-same-worktree-sessions-count-co-location-as-file-cont.md` |

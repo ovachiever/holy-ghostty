@@ -1,5 +1,5 @@
-generated_at: "2026-08-14T19:01:13Z"
-session: fc450563-a0ab-4394-a6b1-88682a505e7f
+generated_at: "2026-08-21T19:49:56Z"
+session: 6e040306-1877-4113-b974-ce3e45bfb87e
 findings:
 - kind: landed_open
   issue_id: mn-9a6145
@@ -8,7 +8,7 @@ findings:
   proposed_fix: review the commits; if the work landed, claim and done mn-9a6145
 - kind: landed_open
   issue_id: mn-f2a0b1
-  detail: referenced by landed commit trailer but status is in_progress
+  detail: referenced by landed commit trailer but status is open
   evidence: 03a429c38352, 99f7370324fb, 8384506347ce
   proposed_fix: review the commits; if the work landed, claim and done mn-f2a0b1
 - kind: landed_open
@@ -18,22 +18,22 @@ findings:
   proposed_fix: review the commits; if the work landed, claim and done mn-70875b
 - kind: landed_open
   issue_id: mn-4db5d4
-  detail: referenced by landed commit trailer but status is in_progress
+  detail: referenced by landed commit trailer but status is open
   evidence: f5320cfdd2ec, e32bab02de53, e260f8780ce4, +3 more
   proposed_fix: review the commits; if the work landed, claim and done mn-4db5d4
 - kind: landed_open
   issue_id: mn-943f71
-  detail: referenced by landed commit trailer but status is in_progress
+  detail: referenced by landed commit trailer but status is open
   evidence: a895d4030918, eaebd0d7d294
   proposed_fix: review the commits; if the work landed, claim and done mn-943f71
 - kind: landed_open
   issue_id: mn-b2e2e9
-  detail: referenced by landed commit trailer but status is in_progress
+  detail: referenced by landed commit trailer but status is open
   evidence: 47ac8f53135c, ce1d96579451, c42bfccdff10
   proposed_fix: review the commits; if the work landed, claim and done mn-b2e2e9
 - kind: landed_open
   issue_id: mn-5dc58b
-  detail: referenced by landed commit trailer but status is in_progress
+  detail: referenced by landed commit trailer but status is open
   evidence: 305f964d16b1, ee2bdf7a9edf, 4204cfbfa3a9, +9 more
   proposed_fix: review the commits; if the work landed, claim and done mn-5dc58b
 - kind: landed_open
@@ -48,7 +48,7 @@ findings:
   proposed_fix: review the commits; if the work landed, claim and done mn-7afa94
 - kind: landed_open
   issue_id: mn-7fbb07
-  detail: referenced by landed commit trailer but status is in_progress
+  detail: referenced by landed commit trailer but status is open
   evidence: 5666813121a8, 4a1f23d84c84
   proposed_fix: review the commits; if the work landed, claim and done mn-7fbb07
 - kind: landed_open
@@ -63,14 +63,9 @@ findings:
   proposed_fix: review the commits; if the work landed, claim and done mn-938022
 - kind: landed_open
   issue_id: mn-13a213
-  detail: referenced by landed commit trailer but status is in_progress
+  detail: referenced by landed commit trailer but status is open
   evidence: 3ce096d8dd2e
   proposed_fix: review the commits; if the work landed, claim and done mn-13a213
-- kind: dead_claim
-  issue_id: mn-b2e2e9
-  detail: claimed by dead session ses_pid98196_1786404675
-  evidence: pid 98196 not running
-  proposed_fix: abandon the claim
 - kind: blocker_desync
   issue_id: mn-569b91
   detail: all blockers resolved but status is still blocked
@@ -87,21 +82,57 @@ findings:
   evidence: created_at 2026-07-18
   proposed_fix: promote to an item on a track, or close it
 - kind: doc_reference
+  issue_id: mn-4d778d
+  detail: referenced id does not exist on this board
+  evidence: .handoff/.archive/legacy-sources/6e7c9637405a72ba3247aac5d3782737d94d1734f2a680401dc48c4c16015f1d.source:110
+- kind: doc_reference
+  issue_id: mn-7dfdb0
+  detail: referenced id does not exist on this board
+  evidence: .handoff/.archive/legacy-sources/4df76067642671fd5fb20ac03150562a420325f3323e348910d8f4a4eae43d7c.source:122
+- kind: doc_reference
+  issue_id: mn-43932b
+  detail: referenced id does not exist on this board
+  evidence: .handoff/.archive/legacy-sources/4df76067642671fd5fb20ac03150562a420325f3323e348910d8f4a4eae43d7c.source:186
+- kind: doc_reference
+  issue_id: mn-b7efa6
+  detail: referenced id does not exist on this board
+  evidence: .handoff/44-mn-fe1b48-sessions-panel-right-hand-utility-surface-hosting-agent-sessions.md:36
+- kind: doc_reference
+  issue_id: mn-b7efa6
+  detail: referenced id does not exist on this board
+  evidence: .handoff/45b44-mn-a98f88-handoff-wiring-end-to-end-resume-verification.md:36
+- kind: doc_reference
+  issue_id: mn-4d778d
+  detail: referenced id does not exist on this board
+  evidence: .handoff/64-mn-13a213-p0-recovery-real-crash-2026-08-14-live-but-younger-server-re-ope.md:143
+- kind: doc_reference
+  issue_id: mn-4d778d
+  detail: referenced id does not exist on this board
+  evidence: .handoff/55-mn-b2e2e9-inbox-focus-instant-manna-per-source-refresh-root-cause-the-unav.md:143
+- kind: doc_reference
+  issue_id: mn-7dfdb0
+  detail: referenced id does not exist on this board
+  evidence: .handoff/12-mn-9a6145-p0-recovery-add-restore-all-restore-selected-and-recovery-backup.md:38
+- kind: doc_reference
+  issue_id: mn-f79edc
+  detail: referenced id does not exist on this board
+  evidence: .handoff/56-mn-5dc58b-inbox-brief-intelligent-panel-two-drawers-answer-line-ranked-thr.md:36
+- kind: doc_reference
+  issue_id: mn-7dfdb0
+  detail: referenced id does not exist on this board
+  evidence: .handoff/56-mn-5dc58b-inbox-brief-intelligent-panel-two-drawers-answer-line-ranked-thr.md:167
+- kind: doc_reference
+  issue_id: mn-43932b
+  detail: referenced id does not exist on this board
+  evidence: .handoff/56-mn-5dc58b-inbox-brief-intelligent-panel-two-drawers-answer-line-ranked-thr.md:231
+- kind: doc_reference
   issue_id: mn-b17dc6
   detail: referenced id does not exist on this board
   evidence: .handoff/OVERSEER-JARVIS-PLAN-2026-07-16.md:137
 - kind: doc_reference
-  issue_id: mn-7dfdb0
-  detail: referenced id does not exist on this board
-  evidence: .dev/session-prompts/10-INTELLIGENT-INBOX.md:122
-- kind: doc_reference
-  issue_id: mn-43932b
-  detail: referenced id does not exist on this board
-  evidence: .dev/session-prompts/10-INTELLIGENT-INBOX.md:186
-- kind: doc_reference
   issue_id: mn-4d778d
   detail: referenced id does not exist on this board
-  evidence: .dev/session-prompts/09-INBOX-LATENCY.md:110
+  evidence: .handoff/63-mn-938022-p0-restore-restored-sessions-carry-wrong-names-and-wrong-notes-i.md:143
 - kind: doc_reference
   issue_id: mn-b17dc6
   detail: referenced id does not exist on this board
@@ -114,18 +145,68 @@ findings:
   issue_id: mn-4d778d
   detail: referenced id does not exist on this board
   evidence: .dev/brief-holy-capture-2026-08-11.json:113
+- kind: doc_reference
+  issue_id: mn-7dfdb0
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/board/issues.jsonl:14
+- kind: doc_reference
+  issue_id: mn-b7efa6
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/board/issues.jsonl:54
+- kind: doc_reference
+  issue_id: mn-f79edc
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/board/issues.jsonl:71
+- kind: doc_reference
+  issue_id: mn-bbbeac
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/board/issues.jsonl:82
+- kind: doc_reference
+  issue_id: mn-b17dc6
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/board/drift.yaml:90
+- kind: doc_reference
+  issue_id: mn-7dfdb0
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/board/drift.yaml:94
+- kind: doc_reference
+  issue_id: mn-43932b
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/board/drift.yaml:98
+- kind: doc_reference
+  issue_id: mn-4d778d
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/board/drift.yaml:102
+- kind: doc_reference
+  issue_id: mn-b17dc6
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/handoff/OVERSEER-JARVIS-PLAN-2026-07-16.md.source:137
+- kind: doc_reference
+  issue_id: mn-7dfdb0
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/sources/local/10-INTELLIGENT-INBOX.md.source:122
+- kind: doc_reference
+  issue_id: mn-43932b
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/sources/local/10-INTELLIGENT-INBOX.md.source:186
+- kind: doc_reference
+  issue_id: mn-4d778d
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/sources/local/09-INBOX-LATENCY.md.source:110
+- kind: doc_reference
+  issue_id: mn-7dfdb0
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/sources/external/06-CRASH-RESTORE.md.source:5
+- kind: doc_reference
+  issue_id: mn-b7efa6
+  detail: referenced id does not exist on this board
+  evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/sources/external/02-HOLY-PANEL.md.source:3
 - kind: prompt_pairing
-  issue_id: mn-b2e2e9
-  detail: prompt file /Users/erik/Custom-Coding/holy-ghostty/.dev/session-prompts/09-INBOX-LATENCY.md does not reference this issue
-  evidence: /Users/erik/Custom-Coding/holy-ghostty/.dev/session-prompts/09-INBOX-LATENCY.md
-  proposed_fix: add mn-b2e2e9 to the prompt file, or repoint --prompt
-- kind: prompt_pairing
-  issue_id: mn-938022
-  detail: prompt file /Users/erik/Custom-Coding/holy-ghostty/.dev/session-prompts/09-INBOX-LATENCY.md does not reference this issue
-  evidence: /Users/erik/Custom-Coding/holy-ghostty/.dev/session-prompts/09-INBOX-LATENCY.md
-  proposed_fix: add mn-938022 to the prompt file, or repoint --prompt
-- kind: prompt_pairing
-  issue_id: mn-13a213
-  detail: prompt file /Users/erik/Custom-Coding/holy-ghostty/.dev/session-prompts/09-INBOX-LATENCY.md does not reference this issue
-  evidence: /Users/erik/Custom-Coding/holy-ghostty/.dev/session-prompts/09-INBOX-LATENCY.md
-  proposed_fix: add mn-13a213 to the prompt file, or repoint --prompt
+  issue_id: mn-fe1b48
+  detail: prompt pointer .handoff/44-mn-fe1b48-sessions-panel-right-hand-utility-surface-hosting-agent-sessions.md does not resolve to claiming file .handoff/45b44-mn-a98f88-handoff-wiring-end-to-end-resume-verification.md
+  evidence: .handoff/45b44-mn-a98f88-handoff-wiring-end-to-end-resume-verification.md
+  proposed_fix: repoint --prompt or drop the stale claim
+- kind: handoff_presentation
+  detail: .handoff/README.md does not match current board priority
+  evidence: handoff_index
+  proposed_fix: agent-do manna sync
