@@ -1,104 +1,56 @@
 # Holy Ghostty and agent-sessions Interoperability
 
-Last updated: 2026-04-15
+Last updated: 2026-08-22
 
-This document records the chosen interoperability strategy between Holy Ghostty and `agent-sessions`.
+This document describes the interoperability contract between Holy Ghostty and `agent-sessions`. The integration has two directions, each with its own contract surface.
 
-## Decision
+## The Two Directions
 
-Chosen route:
-
-- `agent-sessions` will read Holy Ghostty data in read-only mode through a future `holy-ghostty` provider.
-
-Holy Ghostty keeps its own SQLite database as its operational source of truth. `agent-sessions` does not own that database, does not write to it, and does not define Holy Ghostty's internal schema.
-
-## Why This Route
-
-This is the cleanest arrangement for both products.
-
-Holy Ghostty needs a database for:
-
-- live session durability
-- event history
-- alert history
-- archive/relaunch memory
-- supervision and restore
-
-`agent-sessions` needs data for:
-
-- browsing
-- search
-- annotations
-- transcript reading
-- resume actions
-
-Those overlap, but they are not the same product responsibility.
-
-This route avoids:
-
-- one shared database owned by two apps
-- duplicate write pipelines
-- fragile export/import loops
-- forcing Holy Ghostty's schema to become a generic session-index schema
+1. **Crash restore (implemented, Holy consumes agent-sessions).** Holy Ghostty's Session Restore uses the `agent-sessions` CLI as its conversation oracle: one `resolve-batch` call resolves every interrupted session on the restore sheet to a resumable provider conversation.
+2. **Read model (Holy side shipped, consumer pending).** Holy Ghostty exposes versioned, read-only compatibility views in its SQLite database for a future `agent-sessions` `holy-ghostty` provider. The views ship in Holy's schema; `agent-sessions` does not yet include a provider that reads them.
 
 ## Core Rule
 
 Holy Ghostty owns its internal schema.
 
-`agent-sessions` consumes a stable read model exposed by Holy Ghostty.
+`agent-sessions` consumes a stable read model exposed by Holy Ghostty, and Holy Ghostty consumes a stable CLI contract exposed by `agent-sessions`.
 
-The integration contract is the read model, not the raw internal tables.
+The integration contract in each direction is the external surface — views on one side, CLI verbs and JSON on the other — never the raw internal tables or index files.
 
-## Interoperability Contract
+This arrangement avoids:
 
-Holy Ghostty should expose versioned, read-only compatibility views in its SQLite database.
+- one shared database owned by two apps
+- duplicate write pipelines
+- fragile export/import loops
+- forcing either product's internal schema to become the other's contract
 
-Recommended names:
+## Direction 1: Crash-Restore Resolution
 
-- `agent_sessions_sessions_v1`
-- `agent_sessions_resume_targets_v1`
-- `agent_sessions_events_v1`
-- `agent_sessions_annotations_v1`
+Implemented in `macos/Sources/HolyGhostty/Restore/HolyRestoreResolveClient.swift` on the Holy side and `agent_sessions/resolve.py` on the agent-sessions side.
 
-Future:
+Contract:
 
-- `agent_sessions_messages_v1`
+- `agent-sessions` exposes `resolve` (one session) and `resolve-batch` (many) as CLI verbs. Holy uses `resolve-batch --json`: the whole restore sheet's questions ship in a single call, and the reply is one JSON object on stdout.
+- `resolve-batch` performs its own scoped reindex of the relevant harness/project scopes, with a per-scope hold-off (120 seconds) so restore attempts cannot thrash the index.
+- Naming is mapped at the boundary: Holy Ghostty names runtimes (`claude`, `codex`, `opencode`); the agent-sessions index names harnesses. The resolve layer translates.
+- Holy fails closed on this contract: a missing CLI, a missing `resolve-batch` verb, a crash, a timeout, or an undecodable payload makes rows retryable — it never fabricates a conversation match.
+- Downstream of resolution, assignment of conversations to restore rows is Holy's job and is globally unique: no two rows can receive the same conversation id. The resumable identity Holy persists is the final argv (`claude --resume <id>`, `codex resume <id>`, `opencode --session <id>`); nothing re-resolves after restore.
 
-This keeps the contract explicit and versionable. Holy Ghostty can evolve its internal tables while keeping these external views stable.
+## Direction 2: The Read-Model Views
 
-## What v0.2 Must Preserve
-
-Even if `agent-sessions` integration is not implemented in `v0.2`, the `v0.2` schema should preserve enough normalized data to support it later without a rewrite.
-
-Minimum compatibility fields:
-
-- stable session UUID
-- runtime / harness name
-- human title
-- mission / objective
-- created / updated / archived timestamps
-- project path or worktree path
-- repository root
-- latest phase
-- latest attention state
-- latest preview text
-- enough resume metadata to reopen or continue the session
-
-## Proposed Compatibility Views
+Holy Ghostty's schema defines four versioned, read-only SQL views (created in the initial schema and maintained by later migrations; all four exclude sessions pending purge):
 
 ### 1. `agent_sessions_sessions_v1`
 
-Purpose:
+Provider-readable session list for browsing and filtering.
 
-- provider-readable session list for browsing and filtering
-
-Suggested columns:
+Columns:
 
 - `id`
-- `harness`
+- `harness` (Holy's runtime name)
 - `title`
-- `project_path`
-- `project_name`
+- `project_path` (worktree path, else working directory, else repository root)
+- `project_name` (currently `NULL`)
 - `repository_root`
 - `worktree_path`
 - `created_at`
@@ -107,32 +59,28 @@ Suggested columns:
 - `phase`
 - `attention`
 - `preview_text`
-- `content_hash`
-- `extra_json`
+- `content_hash` (currently `NULL`)
+- `extra_json` (the launch-spec JSON)
 
 ### 2. `agent_sessions_resume_targets_v1`
 
-Purpose:
+Enough resume metadata for an external provider to reopen or continue a Holy session.
 
-- allow `agent-sessions` to resume or reopen a Holy Ghostty session meaningfully
-
-Suggested columns:
+Columns:
 
 - `session_id`
 - `runtime`
 - `working_directory`
 - `repository_root`
-- `resume_kind`
 - `resume_payload_json`
 - `preferred_command`
+- `resume_kind` (`active_session` or `archived_session`)
 
 ### 3. `agent_sessions_events_v1`
 
-Purpose:
+External browsing of the Holy Ghostty event ledger.
 
-- allow external browsing of the Holy Ghostty event ledger
-
-Suggested columns:
+Columns:
 
 - `event_id`
 - `session_id`
@@ -145,11 +93,9 @@ Suggested columns:
 
 ### 4. `agent_sessions_annotations_v1`
 
-Purpose:
+Annotation/tag bridge over Holy's `annotations` table.
 
-- future-compatible annotation/tag bridge
-
-Suggested columns:
+Columns:
 
 - `id`
 - `session_id`
@@ -158,90 +104,27 @@ Suggested columns:
 - `value`
 - `source`
 
+## Guarantees Behind the Views
+
+- **Stable IDs.** Session IDs are durable and are not regenerated on restore or import.
+- **Stable runtime naming.** Canonical runtime names are `shell`, `claude`, `codex`, `opencode`.
+- **Resume metadata is first-class.** Resume intent is persisted (`resume_payload_json`, `preferred_command`), not reconstructible only from UI code.
+- **Versioned external views.** No external consumer is pointed at internal tables.
+- **Additive compatibility.** If the integration shape changes, `v2` views are added; `v1` views are not silently changed.
+
 ## Transcript Compatibility
 
-This is the one part not worth over-solving in `v0.2`.
+Holy Ghostty does not maintain structured provider transcript data comparable to `agent-sessions` provider logs. It has session state, preview text, events, and runtime telemetry. The views therefore expose sessions, resume targets, events, and annotations — not a message/transcript projection. A richer `agent_sessions_messages_v1` remains unbuilt and is not faked.
 
-Holy Ghostty today does not have structured provider transcript data comparable to `agent-sessions` provider logs. It has:
+## Boundaries
 
-- session state
-- preview text
-- events
-- runtime heuristics
-
-So the correct sequence is:
-
-- `v0.2`: expose sessions, resume targets, and event history
-- `v0.3+`: expose richer transcript or message projections once structured telemetry is stronger
-
-Do not distort `v0.2` just to fake a transcript model it does not yet have.
-
-## Required v0.2 Design Constraint
-
-The `v0.2` database plan should include these compatibility guarantees:
-
-### 1. Stable IDs
-
-Session IDs must remain durable and not be regenerated on every restore/import.
-
-### 2. Stable runtime naming
-
-Use canonical runtime names:
-
-- `shell`
-- `claude`
-- `codex`
-- `opencode`
-
-### 3. Resume metadata is first-class
-
-Do not make resume behavior reconstructible only from UI code.
-
-Persist enough resume intent that a separate provider can use it.
-
-### 4. Versioned external views
-
-Never point another app directly at arbitrary internal tables and call that the contract.
-
-### 5. Additive compatibility
-
-If the integration shape changes, add `v2` views rather than silently changing `v1`.
-
-## What Holy Ghostty Should Not Do
-
-Holy Ghostty should not:
+Holy Ghostty does not:
 
 - use the same SQLite file as `agent-sessions`
-- depend on Python or the `agent-sessions` package
-- shape all internal data around `agent-sessions`
-- promise transcript fidelity before structured telemetry exists
+- depend on Python or the `agent-sessions` package (the CLI is invoked as an external process and its absence degrades gracefully)
+- shape internal data around `agent-sessions`
+- promise transcript fidelity that structured telemetry cannot back
 
-## What agent-sessions Will Eventually Do
+## The Pending Provider
 
-Later, `agent-sessions` can add a provider named:
-
-- `holy-ghostty`
-
-That provider would:
-
-- open Holy Ghostty's SQLite database read-only
-- query the compatibility views
-- map rows into the existing `Session` model
-- provide resume behavior through `resume_payload_json` or `preferred_command`
-
-At that point:
-
-- Holy Ghostty becomes the live operator surface
-- `agent-sessions` becomes the cross-provider browser and search layer
-
-That is a clean relationship.
-
-## Bottom Line
-
-The chosen design is:
-
-- Holy Ghostty owns its operational database
-- Holy Ghostty exposes versioned, read-only compatibility views
-- `agent-sessions` later consumes those views through a provider adapter
-
-That is enough to ensure the two projects can work together without coupling them prematurely.
+A future `agent-sessions` provider named `holy-ghostty` would open Holy's database read-only, query the compatibility views, map rows into the existing `Session` model, and resume through `resume_payload_json` or `preferred_command`. At that point Holy Ghostty is the live operator surface and `agent-sessions` the cross-provider browser and search layer. The views above are the complete contract that provider needs.
