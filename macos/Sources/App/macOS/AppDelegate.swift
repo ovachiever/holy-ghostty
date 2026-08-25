@@ -30,6 +30,7 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuReloadConfig: NSMenuItem?
     @IBOutlet private var menuClaudeModelIndicator: NSMenuItem?
     private var menuAgentStateIndicators: NSMenuItem?
+    private var menuClaudeUsageGuard: NSMenuItem?
     @IBOutlet private var menuSecureInput: NSMenuItem?
     @IBOutlet private var menuQuit: NSMenuItem?
 
@@ -1265,6 +1266,75 @@ class AppDelegate: NSObject,
         let modelIndex = menu.index(of: modelItem)
         menu.insertItem(item, at: max(0, modelIndex))
         menuAgentStateIndicators = item
+
+        let usageItem = NSMenuItem(
+            title: "Enable Claude Usage Guard…",
+            action: #selector(toggleClaudeUsageGuard(_:)),
+            keyEquivalent: ""
+        )
+        usageItem.target = self
+        menu.insertItem(usageItem, at: max(0, menu.index(of: modelItem) + 1))
+        menuClaudeUsageGuard = usageItem
+    }
+
+    @IBAction func toggleClaudeUsageGuard(_ sender: Any?) {
+        defer { refreshClaudeUsageGuardMenu() }
+        let policy = HolyClaudeUsagePolicy.fromUserDefaults()
+        switch HolyClaudeUsageBridge.currentUserInstallationState() {
+        case .notInstalled, .needsRepair:
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Enable Claude usage guard?"
+            alert.informativeText = """
+            Holy will poll Anthropic's usage endpoint with the signed-in Claude Code account's keychain token (read over a pipe, sent only as a header) and show the 5-hour, weekly, and per-model windows in the sidebar. It also adds a Holy-owned hook on PreToolUse and UserPromptSubmit that tells every running Claude session to checkpoint at \(Int(policy.warnPercent))% and to pause with a note at \(Int(policy.criticalPercent))% or within \(Int(policy.leadMinutes)) minutes of a projected cap; new subagent spawns are denied at that point so they cannot die mid-work. Other hooks and settings stay unchanged. Thresholds: defaults write org.holyghostty.app holy.claudeUsage.warnPercent | criticalPercent | leadMinutes | pollSeconds.
+            """
+            alert.addButton(withTitle: "Enable")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            guard HolyClaudeUsageBridge.installForCurrentUser(policy: policy) != nil else {
+                let failure = NSAlert()
+                failure.alertStyle = .warning
+                failure.messageText = "Could not enable Claude usage guard"
+                failure.informativeText = "Holy left other Claude settings unchanged. Check the app log for the exact file error."
+                failure.addButton(withTitle: "OK")
+                failure.runModal()
+                return
+            }
+            if HolyClaudeModelBridge.currentUserInstallationState() == .notInstalled {
+                let hint = NSAlert()
+                hint.alertStyle = .informational
+                hint.messageText = "Claude usage guard enabled"
+                hint.informativeText = "Tip: also enable the Claude Model Indicator. Its status line reports each session's own 5-hour and weekly windows, which keeps the guard accurate for sessions still running under a previous account after you switch."
+                hint.addButton(withTitle: "OK")
+                hint.runModal()
+            }
+
+        case .installed:
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Disable Claude usage guard?"
+            alert.informativeText = "Holy will remove only its own usage hooks and generated helpers. Usage history stays on disk so re-enabling starts with context."
+            alert.addButton(withTitle: "Disable")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            _ = HolyClaudeUsageBridge.removeForCurrentUser()
+        }
+    }
+
+    private func refreshClaudeUsageGuardMenu() {
+        guard Self.isHolyGhosttyBundle else {
+            menuClaudeUsageGuard?.isHidden = true
+            return
+        }
+        menuClaudeUsageGuard?.isHidden = false
+        switch HolyClaudeUsageBridge.currentUserInstallationState() {
+        case .notInstalled:
+            menuClaudeUsageGuard?.title = "Enable Claude Usage Guard…"
+        case .installed:
+            menuClaudeUsageGuard?.title = "Disable Claude Usage Guard…"
+        case .needsRepair:
+            menuClaudeUsageGuard?.title = "Repair Claude Usage Guard…"
+        }
     }
 
     private func refreshAgentStateIndicatorMenu() {
@@ -1286,6 +1356,7 @@ class AppDelegate: NSObject,
 
     private func refreshClaudeModelIndicatorMenu() {
         refreshAgentStateIndicatorMenu()
+        refreshClaudeUsageGuardMenu()
         guard Self.isHolyGhosttyBundle else {
             menuClaudeModelIndicator?.isHidden = true
             return

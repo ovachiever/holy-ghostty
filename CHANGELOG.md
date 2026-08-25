@@ -4,7 +4,45 @@ All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
-No unreleased changes.
+The cap no longer kills the swarm: the Claude Usage Guard watches the three
+claude.ai Max windows and tells every running session to checkpoint, then
+pause, before one of them lands.
+
+### Added
+
+- Claude Usage Guard (`Enable Claude Usage Guard…`, beside the Claude Model
+  Indicator): a Holy-owned probe reads the signed-in account's OAuth token
+  from the keychain over a pipe, polls Anthropic's usage endpoint once a
+  minute, and writes the normalized 5-hour, weekly, and per-model (Fable)
+  windows with burn rate and projected time-to-cap to
+  `~/Library/Application Support/Holy Ghostty/usage/`. Holy itself never
+  touches the network.
+- A Holy-owned hook on `PreToolUse` and `UserPromptSubmit` injects a
+  checkpoint instruction at 75% (once, then every half lead window), and at
+  90% or within 20 minutes of a projected cap tells the session on every
+  tool call to commit, reply `PAUSED (usage cap):`, and end the turn, while
+  denying `Agent`, `Task`, and `Workflow` so no subagent spawns into a dying
+  window. Never blocks by exit code; prompts are informed, never blocked.
+  Thresholds via `defaults write org.holyghostty.app holy.claudeUsage.*`,
+  mirrored to `usage/policy.json`; the Swift evaluator and its Python
+  mirror are tested for parity.
+- Roster-header usage meter (one bar per window, compact capsule in the
+  collapsed rail) with a popover: account and tier, reset time, burn rate,
+  and ETA per window with threshold ticks, sessions reporting their own
+  windows, last-known numbers for every account Holy has seen, Refresh, and
+  `Wrap up all sessions`, which treats every session as critical for one
+  lead window or until the keychain account changes.
+- The Claude Model Indicator status line now records each session's own
+  5-hour and weekly windows to `usage/sessions/<session_id>.json` and shows
+  `· 5h N% · wk N%`; the guard prefers that reading, so a session still
+  running under a previous account after `/login` elsewhere is judged by
+  its own numbers.
+- macOS notifications on each window's first upward level crossing
+  (replacing, not stacking); critical and capped bounce the Dock and say to
+  `/login` on an account with headroom.
+- When Holy is not running, the hook runs the probe itself once the
+  snapshot goes stale, so the guard works without the app. Disabling
+  removes only Holy's hooks and helpers and leaves `usage/` history on disk.
 
 ## 0.50 (2026-08-22)
 

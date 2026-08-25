@@ -1,0 +1,419 @@
+import Foundation
+import Testing
+@testable import Ghostty
+
+/// The guard has two halves that must agree: the Swift evaluator behind the
+/// meter and notifications, and the Python mirror inside the generated hook.
+/// These tests drive both from the same fixtures.
+struct HolyClaudeUsageGuardTests {
+    private let policy = HolyClaudeUsagePolicy.default
+    private let now = Date(timeIntervalSince1970: 1_787_000_000)
+
+    // MARK: - Evaluator
+
+    @Test func percentThresholdsDecideLevels() {
+        #expect(level(percent: 10) == .normal)
+        #expect(level(percent: policy.warnPercent) == .warn)
+        #expect(level(percent: policy.criticalPercent) == .critical)
+        #expect(level(percent: 100) == .capped)
+    }
+
+    @Test func projectedCapInsideLeadWindowIsCritical() {
+        let inside = bucket(percent: 60, etaFullAt: now.addingTimeInterval(policy.leadMinutes * 60 - 1))
+        let nearlyInside = bucket(percent: 60, etaFullAt: now.addingTimeInterval(policy.leadMinutes * 60 * 2 - 1))
+        let far = bucket(percent: 60, etaFullAt: now.addingTimeInterval(policy.leadMinutes * 60 * 5))
+        #expect(HolyClaudeUsageEvaluator.level(for: inside, policy: policy, now: now)?.level == .critical)
+        #expect(HolyClaudeUsageEvaluator.level(for: nearlyInside, policy: policy, now: now)?.level == .warn)
+        #expect(HolyClaudeUsageEvaluator.level(for: far, policy: policy, now: now)?.level == .normal)
+    }
+
+    @Test func providerSeverityCountsAsWarning() {
+        let bucket = bucket(percent: 20, severity: "warning")
+        #expect(HolyClaudeUsageEvaluator.level(for: bucket, policy: policy, now: now)?.level == .warn)
+    }
+
+    @Test func assessmentPicksTheWorstBucket() {
+        let buckets = [
+            bucket(key: "session", percent: 30),
+            bucket(key: "weekly_all", percent: policy.criticalPercent + 2),
+            bucket(key: "weekly_scoped:Fable", percent: policy.warnPercent + 1),
+        ]
+        let assessment = HolyClaudeUsageEvaluator.assess(buckets: buckets, policy: policy, now: now)
+        #expect(assessment.level == .critical)
+        #expect(assessment.decidingBucket?.key == "weekly_all")
+    }
+
+    @Test func policyDefaultsSurviveBadOverrides() {
+        let defaults = UserDefaults(suiteName: "holy.claudeUsage.tests.\(UUID().uuidString)")!
+        defaults.set(0, forKey: HolyClaudeUsagePolicy.DefaultsKey.warnPercent)
+        defaults.set(50, forKey: HolyClaudeUsagePolicy.DefaultsKey.criticalPercent)
+        defaults.set(-3, forKey: HolyClaudeUsagePolicy.DefaultsKey.leadMinutes)
+        let policy = HolyClaudeUsagePolicy.fromUserDefaults(defaults)
+        #expect(policy.warnPercent == HolyClaudeUsagePolicy.default.warnPercent)
+        // critical below warn is clamped up to warn rather than inverting the order.
+        #expect(policy.criticalPercent == HolyClaudeUsagePolicy.default.warnPercent)
+        #expect(policy.leadMinutes == HolyClaudeUsagePolicy.default.leadMinutes)
+    }
+
+    // MARK: - Parser
+
+    @Test func parsesProbeSnapshotAndSessionReading() throws {
+        let snapshot = try HolyClaudeUsageSnapshotParser.parseSnapshot(Data(latestJSON(percent: 42).utf8))
+        #expect(snapshot.account.email == "erik@example.com")
+        #expect(snapshot.buckets.count == 3)
+        #expect(snapshot.bucket("weekly_scoped:Fable")?.label == "Week (Fable)")
+        #expect(snapshot.bucket("session")?.percent == 42)
+        #expect(snapshot.bucket("session")?.resetsAt == now.addingTimeInterval(3_600))
+        #expect(!snapshot.isStale)
+
+        let reading = try HolyClaudeUsageSnapshotParser.parseSessionReading(Data(sessionJSON(fiveHour: 88).utf8))
+        #expect(reading.sessionID == "abc-123")
+        #expect(reading.fiveHour?.percent == 88)
+        #expect(reading.fiveHour?.key == "session")
+        #expect(reading.sevenDay?.percent == 5)
+        #expect(reading.workingDirectory == "/Users/erik/proj")
+    }
+
+    @Test func rejectsUnknownSchema() {
+        let data = Data(#"{"schema": 99, "buckets": []}"#.utf8)
+        #expect(throws: HolyClaudeUsageSnapshotParserError.unsupportedSchema(99)) {
+            try HolyClaudeUsageSnapshotParser.parseSnapshot(data)
+        }
+    }
+
+    // MARK: - Bridge install / remove
+
+    @Test func installIsIdempotentAndRemovalPreservesForeignHooks() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.writeJSON([
+            "model": "opus",
+            "hooks": [
+                "PreToolUse": [["matcher": "Bash", "hooks": [["type": "command", "command": "keep-pre"]]]],
+                "Stop": [["hooks": [["type": "command", "command": "keep-stop"]]]],
+            ],
+        ], to: fixture.paths.settingsURL)
+
+        #expect(try HolyClaudeUsageBridge.install(paths: fixture.paths, policy: policy) == .installed)
+        #expect(try HolyClaudeUsageBridge.installationState(paths: fixture.paths) == .installed)
+        #expect(try HolyClaudeUsageBridge.install(paths: fixture.paths, policy: policy) == .alreadyInstalled)
+        #expect(try String(contentsOf: fixture.paths.guardURL, encoding: .utf8) == HolyClaudeUsageBridge.guardScript)
+        #expect(try String(contentsOf: fixture.paths.probeURL, encoding: .utf8) == HolyClaudeUsageBridge.probeScript)
+        #expect(FileManager.default.fileExists(atPath: fixture.paths.policyURL.path))
+
+        var settings = try fixture.readJSON(fixture.paths.settingsURL)
+        #expect(settings["model"] as? String == "opus")
+        let installedCommands = fixture.commands(in: settings)
+        #expect(installedCommands.contains("keep-pre"))
+        #expect(installedCommands.contains("keep-stop"))
+        #expect(installedCommands.filter { $0.contains("claude-usage-guard.py") }.count == 2)
+
+        // A policy change alone re-installs so the hook reads the new numbers.
+        var tighter = policy
+        tighter.warnPercent = 50
+        #expect(try HolyClaudeUsageBridge.install(paths: fixture.paths, policy: tighter) == .installed)
+        #expect(try HolyClaudeUsageBridge.policyIsCurrent(paths: fixture.paths, policy: tighter))
+
+        #expect(try HolyClaudeUsageBridge.remove(paths: fixture.paths) == .removed)
+        settings = try fixture.readJSON(fixture.paths.settingsURL)
+        #expect(fixture.commands(in: settings) == ["keep-pre", "keep-stop"])
+        #expect(!FileManager.default.fileExists(atPath: fixture.paths.guardURL.path))
+        #expect(!FileManager.default.fileExists(atPath: fixture.paths.probeURL.path))
+        #expect(try HolyClaudeUsageBridge.installationState(paths: fixture.paths) == .notInstalled)
+        #expect(try HolyClaudeUsageBridge.remove(paths: fixture.paths) == .notInstalled)
+    }
+
+    @Test func wrapUpRequestExpiresAndCancels() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try HolyClaudeUsageBridge.requestWrapUp(
+            paths: fixture.paths,
+            policy: policy,
+            accountEmail: "erik@example.com",
+            reason: "test",
+            now: now
+        )
+        #expect(HolyClaudeUsageBridge.activeWrapUpRequest(paths: fixture.paths, now: now)?.reason == "test")
+        #expect(HolyClaudeUsageBridge.activeWrapUpRequest(
+            paths: fixture.paths,
+            now: now.addingTimeInterval(policy.leadMinutes * 60 + 1)
+        ) == nil)
+        try HolyClaudeUsageBridge.cancelWrapUp(paths: fixture.paths)
+        #expect(HolyClaudeUsageBridge.activeWrapUpRequest(paths: fixture.paths, now: now) == nil)
+    }
+
+    // MARK: - Generated guard hook (Python mirror)
+
+    @Test func guardStaysSilentAtNormalUsage() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.installGuard(policy: policy)
+        try fixture.write(latestJSON(percent: 10), to: fixture.paths.latestURL)
+        let output = try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s1")
+        #expect(output == nil)
+    }
+
+    @Test func guardWarnsOnceThenRemindsAfterHalfLead() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.installGuard(policy: policy)
+        try fixture.write(latestJSON(percent: policy.warnPercent + 1), to: fixture.paths.latestURL)
+
+        let first = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s1"))
+        let context = try #require(first["additionalContext"] as? String)
+        #expect(context.contains("HOLY USAGE GUARD"))
+        #expect(context.contains("approaching"))
+        #expect(context.contains("Session (5h) 76%"))
+        #expect(first["permissionDecision"] == nil)
+
+        // Same level, immediately again: suppressed.
+        #expect(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s1") == nil)
+
+        // Back-date the announcement past the reminder interval: announced again.
+        let stateURL = fixture.paths.usageDirectoryURL
+            .appendingPathComponent("guard-state", isDirectory: true)
+            .appendingPathComponent("s1.json")
+        let reminder = policy.leadMinutes * 60 / 2 + 1
+        try fixture.write(
+            #"{"level": "warn", "announced_at": \#(Date().timeIntervalSince1970 - reminder)}"#,
+            to: stateURL
+        )
+        #expect(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s1") != nil)
+    }
+
+    @Test func guardDeniesSubagentSpawnsAtCritical() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.installGuard(policy: policy)
+        try fixture.write(latestJSON(percent: policy.criticalPercent + 3), to: fixture.paths.latestURL)
+
+        let spawn = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Agent", sessionID: "s2"))
+        #expect(spawn["permissionDecision"] as? String == "deny")
+        #expect((spawn["permissionDecisionReason"] as? String)?.contains("Subagent spawns are denied") == true)
+        #expect((spawn["additionalContext"] as? String)?.contains("PAUSED (usage cap):") == true)
+
+        // Every ordinary tool call carries the instruction at critical.
+        let bash1 = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s2"))
+        let bash2 = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s2"))
+        #expect(bash1["permissionDecision"] == nil)
+        #expect((bash1["additionalContext"] as? String)?.contains("IMMINENT") == true)
+        #expect(bash2["additionalContext"] != nil)
+
+        // A user prompt is never blocked, only informed.
+        let prompt = try #require(try fixture.runGuard(event: "UserPromptSubmit", tool: nil, sessionID: "s2"))
+        #expect(prompt["permissionDecision"] == nil)
+        #expect(prompt["additionalContext"] != nil)
+    }
+
+    @Test func guardPrefersTheSessionsOwnReading() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.installGuard(policy: policy)
+        // Machine-wide says calm; this session's own status line says it is
+        // nearly capped (it runs under a different account).
+        try fixture.write(latestJSON(percent: 5), to: fixture.paths.latestURL)
+        try fixture.write(
+            sessionJSON(fiveHour: policy.criticalPercent + 1, resetsAt: Date().addingTimeInterval(3_600)),
+            to: fixture.paths.sessionsDirectoryURL.appendingPathComponent("abc-123.json")
+        )
+        let own = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "abc-123"))
+        #expect((own["additionalContext"] as? String)?.contains("IMMINENT") == true)
+        #expect(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "other") == nil)
+    }
+
+    @Test func guardHonorsWrapUpRequestUntilAccountChanges() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.installGuard(policy: policy)
+        try fixture.write(latestJSON(percent: 5), to: fixture.paths.latestURL)
+        try HolyClaudeUsageBridge.requestWrapUp(
+            paths: fixture.paths,
+            policy: policy,
+            accountEmail: "erik@example.com",
+            reason: "switching accounts"
+        )
+        let paused = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s3"))
+        #expect((paused["additionalContext"] as? String)?.contains("asked every session to pause") == true)
+        let spawn = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Task", sessionID: "s3"))
+        #expect(spawn["permissionDecision"] as? String == "deny")
+
+        // The keychain moved to another account: the request no longer applies.
+        try fixture.write(latestJSON(percent: 5, email: "second@example.com"), to: fixture.paths.latestURL)
+        #expect(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s3") == nil)
+    }
+
+    @Test func guardMirrorsSwiftEvaluatorAcrossFixtures() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.installGuard(policy: policy)
+        let cases: [(percent: Double, etaOffset: TimeInterval?, severity: String?)] = [
+            (10, nil, nil),
+            (policy.warnPercent - 0.5, nil, nil),
+            (policy.warnPercent, nil, nil),
+            (policy.criticalPercent - 0.5, nil, nil),
+            (policy.criticalPercent, nil, nil),
+            (100, nil, nil),
+            (60, policy.leadMinutes * 60 - 5, nil),
+            (60, policy.leadMinutes * 60 * 2 - 5, nil),
+            (60, policy.leadMinutes * 60 * 3, nil),
+            (20, nil, "warning"),
+        ]
+        for testCase in cases {
+            let sessionID = "mirror-\(Int(testCase.percent))-\(Int(testCase.etaOffset ?? 0))-\(testCase.severity ?? "n")"
+            let etaDate = testCase.etaOffset.map { Date().addingTimeInterval($0) }
+            let swiftBucket = bucket(percent: testCase.percent, severity: testCase.severity, etaFullAt: etaDate)
+            let swiftLevel = HolyClaudeUsageEvaluator.level(for: swiftBucket, policy: policy, now: Date())?.level ?? .normal
+            try fixture.write(
+                latestJSON(percent: testCase.percent, etaFullAt: etaDate, severity: testCase.severity, singleBucket: true),
+                to: fixture.paths.latestURL
+            )
+            let output = try fixture.runGuard(event: "PreToolUse", tool: "Agent", sessionID: sessionID)
+            let pythonLevel: HolyClaudeUsageLevel
+            if output == nil {
+                pythonLevel = .normal
+            } else if output?["permissionDecision"] as? String == "deny" {
+                let text = output?["additionalContext"] as? String ?? ""
+                pythonLevel = text.contains("REACHED") ? .capped : .critical
+            } else {
+                pythonLevel = .warn
+            }
+            #expect(pythonLevel == swiftLevel, "percent \(testCase.percent) eta \(String(describing: testCase.etaOffset)) severity \(String(describing: testCase.severity))")
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func level(percent: Double) -> HolyClaudeUsageLevel? {
+        HolyClaudeUsageEvaluator.level(for: bucket(percent: percent), policy: policy, now: now)?.level
+    }
+
+    private func bucket(
+        key: String = "session",
+        percent: Double,
+        severity: String? = nil,
+        etaFullAt: Date? = nil
+    ) -> HolyClaudeUsageBucket {
+        HolyClaudeUsageBucket(
+            key: key,
+            label: key == "session" ? "Session (5h)" : key,
+            percent: percent,
+            severity: severity,
+            resetsAt: now.addingTimeInterval(3_600),
+            windowSeconds: 5 * 3_600,
+            isActive: true,
+            ratePercentPerHour: nil,
+            etaFullAt: etaFullAt
+        )
+    }
+
+    private func latestJSON(
+        percent: Double,
+        email: String = "erik@example.com",
+        etaFullAt: Date? = nil,
+        severity: String? = nil,
+        singleBucket: Bool = false
+    ) -> String {
+        let eta = etaFullAt.map { String(Int($0.timeIntervalSince1970)) } ?? "null"
+        let sev = severity.map { "\"\($0)\"" } ?? "\"normal\""
+        let resets = Int(now.timeIntervalSince1970) + 3_600
+        let weekly = singleBucket ? "" : """
+            ,{"key": "weekly_all", "label": "Week (all models)", "percent": 4, "severity": "normal", "resets_at": \(resets + 86_400), "window_seconds": 604800, "is_active": false, "rate_percent_per_hour": null, "eta_full_at": null},
+            {"key": "weekly_scoped:Fable", "label": "Week (Fable)", "percent": 7, "severity": "normal", "resets_at": \(resets + 86_400), "window_seconds": 604800, "is_active": false, "rate_percent_per_hour": null, "eta_full_at": null}
+            """
+        return """
+        {"schema": 1, "fetched_at": \(Int(Date().timeIntervalSince1970)),
+         "account": {"email": "\(email)", "account_uuid": "u1", "organization": "org", "subscription": "max", "tier": "default_claude_max_20x", "token_expires_at": \(resets)},
+         "buckets": [
+           {"key": "session", "label": "Session (5h)", "percent": \(percent), "severity": \(sev), "resets_at": \(resets), "window_seconds": 18000, "is_active": true, "rate_percent_per_hour": 12.5, "eta_full_at": \(eta)}
+           \(weekly)
+         ],
+         "extra_usage": {"enabled": false, "spend_limit_reached": false},
+         "error": null}
+        """
+    }
+
+    private func sessionJSON(fiveHour: Double, resetsAt: Date? = nil) -> String {
+        let resets = Int((resetsAt ?? now.addingTimeInterval(3_600)).timeIntervalSince1970)
+        return """
+        {"t": \(Int(Date().timeIntervalSince1970)), "session_id": "abc-123", "pane": "%7", "cwd": "/Users/erik/proj",
+         "five_hour": {"percent": \(fiveHour), "resets_at": \(resets)},
+         "seven_day": {"percent": 5, "resets_at": \(resets + 86_400)}}
+        """
+    }
+
+    private struct Fixture {
+        let root: URL
+        let paths: HolyClaudeUsageBridgePaths
+
+        init() throws {
+            root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("holy-claude-usage-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            paths = HolyClaudeUsageBridgePaths(
+                settingsURL: root.appendingPathComponent(".claude/settings.json"),
+                probeURL: root.appendingPathComponent("Holy/claude-usage-probe.py"),
+                guardURL: root.appendingPathComponent("Holy/claude-usage-guard.py"),
+                usageDirectoryURL: root.appendingPathComponent("Holy/usage", isDirectory: true)
+            )
+        }
+
+        func remove() {
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        func installGuard(policy: HolyClaudeUsagePolicy) throws {
+            _ = try HolyClaudeUsageBridge.install(paths: paths, policy: policy)
+        }
+
+        func write(_ contents: String, to url: URL) throws {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(contents.utf8).write(to: url, options: .atomic)
+        }
+
+        func writeJSON(_ object: [String: Any], to url: URL) throws {
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+        }
+
+        func readJSON(_ url: URL) throws -> [String: Any] {
+            let data = try Data(contentsOf: url)
+            return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        }
+
+        func commands(in settings: [String: Any]) -> [String] {
+            guard let hooks = settings["hooks"] as? [String: Any] else { return [] }
+            return hooks.keys.sorted().flatMap { event -> [String] in
+                let groups = hooks[event] as? [[String: Any]] ?? []
+                return groups.flatMap { group in
+                    (group["hooks"] as? [[String: Any]] ?? []).compactMap { $0["command"] as? String }
+                }
+            }
+        }
+
+        /// Runs the generated hook exactly as Claude Code would: hook JSON on
+        /// stdin, `hookSpecificOutput` JSON on stdout, or nothing.
+        func runGuard(event: String, tool: String?, sessionID: String) throws -> [String: Any]? {
+            var input: [String: Any] = ["hook_event_name": event, "session_id": sessionID, "cwd": "/tmp"]
+            if let tool { input["tool_name"] = tool }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            process.arguments = [paths.guardURL.path]
+            process.environment = ["HOLY_USAGE_DIR": paths.usageDirectoryURL.path, "HOME": root.path, "PATH": "/usr/bin:/bin"]
+            let stdin = Pipe()
+            let stdout = Pipe()
+            process.standardInput = stdin
+            process.standardOutput = stdout
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            stdin.fileHandleForWriting.write(try JSONSerialization.data(withJSONObject: input))
+            try stdin.fileHandleForWriting.close()
+            let data = stdout.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            #expect(process.terminationStatus == 0)
+            guard !data.isEmpty else { return nil }
+            let object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            return try #require(object["hookSpecificOutput"] as? [String: Any])
+        }
+    }
+}

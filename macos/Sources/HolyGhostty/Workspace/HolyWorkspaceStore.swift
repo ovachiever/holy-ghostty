@@ -57,6 +57,14 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var draftOwnershipPreview: HolySessionOwnership?
     @Published private(set) var draftLaunchGuardrailRefreshing: Bool = false
     @Published private(set) var attentionClock: Date = .now
+    /// Machine-wide Claude usage as of the last probe; `.empty` until the
+    /// usage guard is installed and has run once.
+    @Published var claudeUsage: HolyClaudeUsageReport = .empty
+    @Published var claudeUsageAssessment: HolyClaudeUsageAssessment = .init(level: .normal, decidingBucket: nil, reason: nil)
+    @Published var claudeUsageGuardInstalled: Bool = false
+    var claudeUsagePolicy: HolyClaudeUsagePolicy = .default
+    let claudeUsageMonitor = HolyClaudeUsageMonitor()
+    var claudeUsageAnnouncedLevelByBucket: [String: HolyClaudeUsageLevel] = [:]
     /// mn-81331d: one contradiction log per session per launch.
     private var attentionContradictionLoggedSessionIDs: Set<UUID> = []
     static let attentionDebugLogger = Logger(
@@ -301,6 +309,14 @@ final class HolyWorkspaceStore: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .holyClaudeUsageBridgeDidChange)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.startClaudeUsageMonitoringIfInstalled()
+            }
+            .store(in: &cancellables)
+        startClaudeUsageMonitoringIfInstalled()
     }
 
     var selectedSession: HolySession? {

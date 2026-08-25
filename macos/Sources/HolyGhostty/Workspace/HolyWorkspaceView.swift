@@ -520,6 +520,8 @@ struct HolyWorkspaceRootView: View {
 
             sessionCountCapsule
 
+            HolyClaudeUsageMeterView(store: store, compact: true)
+
             Spacer(minLength: 0)
 
             collapsedRailButton(

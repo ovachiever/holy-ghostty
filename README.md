@@ -152,6 +152,79 @@ sessions attached to the same checkout report their shared uncommitted file
 count (`N uncommitted files in the shared checkout`) instead of claiming
 cross-session overlap.
 
+## Claude Usage Guard
+
+A claude.ai Max subscription has three windows that each end work when they
+cap: the 5-hour session window, the weekly all-models window, and the weekly
+per-model window (Fable). A capped window kills subagents and teammates
+outright; only the main session waits for the reset, and everything a worker
+had in flight is lost. The Claude Usage Guard watches all three and tells
+every running Claude session to reach a checkpoint, then pause, before the
+cap lands.
+
+Enable it with `Enable Claude Usage Guard…` in the app menu, beside `Enable
+Claude Model Indicator…`. Holy installs two generated helpers it owns,
+`claude-usage-probe.py` and `claude-usage-guard.py`, in
+`~/Library/Application Support/Holy Ghostty/`, and adds Holy-owned hook
+entries on `PreToolUse` (all tools) and `UserPromptSubmit` in
+`~/.claude/settings.json`. Other hooks and settings are untouched; disabling
+removes only Holy's own entries and helpers and leaves the `usage/` history
+on disk.
+
+The probe reads the signed-in account's OAuth token from the macOS keychain
+item `Claude Code-credentials` over a pipe (never on a command line), asks
+`https://api.anthropic.com/api/oauth/usage` for the live windows, and writes
+a normalized snapshot: `usage/latest.json`, a `usage/history.jsonl` pruned
+to one weekly window, and a last-known `usage/accounts/<email>.json` per
+account. Each window carries its burn rate (percent per hour over the
+trailing tenth of the window) and a projected time-to-cap. Holy runs the
+probe once a minute and never touches the network itself. With the Claude
+Model Indicator enabled, the status line also records each session's own
+5-hour and weekly numbers to `usage/sessions/<session_id>.json` and shows
+them as `· 5h N% · wk N%`; that per-session reading stays correct for a
+session still running under a previous account after `/login` elsewhere,
+and the guard prefers it.
+
+Every window sits at one of four levels — normal, warn, critical, capped —
+decided by one evaluator in Holy and mirrored exactly in the hook:
+
+- Warn at 75%, when the projected cap is within 40 minutes and the window
+  is already past half the warn threshold, or when Anthropic reports a
+  non-normal severity. Sessions are told once, then reminded every half
+  lead window: checkpoint now, no new subagents or long tasks.
+- Critical at 90%, or when the projected cap is within 20 minutes. Every
+  tool call carries the instruction to stop at a safe point, commit or
+  write state, reply with a note beginning `PAUSED (usage cap):`, and end
+  the turn. The `Agent`, `Task`, and `Workflow` tools are denied so no
+  subagent is spawned into a dying window.
+- Capped at 100%, handled like critical.
+
+The hook never blocks by exit code, and user prompts are informed, never
+blocked. If the snapshot goes stale because Holy is not running, the hook
+runs the probe itself in the background, so the guard works without the
+app. Thresholds and cadence are
+`defaults write org.holyghostty.app holy.claudeUsage.warnPercent|criticalPercent|leadMinutes|pollSeconds`;
+Holy writes them to `usage/policy.json` so the hook applies the same numbers.
+
+The roster header shows a meter with one bar per window, colored by level
+(a compact percent capsule in the collapsed rail). Clicking it opens a
+popover with the account and tier, each window's reset time, burn rate, and
+ETA with threshold ticks, the sessions reporting their own windows, the
+last-known numbers for every account Holy has seen (only the signed-in one
+is live), `Refresh`, and `Wrap up all sessions`. Wrap-up treats every
+session as critical on its next tool call for one lead window, or until the
+keychain account changes; `Cancel wrap-up` withdraws it. macOS notifications
+fire on each window's first upward level crossing (replacing, not stacking)
+and say to `/login` on an account with headroom; critical and capped also
+bounce the Dock.
+
+Known limits: only the signed-in account is polled live; the per-model
+(Fable) weekly window exists only in the probe's machine-wide snapshot, not
+in per-session readings; the endpoint is undocumented, matched to the
+observed behavior of Claude Code's own `/usage` screen; and a session that
+just ran `/login` may receive one stale warning before its own reading
+refreshes.
+
 ## Session Restore
 
 After any tmux server death — a crash, a reboot, or a deliberate kill — a
@@ -263,6 +336,15 @@ Workspace database:
 
 ```text
 ~/Library/Application Support/org.holyghostty.app.debug/HolyGhostty/holy-ghostty.sqlite3
+```
+
+Claude Usage Guard helpers and usage snapshots (the helpers exist only while
+the guard is enabled; `usage/` persists after disable):
+
+```text
+~/Library/Application Support/Holy Ghostty/claude-usage-probe.py
+~/Library/Application Support/Holy Ghostty/claude-usage-guard.py
+~/Library/Application Support/Holy Ghostty/usage/
 ```
 
 User Claude state is outside the repo and is not managed by Holy Ghostty:

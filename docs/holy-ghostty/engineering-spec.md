@@ -275,6 +275,161 @@ handlers it can prove it owns, blocks on foreign files, and accepts one
 delegation case — a foreign Codex notifier that chains Holy's adapter by file
 name is left untouched in both directions.
 
+## 6B. Claude Usage Guard
+
+The usage guard lives in:
+
+- `macos/Sources/HolyGhostty/Claude/HolyClaudeUsage.swift`
+- `macos/Sources/HolyGhostty/Claude/HolyClaudeUsageBridge.swift`
+- `macos/Sources/HolyGhostty/Claude/HolyClaudeUsageMonitor.swift`
+- `macos/Sources/HolyGhostty/Workspace/HolyWorkspaceStore+ClaudeUsage.swift`
+- `macos/Sources/HolyGhostty/Workspace/HolyClaudeUsageMeterView.swift`
+- the status-line helper in `macos/Sources/HolyGhostty/Claude/HolyClaudeModelBridge.swift`
+- `toggleClaudeUsageGuard` in `macos/Sources/App/macOS/AppDelegate.swift`
+
+Tests: `macos/Tests/HolyGhostty/HolyClaudeUsageGuardTests.swift`.
+
+Problem. A claude.ai Max subscription enforces three windows — 5-hour
+session, weekly all-models, weekly per-model (Fable) — and a capped window
+kills subagents and teammates outright while only the main session
+auto-waits. The guard turns those windows into levels and levels into hook
+instructions, so every running session checkpoints before the cap.
+
+Files on disk. Everything lives under
+`~/Library/Application Support/Holy Ghostty/`: the generated helpers
+`claude-usage-probe.py` and `claude-usage-guard.py` (Python string constants
+in `HolyClaudeUsageBridge`, stamped `Owner: com.holyghostty.claude-usage.v1`,
+mode 0700) and a `usage/` directory (0700) holding `policy.json`,
+`latest.json`, `history.jsonl`, `accounts/<email>.json`,
+`sessions/<session_id>.json`, `guard-state/<session_id>.json`,
+`wrap-up-requested.json`, and a `refresh-requested` stamp.
+`HolyClaudeUsageBridgePaths` is the single definition of these paths;
+`HOLY_USAGE_DIR` redirects the directory for the helpers and the tests.
+
+Probe. `claude-usage-probe.py` reads `~/.claude.json` `oauthAccount` for
+the e-mail, account UUID, and organization, then the keychain item
+`Claude Code-credentials` through `/usr/bin/security find-generic-password
+-w` with captured stdout — the token is never on a command line — taking
+subscription type, rate-limit tier, and token expiry from the same blob. It
+sends the token only as a Bearer header (with
+`anthropic-beta: oauth-2025-04-20`) to
+`https://api.anthropic.com/api/oauth/usage` and normalizes `limits[]` into
+buckets keyed `session`, `weekly_all`, and `weekly_scoped:<model display
+name>`, each with `percent`, `severity`, `resets_at`, `window_seconds`, and
+`is_active`; the older flat `five_hour`/`seven_day` shape is accepted as a
+fallback. Burn rate is the slope over the trailing tenth of a bucket's
+window, using only history samples from the same account, with points
+before an in-span reset discarded; `eta_full_at` is set only when the rate
+is positive and the projected cap precedes the reset. Outputs: `latest.json`
+(schema 1), `history.jsonl` (one compact `{t, a, b}` line per successful
+probe, pruned to one weekly window), and `accounts/<email>.json` (the full
+snapshot under the sanitized e-mail). A failed probe writes its error into
+`latest.json` but carries the previous buckets forward marked `stale_since`,
+so a transient failure neither blanks the meter nor silences the guard. The
+probe also removes `sessions/` files untouched for one session window,
+budgets the whole run to `poll_seconds` (a quarter for the keychain, the
+rest for the request), and exits 1 with the error in the snapshot.
+
+Status line. The Claude Model Indicator helper extracts
+`rate_limits.five_hour` and `rate_limits.seven_day` (`used_percentage`,
+`resets_at`) from the status-line JSON and, when `usage/sessions/` exists,
+writes `{t, session_id, pane, cwd, five_hour, seven_day}` to
+`sessions/<session_id>.json` by atomic rename and appends `· 5h N% · wk N%`
+to the model label. `SessionEnd` removes the file. These numbers come from
+the session's own API responses, so they stay right for a session running
+under an account the keychain has since left.
+
+Policy. `HolyClaudeUsagePolicy` (`warnPercent` 75, `criticalPercent` 90,
+`leadMinutes` 20, `pollSeconds` 60) is read from the `UserDefaults` keys
+`holy.claudeUsage.warnPercent|criticalPercent|leadMinutes|pollSeconds`;
+absent, zero, or out-of-range values fall back, and critical is clamped to
+at least warn. The store writes it to `usage/policy.json` (`warn_percent`,
+`critical_percent`, `lead_minutes`, `poll_seconds`) at install and at every
+monitor start; the hook loads the same file with the same fallbacks.
+
+Evaluation. `HolyClaudeUsageEvaluator.level(for:policy:now:)` is the single
+Swift rule set: `capped` at ≥ 100%; `critical` at ≥ criticalPercent or when
+`eta_full_at − now ≤ lead`; `warn` when the ETA is within 2 × lead and
+percent ≥ warnPercent / 2, at ≥ warnPercent, or when the provider severity
+is anything but `normal`; else `normal`. `assess` takes the worst bucket,
+ties broken by higher percent. The guard script's `level_for` and `assess`
+mirror it line for line, and `guardMirrorsSwiftEvaluatorAcrossFixtures` runs
+both against the same fixtures.
+
+Guard hook. `claude-usage-guard.py` is registered with an empty matcher on
+`PreToolUse` and `UserPromptSubmit`. It reads only `hook_event_name`,
+`session_id`, and `tool_name` from stdin, never prompts or tool inputs. Per
+call it loads the policy, `latest.json`, and the session's own file
+(windows whose `resets_at` has passed are dropped); the session's own
+`session` and `weekly_all` buckets replace the machine-wide ones, and the
+remaining machine buckets (including `weekly_scoped:*`) are merged in. When
+`latest.json` is older than two poll periods it spawns the probe detached,
+gated by the `refresh-requested` stamp to one launch per poll period, so the
+guard runs without the app. Output is always JSON on stdout with exit 0; a
+crash exits 0. At `normal` it clears `guard-state/<session_id>.json` and
+emits nothing. At `warn` it emits `additionalContext` (checkpoint now, no
+new subagents or long tasks) once on entry and again every half lead
+window, tracked in `guard-state`. At `critical` and `capped` every call
+carries the stop instruction — finish or abort at a safe point, commit or
+write state, reply with a note beginning `PAUSED (usage cap):`, end the
+turn — and a `PreToolUse` for `Agent`, `Task`, or `Workflow` adds
+`permissionDecision: deny` with the reason. `UserPromptSubmit` only ever
+receives `additionalContext`.
+
+Wrap-up. `HolyClaudeUsageBridge.requestWrapUp` writes
+`wrap-up-requested.json` (`requested_at`, `expires_at` = now + lead,
+`account_email`, `reason`). The hook raises any level below critical to
+critical while the request is unexpired and its e-mail matches the
+snapshot's signed-in account; a different account cancels it implicitly,
+`cancelWrapUp` deletes it explicitly.
+
+Monitor and store. `HolyClaudeUsageMonitor` is an actor that runs the probe
+on `pollSeconds` with `HOLY_USAGE_DIR` set, terminates it at the deadline,
+then reads back `latest.json`, the live `sessions/*.json` (at least one
+window not yet reset), `accounts/*.json` newest first, and the active
+wrap-up request into a `HolyClaudeUsageReport`. Holy never talks to the
+network. `HolyWorkspaceStore` starts or stops the monitor at launch and on
+`holyClaudeUsageBridgeDidChange`, publishes each report, and assesses the
+machine-wide buckets for the meter's level. `refreshNow` reruns the probe
+immediately; wrap-up request and cancel re-read the disk state without a
+probe.
+
+Presentation. `HolyClaudeUsageMeterView` renders in the roster header — a
+level dot, one bar per bucket colored by that bucket's level, a pause glyph
+while a wrap-up stands, a clock badge when the snapshot is stale — and as a
+compact percent capsule of the deciding bucket in the collapsed rail. The
+popover (`HolyClaudeUsageDetailView`) shows the level title, account and
+tier, snapshot age, each bucket with warn and critical ticks and its reset,
+rate, and ETA, sessions reporting their own windows, known accounts (when
+more than one, or when the newest differs from the signed-in one), and the
+Refresh and wrap-up controls.
+
+Notifications. `notifyClaudeUsageTransitions` keeps the last announced
+level per bucket key and delivers one `UNNotificationRequest` per upward
+crossing with identifier `holy.claude-usage.<key>.<level>`, so a repeat
+replaces rather than stacks; a downward crossing or a vanished bucket resets
+the record. Critical and capped call `requestUserAttention(.criticalRequest)`.
+Authorization is requested on first need; a denial is silent.
+
+Installation. `toggleClaudeUsageGuard` is consent-gated behind
+`Enable Claude Usage Guard…` (inserted after `Enable Claude Model
+Indicator…`, hidden outside the Holy bundle; the title becomes `Disable…`
+or `Repair…` by installation state). `HolyClaudeUsageBridge.install`
+creates the directories, writes both helpers and `policy.json`, and within
+each event's groups replaces only handlers whose command is Holy's guard
+path, preserving every foreign group and the settings file's permissions and
+symlink target. `remove` strips only those handlers and deletes only helpers
+carrying the owner marker; `usage/` stays. `installationState` reports
+`needsRepair` when a helper or hook is present but not current. Enabling
+while the Model Indicator is absent shows a one-time hint to enable it.
+
+Known limits. Only the signed-in account is polled live. The per-model
+(Fable) weekly bucket exists only in the probe's machine-wide snapshot, not
+in per-session readings. The endpoint is undocumented; the probe matches
+the observed behavior of Claude Code's own `/usage` screen. A session that
+just ran `/login` may receive one stale warning before its own reading
+refreshes.
+
 ## 7. Budget Intelligence
 
 ### Budget parser

@@ -162,6 +162,104 @@ identities with a persisted watermark, so restarts and duplicate deliveries
 never re-alert, and a finish committed while Holy is closed alerts exactly
 once on the next launch.
 
+## Claude Usage Guard
+
+A claude.ai Max subscription has three windows that each end work when they
+cap: the 5-hour session window, the weekly all-models window, and the weekly
+per-model window (Fable). A capped window kills subagents and teammates
+outright; only the main session waits for the reset, and everything a worker
+had in flight is gone. The usage guard watches all three and tells every
+running Claude session to reach a checkpoint, then pause, before that
+happens.
+
+### What you see
+
+The roster header carries a meter: one bar per window, colored by level,
+with a compact percent capsule in the collapsed rail. A pause glyph means a
+wrap-up is in force; a clock badge means the last probe failed and the
+numbers are carried forward. Click the meter for the popover:
+
+- Account, tier, and how old the snapshot is.
+- Each window's percent with threshold ticks, reset time, burn rate, and
+  projected time to cap.
+- Sessions reporting their own 5-hour and weekly windows through the Claude
+  Model Indicator status line.
+- Last-known numbers for every account Holy has seen. Only the signed-in
+  account is live; the meter follows the keychain.
+- `Refresh`, and `Wrap up all sessions` / `Cancel wrap-up`.
+
+With the Claude Model Indicator enabled, each session's status line also
+reads `· 5h N% · wk N%` after the model name.
+
+### Levels
+
+| Level | When | Sessions are told |
+|---|---|---|
+| Normal | Below every threshold | Nothing |
+| Warn | 75% of any window; a projected cap within 40 minutes once the window is past half the warn threshold; or a non-normal severity from Anthropic | Once on entry and again every half lead window: checkpoint now, no new subagents or long tasks |
+| Critical | 90%, or a projected cap within 20 minutes | On every tool call: stop at a safe point, commit or write state, reply with a note beginning `PAUSED (usage cap):`, end the turn. `Agent`, `Task`, and `Workflow` are denied |
+| Capped | 100% | As critical |
+
+The hook never blocks by exit code, and your own prompts are informed, never
+blocked. The thresholds and the poll cadence are preferences (defaults
+shown):
+
+```bash
+defaults write org.holyghostty.app holy.claudeUsage.warnPercent 75
+defaults write org.holyghostty.app holy.claudeUsage.criticalPercent 90
+defaults write org.holyghostty.app holy.claudeUsage.leadMinutes 20
+defaults write org.holyghostty.app holy.claudeUsage.pollSeconds 60
+```
+
+Holy writes them to `usage/policy.json` so the hook applies the same numbers.
+
+### Wrapping up before a switch
+
+`Wrap up all sessions` writes a request that treats every session as
+critical on its next tool call, for one lead window or until the keychain
+account changes. The request records the signed-in e-mail, so running
+`/login` on another account cancels it by itself; `Cancel wrap-up` withdraws
+it early.
+
+### Notifications
+
+Each window's first upward level crossing raises a macOS notification,
+identified per window and level so a repeat replaces rather than stacks.
+Critical and capped also bounce the Dock. The text names the account and
+tells you to `/login` on an account with headroom.
+
+### Enabling the guard
+
+Run `Enable Claude Usage Guard…` from the app menu, beside `Enable Claude
+Model Indicator…`. Holy installs two generated helpers it owns in
+`~/Library/Application Support/Holy Ghostty/` — `claude-usage-probe.py` and
+`claude-usage-guard.py` — and adds Holy-owned hook entries on `PreToolUse`
+(all tools) and `UserPromptSubmit` in `~/.claude/settings.json`. Other hooks
+and settings stay untouched. The same menu item reads `Disable…` once
+installed and `Repair…` if the helpers or hooks have drifted; disabling
+removes only Holy's own entries and helpers and leaves `usage/` on disk.
+
+The probe reads the signed-in account's OAuth token from the macOS keychain
+item `Claude Code-credentials` over a pipe, never on a command line, and
+sends it only as a request header to
+`https://api.anthropic.com/api/oauth/usage`. Holy runs it once a minute and
+never makes network calls itself. If Holy is not running and the snapshot
+goes stale, the hook runs the probe in the background, so the guard keeps
+working without the app. Enable the Claude Model Indicator too: its
+per-session readings keep the guard right for a session still running under
+a previous account after `/login` elsewhere.
+
+### Limits
+
+- Only the signed-in account is polled live; other accounts show their
+  last-known numbers.
+- The per-model (Fable) weekly window exists only in the machine-wide
+  snapshot, not in per-session readings.
+- The usage endpoint is undocumented; the probe matches the observed
+  behavior of Claude Code's own `/usage` screen.
+- A session that just ran `/login` may receive one stale warning before its
+  own reading refreshes.
+
 ## Phase Telemetry
 
 Beneath the authoritative indicators, Holy infers a phase for the bottom
