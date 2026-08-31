@@ -415,12 +415,42 @@ final class HolyRestoreEngine: ObservableObject {
         // started for the first time, since the last preflight.
         serverGlobalPathTasks.removeAll()
         let conflictReasons = planConflictReasons()
+        let storedIDGrants = storedProviderSessionIDGrants()
+        preassignedProviderSessionIDs = Set(storedIDGrants.values)
         await runBounded(rowIDs: rows.map(\.id)) { [weak self] rowID in
-            await self?.preflightLocalFacts(rowID: rowID, conflictReasons: conflictReasons)
+            await self?.preflightLocalFacts(
+                rowID: rowID,
+                conflictReasons: conflictReasons,
+                storedIDGrants: storedIDGrants
+            )
         }
         await resolvePendingRowsInOneBatch()
         pendingResolutions.removeAll()
+        preassignedProviderSessionIDs.removeAll()
     }
+
+    /// Rows whose archived record carries a live-captured provider session id
+    /// (Claude's `session_id`, stamped by the agent-state bridge while the
+    /// pane ran). Identity beats proximity: these rows never enter the
+    /// timestamp assignment at all. Sheet order arbitrates the pathological
+    /// duplicate — two archives claiming one conversation — so the first row
+    /// keeps the id and the second falls back to the resolver.
+    private func storedProviderSessionIDGrants() -> [UUID: String] {
+        var grants: [UUID: String] = [:]
+        var claimed: Set<String> = []
+        for row in rows {
+            guard row.plannedLaunchSpec.runtime == .claude,
+                  let id = row.archived.record.launchSpec.providerSessionID,
+                  HolyRestoreCommandBuilder.isSafeProviderSessionID(id),
+                  claimed.insert(id).inserted else { continue }
+            grants[row.id] = id
+        }
+        return grants
+    }
+
+    /// Conversation ids already spent by stored-id rows this preflight pass.
+    /// The batch assignment must never hand one of these to a fallback row.
+    private var preassignedProviderSessionIDs: Set<String> = []
 
     /// Identity collisions visible from the plan itself: two rows targeting
     /// the same tmux session name, or a roster session (with a different
@@ -493,7 +523,11 @@ final class HolyRestoreEngine: ObservableObject {
         return await environment.discoverExecutable(name, tmuxServerPath: query.value)
     }
 
-    private func preflightLocalFacts(rowID: UUID, conflictReasons: [UUID: String]) async {
+    private func preflightLocalFacts(
+        rowID: UUID,
+        conflictReasons: [UUID: String],
+        storedIDGrants: [UUID: String]
+    ) async {
         guard let index = rows.firstIndex(where: { $0.id == rowID }) else { return }
         let row = rows[index]
         updateRow(rowID) { $0.phase = .preflighting }
@@ -541,6 +575,31 @@ final class HolyRestoreEngine: ObservableObject {
             && workingDirectory != nil
 
         if needsResolution, let workingDirectory {
+            // Identity short-circuit: a live-captured provider session id
+            // answers the resolver's question outright. It flows through the
+            // same synthesized resolve outcome the batch resolver would
+            // produce, so the preflight precedence law (conflict, liveness,
+            // cwd, executable) has already gated it above and stays one
+            // total function.
+            if let storedID = storedIDGrants[rowID] {
+                context.resolveOutcome = .resolved(.init(
+                    matched: true,
+                    providerSessionID: storedID,
+                    harness: runtime.rawValue,
+                    runtime: runtime.rawValue,
+                    projectPath: workingDirectory,
+                    resumeCommand: nil,
+                    confidence: .exact,
+                    candidates: []
+                ))
+                let state = HolyRestorePreflight.rowState(runtime: runtime, context: context)
+                updateRow(rowID) {
+                    $0.state = state
+                    $0.phase = .ready
+                }
+                return
+            }
+
             // The row keeps phase .preflighting (rendered "Checking…") and a
             // blocked state, so a mid-preflight Restore skips it honestly.
             pendingResolutions[rowID] = .init(
@@ -613,7 +672,10 @@ final class HolyRestoreEngine: ObservableObject {
                 ))
             }
 
-            let verdicts = HolyRestoreAssignment.assign(rows: assignmentRows)
+            let verdicts = HolyRestoreAssignment.assign(
+                rows: assignmentRows,
+                spentProviderSessionIDs: preassignedProviderSessionIDs
+            )
 
             for item in pending {
                 if let error = errorsByRowID[item.rowID] {
@@ -883,6 +945,10 @@ final class HolyRestoreEngine: ObservableObject {
 
         var spec = row.plannedLaunchSpec
         spec.command = resumeCommand
+        // The restored record carries its conversation identity from the
+        // first moment, before any hook fires — the next crash restores by
+        // id even if this pane never publishes another envelope.
+        spec.providerSessionID = providerSessionID
         spec.initialInput = nil
         if let workingDirectory = resolvedWorkingDirectory(for: row) {
             spec.workingDirectory = workingDirectory
@@ -906,9 +972,11 @@ final class HolyRestoreEngine: ObservableObject {
         if demoteToShell {
             // No history means no honest provider relaunch: replaying
             // `claude` would open a fresh conversation while the row claims
-            // restore. Recreate a labeled shell in the cwd instead.
+            // restore. Recreate a labeled shell in the cwd instead. The
+            // stored conversation id goes with it — a shell runs nothing.
             spec.runtime = .shell
             spec.command = nil
+            spec.providerSessionID = nil
         }
         spec.initialInput = nil
         if let workingDirectory = resolvedWorkingDirectory(for: row) {

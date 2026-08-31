@@ -717,18 +717,37 @@ enum HolyAgentStateBridge {
         return group
     }
 
+    /// Command-substitution argument appended to every Claude hook command.
+    /// It reads ONLY `session_id` from the hook's stdin JSON and hands it to
+    /// the helper as the optional session argument — the helper itself still
+    /// never reads stdin, so transcript leakage stays impossible by
+    /// construction. Any failure (no stdin, malformed JSON, missing python)
+    /// collapses to an empty argument, which the helper treats as "no id".
+    /// The exact bytes are ownership law: local and remote recognizers strip
+    /// this suffix verbatim, so it must never drift between them.
+    static let claudeSessionIDCaptureArgument =
+        #""$(/usr/bin/python3 -c 'import json,sys;print(json.load(sys.stdin).get("session_id") or "")' 2>/dev/null)""#
+
     private static func hookCommand(
         helperURL: URL,
         source: String,
         lifecycle: HolyAgentLifecycleState,
         reasonCode: String
     ) -> String {
-        [
+        var elements = [
             shellQuote(helperURL.path),
             source,
             lifecycle.rawValue,
             reasonCode,
-        ].joined(separator: " ")
+        ]
+        // Claude is the one source whose hook stdin carries a session id that
+        // is also the exact `--resume` id, so only Claude commands capture it.
+        // Codex forwards thread:turn composites through its notifier instead,
+        // and those are not resumable ids.
+        if source == HolyAgentStateSource.claude {
+            elements.append(claudeSessionIDCaptureArgument)
+        }
+        return elements.joined(separator: " ")
     }
 
     static func isOwnedHookCommand(
@@ -738,10 +757,19 @@ enum HolyAgentStateBridge {
     ) -> Bool {
         let prefix = "\(shellQuote(helperURL.path)) \(source) "
         guard command.hasPrefix(prefix) else { return false }
+        var remainder = String(command.dropFirst(prefix.count))
+        // The current generation appends the session-capture argument to
+        // Claude commands. A bare remainder is the prior generation's shape,
+        // still owned so upgrades strip and replace it instead of stacking a
+        // second handler beside it.
+        let captureSuffix = " \(claudeSessionIDCaptureArgument)"
+        if remainder.hasSuffix(captureSuffix) {
+            remainder = String(remainder.dropLast(captureSuffix.count))
+        }
         // Keep empty fields so irregular internal whitespace reads as foreign,
         // matching the remote Python's `split(" ")` — Holy never generates
         // doubled spaces, and local/remote must agree on ownership.
-        let fields = command.dropFirst(prefix.count).split(separator: " ", omittingEmptySubsequences: false)
+        let fields = remainder.split(separator: " ", omittingEmptySubsequences: false)
         guard fields.count == 2,
               HolyAgentLifecycleState(rawValue: String(fields[0])) != nil else {
             return false

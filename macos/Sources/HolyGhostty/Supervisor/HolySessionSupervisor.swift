@@ -202,6 +202,18 @@ final class HolySessionSupervisor {
         // sweep shares it, giving the restore surface an exact "this reboot"
         // scope that survives persistence and later relaunches.
         let coldBootBatchID = UUID()
+        // The restore resolver anchors on lastActivityAt, so it must say
+        // when the CONVERSATION last spoke, not when the app last touched
+        // the record — record.updatedAt rides at "a moment ago" for every
+        // live pane (preview churn, git refresh), which collapsed all
+        // anchors to crash time and let timestamp pairing rotate three
+        // same-cwd sessions onto each other's conversations (2026-08-31).
+        // Provider hook events are the honest signal; updatedAt is only the
+        // fallback for sessions that never published one.
+        let attentionMetadataBySessionID = Dictionary(
+            snapshot.attentionMetadata.map { ($0.sessionID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         let coldBootArchived = dormantRecords.map { record in
             HolyArchivedSession(
                 sourceSessionID: record.id,
@@ -214,7 +226,9 @@ final class HolySessionSupervisor {
                 runtimeTelemetry: .empty,
                 gitSnapshot: nil,
                 lastKnownWorkingDirectory: record.launchSpec.workingDirectory,
-                lastActivityAt: record.updatedAt,
+                lastActivityAt: Self.providerActivityAnchor(
+                    attentionMetadataBySessionID[record.id]
+                ) ?? record.updatedAt,
                 archivedAt: .now,
                 recoveryReason: "\(Self.coldBootRecoveryReasonPrefix) (probably a macOS reboot). Relaunch from history to recreate.",
                 recoveryBootBatchID: coldBootBatchID
@@ -424,6 +438,24 @@ final class HolySessionSupervisor {
     /// `recoverActiveRecords` and `restoreWorkspace` must share this
     /// predicate — the two sites deciding differently is what strands real
     /// sessions in the graveyard while the batch holds only helper shells.
+    /// When the provider conversation in this session last spoke, from hook
+    /// events alone: user prompts (`lastUsedAt`), finished turns, and the
+    /// newest authoritative lifecycle event. `lastSeenAt` is deliberately
+    /// absent — a human glancing at a pane is not conversation activity.
+    /// Nil when the session never published an envelope.
+    nonisolated private static func providerActivityAnchor(
+        _ metadata: HolySessionAttentionMetadata?
+    ) -> Date? {
+        guard let metadata else { return nil }
+        return [
+            metadata.lastUsedAt,
+            metadata.lastAgentFinishedAt,
+            metadata.lastAuthoritativeEventOccurredAt,
+        ]
+        .compactMap(\.self)
+        .max()
+    }
+
     nonisolated static func belongsToColdBootSweep(
         record: HolySessionRecord,
         localServerUnavailable: Bool,

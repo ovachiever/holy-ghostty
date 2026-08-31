@@ -647,6 +647,79 @@ struct HolyRestoreEngineTests {
         #expect(Set(commands).count == 2, "Two rows restored the same conversation: \(commands)")
     }
 
+    // MARK: - Identity-keyed restore (field failure 2026-08-31)
+
+    @Test func aStoredProviderSessionIDShortCircuitsTheResolver() async throws {
+        // The archive carries the conversation id the pane was proven to be
+        // running (captured live from the Claude hook). Identity beats
+        // proximity: the resolver is never even asked, and the restored
+        // spec carries the id forward.
+        var lane = archived()
+        lane.record.launchSpec.providerSessionID = "stored-abc"
+        let resolver = FakeBatchResolver(
+            candidatesByCwd: ["/tmp/lane-a": [candidate("wrong-nearest")]]
+        )
+        let (engine, _, tmux) = makeEngine(archives: [lane], resolver: resolver)
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        #expect(resolver.calls.isEmpty)
+        #expect((try #require(engine.rows.first)).state
+            == .exactResume(providerSessionID: "stored-abc"))
+
+        await engine.restoreAll()
+        #expect(tmux.createdSpecs.compactMap(\.command) == ["'claude' '--resume' 'stored-abc'"])
+        #expect(tmux.createdSpecs.first?.providerSessionID == "stored-abc")
+    }
+
+    @Test func storedIDsAreSpentBeforeTimestampAssignment() async throws {
+        // Row one restores by identity; row two falls back to the resolver,
+        // and the identity-owned conversation is off its table even though
+        // it is the nearest candidate by timestamp.
+        var laneOne = archived(sessionName: "holy-id-1")
+        laneOne.record.launchSpec.providerSessionID = "shared-conv"
+        let laneTwo = archived(sessionName: "holy-id-2")
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [
+            candidate("shared-conv", end: Self.lastActivity),
+            candidate("other-conv", end: Self.lastActivity - 300),
+        ]])
+        let (engine, _, _) = makeEngine(archives: [laneOne, laneTwo], resolver: resolver)
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        #expect(try row(engine, sessionName: "holy-id-1").state
+            == .exactResume(providerSessionID: "shared-conv"))
+        #expect(try row(engine, sessionName: "holy-id-2").state
+            == .exactResume(providerSessionID: "other-conv"))
+        // Only the fallback row reached the resolver.
+        #expect(resolver.calls == [[.init(cwd: "/tmp/lane-a", harness: "claude", near: Self.lastActivity)]])
+    }
+
+    @Test func duplicateStoredIDsGrantTheFirstRowAndResolveTheSecond() async throws {
+        // Two archives claiming one conversation is a capture pathology, not
+        // a license to resume it twice. Sheet order arbitrates: the first
+        // row keeps the identity, the second falls back to the resolver.
+        var laneOne = archived(sessionName: "holy-dup-1")
+        laneOne.record.launchSpec.providerSessionID = "dup-conv"
+        var laneTwo = archived(sessionName: "holy-dup-2")
+        laneTwo.record.launchSpec.providerSessionID = "dup-conv"
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [
+            candidate("dup-conv", end: Self.lastActivity),
+            candidate("fallback-conv", end: Self.lastActivity - 300),
+        ]])
+        let (engine, _, _) = makeEngine(archives: [laneOne, laneTwo], resolver: resolver)
+
+        engine.buildPlan()
+        await engine.runPreflight()
+
+        #expect(try row(engine, sessionName: "holy-dup-1").state
+            == .exactResume(providerSessionID: "dup-conv"))
+        #expect(try row(engine, sessionName: "holy-dup-2").state
+            == .exactResume(providerSessionID: "fallback-conv"))
+    }
+
     @Test func nearTieCandidatesLeftUnclaimedDemoteToThePicker() async throws {
         // One row, two conversations ending 10s apart: auto-picking either
         // would be the old guess in new clothes. The row goes ambiguous and

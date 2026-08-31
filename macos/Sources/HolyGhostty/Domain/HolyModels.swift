@@ -1560,6 +1560,12 @@ struct HolySessionLaunchSpec: Codable, Equatable {
     var waitAfterCommand: Bool
     var environment: [String: String]
     var workspace: HolySessionWorkspaceSpec?
+    /// The provider conversation id last observed live in this session's pane
+    /// (Claude Code's `session_id`, captured from the agent-state envelope).
+    /// Crash restore keys on it — identity, never timestamp proximity — which
+    /// is why it is per-pane state: templates and duplicates must shed it.
+    /// Optional so persisted launch-spec JSON without the key still decodes.
+    var providerSessionID: String? = nil
 
     static func interactiveShell(title: String = "Shell") -> Self {
         .init(
@@ -1679,6 +1685,7 @@ struct HolySessionLaunchSpec: Codable, Equatable {
         var copy = self
         copy.note = nil
         copy.noteUpdatedAtMilliseconds = nil
+        copy.providerSessionID = nil
         copy.isFocused = nil
         copy.todayPinUpdatedAtMilliseconds = nil
         copy.task = nil

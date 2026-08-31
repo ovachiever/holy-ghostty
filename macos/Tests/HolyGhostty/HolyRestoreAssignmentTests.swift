@@ -198,6 +198,114 @@ struct HolyRestoreAssignmentTests {
         #expect(verdicts[rowC] == HolyRestoreAssignmentVerdict.unmatched)
     }
 
+    // MARK: - Claimed near-ties (the 2026-08-31 field failure)
+
+    @Test func clusteredClaimedCompetitorsDemoteInsteadOfCertifyingCoinFlips() {
+        // Two rows share one smeared anchor (record.updatedAt rode at crash
+        // time for every live pane) and two conversations ending seconds
+        // apart. Greedy pairing here is a coin flip; the old audit skipped
+        // claimed competitors and stamped both rows exact — three of four
+        // agent-do sessions restored onto each other's conversations.
+        let rowA = UUID()
+        let rowB = UUID()
+        let candidates = [
+            candidate("live-one", end: 999_990),
+            candidate("live-two", end: 999_975),
+        ]
+
+        let verdicts = HolyRestoreAssignment.assign(rows: [
+            row(rowA, lastActivity: 1_000_000, candidates: candidates),
+            row(rowB, lastActivity: 1_000_000, candidates: candidates),
+        ])
+
+        for id in [rowA, rowB] {
+            guard case .ambiguous = verdicts[id] else {
+                Issue.record("Expected ambiguous for a clustered coin flip, got \(String(describing: verdicts[id]))")
+                return
+            }
+        }
+    }
+
+    @Test func anchorSmearNeverCertifiesARotation() {
+        // The incident shape: four rows all anchored at crash time, two
+        // conversations that really ended at the crash and two idle for
+        // days. Every row's greedy pick is a guess against a closer or
+        // near-equal claimed competitor, so every row must reach the human
+        // as ambiguous — never a confident wrong resume.
+        let anchor = 2_000_000
+        let rowIDs = [UUID(), UUID(), UUID(), UUID()]
+        let candidates = [
+            candidate("live-a", end: anchor - 5),
+            candidate("live-b", end: anchor - 8),
+            candidate("idle-a", end: anchor - 259_200),
+            candidate("idle-b", end: anchor - 259_440),
+        ]
+
+        let verdicts = HolyRestoreAssignment.assign(
+            rows: rowIDs.map { row($0, lastActivity: anchor, candidates: candidates) }
+        )
+
+        for id in rowIDs {
+            guard case .ambiguous = verdicts[id] else {
+                Issue.record("Expected ambiguous under a smeared anchor, got \(String(describing: verdicts[id]))")
+                return
+            }
+        }
+    }
+
+    @Test func decisivelyHeldCompetitorsDissolveAndRestoreExactness() {
+        // Row B holds "held" decisively (its alternative is far outside the
+        // tolerance). Row A's only near-tie is that held id, which is not a
+        // real alternative — it dissolves and A is exact after all.
+        let rowA = UUID()
+        let rowB = UUID()
+
+        let verdicts = HolyRestoreAssignment.assign(rows: [
+            row(rowA, lastActivity: 1_090, candidates: [
+                candidate("free", end: 1_000),
+                candidate("held", end: 1_200),
+            ]),
+            row(rowB, lastActivity: 1_200, candidates: [
+                candidate("free", end: 1_000),
+                candidate("held", end: 1_200),
+            ]),
+        ])
+
+        #expect(verdicts[rowB] == .exact(providerSessionID: "held"))
+        #expect(verdicts[rowA] == .exact(providerSessionID: "free"))
+    }
+
+    // MARK: - Identity-spent ids
+
+    @Test func spentProviderSessionIDsAreOffTheTable() {
+        // A conversation already restored by live-captured identity cannot
+        // be assigned again, even when it is the nearest candidate.
+        let only = UUID()
+        let verdicts = HolyRestoreAssignment.assign(
+            rows: [
+                row(only, lastActivity: 1_000, candidates: [
+                    candidate("identity-owned", end: 1_000),
+                    candidate("free", end: 900),
+                ]),
+            ],
+            spentProviderSessionIDs: ["identity-owned"]
+        )
+        #expect(verdicts[only] == .exact(providerSessionID: "free"))
+    }
+
+    @Test func rowsWhoseOnlyCandidateWasSpentAreUnmatched() {
+        let only = UUID()
+        let verdicts = HolyRestoreAssignment.assign(
+            rows: [
+                row(only, lastActivity: 1_000, candidates: [
+                    candidate("identity-owned", end: 1_000),
+                ]),
+            ],
+            spentProviderSessionIDs: ["identity-owned"]
+        )
+        #expect(verdicts[only] == HolyRestoreAssignmentVerdict.unmatched)
+    }
+
     // MARK: - Sanitization
 
     @Test func unsafeCandidateIDsAreDroppedBeforeAssignment() {

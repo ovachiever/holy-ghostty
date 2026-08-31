@@ -180,6 +180,87 @@ struct HolyAgentStateBridgeTests {
         #expect(twiceGroups.filter { $0["matcher"] as? String == "ScheduleWakeup" }.count == 1)
     }
 
+    // Identity capture (field failure 2026-08-31): crash restore rotated
+    // three same-cwd sessions onto each other's conversations because the
+    // app never learned which conversation each pane was running. Claude
+    // hook commands now hand the helper the session id — and nothing else.
+    @Test func claudeHookCommandsCaptureTheSessionIDAndCodexCommandsDoNot() throws {
+        let helperURL = URL(fileURLWithPath: "/tmp/Holy/agent-state-hook.sh")
+        let claude = try HolyAgentStateBridge.mergingClaudeSettings([:], helperURL: helperURL)
+        let owned = hookCommands(in: claude).filter {
+            HolyAgentStateBridge.isOwnedHookCommand(
+                $0,
+                helperURL: helperURL,
+                source: HolyAgentStateSource.claude
+            )
+        }
+        #expect(owned.count == 8)
+        for command in owned {
+            #expect(command.hasSuffix(" " + HolyAgentStateBridge.claudeSessionIDCaptureArgument))
+        }
+
+        let codex = try HolyAgentStateBridge.mergingCodexHooks([:], helperURL: helperURL)
+        #expect(!hookCommands(in: codex).contains(where: { $0.contains("session_id") }))
+    }
+
+    @Test func priorGenerationBareCommandsAreOwnedAndUpgraded() throws {
+        let helperURL = URL(fileURLWithPath: "/tmp/Holy/agent-state-hook.sh")
+        let legacy = "'\(helperURL.path)' claude working user-prompt"
+        #expect(HolyAgentStateBridge.isOwnedHookCommand(
+            legacy,
+            helperURL: helperURL,
+            source: HolyAgentStateSource.claude
+        ))
+
+        let merged = try HolyAgentStateBridge.mergingClaudeSettings(
+            [
+                "hooks": [
+                    "UserPromptSubmit": [["hooks": [["type": "command", "command": legacy]]]],
+                ],
+            ],
+            helperURL: helperURL
+        )
+        let commands = hookCommands(in: merged)
+        #expect(!commands.contains(legacy))
+        #expect(commands.contains("\(legacy) \(HolyAgentStateBridge.claudeSessionIDCaptureArgument)"))
+    }
+
+    @Test func sessionIDCaptureArgumentExtractsOnlyTheSessionID() throws {
+        let stdout = try runSessionIDCaptureProbe(
+            stdin: #"{"session_id":"abc-123","transcript_path":"TOP SECRET PATH","prompt":"TOP SECRET PROMPT"}"#
+        )
+        #expect(stdout == "abc-123")
+    }
+
+    @Test func sessionIDCaptureArgumentCollapsesToEmptyOnAnyFailure() throws {
+        #expect(try runSessionIDCaptureProbe(stdin: "not json at all") == "")
+        #expect(try runSessionIDCaptureProbe(stdin: "") == "")
+        #expect(try runSessionIDCaptureProbe(stdin: #"{"other_key":true}"#) == "")
+        #expect(try runSessionIDCaptureProbe(stdin: #"{"session_id":null}"#) == "")
+    }
+
+    /// Runs the capture argument exactly as a hook would: through `sh`, with
+    /// the hook's stdin JSON on stdin, echoing the one argument it yields.
+    private func runSessionIDCaptureProbe(stdin: String) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            "printf '%s' \(HolyAgentStateBridge.claudeSessionIDCaptureArgument)",
+        ]
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = Pipe()
+        try process.run()
+        stdinPipe.fileHandleForWriting.write(Data(stdin.utf8))
+        try stdinPipe.fileHandleForWriting.close()
+        process.waitUntilExit()
+        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        return try #require(String(bytes: data, encoding: .utf8))
+    }
+
     @Test func codexMergeLeavesTrustAndExistingHookIndexesAlone() throws {
         let helperURL = URL(fileURLWithPath: "/tmp/Holy/agent-state-hook.sh")
         let existingSessionStart: [[String: Any]] = [

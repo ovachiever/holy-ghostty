@@ -357,8 +357,26 @@ actor HolyRemoteAgentStateBridgeService {
         prefix = shell_quote(helper_path) + " " + source + " "
         if not command.startswith(prefix):
             return False
-        fields = command[len(prefix):].split(" ")
+        remainder = command[len(prefix):]
+        # Byte-exact mirror of HolyAgentStateBridge.claudeSessionIDCaptureArgument.
+        # The current generation appends it to Claude commands; a bare
+        # remainder is the prior shape, still owned so upgrades replace it.
+        capture = " \"$(/usr/bin/python3 -c 'import json,sys;print(json.load(sys.stdin).get(\"session_id\") or \"\")' 2>/dev/null)\""
+        if remainder.endswith(capture):
+            remainder = remainder[:-len(capture)]
+        fields = remainder.split(" ")
         return len(fields) == 2 and fields[0] in lifecycle_values and metadata(fields[1], 64)
+
+    def owned_watcher_hook(command):
+        # Mirror of HolyAgentStateBridge.isOwnedWatcherHookCommand: the
+        # inline watcher producer (mn-f4d77b) keys ownership on its embedded
+        # marker. Without this, remote merges stack a second watcher handler
+        # per pass and removal leaves the old one behind.
+        return (
+            isinstance(command, str)
+            and command.startswith("/usr/bin/python3 -c ")
+            and "holy-watcher-v1" in command
+        )
 
     def checked_hook_root(value, label):
         if not isinstance(value, dict):
@@ -387,7 +405,7 @@ actor HolyRemoteAgentStateBridgeService {
             insertion = None
             for group in hooks.get(event, []):
                 handlers = group["hooks"]
-                keep = [handler for handler in handlers if not owned_hook(handler.get("command"), helper_path, source, lifecycle_values)]
+                keep = [handler for handler in handlers if not owned_hook(handler.get("command"), helper_path, source, lifecycle_values) and not owned_watcher_hook(handler.get("command"))]
                 if len(keep) != len(handlers) and insertion is None:
                     insertion = len(retained)
                 if keep:
@@ -954,6 +972,8 @@ private final class HolyRemoteAgentStateBridgeResumeBox: @unchecked Sendable {
 
 #if DEBUG
 extension HolyRemoteAgentStateBridgeService {
+    static var transactionProgramForTesting: String { transactionProgram }
+
     static func commandPlanForTesting(destination: String) throws -> CommandPlan {
         commandPlan(destination: try validatedDestination(destination), program: transactionProgram)
     }

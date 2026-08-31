@@ -1668,6 +1668,10 @@ final class HolyWorkspaceStore: ObservableObject {
         var launchSpec = session.record.launchSpec
         launchSpec.title = "\(session.title) Copy"
         launchSpec.tmux?.sessionName = nil
+        // A duplicate is a new pane, not the same conversation. Its own hooks
+        // stamp the real id on first event; inheriting the original's would
+        // let a crash restore resume one conversation into two rows.
+        launchSpec.providerSessionID = nil
 
         if var workspace = launchSpec.workspace,
            workspace.strategy == .createManagedWorktree {

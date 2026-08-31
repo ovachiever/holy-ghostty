@@ -3,6 +3,20 @@ import Testing
 @testable import Ghostty
 
 struct HolyRemoteAgentStateBridgeServiceTests {
+    @Test func remoteOwnedHookRecognizerCarriesTheExactSessionIDCaptureArgument() {
+        // The remote Python strips the Claude session-capture suffix
+        // byte-exactly before field-splitting ownership checks. Any drift
+        // from the Swift constant would make remote upgrades stack a second
+        // handler beside the old one instead of replacing it.
+        let escaped = HolyAgentStateBridge.claudeSessionIDCaptureArgument
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        #expect(
+            HolyRemoteAgentStateBridgeService.transactionProgramForTesting
+                .contains("capture = \" \(escaped)\"")
+        )
+    }
+
     @Test func commandPlanKeepsDestinationOutOfRemoteShellSource() throws {
         let destination = "builder@[2001:db8::1]"
         let plan = try HolyRemoteAgentStateBridgeService.commandPlanForTesting(
