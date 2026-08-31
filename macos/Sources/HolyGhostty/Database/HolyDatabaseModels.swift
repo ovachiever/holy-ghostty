@@ -2,7 +2,7 @@ import Foundation
 
 enum HolyDatabaseSchema {
     static let filename = "holy-ghostty.sqlite3"
-    static let currentUserVersion: Int32 = 8
+    static let currentUserVersion: Int32 = 9
     static let busyTimeoutMilliseconds: Int32 = 5_000
 }
 

@@ -184,7 +184,7 @@ struct HolyAgentStateBridgeTests {
     // three same-cwd sessions onto each other's conversations because the
     // app never learned which conversation each pane was running. Claude
     // hook commands now hand the helper the session id — and nothing else.
-    @Test func claudeHookCommandsCaptureTheSessionIDAndCodexCommandsDoNot() throws {
+    @Test func everyClaudeAndCodexLifecycleHookCapturesTheSessionID() throws {
         let helperURL = URL(fileURLWithPath: "/tmp/Holy/agent-state-hook.sh")
         let claude = try HolyAgentStateBridge.mergingClaudeSettings([:], helperURL: helperURL)
         let owned = hookCommands(in: claude).filter {
@@ -196,11 +196,21 @@ struct HolyAgentStateBridgeTests {
         }
         #expect(owned.count == 8)
         for command in owned {
-            #expect(command.hasSuffix(" " + HolyAgentStateBridge.claudeSessionIDCaptureArgument))
+            #expect(command.hasSuffix(" " + HolyAgentStateBridge.hookSessionIDCaptureArgument))
         }
 
         let codex = try HolyAgentStateBridge.mergingCodexHooks([:], helperURL: helperURL)
-        #expect(!hookCommands(in: codex).contains(where: { $0.contains("session_id") }))
+        let codexOwned = hookCommands(in: codex).filter {
+            HolyAgentStateBridge.isOwnedHookCommand(
+                $0,
+                helperURL: helperURL,
+                source: HolyAgentStateSource.codex
+            )
+        }
+        #expect(codexOwned.count == 3)
+        for command in codexOwned {
+            #expect(command.hasSuffix(" " + HolyAgentStateBridge.hookSessionIDCaptureArgument))
+        }
     }
 
     @Test func priorGenerationBareCommandsAreOwnedAndUpgraded() throws {
@@ -222,7 +232,7 @@ struct HolyAgentStateBridgeTests {
         )
         let commands = hookCommands(in: merged)
         #expect(!commands.contains(legacy))
-        #expect(commands.contains("\(legacy) \(HolyAgentStateBridge.claudeSessionIDCaptureArgument)"))
+        #expect(commands.contains("\(legacy) \(HolyAgentStateBridge.hookSessionIDCaptureArgument)"))
     }
 
     @Test func sessionIDCaptureArgumentExtractsOnlyTheSessionID() throws {
@@ -246,7 +256,7 @@ struct HolyAgentStateBridgeTests {
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = [
             "-c",
-            "printf '%s' \(HolyAgentStateBridge.claudeSessionIDCaptureArgument)",
+            "printf '%s' \(HolyAgentStateBridge.hookSessionIDCaptureArgument)",
         ]
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()

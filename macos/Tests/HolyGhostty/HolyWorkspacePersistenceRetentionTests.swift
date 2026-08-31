@@ -5,6 +5,69 @@ import Testing
 
 struct HolyWorkspacePersistenceRetentionTests {
     @MainActor
+    @Test func harnessSessionIdentityPersistsForRosterAndArchiveRows() throws {
+        try withTemporaryDatabase { database, _ in
+            let activeID = UUID()
+            let archivedID = UUID()
+            let activeHarnessID = "3c15edbd-4860-45ef-a705-8d6f4916f911"
+            let archivedHarnessID = "019f6280-5fc7-7093-a705-8d6f4916f911"
+            var activeSpec = HolySessionLaunchSpec.interactiveTmuxShell(title: "Active identity")
+            activeSpec.runtime = .claude
+            activeSpec.providerSessionID = activeHarnessID
+            let activeRecord = HolySessionRecord(
+                id: activeID,
+                launchSpec: activeSpec,
+                harnessSessionID: activeHarnessID
+            )
+            var archived = archivedSession(sourceSessionID: archivedID, gitSnapshot: nil)
+            archived.record.harnessSessionID = archivedHarnessID
+
+            let workspace = HolyWorkspaceSnapshot(
+                sessions: [activeRecord],
+                selectedSessionID: activeID,
+                archivedSessions: [archived]
+            )
+            try persist(workspace, in: database)
+
+            #expect(
+                try database.scalarText(
+                    "SELECT harness_session_id FROM sessions WHERE id = '\(activeID.uuidString)';"
+                ) == activeHarnessID
+            )
+            #expect(
+                try database.scalarText(
+                    "SELECT harness_session_id FROM sessions WHERE id = '\(archivedID.uuidString)';"
+                ) == archivedHarnessID
+            )
+            let loaded = try #require(try HolyWorkspaceDatabasePersistence.load(from: database))
+            #expect(loaded.sessions.first?.harnessSessionID == activeHarnessID)
+            #expect(loaded.archivedSessions.first?.record.harnessSessionID == archivedHarnessID)
+
+            let lookupPlan = try queryPlan(
+                "EXPLAIN QUERY PLAN SELECT id FROM sessions WHERE harness_session_id = '\(activeHarnessID)';",
+                in: database
+            )
+            #expect(lookupPlan.contains("sessions_harness_session_id_idx"))
+
+            // The immediately preceding build stored Claude's id only inside
+            // launch_spec_json. A v9 load promotes that value, and the next
+            // ordinary save heals the first-class column without a side path.
+            try database.execute(
+                "UPDATE sessions SET harness_session_id = NULL WHERE id = ?;",
+                bindings: [.text(activeID.uuidString)]
+            )
+            let legacyLoaded = try #require(try HolyWorkspaceDatabasePersistence.load(from: database))
+            #expect(legacyLoaded.sessions.first?.harnessSessionID == activeHarnessID)
+            try persist(legacyLoaded, in: database)
+            #expect(
+                try database.scalarText(
+                    "SELECT harness_session_id FROM sessions WHERE id = '\(activeID.uuidString)';"
+                ) == activeHarnessID
+            )
+        }
+    }
+
+    @MainActor
     @Test func unchangedGitStateReusesLatestSnapshotRow() throws {
         try withTemporaryDatabase { database, _ in
             let sessionID = UUID()
@@ -360,7 +423,8 @@ struct HolyWorkspacePersistenceRetentionTests {
                 working_directory, latest_phase, latest_attention
             ) VALUES (
                 'session-v7', 'Preserved', 'codex', '2026-07-01T00:00:00.000Z',
-                '2026-07-02T00:00:00.000Z', '{}', '/tmp', 'active', 'none'
+                '2026-07-02T00:00:00.000Z', '{"providerSessionID":"legacy-v8-id"}',
+                '/tmp', 'active', 'none'
             );
             INSERT INTO git_snapshots (
                 session_id, captured_at, repository_root, worktree_path,
@@ -387,6 +451,10 @@ struct HolyWorkspacePersistenceRetentionTests {
 
         #expect(try database.userVersion() == HolyDatabaseSchema.currentUserVersion)
         #expect(try database.scalarText("SELECT title FROM sessions;") == "Preserved")
+        #expect(
+            try database.scalarText("SELECT harness_session_id FROM sessions;")
+                == "legacy-v8-id"
+        )
         #expect(try database.scalarInt64("SELECT latest_git_snapshot_id FROM sessions;") == 1)
         #expect(try database.scalarInt64("SELECT COUNT(*) FROM agent_sessions_sessions_v1;") == 1)
         #expect(try database.scalarInt64("SELECT COUNT(*) FROM agent_sessions_resume_targets_v1;") == 1)
@@ -401,8 +469,13 @@ struct HolyWorkspacePersistenceRetentionTests {
             "EXPLAIN QUERY PLAN SELECT 1 FROM git_snapshots WHERE session_id = 'session-v7' ORDER BY captured_at;",
             in: database
         )
+        let harnessLookupPlan = try queryPlan(
+            "EXPLAIN QUERY PLAN SELECT id FROM sessions WHERE harness_session_id = 'session-v7';",
+            in: database
+        )
         #expect(latestLookupPlan.contains("sessions_latest_git_snapshot_id_idx"))
         #expect(historyLookupPlan.contains("git_snapshots_session_captured_at_idx"))
+        #expect(harnessLookupPlan.contains("sessions_harness_session_id_idx"))
 
         try database.execute(
             "UPDATE sessions SET purge_pending_at = '2026-07-10T00:00:00.000Z' WHERE id = 'session-v7';"

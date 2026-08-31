@@ -63,6 +63,11 @@ enum HolyDatabaseMigrator {
             label: "Bounded persistence retention",
             statements: schemaV8
         ),
+        .init(
+            version: 9,
+            label: "Harness session identity keystone",
+            statements: schemaV9
+        ),
     ]
 
     private static let schemaV1: [String] = [
@@ -470,6 +475,24 @@ enum HolyDatabaseMigrator {
         FROM annotations
         INNER JOIN sessions ON sessions.id = annotations.session_id
         WHERE sessions.purge_pending_at IS NULL;
+        """,
+    ]
+
+    private static let schemaV9: [String] = [
+        """
+        ALTER TABLE sessions
+        ADD COLUMN harness_session_id TEXT;
+        """,
+        """
+        UPDATE sessions
+        SET harness_session_id = json_extract(launch_spec_json, '$.providerSessionID')
+        WHERE json_valid(launch_spec_json)
+          AND json_type(launch_spec_json, '$.providerSessionID') = 'text'
+          AND trim(json_extract(launch_spec_json, '$.providerSessionID')) <> '';
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS sessions_harness_session_id_idx
+        ON sessions(harness_session_id);
         """,
     ]
 }

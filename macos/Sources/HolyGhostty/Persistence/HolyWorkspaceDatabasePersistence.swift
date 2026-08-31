@@ -29,6 +29,7 @@ enum HolyWorkspaceDatabasePersistence {
 
     private struct HolySessionRowProjection {
         let sessionID: UUID
+        let harnessSessionID: String?
         let title: String
         let runtime: HolySessionRuntime
         let mission: String?
@@ -235,7 +236,7 @@ enum HolyWorkspaceDatabasePersistence {
 
     private static func loadActiveSessionRecords(from database: HolyDatabase) throws -> [HolySessionRecord] {
         let sql = """
-        SELECT id, launch_spec_json, created_at, updated_at
+        SELECT id, launch_spec_json, created_at, updated_at, harness_session_id
         FROM sessions
         WHERE archived_at IS NULL
           AND purge_pending_at IS NULL
@@ -253,6 +254,7 @@ enum HolyWorkspaceDatabasePersistence {
             rows.append(.init(
                 id: id,
                 launchSpec: launchSpec,
+                harnessSessionID: textColumn(statement, index: 4) ?? launchSpec.providerSessionID,
                 createdAt: createdAt,
                 updatedAt: updatedAt
             ))
@@ -292,7 +294,8 @@ enum HolyWorkspaceDatabasePersistence {
             git_snapshots.unstaged_count,
             git_snapshots.untracked_count,
             git_snapshots.conflicted_count,
-            git_snapshots.changed_files_json
+            git_snapshots.changed_files_json,
+            sessions.harness_session_id
         FROM sessions
         LEFT JOIN git_snapshots ON git_snapshots.id = sessions.latest_git_snapshot_id
         WHERE sessions.archived_at IS NOT NULL
@@ -333,6 +336,7 @@ enum HolyWorkspaceDatabasePersistence {
             let record = HolySessionRecord(
                 id: sourceSessionID,
                 launchSpec: launchSpec,
+                harnessSessionID: textColumn(statement, index: 29) ?? launchSpec.providerSessionID,
                 createdAt: createdAt,
                 updatedAt: updatedAt
             )
@@ -414,6 +418,7 @@ enum HolyWorkspaceDatabasePersistence {
         try upsertSessionRow(
             .init(
                 sessionID: record.id,
+                harnessSessionID: record.effectiveHarnessSessionID,
                 title: record.launchSpec.resolvedTitle,
                 runtime: record.launchSpec.runtime,
                 mission: record.launchSpec.objective,
@@ -462,6 +467,7 @@ enum HolyWorkspaceDatabasePersistence {
         try upsertSessionRow(
             .init(
                 sessionID: archivedSession.sourceSessionID,
+                harnessSessionID: archivedSession.record.effectiveHarnessSessionID,
                 title: archivedSession.title,
                 runtime: archivedSession.runtime,
                 mission: archivedSession.record.launchSpec.objective,
@@ -522,13 +528,14 @@ enum HolyWorkspaceDatabasePersistence {
     ) throws {
         let sql = """
         INSERT INTO sessions (
-            id, title, runtime, mission, created_at, updated_at, archived_at,
+            id, harness_session_id, title, runtime, mission, created_at, updated_at, archived_at,
             launch_spec_json, ownership_json, working_directory, repository_root, worktree_path,
             branch_name, latest_preview_text, resume_metadata_json, preferred_command,
             latest_phase, latest_attention, latest_signal_json, latest_budget_json, latest_command_telemetry_json,
             latest_runtime_telemetry_json, latest_git_snapshot_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
+            harness_session_id = excluded.harness_session_id,
             title = excluded.title,
             runtime = excluded.runtime,
             mission = excluded.mission,
@@ -555,6 +562,7 @@ enum HolyWorkspaceDatabasePersistence {
 
         try database.execute(sql, bindings: [
             .text(projection.sessionID.uuidString),
+            binding(for: projection.harnessSessionID),
             .text(projection.title),
             .text(projection.runtime.rawValue),
             binding(for: projection.mission),

@@ -292,6 +292,75 @@ struct HolyAgentStateEnvelope: Equatable, Sendable {
     }
 }
 
+/// One join law for the harness conversation identity carried by hooks.
+///
+/// Hooks and transcripts expose the full UUID. Manna publishes the first 16
+/// compact UUID characters in labels such as `claude-3c15edbd486045ef`, while
+/// coord publishes the first 12 in labels such as `session-3c15edbd4860`.
+/// Matching therefore compares the shared hex prefix, exactly like Manna
+/// serve's claimant-to-peer join. Exact opaque identifiers still match each
+/// other, but prefix matching is deliberately limited to UUID/hex forms and
+/// requires coord's full 12-character key.
+enum HolyHarnessSessionIdentity {
+    private static let minimumSharedHexLength = 12
+
+    static func matches(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard let lhs = sanitized(lhs), let rhs = sanitized(rhs) else { return false }
+        if lhs.caseInsensitiveCompare(rhs) == .orderedSame { return true }
+        guard let lhsHex = sharedHexToken(for: lhs),
+              let rhsHex = sharedHexToken(for: rhs) else {
+            return false
+        }
+        return lhsHex.hasPrefix(rhsHex) || rhsHex.hasPrefix(lhsHex)
+    }
+
+    /// Returns one match or nil. A truncated-prefix collision is ambiguity,
+    /// never permission to select whichever row happened to arrive first.
+    static func uniqueMatch<Element>(
+        for identity: String?,
+        in candidates: [Element],
+        identityOf: (Element) -> String?
+    ) -> Element? {
+        var result: Element?
+        for candidate in candidates where matches(identity, identityOf(candidate)) {
+            guard result == nil else { return nil }
+            result = candidate
+        }
+        return result
+    }
+
+    private static func sanitized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.utf8.count <= 128 else { return nil }
+        return trimmed
+    }
+
+    private static func sharedHexToken(for value: String) -> String? {
+        if let uuid = UUID(uuidString: value) {
+            return uuid.uuidString
+                .replacingOccurrences(of: "-", with: "")
+                .lowercased()
+        }
+
+        let lowercased = value.lowercased()
+        let tail = lowercased.split(separator: "-", omittingEmptySubsequences: false).last
+            .map(String.init) ?? lowercased
+        let candidate = isHex(tail) ? tail : lowercased
+        guard candidate.utf8.count >= minimumSharedHexLength,
+              isHex(candidate) else {
+            return nil
+        }
+        return candidate
+    }
+
+    private static func isHex(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.allSatisfy { byte in
+            (48 ... 57).contains(byte) || (97 ... 102).contains(byte)
+        }
+    }
+}
+
 enum HolyAgentStateTransport {
     static let notificationTitle = "com.holyghostty.agent-state.v1"
     static let tmuxOption = "@holy_agent_state_v1"

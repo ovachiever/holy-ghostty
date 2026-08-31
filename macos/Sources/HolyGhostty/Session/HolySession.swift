@@ -169,6 +169,8 @@ final class HolySession: ObservableObject, Identifiable {
     /// Screen-derived telemetry never writes this value.
     @Published private(set) var agentStateEnvelope: HolyAgentStateEnvelope?
     @Published private(set) var agentStateObservedAt: Date?
+    /// Shared identity used by roster, board/coord joins, archive, and restore.
+    var harnessSessionID: String? { record.effectiveHarnessSessionID }
     /// Live count of Claude Code background shells, read from the input-box
     /// footer chrome ("⏵⏵ auto mode on · 1 shell · ← for agents"). Feeds the
     /// watcher eye alongside armed /loop wakeups; never a working claim.
@@ -1152,27 +1154,9 @@ final class HolySession: ObservableObject, Identifiable {
         agentStateEnvelope = envelope
         agentStateObservedAt = observedAt
         activityAt = max(activityAt, observedAt)
-        captureProviderSessionID(from: envelope)
+        record.captureHarnessSessionIdentity(from: envelope)
         markUpdated()
         return true
-    }
-
-    /// Records the provider conversation id the pane just proved it is
-    /// running. This is the identity crash restore keys on — the 2026-08-31
-    /// field failure rotated three same-cwd sessions onto each other's
-    /// conversations because restore had only timestamp proximity to guess
-    /// with. Claude only: its hook `session_id` IS the exact `--resume` id.
-    /// Codex envelopes carry thread:turn composites and OpenCode ids are
-    /// unverified against `--session`, so neither is trusted yet.
-    private func captureProviderSessionID(from envelope: HolyAgentStateEnvelope) {
-        guard envelope.source == HolyAgentStateSource.claude,
-              record.launchSpec.runtime == .claude,
-              let sessionID = envelope.sessionID,
-              HolyRestoreCommandBuilder.isSafeProviderSessionID(sessionID),
-              record.launchSpec.providerSessionID != sessionID else {
-            return
-        }
-        record.launchSpec.providerSessionID = sessionID
     }
 
     /// Minimum interval before this session is eligible for another derived-state poll,

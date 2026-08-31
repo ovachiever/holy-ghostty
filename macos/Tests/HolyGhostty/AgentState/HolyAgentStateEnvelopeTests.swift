@@ -3,6 +3,102 @@ import Testing
 @testable import Ghostty
 
 struct HolyAgentStateEnvelopeTests {
+    @Test func lifecycleHooksCaptureTheHarnessIdentityForEveryRuntime() throws {
+        let cases: [(HolySessionRuntime, String, String)] = [
+            (.claude, HolyAgentStateSource.claude, "3c15edbd-4860-45ef-a705-8d6f4916f911"),
+            (.codex, HolyAgentStateSource.codex, "019f6280-5fc7-7093-a705-8d6f4916f911"),
+            (.opencode, HolyAgentStateSource.openCode, "ses_4f2c67d0"),
+        ]
+
+        for (runtime, source, harnessSessionID) in cases {
+            var launchSpec = HolySessionLaunchSpec.interactiveTmuxShell(title: runtime.displayName)
+            launchSpec.runtime = runtime
+            var record = HolySessionRecord(launchSpec: launchSpec)
+            let envelope = try HolyAgentStateEnvelope(
+                source: source,
+                lifecycle: .working,
+                occurredAtMilliseconds: 1_752_500_123_456,
+                eventToken: "capture-\(source)",
+                sessionID: harnessSessionID,
+                reasonCode: "user-prompt"
+            )
+
+            let captured = record.captureHarnessSessionIdentity(from: envelope)
+            #expect(captured)
+            #expect(record.harnessSessionID == harnessSessionID)
+            #expect(
+                record.launchSpec.providerSessionID
+                    == (runtime == .claude ? harnessSessionID : nil)
+            )
+            let recaptured = record.captureHarnessSessionIdentity(from: envelope)
+            #expect(!recaptured)
+        }
+    }
+
+    @Test func syntheticCodexTurnTokenCannotReplaceTheHookSessionIdentity() throws {
+        var launchSpec = HolySessionLaunchSpec.interactiveTmuxShell(title: "Codex")
+        launchSpec.runtime = .codex
+        var record = HolySessionRecord(
+            launchSpec: launchSpec,
+            harnessSessionID: "019f6280-5fc7-7093-a705-8d6f4916f911"
+        )
+        let notification = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.codex,
+            lifecycle: .finished,
+            occurredAtMilliseconds: 1_752_500_123_457,
+            eventToken: "notify-turn",
+            sessionID: "thread-42:turn-7",
+            reasonCode: "turn-finished"
+        )
+
+        let captured = record.captureHarnessSessionIdentity(from: notification)
+        #expect(!captured)
+        #expect(record.harnessSessionID == "019f6280-5fc7-7093-a705-8d6f4916f911")
+    }
+
+    @Test func sharedIdentityJoinResolvesRosterClaimantCoordArchiveAndRestore() throws {
+        let harnessSessionID = "3C15EDBD-4860-45EF-A705-8D6F4916F911"
+        let rosterRow = HolySessionRecord(
+            launchSpec: .interactiveTmuxShell(title: "Keystone"),
+            harnessSessionID: harnessSessionID
+        )
+        let unrelatedRow = HolySessionRecord(
+            launchSpec: .interactiveTmuxShell(title: "Other"),
+            harnessSessionID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        )
+        let rows = [rosterRow, unrelatedRow]
+        let mannaClaimant = "claude-3c15edbd486045ef"
+        let coordPeer = "session-3c15edbd4860"
+        let archiveTranscript = harnessSessionID.lowercased()
+        let restoreTarget = harnessSessionID
+
+        for identity in [mannaClaimant, coordPeer, archiveTranscript, restoreTarget] {
+            let match = HolyHarnessSessionIdentity.uniqueMatch(
+                for: identity,
+                in: rows,
+                identityOf: \.effectiveHarnessSessionID
+            )
+            #expect(match?.id == rosterRow.id)
+            #expect(rosterRow.matchesHarnessSessionIdentity(identity))
+        }
+
+        #expect(HolyHarnessSessionIdentity.matches(mannaClaimant, coordPeer))
+        #expect(!HolyHarnessSessionIdentity.matches(mannaClaimant, "session-ffffffffffff"))
+        #expect(!HolyHarnessSessionIdentity.matches("session-ab", "claude-ab"))
+
+        let prefixCollision = HolySessionRecord(
+            launchSpec: .interactiveTmuxShell(title: "Collision"),
+            harnessSessionID: "3c15edbd-4860-ffff-b111-222222222222"
+        )
+        #expect(
+            HolyHarnessSessionIdentity.uniqueMatch(
+                for: coordPeer,
+                in: [rosterRow, prefixCollision],
+                identityOf: \.effectiveHarnessSessionID
+            ) == nil
+        )
+    }
+
     @Test func wireValueRoundTripsWithoutTranscriptText() throws {
         let envelope = try HolyAgentStateEnvelope(
             source: "future-harness.v2",

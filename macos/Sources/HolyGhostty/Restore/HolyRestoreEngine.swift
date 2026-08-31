@@ -429,9 +429,9 @@ final class HolyRestoreEngine: ObservableObject {
         preassignedProviderSessionIDs.removeAll()
     }
 
-    /// Rows whose archived record carries a live-captured provider session id
-    /// (Claude's `session_id`, stamped by the agent-state bridge while the
-    /// pane ran). Identity beats proximity: these rows never enter the
+    /// Rows whose archived record carries a live-captured harness session id
+    /// (Claude's `session_id`, stamped by the agent-state bridge while the pane
+    /// ran). Identity beats proximity: these rows never enter the
     /// timestamp assignment at all. Sheet order arbitrates the pathological
     /// duplicate — two archives claiming one conversation — so the first row
     /// keeps the id and the second falls back to the resolver.
@@ -440,7 +440,7 @@ final class HolyRestoreEngine: ObservableObject {
         var claimed: Set<String> = []
         for row in rows {
             guard row.plannedLaunchSpec.runtime == .claude,
-                  let id = row.archived.record.launchSpec.providerSessionID,
+                  let id = row.archived.record.effectiveHarnessSessionID,
                   HolyRestoreCommandBuilder.isSafeProviderSessionID(id),
                   claimed.insert(id).inserted else { continue }
             grants[row.id] = id

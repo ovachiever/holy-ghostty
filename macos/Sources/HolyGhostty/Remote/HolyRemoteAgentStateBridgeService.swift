@@ -358,8 +358,8 @@ actor HolyRemoteAgentStateBridgeService {
         if not command.startswith(prefix):
             return False
         remainder = command[len(prefix):]
-        # Byte-exact mirror of HolyAgentStateBridge.claudeSessionIDCaptureArgument.
-        # The current generation appends it to Claude commands; a bare
+        # Byte-exact mirror of HolyAgentStateBridge.hookSessionIDCaptureArgument.
+        # The current generation appends it to stdin-backed commands; a bare
         # remainder is the prior shape, still owned so upgrades replace it.
         capture = " \"$(/usr/bin/python3 -c 'import json,sys;print(json.load(sys.stdin).get(\"session_id\") or \"\")' 2>/dev/null)\""
         if remainder.endswith(capture):

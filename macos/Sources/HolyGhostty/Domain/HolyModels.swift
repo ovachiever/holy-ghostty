@@ -1560,11 +1560,10 @@ struct HolySessionLaunchSpec: Codable, Equatable {
     var waitAfterCommand: Bool
     var environment: [String: String]
     var workspace: HolySessionWorkspaceSpec?
-    /// The provider conversation id last observed live in this session's pane
-    /// (Claude Code's `session_id`, captured from the agent-state envelope).
-    /// Crash restore keys on it — identity, never timestamp proximity — which
-    /// is why it is per-pane state: templates and duplicates must shed it.
-    /// Optional so persisted launch-spec JSON without the key still decodes.
+    /// Legacy compatibility mirror of Claude Code's exact `--resume` target.
+    /// Cross-surface identity lives on `HolySessionRecord.harnessSessionID`;
+    /// this remains in launch-spec JSON only so the immediately preceding
+    /// crash-restore build keeps decoding and restoring safely.
     var providerSessionID: String? = nil
 
     static func interactiveShell(title: String = "Shell") -> Self {
@@ -1704,19 +1703,71 @@ struct HolySessionLaunchSpec: Codable, Equatable {
 struct HolySessionRecord: Codable, Identifiable, Equatable {
     let id: UUID
     var launchSpec: HolySessionLaunchSpec
+    /// Stable conversation identity published by the running harness. This is
+    /// roster/archive identity, not Holy's own row UUID. SQLite persists it as
+    /// `sessions.harness_session_id` so board, coord, archive, and restore all
+    /// join through one first-class value.
+    var harnessSessionID: String?
     var createdAt: Date
     var updatedAt: Date
 
     init(
         id: UUID = UUID(),
         launchSpec: HolySessionLaunchSpec,
+        harnessSessionID: String? = nil,
         createdAt: Date = .init(),
         updatedAt: Date = .init()
     ) {
         self.id = id
         self.launchSpec = launchSpec
+        self.harnessSessionID = harnessSessionID ?? launchSpec.providerSessionID
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    /// Compatibility for the short-lived pre-column build that stored only
+    /// Claude's resume id inside launch-spec JSON.
+    var effectiveHarnessSessionID: String? {
+        harnessSessionID ?? launchSpec.providerSessionID
+    }
+
+    func matchesHarnessSessionIdentity(_ identity: String?) -> Bool {
+        HolyHarnessSessionIdentity.matches(effectiveHarnessSessionID, identity)
+    }
+
+    /// Records the stable conversation identity proved by a lifecycle hook.
+    /// Codex's older top-level notify adapter uses the same wire field for a
+    /// per-turn token, so that synthetic finish may report lifecycle but may
+    /// not replace the session identity captured by stdin-backed hooks.
+    @discardableResult
+    mutating func captureHarnessSessionIdentity(
+        from envelope: HolyAgentStateEnvelope
+    ) -> Bool {
+        let runtimeMatchesSource = switch (launchSpec.runtime, envelope.source) {
+        case (.claude, HolyAgentStateSource.claude),
+             (.codex, HolyAgentStateSource.codex),
+             (.opencode, HolyAgentStateSource.openCode):
+            true
+        default:
+            false
+        }
+        let isCodexTurnNotification = envelope.source == HolyAgentStateSource.codex
+            && envelope.reasonCode == "turn-finished"
+        guard runtimeMatchesSource,
+              !isCodexTurnNotification,
+              let sessionID = envelope.sessionID,
+              HolyRestoreCommandBuilder.isSafeProviderSessionID(sessionID),
+              harnessSessionID != sessionID else {
+            return false
+        }
+
+        harnessSessionID = sessionID
+        // Claude's hook identity is also its exact resume target. Keep the
+        // legacy launch-spec mirror until old persisted snapshots age out.
+        if envelope.source == HolyAgentStateSource.claude {
+            launchSpec.providerSessionID = sessionID
+        }
+        return true
     }
 }
 

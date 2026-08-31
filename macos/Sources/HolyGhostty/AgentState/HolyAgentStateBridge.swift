@@ -26,7 +26,7 @@ enum HolyAgentStateBridge {
     /// Generation ownership is deliberately separate from the v1 wire
     /// protocol. Bumping it lets the installer replace an older Holy-owned
     /// helper/plugin without treating a modified current generation as ours.
-    static let generationVersion = 3
+    static let generationVersion = 4
     static let openCodePluginFileName = "holy-agent-state.ts"
     static let codexNotifyAdapterFileName = "holy-codex-turn-complete.py"
     static let helperOwnershipMarkerPrefix =
@@ -717,7 +717,8 @@ enum HolyAgentStateBridge {
         return group
     }
 
-    /// Command-substitution argument appended to every Claude hook command.
+    /// Command-substitution argument appended to every stdin-backed lifecycle
+    /// hook command.
     /// It reads ONLY `session_id` from the hook's stdin JSON and hands it to
     /// the helper as the optional session argument — the helper itself still
     /// never reads stdin, so transcript leakage stays impossible by
@@ -725,7 +726,7 @@ enum HolyAgentStateBridge {
     /// collapses to an empty argument, which the helper treats as "no id".
     /// The exact bytes are ownership law: local and remote recognizers strip
     /// this suffix verbatim, so it must never drift between them.
-    static let claudeSessionIDCaptureArgument =
+    static let hookSessionIDCaptureArgument =
         #""$(/usr/bin/python3 -c 'import json,sys;print(json.load(sys.stdin).get("session_id") or "")' 2>/dev/null)""#
 
     private static func hookCommand(
@@ -734,19 +735,13 @@ enum HolyAgentStateBridge {
         lifecycle: HolyAgentLifecycleState,
         reasonCode: String
     ) -> String {
-        var elements = [
+        let elements = [
             shellQuote(helperURL.path),
             source,
             lifecycle.rawValue,
             reasonCode,
+            hookSessionIDCaptureArgument,
         ]
-        // Claude is the one source whose hook stdin carries a session id that
-        // is also the exact `--resume` id, so only Claude commands capture it.
-        // Codex forwards thread:turn composites through its notifier instead,
-        // and those are not resumable ids.
-        if source == HolyAgentStateSource.claude {
-            elements.append(claudeSessionIDCaptureArgument)
-        }
         return elements.joined(separator: " ")
     }
 
@@ -758,11 +753,10 @@ enum HolyAgentStateBridge {
         let prefix = "\(shellQuote(helperURL.path)) \(source) "
         guard command.hasPrefix(prefix) else { return false }
         var remainder = String(command.dropFirst(prefix.count))
-        // The current generation appends the session-capture argument to
-        // Claude commands. A bare remainder is the prior generation's shape,
-        // still owned so upgrades strip and replace it instead of stacking a
-        // second handler beside it.
-        let captureSuffix = " \(claudeSessionIDCaptureArgument)"
+        // The current generation appends the session-capture argument to every
+        // stdin-backed command. A bare remainder is the prior generation's
+        // shape, still owned so upgrades replace instead of stacking handlers.
+        let captureSuffix = " \(hookSessionIDCaptureArgument)"
         if remainder.hasSuffix(captureSuffix) {
             remainder = String(remainder.dropLast(captureSuffix.count))
         }

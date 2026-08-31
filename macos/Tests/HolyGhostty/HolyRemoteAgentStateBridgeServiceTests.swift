@@ -4,11 +4,11 @@ import Testing
 
 struct HolyRemoteAgentStateBridgeServiceTests {
     @Test func remoteOwnedHookRecognizerCarriesTheExactSessionIDCaptureArgument() {
-        // The remote Python strips the Claude session-capture suffix
+        // The remote Python strips the lifecycle session-capture suffix
         // byte-exactly before field-splitting ownership checks. Any drift
         // from the Swift constant would make remote upgrades stack a second
         // handler beside the old one instead of replacing it.
-        let escaped = HolyAgentStateBridge.claudeSessionIDCaptureArgument
+        let escaped = HolyAgentStateBridge.hookSessionIDCaptureArgument
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         #expect(

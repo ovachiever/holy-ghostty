@@ -649,13 +649,13 @@ struct HolyRestoreEngineTests {
 
     // MARK: - Identity-keyed restore (field failure 2026-08-31)
 
-    @Test func aStoredProviderSessionIDShortCircuitsTheResolver() async throws {
+    @Test func aStoredHarnessSessionIDShortCircuitsTheResolver() async throws {
         // The archive carries the conversation id the pane was proven to be
         // running (captured live from the Claude hook). Identity beats
         // proximity: the resolver is never even asked, and the restored
         // spec carries the id forward.
         var lane = archived()
-        lane.record.launchSpec.providerSessionID = "stored-abc"
+        lane.record.harnessSessionID = "stored-abc"
         let resolver = FakeBatchResolver(
             candidatesByCwd: ["/tmp/lane-a": [candidate("wrong-nearest")]]
         )
@@ -678,7 +678,7 @@ struct HolyRestoreEngineTests {
         // and the identity-owned conversation is off its table even though
         // it is the nearest candidate by timestamp.
         var laneOne = archived(sessionName: "holy-id-1")
-        laneOne.record.launchSpec.providerSessionID = "shared-conv"
+        laneOne.record.harnessSessionID = "shared-conv"
         let laneTwo = archived(sessionName: "holy-id-2")
         let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [
             candidate("shared-conv", end: Self.lastActivity),
@@ -702,9 +702,9 @@ struct HolyRestoreEngineTests {
         // a license to resume it twice. Sheet order arbitrates: the first
         // row keeps the identity, the second falls back to the resolver.
         var laneOne = archived(sessionName: "holy-dup-1")
-        laneOne.record.launchSpec.providerSessionID = "dup-conv"
+        laneOne.record.harnessSessionID = "dup-conv"
         var laneTwo = archived(sessionName: "holy-dup-2")
-        laneTwo.record.launchSpec.providerSessionID = "dup-conv"
+        laneTwo.record.harnessSessionID = "dup-conv"
         let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [
             candidate("dup-conv", end: Self.lastActivity),
             candidate("fallback-conv", end: Self.lastActivity - 300),
