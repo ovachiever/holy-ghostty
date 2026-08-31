@@ -26,7 +26,7 @@ Rules:
 - Completed pairs return to unnumbered sealed history on sync, so no numbered
   filename advertises work that is already done.
 - Commit `.manna/workflow.yaml`, `.manna/handoff-order.yaml`,
-  `.manna/issues.jsonl`, and `.handoff/`.
+  `.manna/federation.yaml`, `.manna/issues.jsonl`, and `.handoff/`.
 
 ## Generated index
 
@@ -97,3 +97,10 @@ Rules:
 | 63 | `mn-938022` | open | none | `.handoff/63-mn-938022-p0-restore-restored-sessions-carry-wrong-names-and-wrong-notes-i.md` |
 | 64 | `mn-13a213` | open | none | `.handoff/64-mn-13a213-p0-recovery-real-crash-2026-08-14-live-but-younger-server-re-ope.md` |
 | 65 | `mn-eb6b3e` | open | none | `.handoff/65-mn-eb6b3e-pre-existing-test-failure-holybrieftriagetests-needsmethreadslea.md` |
+| 66 | `mn-b864b4` | open | none | `.handoff/66-mn-b864b4-post-incident-gaps-clear-readopt-wipes-attention-metadata-no-re-k.md` |
+| 67 | `mn-26e29e` | open | none | `.handoff/67-mn-26e29e-keystone-store-harness-session-id-from-hooks-join-everything-on-i.md` |
+| 68 | `mn-330752` | blocked | `mn-26e29e` | `.handoff/68b67-mn-330752-board-mode-native-full-screen-manna-cockpit-in-the-workspace.md` |
+| 69 | `mn-767817` | blocked | `mn-26e29e` | `.handoff/69b67-mn-767817-archive-mode-native-full-width-rebuild-of-agent-sessions.md` |
+| 70 | `mn-7a8cae` | blocked | `mn-26e29e` | `.handoff/70b67-mn-7a8cae-attention-one-record-roster-and-board-read-coord-holy-writes-its.md` |
+| 71 | `mn-3772d7` | open | none | `.handoff/71-mn-3772d7-inbox-narrowing-github-only-two-tab-dock-manna-source-deleted-br.md` |
+| 72 | `mn-ac80c9` | open | none | `.handoff/72-mn-ac80c9-board-hygiene-reconcile-the-46-drift-findings-and-retire-superse.md` |
