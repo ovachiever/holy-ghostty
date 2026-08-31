@@ -101,7 +101,13 @@ struct HolyBriefTriageTests {
     }
 
     @Test func needsMeThreadsLeadAndCalmThreadsStayOut() throws {
-        let triaged = HolyBriefTriage.triage(try payload())
+        // Pin the clock to the fixture's own era: with the default wall
+        // clock, the frozen 2026-08-11 threads age past quiet-aging as the
+        // calendar advances and the test rots into a false failure.
+        let triaged = HolyBriefTriage.triage(
+            try payload(),
+            now: Date(timeIntervalSince1970: 1_786_464_000)
+        )
         #expect(triaged.hero?.id == "pr-agent-do-23")
         #expect(triaged.needsMe.isEmpty)
         // The calm session moved since last look: activity, not attention.
