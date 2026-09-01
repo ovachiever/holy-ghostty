@@ -206,9 +206,13 @@ app. Thresholds and cadence are
 `defaults write org.holyghostty.app holy.claudeUsage.warnPercent|criticalPercent|leadMinutes|pollSeconds`;
 Holy writes them to `usage/policy.json` so the hook applies the same numbers.
 
-The sidebar footer shows a centered meter with one bar per window, colored
-by level, just above the pane-layout controls (a compact percent capsule in
-the collapsed rail). Clicking it opens a
+The numbers live in the green tmux bar itself, centred between the window
+list and the model label: a `⌁ claude 5h 30% · wk 41% · Fable 79%` segment,
+identical in every session because it is machine-global, published by the
+probe as the server-wide `@holy_usage_v1` option. A calm window stays plain
+black-on-green; a warn window becomes a yellow chip, critical or capped a
+red one; an active wrap-up shows `⏸ WRAP UP` and a failed probe a
+`(stale Nm)` tag. `Claude Usage…` in the roster's `…` menu opens a
 popover with the account and tier, each window's reset time, burn rate, and
 ETA with threshold ticks, the sessions reporting their own windows, the
 last-known numbers for every account Holy has seen (only the signed-in one

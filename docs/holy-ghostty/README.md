@@ -174,9 +174,12 @@ happens.
 
 ### What you see
 
-The sidebar footer carries a centered meter just above the pane-layout
-controls: one bar per window, colored by level, with a compact percent
-capsule in the collapsed rail. A pause glyph means a
+The green tmux bar carries the numbers, centred between the window list
+and the model label: `⌁ claude 5h 30% · wk 41% · Fable 79%`, the same in
+every session because the value is machine-global. Calm windows stay plain;
+a warn window is a yellow chip, critical or capped a red one; an active
+wrap-up prepends `⏸ WRAP UP`, and a probe that cannot reach the endpoint
+appends `(stale Nm)`. A pause glyph means a
 wrap-up is in force; a clock badge means the last probe failed and the
 numbers are carried forward. Click the meter for the popover:
 

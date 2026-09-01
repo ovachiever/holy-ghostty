@@ -287,6 +287,14 @@ struct HolySessionRosterView: View {
                 Label("Session History", systemImage: "clock")
             }
 
+            if store.claudeUsageGuardInstalled {
+                Button {
+                    store.claudeUsagePresented = true
+                } label: {
+                    Label("Claude Usage…", systemImage: "gauge.with.needle")
+                }
+            }
+
             if let selected = store.selectedSession {
                 Divider()
 

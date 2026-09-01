@@ -281,6 +281,53 @@ struct HolyClaudeUsageGuardTests {
         }
     }
 
+    @Test func probeComposesGreenBarSegmentMirroringLevels() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.installGuard(policy: policy)
+        let harness = """
+        import runpy, sys, time
+        module = runpy.run_path(sys.argv[1], run_name="probe_test")
+        now = time.time()
+        buckets = [
+            {"key": "session", "percent": 30.0},
+            {"key": "weekly_all", "percent": \(policy.warnPercent + 1)},
+            {"key": "weekly_scoped:Fable", "percent": \(policy.criticalPercent + 1)},
+        ]
+        policy = {"warn_percent": \(policy.warnPercent), "critical_percent": \(policy.criticalPercent),
+                  "lead_minutes": \(policy.leadMinutes), "poll_seconds": \(policy.pollSeconds)}
+        print(module["compose_segment"](buckets, policy, now))
+        print(module["compose_segment"]([], policy, now))
+        print(module["compose_segment"](buckets, policy, now, stale_seconds=300, wrap_up=True))
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", harness, fixture.paths.probeURL.path]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let output = String(
+            data: stdout.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? ""
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        #expect(lines.count >= 3)
+        // Calm window stays plain; warn becomes a yellow chip; critical a red one.
+        #expect(lines[0].contains("⌁ claude"))
+        #expect(lines[0].contains("5h 30%"))
+        #expect(!lines[0].contains("bg=yellow,bold] 5h"))
+        #expect(lines[0].contains("#[fg=black,bg=yellow,bold] wk \(Int(policy.warnPercent + 1))% #[default]"))
+        #expect(lines[0].contains("#[fg=white,bg=red,bold] Fable \(Int(policy.criticalPercent + 1))% #[default]"))
+        // No numbers, no segment: the green bar returns to stock.
+        #expect(lines[1].isEmpty)
+        // Wrap-up and staleness are visible in the bar itself.
+        #expect(lines[2].contains("⏸ WRAP UP"))
+        #expect(lines[2].contains("(stale 5m)"))
+    }
+
     // MARK: - Helpers
 
     private func level(percent: Double) -> HolyClaudeUsageLevel? {

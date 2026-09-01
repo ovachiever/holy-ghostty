@@ -1,174 +1,13 @@
 import SwiftUI
 
-/// Machine-wide Claude usage meter: one bar per window the signed-in account
-/// reports, colored by how close it is to the cap. The full form is a
-/// centered band in the sidebar footer, just above the view controls; the
-/// compact form is a percent capsule in the collapsed rail. Clicking opens
-/// the details popover with reset times, burn-rate ETA, the last-known
-/// numbers for every account Holy has seen, and the wrap-up switch.
-struct HolyClaudeUsageMeterView: View {
-    @ObservedObject var store: HolyWorkspaceStore
-    var compact: Bool = false
-
-    @State private var showingDetails = false
-
-    var body: some View {
-        if store.claudeUsageGuardInstalled {
-            if compact {
-                meterButton(arrowEdge: .trailing) { compactBody }
-            } else {
-                VStack(spacing: 0) {
-                    Rectangle()
-                        .fill(HolyGhosttyTheme.border)
-                        .frame(height: 0.5)
-                    meterButton(arrowEdge: .top) { fullBody }
-                        .padding(.vertical, 6)
-                        .frame(maxWidth: .infinity)
-                }
-                .background(HolyGhosttyTheme.bgElevated)
-            }
-        }
-    }
-
-    private func meterButton(
-        arrowEdge: Edge,
-        @ViewBuilder label: () -> some View
-    ) -> some View {
-        Button {
-            showingDetails.toggle()
-        } label: {
-            label()
-        }
-        .buttonStyle(.plain)
-        .help(helpText)
-        .popover(isPresented: $showingDetails, arrowEdge: arrowEdge) {
-            HolyClaudeUsageDetailView(store: store)
-        }
-    }
-
-    private var report: HolyClaudeUsageReport { store.claudeUsage }
-    private var assessment: HolyClaudeUsageAssessment { store.claudeUsageAssessment }
-    private var buckets: [HolyClaudeUsageBucket] { report.snapshot?.buckets ?? [] }
-
-    private var fullBody: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(HolyClaudeUsagePalette.color(for: assessment.level))
-                .frame(width: 6, height: 6)
-            if buckets.isEmpty {
-                Text(report.snapshot?.error ?? report.probeFailure ?? "usage: waiting for first probe")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                    .lineLimit(1)
-            } else {
-                ForEach(buckets) { bucket in
-                    bar(for: bucket)
-                }
-            }
-            if report.wrapUpRequest != nil {
-                Image(systemName: "pause.circle.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(HolyGhosttyTheme.danger)
-                    .help("Wrap-up requested: every session pauses on its next tool call")
-            }
-            if report.snapshot?.isStale == true {
-                Image(systemName: "clock.badge.exclamationmark")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(HolyGhosttyTheme.warning)
-            }
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(
-            Capsule(style: .continuous)
-                .fill(HolyGhosttyTheme.bg.opacity(0.84))
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .stroke(borderColor, lineWidth: 0.5)
-        )
-        .contentShape(Capsule(style: .continuous))
-    }
-
-    private var compactBody: some View {
-        let worst = assessment.decidingBucket
-        return Text(worst?.percent.map { HolyClaudeUsageEvaluator.formatPercent($0) } ?? "—")
-            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-            .foregroundStyle(HolyClaudeUsagePalette.color(for: assessment.level))
-            .lineLimit(1)
-            .minimumScaleFactor(0.72)
-            .frame(width: 24, height: 18)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(HolyGhosttyTheme.bg.opacity(0.84))
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .stroke(borderColor, lineWidth: 0.5)
-            )
-            .contentShape(Capsule(style: .continuous))
-    }
-
-    private func bar(for bucket: HolyClaudeUsageBucket) -> some View {
-        let level = HolyClaudeUsageEvaluator.level(
-            for: bucket,
-            policy: store.claudeUsagePolicy,
-            now: store.attentionClock
-        )?.level ?? .normal
-        let fraction = min(max((bucket.percent ?? 0) / 100, 0), 1)
-        return HStack(spacing: 3) {
-            Text(bucket.shortLabel)
-                .font(.system(size: 9, weight: .medium, design: .monospaced))
-                .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                .lineLimit(1)
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    Capsule(style: .continuous)
-                        .fill(HolyGhosttyTheme.borderActive)
-                    Capsule(style: .continuous)
-                        .fill(HolyClaudeUsagePalette.color(for: level))
-                        .frame(width: max(2, proxy.size.width * fraction))
-                }
-            }
-            .frame(width: 26, height: 4)
-            Text(bucket.percent.map { HolyClaudeUsageEvaluator.formatPercent($0) } ?? "—")
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .foregroundStyle(HolyClaudeUsagePalette.color(for: level))
-                .lineLimit(1)
-        }
-    }
-
-    private var borderColor: Color {
-        switch assessment.level {
-        case .normal: HolyGhosttyTheme.borderActive
-        case .warn: HolyGhosttyTheme.warning.opacity(0.6)
-        case .critical, .capped: HolyGhosttyTheme.danger.opacity(0.8)
-        }
-    }
-
-    private var helpText: String {
-        var lines: [String] = []
-        if let snapshot = report.snapshot {
-            lines.append("Claude usage · \(snapshot.account.displayName)")
-            for bucket in snapshot.buckets {
-                lines.append(HolyClaudeUsageFormatting.line(for: bucket, now: store.attentionClock))
-            }
-            if let error = snapshot.error {
-                lines.append("probe: \(error)")
-            }
-        } else if let failure = report.probeFailure {
-            lines.append("Claude usage probe: \(failure)")
-        } else {
-            lines.append("Claude usage: waiting for the first probe")
-        }
-        lines.append("Click for details, other accounts, and the wrap-up switch.")
-        return lines.joined(separator: "\n")
-    }
-}
-
-/// The popover behind the meter.
+/// The Claude usage details sheet: reset times, burn-rate ETA, the
+/// last-known numbers for every account Holy has seen, and the wrap-up
+/// switch. The live numbers themselves render in the tmux green bar
+/// (centred, via the @holy_usage_v1 server option the probe publishes);
+/// this view is reached from the roster's … menu as "Claude Usage…".
 struct HolyClaudeUsageDetailView: View {
     @ObservedObject var store: HolyWorkspaceStore
+    var showsClose: Bool = false
 
     private var report: HolyClaudeUsageReport { store.claudeUsage }
     private var now: Date { store.attentionClock }
@@ -346,6 +185,15 @@ struct HolyClaudeUsageDetailView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+
+            if showsClose {
+                Button("Close") {
+                    store.claudeUsagePresented = false
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .keyboardShortcut(.cancelAction)
+            }
 
             Spacer()
 

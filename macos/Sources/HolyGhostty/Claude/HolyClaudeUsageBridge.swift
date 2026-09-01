@@ -97,6 +97,9 @@ enum HolyClaudeUsageBridge {
         let paths = HolyClaudeUsageBridgePaths.currentUser()
         do {
             let outcome = try remove(paths: paths)
+            // The probe published the green-bar segment as a server-global
+            // option; without this the last value would outlive the guard.
+            clearTmuxUsageSegment()
             NotificationCenter.default.post(name: .holyClaudeUsageBridgeDidChange, object: nil)
             return outcome
         } catch {
@@ -320,15 +323,25 @@ enum HolyClaudeUsageBridge {
 
 
     def load_policy(root):
+        defaults = {
+            "warn_percent": __WARN_PERCENT__,
+            "critical_percent": __CRITICAL_PERCENT__,
+            "lead_minutes": __LEAD_MINUTES__,
+            "poll_seconds": __POLL_SECONDS__,
+        }
         try:
             with open(os.path.join(root, "policy.json"), "r", encoding="utf-8") as handle:
-                policy = json.load(handle)
+                stored = json.load(handle)
         except (OSError, ValueError):
-            policy = {}
-        poll = policy.get("poll_seconds")
-        if not isinstance(poll, (int, float)) or poll <= 0:
-            poll = __POLL_SECONDS__
-        return {"poll_seconds": float(poll)}
+            stored = {}
+        policy = dict(defaults)
+        for key in policy:
+            value = stored.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                policy[key] = float(value)
+        if policy["critical_percent"] < policy["warn_percent"]:
+            policy["critical_percent"] = policy["warn_percent"]
+        return policy
 
 
     def read_keychain_token(deadline_seconds):
@@ -542,6 +555,119 @@ enum HolyClaudeUsageBridge {
                     bucket["eta_full_at"] = int(eta)
 
 
+    def bucket_level(bucket, policy, now):
+        """Mirror of HolyClaudeUsageEvaluator (also mirrored in the guard)."""
+        percent = bucket.get("percent")
+        if not isinstance(percent, (int, float)):
+            return "normal"
+        lead = policy["lead_minutes"] * 60.0
+        if percent >= 100:
+            return "capped"
+        if percent >= policy["critical_percent"]:
+            return "critical"
+        eta = bucket.get("eta_full_at")
+        if isinstance(eta, (int, float)):
+            remaining = eta - now
+            if remaining <= lead:
+                return "critical"
+            if remaining <= lead * 2 and percent >= policy["warn_percent"] / 2.0:
+                return "warn"
+        if percent >= policy["warn_percent"]:
+            return "warn"
+        severity = (bucket.get("severity") or "").lower()
+        if severity and severity != "normal":
+            return "warn"
+        return "normal"
+
+
+    def short_label(key):
+        if key == "session":
+            return "5h"
+        if key == "weekly_all":
+            return "wk"
+        if key.startswith("weekly_scoped:"):
+            return key.split(":", 1)[1]
+        return key
+
+
+    def compose_segment(buckets, policy, now, stale_seconds=None, wrap_up=False):
+        """The centred green-bar segment. Styled for tmux's stock black-on-green
+        status bar: calm windows stay plain, a warn window becomes a yellow
+        chip, critical/capped a red one. The ⌁ prefix and the identical value
+        in every session mark it as machine-global, not this session's."""
+        chips = []
+        for bucket in buckets:
+            percent = bucket.get("percent")
+            if not isinstance(percent, (int, float)):
+                continue
+            text = "%s %d%%" % (short_label(bucket.get("key") or "?"), int(round(percent)))
+            level = bucket_level(bucket, policy, now)
+            if level in ("critical", "capped"):
+                chips.append("#[fg=white,bg=red,bold] %s #[default]" % text)
+            elif level == "warn":
+                chips.append("#[fg=black,bg=yellow,bold] %s #[default]" % text)
+            else:
+                chips.append(text)
+        if not chips:
+            return ""
+        segment = "#[dim]⌁ claude#[nodim] " + " · ".join(chips)
+        if wrap_up:
+            segment = "#[fg=white,bg=red,bold] ⏸ WRAP UP #[default] " + segment
+        if isinstance(stale_seconds, (int, float)) and stale_seconds > 0:
+            segment += " #[dim](stale %dm)#[nodim]" % max(1, int(stale_seconds / 60))
+        return segment
+
+
+    def tmux_binary():
+        override = os.environ.get("HOLY_TMUX_BIN")
+        candidates = [override] if override else []
+        candidates += ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
+        for candidate in candidates:
+            if candidate and os.access(candidate, os.X_OK):
+                return candidate
+        from shutil import which
+        return which("tmux")
+
+
+    def publish_tmux(root, snapshot, policy, now, deadline_seconds):
+        tmux = tmux_binary()
+        if not tmux:
+            return
+        stale_since = snapshot.get("stale_since")
+        stale_seconds = (now - stale_since) if isinstance(stale_since, (int, float)) else None
+        wrap = read_wrap_up(root, snapshot, now)
+        segment = compose_segment(
+            snapshot.get("buckets") or [], policy, now,
+            stale_seconds=stale_seconds, wrap_up=wrap,
+        )
+        socket = os.environ.get("HOLY_TMUX_SOCKET", "holy")
+        try:
+            subprocess.run(
+                [tmux, "-L", socket, "set-option", "-g", "@holy_usage_v1", segment],
+                capture_output=True,
+                timeout=deadline_seconds,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+    def read_wrap_up(root, snapshot, now):
+        try:
+            with open(os.path.join(root, "wrap-up-requested.json"), "r", encoding="utf-8") as handle:
+                request = json.load(handle)
+        except (OSError, ValueError):
+            return False
+        expires = request.get("expires_at")
+        if not isinstance(expires, (int, float)) or expires <= now:
+            return False
+        wanted = request.get("account_email")
+        current = (snapshot.get("account") or {}).get("email")
+        if wanted and current and wanted != current:
+            return False
+        return True
+
+
     def prune_session_files(root, now):
         sessions_dir = os.path.join(root, "sessions")
         try:
@@ -629,6 +755,7 @@ enum HolyClaudeUsageBridge {
 
         write_atomic(latest_path, json.dumps(snapshot, indent=1) + "\n")
         prune_session_files(root, now)
+        publish_tmux(root, snapshot, policy, now, deadline * KEYCHAIN_SHARE_OF_DEADLINE)
         if "--print" in sys.argv:
             sys.stdout.write(json.dumps(snapshot, indent=1) + "\n")
         return 0 if snapshot["error"] is None else 1
@@ -637,6 +764,9 @@ enum HolyClaudeUsageBridge {
     if __name__ == "__main__":
         sys.exit(main())
     """#
+    .replacingOccurrences(of: "__WARN_PERCENT__", with: String(Int(HolyClaudeUsagePolicy.default.warnPercent)))
+    .replacingOccurrences(of: "__CRITICAL_PERCENT__", with: String(Int(HolyClaudeUsagePolicy.default.criticalPercent)))
+    .replacingOccurrences(of: "__LEAD_MINUTES__", with: String(Int(HolyClaudeUsagePolicy.default.leadMinutes)))
     .replacingOccurrences(of: "__POLL_SECONDS__", with: String(Int(HolyClaudeUsagePolicy.default.pollSeconds)))
 
     /// The hook. Runs on PreToolUse (every tool) and UserPromptSubmit, reads
@@ -1107,6 +1237,33 @@ enum HolyClaudeUsageBridge {
 
     static func shellQuote(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
+    }
+
+    @discardableResult
+    static func clearTmuxUsageSegment(
+        socketName: String = HolySessionTmuxSpec.defaultSocketName
+    ) -> Bool {
+        let script = "unset TMUX TMUX_PANE TMUX_TMPDIR; "
+            + "tmux -L \(shellQuote(socketName)) set-option -gu @holy_usage_v1"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", script]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            let deadline = Date().addingTimeInterval(5)
+            while process.isRunning, Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.025)
+            }
+            guard !process.isRunning else {
+                process.terminate()
+                return false
+            }
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
     }
 }
 

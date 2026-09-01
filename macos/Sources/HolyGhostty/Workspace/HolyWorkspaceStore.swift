@@ -62,6 +62,7 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published var claudeUsage: HolyClaudeUsageReport = .empty
     @Published var claudeUsageAssessment: HolyClaudeUsageAssessment = .init(level: .normal, decidingBucket: nil, reason: nil)
     @Published var claudeUsageGuardInstalled: Bool = false
+    @Published var claudeUsagePresented: Bool = false
     var claudeUsagePolicy: HolyClaudeUsagePolicy = .default
     let claudeUsageMonitor = HolyClaudeUsageMonitor()
     var claudeUsageAnnouncedLevelByBucket: [String: HolyClaudeUsageLevel] = [:]

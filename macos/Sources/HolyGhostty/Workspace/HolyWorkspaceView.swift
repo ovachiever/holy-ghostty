@@ -154,6 +154,9 @@ struct HolyWorkspaceRootView: View {
         .clipped()
         .focused($workspaceFocused)
         .ghosttyLastFocusedSurface(lastFocusedSurface)
+        .sheet(isPresented: $store.claudeUsagePresented) {
+            HolyClaudeUsageDetailView(store: store, showsClose: true)
+        }
         .sheet(isPresented: $store.composerPresented) {
             HolyNewSessionSheet(
                 draft: $store.draft,
@@ -242,12 +245,6 @@ struct HolyWorkspaceRootView: View {
                                 onToggleCollapse: { toggleRosterCollapsed() }
                             )
                             .frame(maxHeight: .infinity)
-
-                            // Machine-wide Claude usage: the number that
-                            // decides whether every worker above survives the
-                            // next hour. Sits just above the view controls so
-                            // the footer cluster stays the sidebar's floor.
-                            HolyClaudeUsageMeterView(store: store)
 
                             leftRailViewControls
                         }
@@ -525,8 +522,6 @@ struct HolyWorkspaceRootView: View {
             .help("Expand session sidebar")
 
             sessionCountCapsule
-
-            HolyClaudeUsageMeterView(store: store, compact: true)
 
             Spacer(minLength: 0)
 

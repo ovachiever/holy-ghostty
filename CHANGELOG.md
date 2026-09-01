@@ -26,8 +26,12 @@ pause, before one of them lands.
   Thresholds via `defaults write org.holyghostty.app holy.claudeUsage.*`,
   mirrored to `usage/policy.json`; the Swift evaluator and its Python
   mirror are tested for parity.
-- Sidebar-footer usage meter, centered above the pane-layout controls (one
-  bar per window, compact capsule in the collapsed rail) with a popover: account and tier, reset time, burn rate,
+- Usage in the green tmux bar, centred and machine-global: `⌁ claude`
+  plus one chip per window (plain when calm, yellow at warn, red at
+  critical/capped, `⏸ WRAP UP` while a wrap-up stands, `(stale Nm)` when
+  the probe fails), published by the probe as the server-wide
+  `@holy_usage_v1` option. `Claude Usage…` in the roster's `…` menu opens
+  the details sheet: account and tier, reset time, burn rate,
   and ETA per window with threshold ticks, sessions reporting their own
   windows, last-known numbers for every account Holy has seen, Refresh, and
   `Wrap up all sessions`, which treats every session as critical for one

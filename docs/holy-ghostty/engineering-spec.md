@@ -394,14 +394,20 @@ machine-wide buckets for the meter's level. `refreshNow` reruns the probe
 immediately; wrap-up request and cancel re-read the disk state without a
 probe.
 
-Presentation. `HolyClaudeUsageMeterView` renders as a centered band in the
-sidebar footer, directly above `leftRailViewControls` — a level dot, one
-bar per bucket colored by that bucket's level, a pause glyph while a
-wrap-up stands, a clock badge when the snapshot is stale — and as a
-compact percent capsule of the deciding bucket in the collapsed rail. The
-footer band draws its own top hairline and background inside the
-guard-installed conditional, so nothing reserves space while the guard is
-off; its popover opens upward (`arrowEdge: .top`). The
+Presentation. The probe publishes a styled segment to the tmux server as
+the global `@holy_usage_v1` option (`compose_segment`, mirroring the
+evaluator's levels; socket from `HOLY_TMUX_SOCKET`, default `holy`, binary
+from `HOLY_TMUX_BIN` or the usual install paths). The managed status
+config renders it centred: `managedTmuxStatusFormat` is tmux 3.7's default
+`status-format[0]` captured verbatim with one inserted
+`#[nolist align=centre]#{E:@holy_usage_v1}#[default]` block before the
+right-aligned range, set both in `managed-tmux.conf` and in the live
+option-set path, so an empty option leaves the bar byte-identical to
+stock. Warn buckets render as yellow chips, critical/capped as red, an
+active wrap-up prepends `⏸ WRAP UP`, staleness appends `(stale Nm)`.
+Disabling the guard clears the option (`clearTmuxUsageSegment`).
+`HolyClaudeUsageDetailView` is reached from the roster's `…` menu
+(`Claude Usage…`, gated on installation) as a sheet with a Close button. The
 popover (`HolyClaudeUsageDetailView`) shows the level title, account and
 tier, snapshot age, each bucket with warn and critical ticks and its reset,
 rate, and ETA, sessions reporting their own windows, known accounts (when
