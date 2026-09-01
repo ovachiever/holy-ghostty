@@ -287,6 +287,7 @@ enum HolyClaudeUsageBridge {
     # in a command line.
     import json
     import os
+    import re
     import subprocess
     import sys
     import time
@@ -586,8 +587,16 @@ enum HolyClaudeUsageBridge {
         if key == "weekly_all":
             return "wk"
         if key.startswith("weekly_scoped:"):
-            return key.split(":", 1)[1]
-        return key
+            label = key.split(":", 1)[1]
+        else:
+            label = key
+        # The scoped-model name arrives from the API response and ends up
+        # inside a tmux option that the status format expands with #{E:...},
+        # where #(...) runs a command. Only this app's own style directives
+        # may carry tmux syntax: strip everything outside a plain alphabet,
+        # bounded like the status line's model label (48).
+        label = re.sub(r"[^A-Za-z0-9 ._+-]", "", label)[:48]
+        return label or "?"
 
 
     def compose_segment(buckets, policy, now, stale_seconds=None, wrap_up=False):

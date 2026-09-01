@@ -293,6 +293,7 @@ struct HolyClaudeUsageGuardTests {
             {"key": "session", "percent": 30.0},
             {"key": "weekly_all", "percent": \(policy.warnPercent + 1)},
             {"key": "weekly_scoped:Fable", "percent": \(policy.criticalPercent + 1)},
+            {"key": "weekly_scoped:Fa#(whoami)%H;'`ble", "percent": 10.0},
         ]
         policy = {"warn_percent": \(policy.warnPercent), "critical_percent": \(policy.criticalPercent),
                   "lead_minutes": \(policy.leadMinutes), "poll_seconds": \(policy.pollSeconds)}
@@ -321,6 +322,11 @@ struct HolyClaudeUsageGuardTests {
         #expect(!lines[0].contains("bg=yellow,bold] 5h"))
         #expect(lines[0].contains("#[fg=black,bg=yellow,bold] wk \(Int(policy.warnPercent + 1))% #[default]"))
         #expect(lines[0].contains("#[fg=white,bg=red,bold] Fable \(Int(policy.criticalPercent + 1))% #[default]"))
+        // A hostile scoped-model name from the API cannot smuggle tmux format
+        // syntax into the #{E:...}-expanded option: #( would run a command.
+        #expect(lines[0].contains("FawhoamiHble 10%"))
+        #expect(!lines[0].contains("#(whoami)"))
+        #expect(!lines[0].contains("%H"))
         // No numbers, no segment: the green bar returns to stock.
         #expect(lines[1].isEmpty)
         // Wrap-up and staleness are visible in the bar itself.
