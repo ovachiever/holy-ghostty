@@ -146,7 +146,6 @@ struct HolyWorkspacePersistenceRetentionTests {
             try persist(.empty, in: database)
 
             #expect(try database.scalarInt64("SELECT COUNT(*) FROM sessions;") == 1)
-            #expect(try database.scalarInt64("SELECT COUNT(*) FROM agent_sessions_sessions_v1;") == 0)
             #expect(try HolyWorkspaceDatabasePersistence.load(from: database)?.archivedSessions.isEmpty == true)
 
             let interrupted = try HolyWorkspaceRetentionMaintenance.prune(
@@ -345,7 +344,7 @@ struct HolyWorkspacePersistenceRetentionTests {
         #expect(retained.last?.archivedAt == now.addingTimeInterval(-90 * 24 * 60 * 60))
     }
 
-    @Test func versionSevenUpgradePreservesRowsAndHidesTombstonesEverywhere() throws {
+    @Test func versionSevenUpgradePreservesRowsAndRetiresCompatibilityViews() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("holy-v7-migration-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -456,10 +455,18 @@ struct HolyWorkspacePersistenceRetentionTests {
                 == "legacy-v8-id"
         )
         #expect(try database.scalarInt64("SELECT latest_git_snapshot_id FROM sessions;") == 1)
-        #expect(try database.scalarInt64("SELECT COUNT(*) FROM agent_sessions_sessions_v1;") == 1)
-        #expect(try database.scalarInt64("SELECT COUNT(*) FROM agent_sessions_resume_targets_v1;") == 1)
-        #expect(try database.scalarInt64("SELECT COUNT(*) FROM agent_sessions_events_v1;") == 1)
-        #expect(try database.scalarInt64("SELECT COUNT(*) FROM agent_sessions_annotations_v1;") == 1)
+        for view in [
+            "agent_sessions_sessions_v1",
+            "agent_sessions_resume_targets_v1",
+            "agent_sessions_events_v1",
+            "agent_sessions_annotations_v1",
+        ] {
+            #expect(
+                try database.scalarInt64(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = '\(view)';"
+                ) == 0
+            )
+        }
 
         let latestLookupPlan = try queryPlan(
             "EXPLAIN QUERY PLAN SELECT 1 FROM sessions WHERE latest_git_snapshot_id = 1;",
@@ -481,10 +488,11 @@ struct HolyWorkspacePersistenceRetentionTests {
             "UPDATE sessions SET purge_pending_at = '2026-07-10T00:00:00.000Z' WHERE id = 'session-v7';"
         )
         #expect(try database.scalarInt64("SELECT COUNT(*) FROM sessions;") == 1)
-        #expect(try database.scalarInt64("SELECT COUNT(*) FROM agent_sessions_sessions_v1;") == 0)
-        #expect(try database.scalarInt64("SELECT COUNT(*) FROM agent_sessions_resume_targets_v1;") == 0)
-        #expect(try database.scalarInt64("SELECT COUNT(*) FROM agent_sessions_events_v1;") == 0)
-        #expect(try database.scalarInt64("SELECT COUNT(*) FROM agent_sessions_annotations_v1;") == 0)
+        #expect(
+            try database.scalarInt64(
+                "SELECT COUNT(*) FROM sessions WHERE purge_pending_at IS NULL;"
+            ) == 0
+        )
     }
 
     @MainActor

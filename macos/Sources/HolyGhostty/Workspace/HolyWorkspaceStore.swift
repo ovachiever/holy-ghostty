@@ -97,14 +97,6 @@ final class HolyWorkspaceStore: ObservableObject {
             refreshSessionPresentationState()
             scheduleSelectedSessionSeenMark()
             persist(pendingEvents: selectionEvents(from: oldValue, to: selectedSessionID))
-            // Focus decides the manna board scope, so a switch re-reads the
-            // board immediately — local files, sub-second — while GitHub and
-            // alerts keep their own cadence (mn-b2e2e9).
-            refreshFocusedManna(force: true)
-            // The brief feed is dormant in the panel (Erik 2026-08-12: the
-            // panel is project GH + project manna + an All-GitHub tab). The
-            // engine and contract stay live for CLI consumers; no panel
-            // refresh means no idle subprocess or model spend.
         }
     }
     @Published var soloSessionID: UUID? {
@@ -149,9 +141,7 @@ final class HolyWorkspaceStore: ObservableObject {
     )
     private let inboxRepoSlugResolver = HolyGitHubRepoSlugResolver()
 
-    /// The focused session's GitHub slug, for the panel's project-scoped
-    /// GitHub view (Erik 2026-08-12: "GH notifications for the project I'm
-    /// in, manna for the project I'm in, and a gh-global tab").
+    /// The focused session's GitHub slug for the dock's project-scoped tab.
     ///
     /// Ownership can be missing on adopted/restored sessions (mn-938022:
     /// the 2026-08-12 restore left ownership_json NULL on every row, which
@@ -169,32 +159,17 @@ final class HolyWorkspaceStore: ObservableObject {
             sshDestination: transport.isRemote ? transport.sshDestination : nil
         )
     }
-    /// The human inbox engine: GitHub PR attention, DB alerts, and manna
-    /// triage. Sources conform to HolyInboxRowSource.
+    /// The right dock is a GitHub view. Board work lives in the full-screen
+    /// board workspace, and alerts retain their existing notification path.
     private(set) lazy var inboxEngine: HolyInboxEngine = {
         let resolver = inboxRepoSlugResolver
         return HolyInboxEngine(
             sources: [
-                // Panel order is source order. GitHub first (Erik 2026-08-10):
-                // cross-repo attention outranks local housekeeping.
                 HolyGitHubInboxSource(),
-                // A manna board is a path, not a GitHub slug, so board scope
-                // comes from the focused session rather than the refresh
-                // context — and ONLY the focused session's project.
-                HolyMannaInboxSource(repositoryRootsProvider: { [weak self] in
-                    await MainActor.run {
-                        HolyMannaInboxSource.repositoryRoots(
-                            focused: self?.selectedSession
-                        )
-                    }
-                }),
-                HolyAlertInboxSource(),
             ],
-            // The brief renders above these; the engine's sections are the
-            // Library (manna backlog, gh browse) plus the alerts drawer.
             // Same ownership-or-cwd fallback and host awareness as
-            // focusedRepoSlug() — adopted/restored sessions can lack
-            // ownership (mn-938022); remote sessions resolve on their host.
+            // focusedRepoSlug(): this context determines which GitHub rows
+            // belong in the project tab.
             focusedRepoSlugProvider: { [weak self] in
                 let context = await MainActor.run { () -> (String, String?)? in
                     guard let session = self?.selectedSession,
@@ -206,41 +181,18 @@ final class HolyWorkspaceStore: ObservableObject {
                 guard let (root, destination) = context else { return nil }
                 return await resolver.slug(forRepositoryRoot: root, sshDestination: destination)
             },
-            // The shell button's cwd must exist on THIS machine: remote
-            // sessions get no path (and no button) until spawn-on-host
-            // lands — a button with a foreign cwd would lie.
+            // Loaded GitHub commands run only at the authoritative local
+            // repository root. A working-directory or remote-path fallback
+            // could target the wrong checkout, so absence means no button.
             focusedRepoPathProvider: { [weak self] in
                 await MainActor.run {
                     guard let session = self?.selectedSession,
                           !session.record.launchSpec.transport.normalized.isRemote
                     else { return nil }
-                    return session.ownership.repositoryRoot ?? session.workingDirectory
+                    return session.ownership.repositoryRoot
                 }
             }
         )
-    }()
-
-    /// The panel's answer line and attention drawer come from `agent-do
-    /// brief holy` through this feed; the engine's sections above become the
-    /// Library beneath it (mn-5dc58b).
-    private(set) lazy var briefFeed: HolyBriefFeed = {
-        HolyBriefFeed(contextProvider: { [weak self] in
-            await MainActor.run {
-                let session = self?.selectedSession
-                let root = HolyMannaInboxSource.repositoryRoots(focused: session).first
-                // The estate lives where the session lives: a remote
-                // session's brief runs on its host over SSH (mn-7fbb07).
-                let transport = session?.record.launchSpec.transport.normalized
-                let remoteHost = (transport?.isRemote == true)
-                    ? transport?.sshDestination?.nilIfBlank
-                    : nil
-                return .init(
-                    focusedRepoPath: root,
-                    focusedBoardPath: root,
-                    remoteHost: remoteHost
-                )
-            }
-        })
     }()
     private let agentStateMonitor = HolyTmuxAgentStateMonitor()
     private let workspaceStartedAt = Date()
@@ -248,11 +200,6 @@ final class HolyWorkspaceStore: ObservableObject {
     private var refreshCoordinator: HolySessionRefreshCoordinator?
     private var paneLayoutMemo: (key: PaneLayoutMemoKey, layout: HolyPaneLayout, labels: [UUID: String])?
     private var sessionObservationCancellables: Set<AnyCancellable> = []
-    /// Session mutation is noisy (terminal frames, telemetry, activity), but
-    /// manna only cares when the selected session's project anchor changes.
-    /// This fingerprint lets the late git snapshot trigger exactly one fresh
-    /// read without turning every pane repaint into two subprocesses.
-    private var lastFocusedMannaRoots: [String]?
     private var cancellables: Set<AnyCancellable> = []
     private var repairBackoff = HolyRepairBackoff()
     private var activeTmuxMetadataRefreshCancellable: AnyCancellable?
@@ -323,13 +270,6 @@ final class HolyWorkspaceStore: ObservableObject {
     var selectedSession: HolySession? {
         guard let selectedSessionID else { return sessions.first }
         return sessions.first(where: { $0.id == selectedSessionID }) ?? sessions.first
-    }
-
-    private func refreshFocusedManna(force: Bool = false) {
-        let roots = HolyMannaInboxSource.repositoryRoots(focused: selectedSession)
-        guard force || roots != lastFocusedMannaRoots else { return }
-        lastFocusedMannaRoots = roots
-        inboxEngine.requestRefresh(sourceID: HolyMannaInboxSectioner.sourceID)
     }
 
     var soloSession: HolySession? {
@@ -4033,12 +3973,6 @@ final class HolyWorkspaceStore: ObservableObject {
         recomputeCoordination()
         if session.id == selectedSessionID {
             scheduleSelectedSessionSeenMark()
-        }
-        if session.id == selectedSession?.id {
-            // A nil selectedSessionID still focuses `sessions.first`.
-            // `objectWillChange` is bridged onto a fresh MainActor task by
-            // `bindSessions`, so this observes the newly applied git/cwd fact.
-            refreshFocusedManna()
         }
         sessionSupervisor.sessionDidMutate(
             session,

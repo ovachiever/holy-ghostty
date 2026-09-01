@@ -7,6 +7,39 @@ enum HolyWorkspaceRightPanel: String, Codable, Equatable, Sendable {
     case inbox
 }
 
+/// Builds a fresh shell URL with one visible, unsubmitted command. Control
+/// characters are removed so source data cannot submit or hide keystrokes.
+enum HolyInboxCommandSpawn {
+    static func typedCommandURL(
+        command: String,
+        title: String,
+        workingDirectory: String?
+    ) -> URL? {
+        let typeable = String(
+            command.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        ).trimmingCharacters(in: .whitespaces)
+        guard !typeable.isEmpty else { return nil }
+
+        var components = URLComponents()
+        components.scheme = HolyAutomationURLParser.scheme
+        components.host = "spawn"
+        var items = [
+            URLQueryItem(name: "runtime", value: "shell"),
+            URLQueryItem(name: "title", value: title),
+            URLQueryItem(name: "initialInput", value: typeable),
+        ]
+        if let workingDirectory {
+            items.insert(URLQueryItem(name: "workingDirectory", value: workingDirectory), at: 1)
+        }
+        components.queryItems = items
+        // URLComponents leaves plus signs literal, while the automation
+        // parser reads them as spaces. Preserve the command byte here.
+        components.percentEncodedQuery = components.percentEncodedQuery?
+            .replacingOccurrences(of: "+", with: "%2B")
+        return components.url
+    }
+}
+
 /// One compact status chip on an inbox row ("review requested", "draft").
 struct HolyInboxChip: Equatable, Hashable, Sendable {
     enum Emphasis: Equatable, Hashable, Sendable {

@@ -1484,8 +1484,8 @@ private final class HolySessionAlertCoordinator {
     private var authorizationRequested = false
     private var hasEstablishedBaseline = false
     private var previousStates: [UUID: HolySessionAlertState] = [:]
-    /// Delivery also lands in the alerts table so the human inbox can render
-    /// and acknowledge it; the notification path itself is unchanged.
+    /// Delivery also lands in the alerts table as history. Notifications are
+    /// the user-facing surface.
     private let inboxAlertStore = HolyInboxAlertStore()
     private var collisionBacklogRetired = false
 
@@ -1619,9 +1619,8 @@ private final class HolySessionAlertCoordinator {
             NSApplication.shared.requestUserAttention(.criticalRequest)
         }
 
-        // Persist the delivery for the human inbox (acknowledge lifecycle
-        // lives there). Off the main thread; a failed write never blocks the
-        // notification.
+        // Persist delivery history off the main thread. A failed write never
+        // blocks the notification.
         let store = inboxAlertStore
         let sessionID = session.id
         Task.detached(priority: .utility) {

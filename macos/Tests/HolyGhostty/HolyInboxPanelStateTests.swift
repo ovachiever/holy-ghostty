@@ -36,4 +36,14 @@ struct HolyInboxPanelStateTests {
         #expect(HolyInboxBadge.label(for: 99) == "99")
         #expect(HolyInboxBadge.label(for: 240) == "99+")
     }
+
+    @Test func projectTabNameComesFromTheOwnershipRepositoryRoot() {
+        #expect(
+            HolyInboxPanelView.projectName(
+                repositoryRoot: "/Users/erik/Custom-Coding/holy-ghostty"
+            ) == "holy-ghostty"
+        )
+        #expect(HolyInboxPanelView.projectName(repositoryRoot: nil) == nil)
+        #expect(HolyInboxPanelView.projectName(repositoryRoot: "   ") == nil)
+    }
 }

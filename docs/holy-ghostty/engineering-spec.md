@@ -8,7 +8,7 @@ Current release: `0.50`.
 
 ## 1. Purpose
 
-Holy Ghostty is a macOS-native shell built around Ghostty terminal surfaces for running and supervising coding sessions. The Holy layer adds session orchestration, tmux-backed local and SSH launch policy, worktree management, git-aware coordination, runtime heuristics, structured telemetry, budget intelligence, an external task inbox, a human inbox, crash restore, an append-only event ledger, archive/history, templates, remote host discovery, and native alerts without replacing Ghostty's terminal core.
+Holy Ghostty is a macOS-native shell built around Ghostty terminal surfaces for running and supervising coding sessions. The Holy layer adds session orchestration, tmux-backed local and SSH launch policy, worktree management, git-aware coordination, runtime heuristics, structured telemetry, budget intelligence, an external task inbox, a GitHub attention dock, crash restore, an append-only event ledger, archive/history, templates, remote host discovery, and native alerts without replacing Ghostty's terminal core.
 
 ## 2. Scope And Current Boundary
 
@@ -683,50 +683,35 @@ Tmux liveness during restore uses the same `HolyTmuxLifecycleService`
 described in section 9, so adoption, conflict, and absence verdicts are
 inventory-proven.
 
-## 9B. Human Inbox
+## 9B. GitHub Attention Dock
 
 - `macos/Sources/HolyGhostty/Inbox/HolyInboxEngine.swift`
 - `macos/Sources/HolyGhostty/Inbox/HolyInboxModels.swift`
 - `macos/Sources/HolyGhostty/Inbox/HolyInboxPanelView.swift`
 - `macos/Sources/HolyGhostty/Inbox/HolyGitHubInboxSource.swift`
-- `macos/Sources/HolyGhostty/Inbox/HolyAlertInboxSource.swift`
 - `macos/Sources/HolyGhostty/Inbox/HolyInboxAlertStore.swift`
-- `macos/Sources/HolyGhostty/Inbox/HolyMannaInboxSource.swift`
-- `macos/Sources/HolyGhostty/Inbox/HolyBriefContract.swift`
-- `macos/Sources/HolyGhostty/Inbox/HolyBriefFeed.swift`
-- `macos/Sources/HolyGhostty/Inbox/HolyBriefTriage.swift`
-- `macos/Sources/HolyGhostty/Inbox/HolyBriefViews.swift`
 
-The Inbox panel (`⌘P`, `View ▸ Inbox Panel`) is one pane for everything
-waiting on a human.
+The right dock (`⌘P`, `View ▸ Inbox Panel`) is a GitHub-only attention view
+with exactly two scopes: the focused repository and all repositories. The
+focused tab name and loaded-command directory come from the selected
+session's authoritative ownership repository root.
 
-Engine. `HolyInboxEngine` polls every registered source on a cadence — 75
-seconds while the panel is visible, 5 minutes hidden so the unread badge
-cannot lie — plus immediately on panel open, app foreground, and manual
-refresh. Sources refresh independently (a slow GitHub sweep never holds
-local rows hostage), sections render in registration order regardless of
-completion order, and per-source refreshes are serialized with coalescing.
+Engine. `HolyInboxEngine` polls the registered GitHub source every 75 seconds
+while the panel is visible and every 5 minutes while hidden, plus immediately
+on panel open, app foreground, and manual refresh. Refreshes are serialized
+with coalescing. The focused tab filters the global sweep by the selected
+repository's GitHub slug; the All tab renders the complete sweep.
 
-Sources:
+GitHub attention (`HolyGitHubInboxSource`) renders your-move rows first and
+then waiting or bot-digest sections. Loaded action commands open in a fresh
+shell as visible, unsubmitted input, and only when Holy has the authoritative
+local repository root.
 
-- GitHub attention (`HolyGitHubInboxSource`): needs-review rows first, then
-  maintainer sweeps (`maintainer_unreviewed`, `maintainer_review_stale`);
-  bot authors collapse to one digest per repository.
-- In-app alerts (`HolyAlertInboxSource` over `HolyInboxAlertStore`): alert
-  deliveries are recorded to the `alerts` table; acknowledge writes
-  `acknowledged_at` and the row leaves the pane on the next refresh.
-- Manna board triage (`HolyMannaInboxSource`): rows from the repository's
-  agent-do manna board with human decisions prominent. Manna ids are
-  validated against manna's own id alphabet (`mn-` plus lowercase
-  `[a-z0-9]`) before any id reaches an executed command's stdin, and a
-  glance never mutates the board.
-
-Brief. `HolyBriefFeed` runs `agent-do brief holy --json` as one composite
-call and publishes the parsed payload (answer paragraph, threads,
-suggestions); `HolyBriefContract` parses it fail-closed against contract
-version 1, and `HolyBriefTriage` is a pure mapping deciding which threads
-earn the Needs-me drawer versus Library inventory. The brief is not an
-engine source; the engine keeps carrying the Library sources.
+Alerts are not a dock source. `HolySessionAlertCoordinator` continues to fire
+native notifications and records delivery history through
+`HolyInboxAlertStore`; the `alerts` table remains. Manna belongs to the native
+board workspace, not the GitHub dock. The retired `brief holy` renderer and
+its contract are not part of Holy.
 
 ## 10. Workspace Store And Orchestration
 
@@ -771,7 +756,7 @@ Core SQLite connection wrapper using the system `SQLite3` framework directly. Co
 - `macos/Sources/HolyGhostty/Database/HolyDatabaseMigrator.swift`
 - `macos/Sources/HolyGhostty/Database/HolyDatabaseModels.swift`
 
-Sequential schema migration runner with 8 migrations:
+Sequential schema migration runner with 10 migrations:
 
 1. Full initial schema (sessions, events, git_snapshots, templates, alerts, annotations, indexes, and `agent-sessions` compatibility views)
 2. `latest_budget_json` column on sessions
@@ -781,8 +766,10 @@ Sequential schema migration runner with 8 migrations:
 6. `remote_hosts` table
 7. `launch_profiles` table
 8. bounded-retention tombstones (`sessions.purge_pending_at`) and compatibility-view filtering
+9. first-class harness session identity and lookup index
+10. retirement of the four `agent_sessions_*_v1` compatibility views
 
-Current schema version: 8.
+Current schema version: 10.
 
 ### Database paths
 
@@ -796,16 +783,14 @@ Database location:
 
 Also defines the legacy JSON snapshot path for migration discovery.
 
-### Compatibility views
+### Retired compatibility views
 
-The schema includes four read-only SQL views forming the `agent-sessions` read-model contract:
-
-- `agent_sessions_sessions_v1`
-- `agent_sessions_resume_targets_v1`
-- `agent_sessions_events_v1`
-- `agent_sessions_annotations_v1`
-
-All four filter out purge-pending sessions. See `docs/holy-ghostty/agent-sessions-interoperability.md` for the contract and for the reverse direction, where Holy's crash restore consumes the `agent-sessions` `resolve-batch` CLI as its conversation oracle.
+Migration 10 drops the four historical `agent_sessions_*_v1` read-model
+views. Holy owns its archive directly, so no planned `agent-sessions`
+provider reads Holy's database. The remaining interoperability boundary is
+one-way and explicit: crash restore invokes `agent-sessions resolve-batch`
+as its conversation oracle. See
+`docs/holy-ghostty/agent-sessions-interoperability.md`.
 
 Additional persisted tables:
 
@@ -1038,8 +1023,9 @@ through the agent-state gate described in section 6A, with deterministic
 request identities and a persisted watermark so duplicates and restarts never
 re-alert.
 
-Alert deliveries are also recorded to the `alerts` table and surface in the
-Human Inbox (section 9B), where each row stays until explicitly acknowledged.
+Alert deliveries are also recorded to the `alerts` table as history. Native
+notifications and app-attention requests are the user-facing surfaces; alerts
+do not appear in the GitHub dock described in section 9B.
 
 ## 22. Views And User-Facing Surfaces
 
@@ -1125,7 +1111,8 @@ Per-shutdown restore groups with recency washes, per-row states, the candidate p
 
 - `macos/Sources/HolyGhostty/Inbox/HolyInboxPanelView.swift`
 
-The Human Inbox pane: brief answer line, Needs-me drawer, and the Library sections (GitHub attention, alerts, manna triage). See section 9B.
+The GitHub attention dock has two tabs: the focused repository and the global
+sweep. See section 9B.
 
 ### Budget intelligence section
 
@@ -1235,7 +1222,7 @@ macos/Sources/HolyGhostty/
 ├── Domain/                 # Core data model, indicator policy, attention metadata
 ├── Events/                 # Event model and event repository
 ├── Git/                    # Git snapshot model and client
-├── Inbox/                  # Human Inbox engine, sources, brief feed, panel view
+├── Inbox/                  # GitHub attention engine, source, alert history store, panel view
 ├── Persistence/            # JSON persistence, DB persistence, retention policy, coders
 ├── Profiles/               # Launch profiles and default New target persistence
 ├── Remote/                 # Remote host registry, import, tmux discovery

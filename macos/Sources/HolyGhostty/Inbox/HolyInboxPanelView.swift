@@ -55,9 +55,8 @@ struct HolyWorkspaceRightPanelHost: View {
 
 // MARK: - Inbox panel
 
-/// The inbox for humans: every row is addressed to Erik, actionable, and
-/// self-clearing when reality changes. The pane shows what the terminal
-/// cannot — cross-repo attention state — with minimal chrome.
+/// GitHub attention for the focused repository or every repository. Rows are
+/// actionable and leave when the next GitHub sweep says reality changed.
 struct HolyInboxPanelView: View {
     @ObservedObject var store: HolyWorkspaceStore
     @ObservedObject var engine: HolyInboxEngine
@@ -67,16 +66,15 @@ struct HolyInboxPanelView: View {
     @State private var expandedOverrides: [String: Bool] = [:]
     /// Expanded digest rows (bot PRs per repo).
     @State private var expandedDigestRowIDs: Set<String> = []
-    /// The lens. Text filters every rendered row; Enter routes mn-ids to the
-    /// board, #N to the focused repo's PR, prose to `brief ask`.
+    /// The lens filters rendered PR rows. Enter on #N opens that pull request
+    /// in the focused repository.
     @State private var lensText = ""
 
-    /// Erik's spec, 2026-08-12, replacing the brief-instrument experiment:
-    /// the default view is THIS PROJECT (its GitHub attention + its manna +
-    /// alerts); one tab away is ALL GITHUB (every PR needing him anywhere).
+    /// The right dock has exactly two GitHub scopes: the focused repository
+    /// and the global sweep.
     enum Tab: String, CaseIterable {
         case project
-        case githubAll
+        case all
     }
 
     @State private var tab: Tab = .project
@@ -100,7 +98,7 @@ struct HolyInboxPanelView: View {
                     switch tab {
                     case .project:
                         projectSections
-                    case .githubAll:
+                    case .all:
                         globalGitHubSections
                     }
                 }
@@ -122,7 +120,7 @@ struct HolyInboxPanelView: View {
     private var tabPicker: some View {
         HStack(spacing: 2) {
             tabButton(.project, title: focusedProjectName ?? "This project")
-            tabButton(.githubAll, title: "All GitHub")
+            tabButton(.all, title: "All")
             Spacer()
         }
         .padding(.horizontal, 10)
@@ -167,8 +165,8 @@ struct HolyInboxPanelView: View {
     private var projectSections: some View {
         let lens = lensText.trimmingCharacters(in: .whitespaces).lowercased()
 
-        // The focused repo's GitHub attention. No slug (no remote, detached
-        // session) renders no GitHub here — All GitHub is one tab away.
+        // No slug (no remote, detached session) renders no project rows. The
+        // global GitHub sweep remains one tab away.
         ForEach(engine.sections.filter { $0.sourceID == HolyGitHubInboxSectioner.sourceID }) { section in
             let rows = section.rows.filter {
                 rowBelongsToFocusedRepo($0) && lensMatches($0.title + " " + ($0.subtitle ?? ""), lens)
@@ -192,27 +190,6 @@ struct HolyInboxPanelView: View {
             }
         }
 
-        // The focused project's board, whole.
-        ForEach(engine.sections.filter { $0.sourceID == HolyMannaInboxSectioner.sourceID }) { section in
-            let rows = section.rows.filter { lensMatches($0.title + " " + ($0.subtitle ?? ""), lens) }
-            sectionHeader(section, visibleCount: rows.count)
-            if isExpanded(section) {
-                ForEach(rows) { row in
-                    rowView(row, in: section)
-                }
-            }
-        }
-
-        // Alerts are already scoped to this machine's sessions.
-        ForEach(engine.sections.filter { $0.sourceID == "alerts" }) { section in
-            let rows = section.rows.filter { lensMatches($0.title, lens) }
-            sectionHeader(section, visibleCount: rows.count)
-            if isExpanded(section) {
-                ForEach(rows) { row in
-                    rowView(row, in: section)
-                }
-            }
-        }
     }
 
     // MARK: All GitHub
@@ -245,12 +222,15 @@ struct HolyInboxPanelView: View {
         lens.isEmpty || haystack.lowercased().contains(lens)
     }
 
-    private var focusedBoardPath: String? {
-        HolyMannaInboxSource.repositoryRoots(focused: store.selectedSession).first
+    private var focusedProjectName: String? {
+        Self.projectName(repositoryRoot: store.selectedSession?.ownership.repositoryRoot)
     }
 
-    private var focusedProjectName: String? {
-        focusedBoardPath.map { URL(fileURLWithPath: $0).lastPathComponent }
+    static func projectName(repositoryRoot: String?) -> String? {
+        guard let root = repositoryRoot?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !root.isEmpty else { return nil }
+        let name = URL(fileURLWithPath: root).lastPathComponent
+        return name.isEmpty ? nil : name
     }
 
     // MARK: Lens
@@ -260,7 +240,7 @@ struct HolyInboxPanelView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(HolyGhosttyTheme.textTertiary)
-            TextField("Search or ask…", text: $lensText)
+            TextField("Search pull requests…", text: $lensText)
                 .textFieldStyle(.plain)
                 .font(.system(size: 10.5))
                 .foregroundStyle(HolyGhosttyTheme.textPrimary)
@@ -280,30 +260,18 @@ struct HolyInboxPanelView: View {
         .frame(height: 26)
     }
 
-    /// Enter routes by shape: a manna id opens the board row in a shell
-    /// (typed, read-only verb), #N opens the focused repo's PR, anything
-    /// else becomes a `brief ask` question typed into a shell.
+    /// Enter on #N opens that pull request in the focused repository. Other
+    /// text remains a filter; the dock does not route board or brief commands.
     private func routeLens() {
         let input = lensText.trimmingCharacters(in: .whitespaces)
         guard !input.isEmpty else { return }
 
-        if HolyMannaInboxSectioner.isValidIssueID(input) {
-            if let root = focusedBoardPath,
-               let url = HolyMannaInboxSectioner.spawnURL(boardRoot: root, issueID: input) {
-                openURL(url)
-            }
-            return
-        }
         if input.hasPrefix("#"), let number = Int(input.dropFirst()), number > 0 {
             if let repo = focusedSlug,
                let url = URL(string: "https://github.com/\(repo)/pull/\(number)") {
                 openURL(url)
+                lensText = ""
             }
-            return
-        }
-        if let url = HolyBriefSpawn.askURL(question: input, workingDirectory: focusedBoardPath) {
-            openURL(url)
-            lensText = ""
         }
     }
 
@@ -317,7 +285,7 @@ struct HolyInboxPanelView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Text("Inbox")
+            Text("GitHub")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(HolyGhosttyTheme.textPrimary)
 
@@ -347,7 +315,7 @@ struct HolyInboxPanelView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(HolyGhosttyTheme.textSecondary)
-            .help("Refresh inbox")
+            .help("Refresh GitHub")
 
             Button {
                 store.toggleInboxPanel()
@@ -492,10 +460,10 @@ struct HolyInboxPanelView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(HolyGhosttyTheme.textSecondary)
             } else {
-                Text("Nothing needs you")
+                Text("No GitHub attention")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(HolyGhosttyTheme.textSecondary)
-                Text("Rows appear when a PR or alert waits on you, and leave when reality clears them.")
+                Text("Rows appear when a pull request needs you, and leave when GitHub clears them.")
                     .font(.system(size: 10))
                     .foregroundStyle(HolyGhosttyTheme.textTertiary)
                     .multilineTextAlignment(.center)
@@ -731,6 +699,6 @@ struct HolyInboxToggleButton: View {
                 ? HolyGhosttyTheme.halo
                 : HolyGhosttyTheme.textSecondary
         )
-        .help("Inbox — what needs you (⌘P)")
+        .help("GitHub attention (⌘P)")
     }
 }

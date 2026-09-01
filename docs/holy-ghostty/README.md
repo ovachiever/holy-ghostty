@@ -316,24 +316,19 @@ Restore resumes the exact agent conversation:
 The identity guarantee is the argv itself: once a row restores, nothing
 re-resolves behind it.
 
-## Human Inbox
+## GitHub Attention Dock
 
-`Command-P` or `View ▸ Inbox Panel` toggles the Human Inbox: one pane for
-everything waiting on a human.
+`Command-P` or `View ▸ Inbox Panel` toggles a GitHub-only right dock. The
+focused-repository tab filters the global GitHub sweep to the selected
+session's owned repository; the All tab shows every repository. Needs-review
+items lead, maintainer sweeps follow, and bot authors collapse into one digest
+per repository.
 
-Sections:
-
-- GitHub attention: needs-review items first, then maintainer sweeps, with
-  bot authors collapsed into one digest per repository.
-- In-app alerts: delivered alerts stay listed until explicitly acknowledged.
-- Manna board triage: rows from the repository's agent-do manna board, with
-  human decisions listed prominently. Ids are validated against manna's own
-  alphabet before any board command runs.
-
-Rows clear themselves when the underlying condition clears. The unread badge
-refreshes on a five-minute cadence while the panel is hidden — and
-immediately on panel open, app foreground, or manual refresh — so it cannot
-lie about what is waiting.
+Rows clear when the next GitHub sweep says the underlying condition cleared.
+The unread badge refreshes on a five-minute cadence while the panel is hidden,
+and immediately on panel open, app foreground, or manual refresh. Native alert
+notifications continue outside this dock, with delivery history retained in
+the database.
 
 ## Creating Sessions
 
@@ -423,7 +418,7 @@ Persistence includes:
 - Latest budget telemetry.
 - Task records.
 - Launch profiles and the default `New` profile.
-- Compatibility views.
+- Alert delivery history.
 
 The database uses schema migrations and WAL.
 

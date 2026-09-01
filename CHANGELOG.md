@@ -49,6 +49,16 @@ pause, before one of them lands.
   snapshot goes stale, so the guard works without the app. Disabling
   removes only Holy's hooks and helpers and leaves `usage/` history on disk.
 
+### Changed
+
+- The right dock is now GitHub only, with one tab for the focused repository
+  and one for all repositories. The old Manna rows, in-dock alert rows, and
+  dormant `brief holy` renderer are retired. Native notifications still fire,
+  and their delivery history remains in the `alerts` table.
+- Database migration 10 removes the unused `agent_sessions_*_v1` read-model
+  views. Holy owns its archive natively; `agent-sessions` remains the external
+  conversation oracle used by crash restore.
+
 ## 0.50 (2026-08-22)
 
 A shutdown is no longer a loss, and attention has a home: whenever the tmux

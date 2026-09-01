@@ -177,6 +177,20 @@ struct HolyGitHubStageTests {
         #expect(pathless.first?.rows.first?.commandSpawnURL == nil)
     }
 
+    @Test func loadedCommandCannotSubmitControlCharactersAndPreservesPlus() throws {
+        let url = try #require(HolyInboxCommandSpawn.typedCommandURL(
+            command: "  agent-do gh merge +1\r\n",
+            title: "Merge #1",
+            workingDirectory: "/Users/erik/Custom-Coding/vms.io"
+        ))
+        let query = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+
+        #expect(query.contains(.init(name: "initialInput", value: "agent-do gh merge +1")))
+        #expect(query.contains(.init(
+            name: "workingDirectory", value: "/Users/erik/Custom-Coding/vms.io"
+        )))
+    }
+
     // MARK: - Remote slug rail
 
     @Test func remoteSlugQueryRidesTheBatchModeRailWithAQuotedRoot() {

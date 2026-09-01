@@ -512,7 +512,7 @@ enum HolyGitHubInboxSectioner {
            let path = focusedRepoPath,
            let slug = focusedRepoSlug,
            item.repo == slug {
-            commandSpawnURL = HolyBriefSpawn.typedCommandURL(
+            commandSpawnURL = HolyInboxCommandSpawn.typedCommandURL(
                 command: command,
                 title: "\(item.nextAction?.verb ?? "PR") #\(item.number)",
                 workingDirectory: path
@@ -753,29 +753,10 @@ final class HolyGitHubInboxSource: HolyInboxRowSource {
         return environment
     }
 
-    /// The voice key, captured from the login shell (Erik's .zshenv) because
-    /// the macOS keychain refuses headless writes after a reboot and
-    /// agent-do's creds resolution reads the environment before its store.
-    /// Deliberately NOT part of `sharedSubprocessEnvironment`: only the
-    /// brief invocation needs it, and the gh sweep's process tree must not
-    /// inherit a credential it never uses (security review 2026-08-11).
-    /// The value enters that one child environment; nothing logs it.
-    static let anthropicKeyFromLoginShell = Task<String?, Never> {
-        let result = await HolyRestoreProcessRunner.run(
-            executablePath: "/bin/zsh",
-            arguments: ["-lc", #"printf %s "$ANTHROPIC_API_KEY""#],
-            timeout: loginShellProbeTimeout
-        )
-        guard case let .success(output) = result, output.exitCode == 0 else { return nil }
-        let key = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        return key.isEmpty ? nil : key
-    }
-
     /// One PATH lookup per app lifetime, matching the resolve client: a Dock
     /// launch inherits a login (non-interactive) shell PATH, so probe through
     /// `/bin/zsh -lc` and fall back to well-known install locations.
-    /// Internal, not private: HolyBriefFeed runs the same binary.
-    static let sharedBinaryPath = Task<String?, Never> {
+    private static let sharedBinaryPath = Task<String?, Never> {
         let result = await HolyRestoreProcessRunner.run(
             executablePath: "/bin/zsh",
             arguments: ["-lc", "command -v \(binaryName)"],

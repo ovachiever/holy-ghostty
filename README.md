@@ -40,7 +40,7 @@ The app currently supports:
 - Durable SQLite workspace persistence with migrations, WAL, and event history.
 - Session archive, search, relaunch, and recovery context.
 - Session Restore: per-shutdown restore groups after any tmux server death, resuming the exact agent conversation for Claude, Codex, and OpenCode sessions.
-- Human Inbox panel (`⌘P`) joining GitHub attention, in-app alerts, and manna board triage.
+- GitHub attention dock (`⌘P`) with focused-repository and all-repositories tabs.
 - Per-session notes, shown in the roster and in Session Restore.
 - Four roster layouts: Classic, Calm, Triage, and Focus.
 - Launch templates and external task records.
@@ -250,15 +250,15 @@ labeled shell-only recreate. Machine-titled helper shells are collapsed
 inside their group, and rows carry the session's note. The restored identity
 is the argv itself; nothing re-resolves after restore.
 
-## Human Inbox
+## GitHub Attention Dock
 
-`⌘P` or `View ▸ Inbox Panel` opens the Human Inbox: one pane for everything
-waiting on a human. It joins GitHub attention (needs-review first, then
-maintainer sweeps and per-repo bot digests), in-app alerts with explicit
-acknowledge, and manna board triage with human decisions listed prominently,
-for repositories carrying an agent-do manna board. Rows clear themselves
-when the underlying condition clears, and the unread badge stays honest on a
-five-minute hidden refresh cadence.
+`⌘P` or `View ▸ Inbox Panel` opens a GitHub-only right dock. The focused tab
+shows pull-request attention for the selected session's owned repository; the
+All tab shows every repository. Needs-review items lead, maintainer sweeps
+follow, and bot authors collapse into per-repository digests. Rows clear when
+the next GitHub sweep says the underlying condition cleared, and the unread
+badge refreshes every five minutes while the dock is hidden. Alerts continue
+through native notifications and retain delivery history in SQLite.
 
 ## Requirements
 

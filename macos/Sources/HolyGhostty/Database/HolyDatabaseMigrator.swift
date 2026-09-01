@@ -68,6 +68,11 @@ enum HolyDatabaseMigrator {
             label: "Harness session identity keystone",
             statements: schemaV9
         ),
+        .init(
+            version: 10,
+            label: "Retire agent-sessions compatibility views",
+            statements: schemaV10
+        ),
     ]
 
     private static let schemaV1: [String] = [
@@ -494,5 +499,12 @@ enum HolyDatabaseMigrator {
         CREATE INDEX IF NOT EXISTS sessions_harness_session_id_idx
         ON sessions(harness_session_id);
         """,
+    ]
+
+    private static let schemaV10: [String] = [
+        "DROP VIEW IF EXISTS agent_sessions_sessions_v1;",
+        "DROP VIEW IF EXISTS agent_sessions_resume_targets_v1;",
+        "DROP VIEW IF EXISTS agent_sessions_events_v1;",
+        "DROP VIEW IF EXISTS agent_sessions_annotations_v1;",
     ]
 }
