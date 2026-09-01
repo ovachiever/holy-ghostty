@@ -31,6 +31,42 @@ struct HolySessionRuntimeInferenceTests {
         #expect(Self.inferredRuntime(preview: "gpt-5.1 high") == .codex)
     }
 
+    @Test func explicitLaunchRuntimeOutvotesStaleScreenInference() {
+        #expect(
+            HolySession.resolvedDisplayRuntimeForTesting(
+                launchRuntime: .codex,
+                inferredRuntime: .claude
+            ) == .codex
+        )
+        #expect(
+            HolySession.inferredRuntimeForTesting(
+                launchRuntime: .codex,
+                preview: "⏵⏵ auto mode on · ← for agents"
+            ) == nil
+        )
+    }
+
+    @Test func persistedRuntimeUpgradeClearsOnlyTheStaleLatch() {
+        #expect(
+            HolySession.reconciledInferredRuntimeForTesting(
+                launchRuntime: .codex,
+                currentInferredRuntime: .claude,
+                detectedRuntime: nil
+            ) == nil
+        )
+        #expect(
+            HolySession.reconciledInferredRuntimeForTesting(
+                launchRuntime: .shell,
+                currentInferredRuntime: .claude,
+                detectedRuntime: nil
+            ) == .claude
+        )
+    }
+
+    @Test func sharedShortcutHintAloneDoesNotInferClaude() {
+        #expect(Self.inferredRuntime(preview: "? for shortcuts") == nil)
+    }
+
     // Erik's field report 2026-07-28: the agent-sessions browser TUI — a
     // python program whose whole screen is DATA about Claude Code sessions —
     // reclassified its shell session as Claude through prose substrings

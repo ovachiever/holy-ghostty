@@ -269,6 +269,38 @@ struct HolySessionLiveStatusTests {
         #expect(HolySession.backgroundShellCountForTesting(fromActiveContents: pane) == 1)
     }
 
+    // MARK: - Codex runtime chrome (v0.151, captured 2026-09-01)
+
+    // Exact live loading frame from session 7A72011F. The shortcut hint is
+    // shared with Claude; the Codex-owned prompt line must win before it.
+    @Test func codexLoadingFrameDoesNotFallIntoTheClaudeLane() {
+        let pane = [
+            "│ model:       loading   /model to change   │",
+            "│ directory:   ~/Custom-Coding/holy-ghostty │",
+            "│ permissions: YOLO mode                    │",
+            "╰───────────────────────────────────────────╯",
+            "› Ask Codex to do anything",
+            "? for shortcuts",
+        ].joined(separator: "\n")
+
+        #expect(HolySession.inferredRuntimeForTesting(preview: pane) == .codex)
+    }
+
+    // Exact live queue/context footer from session 7A72011F, sequence 5.
+    @Test func codexQueueContextFooterInfersCodex() {
+        let footer = "tab to queue message                                                                                                                                                                                                                                                100% context left"
+        #expect(HolySession.inferredRuntimeForTesting(preview: footer) == .codex)
+    }
+
+    @Test func codexBannerMustOwnItsLine() {
+        #expect(HolySession.inferredRuntimeForTesting(preview: "OpenAI Codex") == .codex)
+        #expect(
+            HolySession.inferredRuntimeForTesting(
+                preview: "Harness: OpenAI Codex session browser row"
+            ) == nil
+        )
+    }
+
     // MARK: - Codex background-terminal census (footer pinned 2026-08-10)
 
     // Fixture captured verbatim from the live pane 2026-08-10: the census

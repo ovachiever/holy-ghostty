@@ -233,7 +233,10 @@ final class HolySession: ObservableObject, Identifiable {
     }
 
     var displayRuntime: HolySessionRuntime {
-        inferredRuntime ?? runtime
+        Self.resolvedDisplayRuntime(
+            launchRuntime: runtime,
+            inferredRuntime: inferredRuntime
+        )
     }
 
     var displayTitle: String {
@@ -643,6 +646,7 @@ final class HolySession: ObservableObject, Identifiable {
         if record.launchSpec.runtime == .shell,
            discoveredLaunchSpec.runtime != .shell {
             record.launchSpec.runtime = discoveredLaunchSpec.runtime
+            reconcileInferredRuntime(detectedRuntime: nil)
             changed = true
         }
 
@@ -810,7 +814,7 @@ final class HolySession: ObservableObject, Identifiable {
         // activity, roster invalidations, or persistence while they browse it.
         let activeContents = surfaceView.cachedActiveContents.get()
         let nextPreview = Self.previewText(from: activeContents)
-        if let nextInferredRuntime = Self.inferredRuntime(
+        let detectedRuntime = Self.inferredRuntime(
             launchRuntime: runtime,
             surfaceTitle: surfaceView.title,
             preview: nextPreview,
@@ -820,12 +824,10 @@ final class HolySession: ObservableObject, Identifiable {
             tmuxSessionName: record.launchSpec.tmux?.sessionName,
             tmuxSocketName: record.launchSpec.tmux?.socketName,
             objective: record.launchSpec.objective
-        ),
-           inferredRuntime != nextInferredRuntime {
-            inferredRuntime = nextInferredRuntime
-        }
+        )
+        reconcileInferredRuntime(detectedRuntime: detectedRuntime)
 
-        let effectiveRuntime = inferredRuntime ?? runtime
+        let effectiveRuntime = displayRuntime
         var modelSelectionChanged = false
         if effectiveRuntime == .claude {
             // Claude's explicit status-line integration writes its structured
@@ -968,6 +970,34 @@ final class HolySession: ObservableObject, Identifiable {
 
         tmuxModelLabelDelivery.request(normalizedLabel)
         startTmuxModelLabelSyncIfNeeded()
+    }
+
+    private func reconcileInferredRuntime(detectedRuntime: HolySessionRuntime?) {
+        let nextRuntime = Self.reconciledInferredRuntime(
+            launchRuntime: runtime,
+            currentInferredRuntime: inferredRuntime,
+            detectedRuntime: detectedRuntime
+        )
+        if inferredRuntime != nextRuntime {
+            inferredRuntime = nextRuntime
+        }
+    }
+
+    private static func resolvedDisplayRuntime(
+        launchRuntime: HolySessionRuntime,
+        inferredRuntime: HolySessionRuntime?
+    ) -> HolySessionRuntime {
+        guard launchRuntime == .shell else { return launchRuntime }
+        return inferredRuntime ?? launchRuntime
+    }
+
+    private static func reconciledInferredRuntime(
+        launchRuntime: HolySessionRuntime,
+        currentInferredRuntime: HolySessionRuntime?,
+        detectedRuntime: HolySessionRuntime?
+    ) -> HolySessionRuntime? {
+        guard launchRuntime == .shell else { return nil }
+        return detectedRuntime ?? currentInferredRuntime
     }
 
     private func startTmuxModelLabelSyncIfNeeded() {
@@ -2319,12 +2349,13 @@ final class HolySession: ObservableObject, Identifiable {
 
 #if DEBUG
     static func inferredRuntimeForTesting(
+        launchRuntime: HolySessionRuntime = .shell,
         preview: String = "",
         command: String? = nil,
         surfaceTitle: String = ""
     ) -> HolySessionRuntime? {
         inferredRuntime(
-            launchRuntime: .shell,
+            launchRuntime: launchRuntime,
             surfaceTitle: surfaceTitle,
             preview: preview,
             command: command,
@@ -2333,6 +2364,28 @@ final class HolySession: ObservableObject, Identifiable {
             tmuxSessionName: "holy-shell0",
             tmuxSocketName: nil,
             objective: nil
+        )
+    }
+
+    static func resolvedDisplayRuntimeForTesting(
+        launchRuntime: HolySessionRuntime,
+        inferredRuntime: HolySessionRuntime?
+    ) -> HolySessionRuntime {
+        resolvedDisplayRuntime(
+            launchRuntime: launchRuntime,
+            inferredRuntime: inferredRuntime
+        )
+    }
+
+    static func reconciledInferredRuntimeForTesting(
+        launchRuntime: HolySessionRuntime,
+        currentInferredRuntime: HolySessionRuntime?,
+        detectedRuntime: HolySessionRuntime?
+    ) -> HolySessionRuntime? {
+        reconciledInferredRuntime(
+            launchRuntime: launchRuntime,
+            currentInferredRuntime: currentInferredRuntime,
+            detectedRuntime: detectedRuntime
         )
     }
 
@@ -2457,10 +2510,11 @@ final class HolySession: ObservableObject, Identifiable {
         // Claude (2026-07-28: the agent-sessions browser TUI reclassified
         // its shell session through exactly those substrings). Real evidence
         // is chrome only Claude Code itself draws: the ⏵⏵ mode footer, the
-        // welcome banner, the shortcut hint, or a tmux status bar whose
-        // ACTIVE window is literally running claude.
+        // welcome banner, or a tmux status bar whose ACTIVE window is
+        // literally running claude. "? for shortcuts" is shared with Codex
+        // v0.151 and therefore carries no runtime authority by itself.
         evidence.range(
-            of: #"(?m)^\s*⏵⏵\s|^\s*[✢✳✶✻✽·]?\s*welcome to claude code|^\s*\? for shortcuts\b|\[[^\[\]\n]*:claude(\.[a-z0-9]+)?\*"#,
+            of: #"(?m)^\s*⏵⏵\s|^\s*[✢✳✶✻✽·]?\s*welcome to claude code|\[[^\[\]\n]*:claude(\.[a-z0-9]+)?\*"#,
             options: .regularExpression
         ) != nil
     }
@@ -2468,9 +2522,12 @@ final class HolySession: ObservableObject, Identifiable {
     private static func containsCodexScreenMarker(_ evidence: String) -> Bool {
         // Line-anchored for the same reason as the Claude markers above:
         // "OpenAI Codex" as mid-line prose is something browsers print about
-        // sessions; the real banner and CLI chrome start their own lines.
+        // sessions; the real banner, prompt, and footer chrome own their
+        // entire lines. Codex v0.151 can show its queue/context footer before
+        // the model footer appears, while it still shares "? for shortcuts"
+        // with Claude.
         evidence.range(
-            of: #"(?m)^\s*openai codex\b|^\s*codex cli\b|^\s*codex\s*$|\[[^\[\]\n]*:codex(\.[a-z0-9]+)?\*"#,
+            of: #"(?m)^[ \t]*openai codex\b|^[ \t]*codex cli\b|^[ \t]*codex[ \t]*$|^[ \t]*›[ \t]+ask codex to do anything[ \t]*$|^[ \t]*tab to queue message(?:[ \t]+\d{1,3}%[ \t]+context left)?[ \t]*$|^[ \t]*\d{1,3}%[ \t]+context left[ \t]*$|\[[^\[\]\n]*:codex(\.[a-z0-9]+)?\*"#,
             options: .regularExpression
         ) != nil
     }
