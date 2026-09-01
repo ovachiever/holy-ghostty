@@ -394,9 +394,11 @@ enum HolyClaudeModelBridge {
 
     [ -n "$model" ] || exit 0
 
+    # The tmux label carries model and effort only: the green bar already
+    # shows machine-wide usage in its centred segment, and this session's
+    # own numbers belong to the printed status row inside the pane.
     label=$model
     [ -z "$effort" ] || label="$label · $effort"
-    label="$label$usage_suffix"
 
     if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
       # Model and effort are restricted above to a small, quote-free alphabet.
@@ -407,7 +409,7 @@ enum HolyClaudeModelBridge {
         2>/dev/null || true
     fi
 
-    printf 'Model · %s\n' "$label"
+    printf 'Model · %s%s\n' "$label" "$usage_suffix"
     """#
 
     private static func loadSettings(

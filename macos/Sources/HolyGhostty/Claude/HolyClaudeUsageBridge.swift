@@ -609,7 +609,10 @@ enum HolyClaudeUsageBridge {
             percent = bucket.get("percent")
             if not isinstance(percent, (int, float)):
                 continue
-            text = "%s %d%%" % (short_label(bucket.get("key") or "?"), int(round(percent)))
+            # tmux strftimes the fully expanded status line, so a literal
+            # percent sign must arrive doubled or it is eaten as a (bad)
+            # conversion. The sanitized label alphabet excludes %.
+            text = "%s %d%%%%" % (short_label(bucket.get("key") or "?"), int(round(percent)))
             level = bucket_level(bucket, policy, now)
             if level in ("critical", "capped"):
                 chips.append("#[fg=white,bg=red,bold] %s #[default]" % text)

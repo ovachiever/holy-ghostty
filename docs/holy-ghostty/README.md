@@ -192,8 +192,10 @@ numbers are carried forward. Click the meter for the popover:
   account is live; the meter follows the keychain.
 - `Refresh`, and `Wrap up all sessions` / `Cancel wrap-up`.
 
-With the Claude Model Indicator enabled, each session's status line also
-reads `· 5h N% · wk N%` after the model name.
+With the Claude Model Indicator enabled, the status row printed inside
+each Claude pane reads `· 5h N% · wk N%` after the model name — the one
+place per-session numbers show. The green bar's model label stays model
+and effort only, so usage appears in the bar exactly once, centred.
 
 ### Levels
 

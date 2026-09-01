@@ -38,7 +38,8 @@ pause, before one of them lands.
   lead window or until the keychain account changes.
 - The Claude Model Indicator status line now records each session's own
   5-hour and weekly windows to `usage/sessions/<session_id>.json` and shows
-  `· 5h N% · wk N%`; the guard prefers that reading, so a session still
+  `· 5h N% · wk N%` in the pane's printed status row (the bar's model
+  label stays model-only); the guard prefers that reading, so a session still
   running under a previous account after `/login` elsewhere is judged by
   its own numbers.
 - macOS notifications on each window's first upward level crossing

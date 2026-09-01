@@ -335,7 +335,10 @@ Status line. The Claude Model Indicator helper extracts
 `resets_at`) from the status-line JSON and, when `usage/sessions/` exists,
 writes `{t, session_id, pane, cwd, five_hour, seven_day}` to
 `sessions/<session_id>.json` by atomic rename and appends `· 5h N% · wk N%`
-to the model label. `SessionEnd` removes the file. These numbers come from
+to the printed status row only — the tmux `@holy_model_label` stays model
+and effort, so the bar never shows usage twice. Percent signs bound for
+the bar are doubled (`%%`) because tmux strftimes the fully expanded
+status line. `SessionEnd` removes the file. These numbers come from
 the session's own API responses, so they stay right for a session running
 under an account the keychain has since left.
 

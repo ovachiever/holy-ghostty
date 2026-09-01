@@ -318,13 +318,13 @@ struct HolyClaudeUsageGuardTests {
         #expect(lines.count >= 3)
         // Calm window stays plain; warn becomes a yellow chip; critical a red one.
         #expect(lines[0].contains("⌁ claude"))
-        #expect(lines[0].contains("5h 30%"))
+        #expect(lines[0].contains("5h 30%%"))
         #expect(!lines[0].contains("bg=yellow,bold] 5h"))
-        #expect(lines[0].contains("#[fg=black,bg=yellow,bold] wk \(Int(policy.warnPercent + 1))% #[default]"))
-        #expect(lines[0].contains("#[fg=white,bg=red,bold] Fable \(Int(policy.criticalPercent + 1))% #[default]"))
+        #expect(lines[0].contains("#[fg=black,bg=yellow,bold] wk \(Int(policy.warnPercent + 1))%% #[default]"))
+        #expect(lines[0].contains("#[fg=white,bg=red,bold] Fable \(Int(policy.criticalPercent + 1))%% #[default]"))
         // A hostile scoped-model name from the API cannot smuggle tmux format
         // syntax into the #{E:...}-expanded option: #( would run a command.
-        #expect(lines[0].contains("FawhoamiHble 10%"))
+        #expect(lines[0].contains("FawhoamiHble 10%%"))
         #expect(!lines[0].contains("#(whoami)"))
         #expect(!lines[0].contains("%H"))
         // No numbers, no segment: the green bar returns to stock.

@@ -181,7 +181,8 @@ trailing tenth of the window) and a projected time-to-cap. Holy runs the
 probe once a minute and never touches the network itself. With the Claude
 Model Indicator enabled, the status line also records each session's own
 5-hour and weekly numbers to `usage/sessions/<session_id>.json` and shows
-them as `· 5h N% · wk N%`; that per-session reading stays correct for a
+them as `· 5h N% · wk N%` in the pane's own status row (the green bar
+keeps usage only in its centred segment); that reading stays correct for a
 session still running under a previous account after `/login` elsewhere,
 and the guard prefers it.
 
