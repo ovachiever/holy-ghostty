@@ -529,8 +529,13 @@ enum HolyAgentStateBridge {
     # an unpersisted event look committed.
     if [ "$latest_persisted" -eq 1 ] && [ "$finish_persisted" -eq 1 ]; then
       tty_path=${HOLY_AGENT_STATE_TTY:-/dev/tty}
+      # `-w /dev/tty` is true even for a process with no controlling
+      # terminal (a daemon-hosted background session), where the open
+      # itself fails with "Device not configured". Redirection errors are
+      # reported before a later 2>/dev/null takes effect, so the stderr
+      # redirect must come first to keep that noise out of hook output.
       if [ -w "$tty_path" ]; then
-        printf '\033Ptmux;\033\033]777;notify;com.holyghostty.agent-state.v1;%s\007\033\\' "$wire" > "$tty_path" 2>/dev/null || true
+        printf '\033Ptmux;\033\033]777;notify;com.holyghostty.agent-state.v1;%s\007\033\\' "$wire" 2>/dev/null > "$tty_path" || true
       fi
     fi
 

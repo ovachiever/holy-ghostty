@@ -239,6 +239,9 @@ class AppDelegate: NSObject,
         if case .needsRepair = HolyAgentStateBridgeInstaller.currentUserInstallationState() {
             _ = HolyAgentStateBridgeInstaller.installForCurrentUser()
         }
+        if case .needsRepair = HolyAgentStateBridgeInstaller.currentUserInstallationState() {
+            _ = HolyAgentStateBridgeInstaller.installForCurrentUser()
+        }
         refreshClaudeModelIndicatorMenu()
 
         // System settings overrides
