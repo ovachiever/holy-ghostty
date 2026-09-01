@@ -174,8 +174,9 @@ happens.
 
 ### What you see
 
-The green tmux bar carries the numbers, centred between the window list
-and the model label: `⌁ claude 5h 30% · wk 41% · Fable 79%`, the same in
+The green tmux bar reads: session name and the quoted pane title on the
+left, and on the right `⌁ claude 5h 30% · wk 41% · Fable 79%` beside the
+clock — the same in
 every session because the value is machine-global. Calm windows stay plain;
 a warn window is a yellow chip, critical or capped a red one; an active
 wrap-up prepends `⏸ WRAP UP`, and a probe that cannot reach the endpoint
@@ -194,8 +195,8 @@ numbers are carried forward. Click the meter for the popover:
 
 With the Claude Model Indicator enabled, the status row printed inside
 each Claude pane reads `· 5h N% · wk N%` after the model name — the one
-place per-session numbers show. The green bar's model label stays model
-and effort only, so usage appears in the bar exactly once, centred.
+place per-session numbers show; the bar itself carries neither model nor
+effort, so usage appears in the bar exactly once, beside the clock.
 
 ### Levels
 

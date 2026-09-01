@@ -335,8 +335,8 @@ Status line. The Claude Model Indicator helper extracts
 `resets_at`) from the status-line JSON and, when `usage/sessions/` exists,
 writes `{t, session_id, pane, cwd, five_hour, seven_day}` to
 `sessions/<session_id>.json` by atomic rename and appends `· 5h N% · wk N%`
-to the printed status row only — the tmux `@holy_model_label` stays model
-and effort, so the bar never shows usage twice. Percent signs bound for
+to the printed status row only — `@holy_model_label` is still published
+as a pane option but the bar no longer renders it. Percent signs bound for
 the bar are doubled (`%%`) because tmux strftimes the fully expanded
 status line. `SessionEnd` removes the file. These numbers come from
 the session's own API responses, so they stay right for a session running
@@ -401,12 +401,13 @@ Presentation. The probe publishes a styled segment to the tmux server as
 the global `@holy_usage_v1` option (`compose_segment`, mirroring the
 evaluator's levels; socket from `HOLY_TMUX_SOCKET`, default `holy`, binary
 from `HOLY_TMUX_BIN` or the usual install paths). The managed status
-config renders it centred: `managedTmuxStatusFormat` is tmux 3.7's default
-`status-format[0]` captured verbatim with one inserted
-`#[nolist align=centre]#{E:@holy_usage_v1}#[default]` block before the
-right-aligned range, set both in `managed-tmux.conf` and in the live
-option-set path, so an empty option leaves the bar byte-identical to
-stock. Warn buckets render as yellow chips, critical/capped as red, an
+options render it on the right: `managedTmuxStatusLeft` puts the session
+name and the quoted 21-column pane title on the left, and
+`managedTmuxStatusRight` is `#{?@holy_usage_v1,#{E:@holy_usage_v1} · ,}`
+plus the clock — no model or effort in the bar. Both are set in
+`managed-tmux.conf` and the live option-set path, which also unsets the
+retired custom `status-format[0]` so servers that carried the earlier
+centred layout heal on connect. An empty option collapses to clock-only. Warn buckets render as yellow chips, critical/capped as red, an
 active wrap-up prepends `⏸ WRAP UP`, staleness appends `(stale Nm)`.
 Disabling the guard clears the option (`clearTmuxUsageSegment`).
 `HolyClaudeUsageDetailView` is reached from the roster's `…` menu

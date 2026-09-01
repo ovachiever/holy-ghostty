@@ -181,8 +181,9 @@ trailing tenth of the window) and a projected time-to-cap. Holy runs the
 probe once a minute and never touches the network itself. With the Claude
 Model Indicator enabled, the status line also records each session's own
 5-hour and weekly numbers to `usage/sessions/<session_id>.json` and shows
-them as `· 5h N% · wk N%` in the pane's own status row (the green bar
-keeps usage only in its centred segment); that reading stays correct for a
+them as `· 5h N% · wk N%` in the pane's own status row — the bar itself
+carries no model or effort (the green bar
+keeps usage only beside the clock); that reading stays correct for a
 session still running under a previous account after `/login` elsewhere,
 and the guard prefers it.
 
@@ -207,8 +208,8 @@ app. Thresholds and cadence are
 `defaults write org.holyghostty.app holy.claudeUsage.warnPercent|criticalPercent|leadMinutes|pollSeconds`;
 Holy writes them to `usage/policy.json` so the hook applies the same numbers.
 
-The numbers live in the green tmux bar itself, centred between the window
-list and the model label: a `⌁ claude 5h 30% · wk 41% · Fable 79%` segment,
+The numbers live in the green tmux bar itself, on the right beside the
+clock: a `⌁ claude 5h 30% · wk 41% · Fable 79%` segment,
 identical in every session because it is machine-global, published by the
 probe as the server-wide `@holy_usage_v1` option. A calm window stays plain
 black-on-green; a warn window becomes a yellow chip, critical or capped a

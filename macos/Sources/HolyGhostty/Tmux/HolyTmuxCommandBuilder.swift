@@ -244,9 +244,16 @@ enum HolyTmuxCommandBuilder {
             ["set-option", "-gq", "terminal-features", managedTmuxTerminalFeatures],
             ["set-option", "-gq", "allow-passthrough", "on"],
             ["set-option", "-gq", "set-clipboard", "on"],
+            ["set-option", "-gq", "status-left-length", managedTmuxStatusLeftLength],
+            ["set-option", "-gq", "status-left", managedTmuxStatusLeft],
             ["set-option", "-gq", "status-right-length", managedTmuxStatusRightLength],
             ["set-option", "-gq", "status-right", managedTmuxStatusRight],
-            ["set-option", "-gq", "status-format[0]", managedTmuxStatusFormat],
+            // Earlier builds centred the usage segment through a custom
+            // status-format[0]; the segment rides status-right now, so heal
+            // any server still carrying the override. Unset the whole array:
+            // unsetting only index 0 of an array option deletes the index —
+            // a blank first status line — instead of restoring the default.
+            ["set-option", "-gqu", "status-format"],
             ["set-window-option", "-gq", "aggressive-resize", "on"],
         ]
 
@@ -281,21 +288,21 @@ enum HolyTmuxCommandBuilder {
     private static let managedTmuxHistoryLimit = "50000"
     private static let managedTmuxTerminalOverrides = "linux*:AX@,xterm-256color:RGB,xterm-ghostty:RGB"
     private static let managedTmuxTerminalFeatures = "xterm*:clipboard:ccolour:cstyle:focus:title,screen*:title,rxvt*:ignorefkeys,xterm-ghostty:clipboard:ccolour:cstyle:focus:title"
+    // The green bar, Erik's layout: session name then the quoted pane title
+    // on the left, the machine-global usage segment beside the clock on the
+    // right. Model and effort never ride the bar — they live in the status
+    // row Claude prints inside its own pane. The usage probe publishes
+    // @holy_usage_v1 server-wide, so every session shows the same value;
+    // percent signs arrive doubled because the status line is strftimed.
+    // Left length: a bracketed 40-column session-name slice (Holy's machine
+    // names like holy-<project>-shell-XXXXXXXX run past 30), the quoted
+    // 21-column title slice, and their separators — 40 + 21 + 7 chrome. A
+    // budget that lands short of the sum swallows the closing quote and jams
+    // the window list against the title.
+    fileprivate static let managedTmuxStatusLeftLength = "68"
+    fileprivate static let managedTmuxStatusLeft = "[#{=40:session_name}] \"#{=21:pane_title}\" "
     fileprivate static let managedTmuxStatusRightLength = "96"
-    fileprivate static let managedTmuxStatusRight = "#{?#{&&:#{==:#{@holy_model_source},claude},#{==:#{@holy_claude_model_enabled},off}},,#{?@holy_model_label,#{@holy_model_label} · ,}}\"#{=21:pane_title}\" %H:%M %d-%b-%y"
-
-    // tmux 3.7's default status-format[0] (captured verbatim) with one Holy
-    // insertion before the right-aligned block: a centred segment expanding
-    // the server-global @holy_usage_v1 option. The usage probe publishes the
-    // machine-wide Claude usage there — the same value in every session's
-    // bar, which is what marks it as global rather than per-session. Empty
-    // option, empty segment: the bar is byte-identical to stock until the
-    // usage guard publishes.
-    fileprivate static let managedTmuxStatusFormat =
-        "#[align=left range=left #{E:status-left-style}]#[push-default]#{T;=/#{status-left-length}:status-left}#[pop-default]#[norange default]#[list=on align=#{status-justify}]#[list=left-marker]<#[list=right-marker]>#[list=on]"
-        + "#{W:#[range=window|#{window_index} #{E:window-status-style}#{?#{&&:#{window_last_flag},#{!=:#{E:window-status-last-style},default}}, #{E:window-status-last-style},}#{?#{&&:#{window_bell_flag},#{!=:#{E:window-status-bell-style},default}}, #{E:window-status-bell-style},#{?#{&&:#{||:#{window_activity_flag},#{window_silence_flag}},#{!=:#{E:window-status-activity-style},default}}, #{E:window-status-activity-style},}}]#[push-default]#{T:window-status-format}#[pop-default]#[norange default]#{?loop_last_flag,,#{E:window-status-separator}},#[range=window|#{window_index} list=focus #{?#{!=:#{E:window-status-current-style},default},#{E:window-status-current-style},#{E:window-status-style}}#{?#{&&:#{window_last_flag},#{!=:#{E:window-status-last-style},default}}, #{E:window-status-last-style},}#{?#{&&:#{window_bell_flag},#{!=:#{E:window-status-bell-style},default}}, #{E:window-status-bell-style},#{?#{&&:#{||:#{window_activity_flag},#{window_silence_flag}},#{!=:#{E:window-status-activity-style},default}}, #{E:window-status-activity-style},}}]#[push-default]#{T:window-status-current-format}#[pop-default]#[norange list=on default]#{?loop_last_flag,,#{E:window-status-separator}}}"
-        + "#[nolist align=centre]#{E:@holy_usage_v1}#[default]"
-        + "#[nolist align=right range=right #{E:status-right-style}]#[push-default]#{T;=/#{status-right-length}:status-right}#[pop-default]#[norange default]"
+    fileprivate static let managedTmuxStatusRight = "#{?@holy_usage_v1,#{E:@holy_usage_v1} · ,}%H:%M %d-%b-%y"
     private static let managedTmuxConfigBody = """
     # Holy Ghostty managed tmux server config.
     # This file is regenerated by the app and applies only to Holy's `tmux -L holy` server.
@@ -308,9 +315,10 @@ enum HolyTmuxCommandBuilder {
     set -g terminal-features "\(managedTmuxTerminalFeatures)"
     set -g allow-passthrough on
     set -g set-clipboard on
+    set -g status-left-length \(managedTmuxStatusLeftLength)
+    set -g status-left '\(managedTmuxStatusLeft)'
     set -g status-right-length \(managedTmuxStatusRightLength)
     set -g status-right '\(managedTmuxStatusRight)'
-    set -g status-format[0] '\(managedTmuxStatusFormat)'
     setw -g aggressive-resize on
 
     # Prefix: backtick instead of C-b. Press `` to type a literal backtick.
@@ -439,6 +447,14 @@ struct HolyTmuxModelLabelUpdateCommand: Sendable, Equatable {
 
         var commandScripts: [String] = []
         if socketName == HolySessionTmuxSpec.defaultSocketName {
+            commandScripts.append(shellCommand(tmuxArguments + [
+                "set-option", "-gq", "status-left-length",
+                HolyTmuxCommandBuilder.managedTmuxStatusLeftLength,
+            ]))
+            commandScripts.append(shellCommand(tmuxArguments + [
+                "set-option", "-gq", "status-left",
+                HolyTmuxCommandBuilder.managedTmuxStatusLeft,
+            ]))
             commandScripts.append(shellCommand(tmuxArguments + [
                 "set-option", "-gq", "status-right-length",
                 HolyTmuxCommandBuilder.managedTmuxStatusRightLength,
@@ -576,6 +592,10 @@ extension HolyTmuxCommandBuilder {
 
     static var managedTmuxStatusRightForTesting: String {
         managedTmuxStatusRight
+    }
+
+    static var managedTmuxStatusLeftForTesting: String {
+        managedTmuxStatusLeft
     }
 }
 #endif

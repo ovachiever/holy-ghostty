@@ -26,7 +26,9 @@ pause, before one of them lands.
   Thresholds via `defaults write org.holyghostty.app holy.claudeUsage.*`,
   mirrored to `usage/policy.json`; the Swift evaluator and its Python
   mirror are tested for parity.
-- Usage in the green tmux bar, centred and machine-global: `⌁ claude`
+- Usage in the green tmux bar, beside the clock and machine-global (the
+  bar shows session name and pane title on the left; model and effort
+  appear only in the pane's printed status row): `⌁ claude`
   plus one chip per window (plain when calm, yellow at warn, red at
   critical/capped, `⏸ WRAP UP` while a wrap-up stands, `(stale Nm)` when
   the probe fails), published by the probe as the server-wide

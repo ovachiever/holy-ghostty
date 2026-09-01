@@ -18,15 +18,21 @@ private let holyTmuxAvailableForModelStatusTests: Bool = {
 }()
 
 struct HolyTmuxModelStatusTests {
-    @Test func managedGreenBarConditionallyIncludesLiveModelLabel() {
-        let status = HolyTmuxCommandBuilder.managedTmuxStatusRightForTesting
+    @Test func managedGreenBarShowsTitleLeftAndGlobalUsageByTheClock() {
+        let left = HolyTmuxCommandBuilder.managedTmuxStatusLeftForTesting
+        let right = HolyTmuxCommandBuilder.managedTmuxStatusRightForTesting
 
-        #expect(status.contains("#{?@holy_model_label"))
-        #expect(status.contains("#{@holy_model_label} · "))
-        #expect(status.contains("#{@holy_model_source},claude"))
-        #expect(status.contains("#{@holy_claude_model_enabled},off"))
-        #expect(status.contains("#{=21:pane_title}"))
-        #expect(!status.contains("Model unknown"))
+        // Left: session name (sliced), then the quoted pane title.
+        #expect(left.contains("session_name}"))
+        #expect(left.contains("#{=21:pane_title}"))
+        #expect(left.range(of: "session_name")!.lowerBound < left.range(of: "pane_title")!.lowerBound)
+
+        // Right: the machine-global usage segment beside the clock — and no
+        // model or effort, which live only in the pane's printed status row.
+        #expect(right.contains("#{?@holy_usage_v1,#{E:@holy_usage_v1} · ,}"))
+        #expect(right.contains("%H:%M"))
+        #expect(!right.contains("@holy_model_label"))
+        #expect(!right.contains("pane_title"))
     }
 
     @Test func updateTargetsStoredExactSessionWithoutRealizingIdentity() throws {
@@ -158,10 +164,12 @@ struct HolyTmuxModelStatusTests {
                 "tmux -L \(socketName) show-options -pqv -t '\(sessionName)' @holy_model_source"
             ) == "app"
         )
+        // The label lives as a pane option only: the bar renders usage and
+        // the clock, never the model.
         #expect(
             runLoginShellOutput(
                 "tmux -L \(socketName) display-message -p -t '\(sessionName)' '#{E:status-right}'"
-            )?.hasPrefix("Opus 4.8 · max · ") == true
+            )?.contains("Opus 4.8") == false
         )
 
         let second = try #require(
