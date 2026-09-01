@@ -174,8 +174,9 @@ happens.
 
 ### What you see
 
-The roster header carries a meter: one bar per window, colored by level,
-with a compact percent capsule in the collapsed rail. A pause glyph means a
+The sidebar footer carries a centered meter just above the pane-layout
+controls: one bar per window, colored by level, with a compact percent
+capsule in the collapsed rail. A pause glyph means a
 wrap-up is in force; a clock badge means the last probe failed and the
 numbers are carried forward. Click the meter for the popover:
 

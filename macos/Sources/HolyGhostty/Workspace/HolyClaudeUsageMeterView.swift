@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Machine-wide Claude usage meter for the roster header: one bar per window
-/// the signed-in account reports, colored by how close it is to the cap.
-/// Clicking opens the details popover with reset times, burn-rate ETA, the
-/// last-known numbers for every account Holy has seen, and the wrap-up switch.
+/// Machine-wide Claude usage meter: one bar per window the signed-in account
+/// reports, colored by how close it is to the cap. The full form is a
+/// centered band in the sidebar footer, just above the view controls; the
+/// compact form is a percent capsule in the collapsed rail. Clicking opens
+/// the details popover with reset times, burn-rate ETA, the last-known
+/// numbers for every account Holy has seen, and the wrap-up switch.
 struct HolyClaudeUsageMeterView: View {
     @ObservedObject var store: HolyWorkspaceStore
     var compact: Bool = false
@@ -12,20 +14,35 @@ struct HolyClaudeUsageMeterView: View {
 
     var body: some View {
         if store.claudeUsageGuardInstalled {
-            Button {
-                showingDetails.toggle()
-            } label: {
-                if compact {
-                    compactBody
-                } else {
-                    fullBody
+            if compact {
+                meterButton(arrowEdge: .trailing) { compactBody }
+            } else {
+                VStack(spacing: 0) {
+                    Rectangle()
+                        .fill(HolyGhosttyTheme.border)
+                        .frame(height: 0.5)
+                    meterButton(arrowEdge: .top) { fullBody }
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity)
                 }
+                .background(HolyGhosttyTheme.bgElevated)
             }
-            .buttonStyle(.plain)
-            .help(helpText)
-            .popover(isPresented: $showingDetails, arrowEdge: compact ? .trailing : .bottom) {
-                HolyClaudeUsageDetailView(store: store)
-            }
+        }
+    }
+
+    private func meterButton(
+        arrowEdge: Edge,
+        @ViewBuilder label: () -> some View
+    ) -> some View {
+        Button {
+            showingDetails.toggle()
+        } label: {
+            label()
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
+        .popover(isPresented: $showingDetails, arrowEdge: arrowEdge) {
+            HolyClaudeUsageDetailView(store: store)
         }
     }
 

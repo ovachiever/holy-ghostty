@@ -394,10 +394,14 @@ machine-wide buckets for the meter's level. `refreshNow` reruns the probe
 immediately; wrap-up request and cancel re-read the disk state without a
 probe.
 
-Presentation. `HolyClaudeUsageMeterView` renders in the roster header — a
-level dot, one bar per bucket colored by that bucket's level, a pause glyph
-while a wrap-up stands, a clock badge when the snapshot is stale — and as a
+Presentation. `HolyClaudeUsageMeterView` renders as a centered band in the
+sidebar footer, directly above `leftRailViewControls` — a level dot, one
+bar per bucket colored by that bucket's level, a pause glyph while a
+wrap-up stands, a clock badge when the snapshot is stale — and as a
 compact percent capsule of the deciding bucket in the collapsed rail. The
+footer band draws its own top hairline and background inside the
+guard-installed conditional, so nothing reserves space while the guard is
+off; its popover opens upward (`arrowEdge: .top`). The
 popover (`HolyClaudeUsageDetailView`) shows the level title, account and
 tier, snapshot age, each bucket with warn and critical ticks and its reset,
 rate, and ETA, sessions reporting their own windows, known accounts (when

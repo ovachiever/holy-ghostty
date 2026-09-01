@@ -206,8 +206,9 @@ app. Thresholds and cadence are
 `defaults write org.holyghostty.app holy.claudeUsage.warnPercent|criticalPercent|leadMinutes|pollSeconds`;
 Holy writes them to `usage/policy.json` so the hook applies the same numbers.
 
-The roster header shows a meter with one bar per window, colored by level
-(a compact percent capsule in the collapsed rail). Clicking it opens a
+The sidebar footer shows a centered meter with one bar per window, colored
+by level, just above the pane-layout controls (a compact percent capsule in
+the collapsed rail). Clicking it opens a
 popover with the account and tier, each window's reset time, burn rate, and
 ETA with threshold ticks, the sessions reporting their own windows, the
 last-known numbers for every account Holy has seen (only the signed-in one

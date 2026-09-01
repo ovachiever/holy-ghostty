@@ -219,10 +219,6 @@ struct HolySessionRosterView: View {
 
                 moreMenu
             }
-
-            // Machine-wide Claude usage: the one number that decides whether
-            // every worker below survives the next hour.
-            HolyClaudeUsageMeterView(store: store)
         }
         .padding(.horizontal, 10)
         .padding(.top, 8 + titlebarInset)

@@ -243,6 +243,12 @@ struct HolyWorkspaceRootView: View {
                             )
                             .frame(maxHeight: .infinity)
 
+                            // Machine-wide Claude usage: the number that
+                            // decides whether every worker above survives the
+                            // next hour. Sits just above the view controls so
+                            // the footer cluster stays the sidebar's floor.
+                            HolyClaudeUsageMeterView(store: store)
+
                             leftRailViewControls
                         }
                     }

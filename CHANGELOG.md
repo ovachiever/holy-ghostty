@@ -26,8 +26,8 @@ pause, before one of them lands.
   Thresholds via `defaults write org.holyghostty.app holy.claudeUsage.*`,
   mirrored to `usage/policy.json`; the Swift evaluator and its Python
   mirror are tested for parity.
-- Roster-header usage meter (one bar per window, compact capsule in the
-  collapsed rail) with a popover: account and tier, reset time, burn rate,
+- Sidebar-footer usage meter, centered above the pane-layout controls (one
+  bar per window, compact capsule in the collapsed rail) with a popover: account and tier, reset time, burn rate,
   and ETA per window with threshold ticks, sessions reporting their own
   windows, last-known numbers for every account Holy has seen, Refresh, and
   `Wrap up all sessions`, which treats every session as critical for one
