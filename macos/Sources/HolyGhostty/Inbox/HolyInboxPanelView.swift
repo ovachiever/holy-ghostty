@@ -663,6 +663,7 @@ struct HolyInboxChipView: View {
 struct HolyInboxToggleButton: View {
     @ObservedObject var store: HolyWorkspaceStore
     @ObservedObject var engine: HolyInboxEngine
+    var showsBadge = true
 
     var body: some View {
         Button {
@@ -673,7 +674,7 @@ struct HolyInboxToggleButton: View {
                     .font(.system(size: 10, weight: .medium))
                     .symbolVariant(store.rightPanelSelection == .inbox ? .fill : .none)
 
-                if let badge = HolyInboxBadge.label(for: engine.badgeCount) {
+                if showsBadge, let badge = HolyInboxBadge.label(for: engine.badgeCount) {
                     Text(badge)
                         .font(.system(size: 9, weight: .bold, design: .rounded))
                         .foregroundStyle(HolyGhosttyTheme.bg)

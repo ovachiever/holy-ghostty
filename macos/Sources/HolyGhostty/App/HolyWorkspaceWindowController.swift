@@ -5,6 +5,7 @@ import GhosttyKit
 
 private enum HolyWorkspaceKeyCode {
     static let tab: UInt16 = 48
+    static let escape: UInt16 = 53
 }
 
 @MainActor
@@ -45,6 +46,7 @@ private final class HolyWorkspaceWindow: NSWindow {
 @MainActor
 final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate {
     let workspaceStore: HolyWorkspaceStore
+    let boardModeStore: HolyMannaBoardModeStore
 
     init(
         ghostty: Ghostty.App,
@@ -52,9 +54,13 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         seedDefaultSession: Bool? = nil
     ) {
         let resolvedSeedDefaultSession = seedDefaultSession ?? (initialConfig == nil)
-        self.workspaceStore = HolyWorkspaceStore(
+        let workspaceStore = HolyWorkspaceStore(
             ghostty: ghostty,
             seedDefaultSession: resolvedSeedDefaultSession
+        )
+        self.workspaceStore = workspaceStore
+        self.boardModeStore = HolyMannaBoardModeStore(
+            usageAssessmentProvider: { workspaceStore.claudeUsageAssessment }
         )
 
         let window = HolyWorkspaceWindow(
@@ -75,7 +81,10 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         window.setFrameAutosaveName("HolyGhosttyWorkspaceWindow")
 
         let hostingController = NSHostingController(
-            rootView: HolyWorkspaceRootView(store: workspaceStore)
+            rootView: HolyWorkspaceRootView(
+                store: workspaceStore,
+                boardModeStore: boardModeStore
+            )
                 .environmentObject(ghostty)
         )
         window.contentViewController = hostingController
@@ -125,7 +134,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        if let selected = workspaceStore.selectedSession {
+        if !boardModeStore.isPresented, let selected = workspaceStore.selectedSession {
             Ghostty.moveFocus(to: selected.surfaceView)
         }
     }
@@ -171,7 +180,8 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
 
     @discardableResult
     func closeSelectedSessionIfAvailable() -> Bool {
-        guard let selected = workspaceStore.selectedSession else { return false }
+        guard !boardModeStore.isPresented,
+              let selected = workspaceStore.selectedSession else { return false }
         workspaceStore.close(selected)
         return true
     }
@@ -191,6 +201,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     }
 
     func toggleCommandPalette() {
+        guard !boardModeStore.isPresented else { return }
         workspaceStore.commandPaletteIsShowing.toggle()
     }
 
@@ -210,16 +221,31 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     }
 
     func handleWorkspaceKeyEquivalent(_ event: NSEvent) -> Bool {
-        if handleSessionCycleKey(event) {
-            return true
-        }
-
         guard event.type == .keyDown,
               let key = event.charactersIgnoringModifiers?.lowercased() else {
             return false
         }
 
         let relevantFlags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+
+        if event.keyCode == HolyWorkspaceKeyCode.escape,
+           relevantFlags.isEmpty,
+           boardModeStore.isPresented {
+            boardModeStore.dismiss()
+            return true
+        }
+
+        if key == "b", relevantFlags == .command {
+            boardModeStore.toggle(context: .focused(session: workspaceStore.selectedSession))
+            workspaceStore.commandPaletteIsShowing = false
+            return true
+        }
+
+        guard !boardModeStore.isPresented else { return false }
+
+        if handleSessionCycleKey(event) {
+            return true
+        }
 
         if relevantFlags == .command,
            let slot = Int(key),
@@ -251,6 +277,13 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     /// both paths land on the same toggle.
     @objc func toggleInboxPanel(_ sender: Any?) {
         workspaceStore.toggleInboxPanel()
+    }
+
+    /// First-responder target of View > Board Mode. Keyboard and menu entry
+    /// share the same full-screen workspace face and focused board.
+    @objc func toggleBoardMode(_ sender: Any?) {
+        boardModeStore.toggle(context: .focused(session: workspaceStore.selectedSession))
+        workspaceStore.commandPaletteIsShowing = false
     }
 
     /// First-responder target of View ▸ Restore Sessions…. The durable
@@ -297,7 +330,8 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        guard let selected = workspaceStore.selectedSession else { return }
+        guard !boardModeStore.isPresented,
+              let selected = workspaceStore.selectedSession else { return }
         Ghostty.moveFocus(to: selected.surfaceView)
     }
 

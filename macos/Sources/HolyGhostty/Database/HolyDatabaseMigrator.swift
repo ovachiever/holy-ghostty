@@ -73,6 +73,11 @@ enum HolyDatabaseMigrator {
             label: "Retire agent-sessions compatibility views",
             statements: schemaV10
         ),
+        .init(
+            version: 11,
+            label: "Content-addressed Board digest cache",
+            statements: schemaV11
+        ),
     ]
 
     private static let schemaV1: [String] = [
@@ -506,5 +511,23 @@ enum HolyDatabaseMigrator {
         "DROP VIEW IF EXISTS agent_sessions_resume_targets_v1;",
         "DROP VIEW IF EXISTS agent_sessions_events_v1;",
         "DROP VIEW IF EXISTS agent_sessions_annotations_v1;",
+    ]
+
+    private static let schemaV11: [String] = [
+        """
+        CREATE TABLE IF NOT EXISTS board_digest_cache (
+            content_hash TEXT NOT NULL,
+            role TEXT NOT NULL,
+            model TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT NOT NULL,
+            PRIMARY KEY (content_hash, role)
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS board_digest_cache_last_used_at_idx
+        ON board_digest_cache(last_used_at);
+        """,
     ]
 }

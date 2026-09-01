@@ -327,6 +327,11 @@
                                     <action selector="toggleQuickTerminal:" target="bbz-4X-AYv" id="qDV-sz-Agc"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Board Mode" keyEquivalent="b" id="bMd-4d-Bx1">
+                                <connections>
+                                    <action selector="toggleBoardMode:" target="-1" id="bMd-4d-Ax2"/>
+                                </connections>
+                            </menuItem>
                             <menuItem title="Inbox Panel" keyEquivalent="p" id="hIp-4d-Bx1">
                                 <connections>
                                     <action selector="toggleInboxPanel:" target="-1" id="hIp-4d-Ax2"/>

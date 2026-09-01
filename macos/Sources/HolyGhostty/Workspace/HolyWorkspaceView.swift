@@ -124,6 +124,7 @@ private final class HolyPaneFocusBridgeView: NSView {
 struct HolyWorkspaceRootView: View {
     @EnvironmentObject private var ghostty: Ghostty.App
     @ObservedObject var store: HolyWorkspaceStore
+    @ObservedObject var boardModeStore: HolyMannaBoardModeStore
     @State private var diffCompareSessionIDRaw: String?
     @State private var lastFocusedSurface: Weak<Ghostty.SurfaceView>?
     @FocusState private var workspaceFocused: Bool
@@ -138,7 +139,7 @@ struct HolyWorkspaceRootView: View {
         ZStack {
             HolyGhosttyBackdrop()
             workspaceContent
-            if let selectedSession = store.selectedSession {
+            if !boardModeStore.isPresented, let selectedSession = store.selectedSession {
                 TerminalCommandPaletteView(
                     surfaceView: selectedSession.surfaceView,
                     isPresented: $store.commandPaletteIsShowing,
@@ -201,10 +202,26 @@ struct HolyWorkspaceRootView: View {
         }
         .onAppear {
             workspaceFocused = true
+            boardModeStore.prepare(context: focusedBoardContext)
+            if !boardModeStore.isPresented {
+                focusSelectedSession()
+            }
+        }
+        .onChange(of: store.selectedSessionID) { _ in
+            guard !boardModeStore.isPresented else { return }
+            boardModeStore.prepare(context: focusedBoardContext)
             focusSelectedSession()
         }
-        .onChange(of: store.selectedSessionID) { _ in focusSelectedSession() }
-        .onChange(of: selectedSessionObjectIdentifier) { _ in focusSelectedSession() }
+        .onChange(of: selectedSessionObjectIdentifier) { _ in
+            guard !boardModeStore.isPresented else { return }
+            focusSelectedSession()
+        }
+        .onChange(of: boardModeStore.isPresented) { isPresented in
+            if !isPresented {
+                boardModeStore.prepare(context: focusedBoardContext)
+                focusSelectedSession()
+            }
+        }
         .onChange(of: focusedSurface) { handleFocusedSurfaceChange($0) }
     }
 
@@ -213,7 +230,17 @@ struct HolyWorkspaceRootView: View {
     @ViewBuilder
     private var workspaceContent: some View {
         GeometryReader { geometry in
-            standardContent
+            Group {
+                if boardModeStore.isPresented {
+                    HolyMannaBoardView(
+                        store: boardModeStore,
+                        onDismiss: { boardModeStore.dismiss() },
+                        onFocusPeer: focusMannaPeer
+                    )
+                } else {
+                    standardContent
+                }
+            }
                 .frame(
                     width: max(0, geometry.size.width),
                     height: max(0, geometry.size.height)
@@ -496,7 +523,11 @@ struct HolyWorkspaceRootView: View {
 
             Spacer(minLength: 0)
 
-            HolyInboxToggleButton(store: store, engine: store.inboxEngine)
+            HStack(spacing: 3) {
+                attentionButton
+                boardModeButton
+                HolyInboxToggleButton(store: store, engine: store.inboxEngine, showsBadge: false)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
@@ -547,7 +578,11 @@ struct HolyWorkspaceRootView: View {
                 store.presentRemoteHosts()
             }
 
-            HolyInboxToggleButton(store: store, engine: store.inboxEngine)
+            collapsedAttentionButton
+            collapsedRailButton(title: "Board (Command-B)", systemName: "rectangle.3.group") {
+                showBoard()
+            }
+            HolyInboxToggleButton(store: store, engine: store.inboxEngine, showsBadge: false)
         }
         .padding(.top, HolyWorkspaceLayout.titlebarControlInset + 8)
         .padding(.bottom, 10)
@@ -590,6 +625,7 @@ struct HolyWorkspaceRootView: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(HolyGhosttyTheme.textSecondary)
+        .accessibilityLabel(title)
         .help(title)
     }
 
@@ -1060,9 +1096,116 @@ struct HolyWorkspaceRootView: View {
     }
 
     private func focusSelectedSession() {
+        guard !boardModeStore.isPresented else { return }
         guard let session = store.selectedSession else { return }
         lastFocusedSurface = Weak(session.surfaceView)
         Ghostty.moveFocus(to: session.surfaceView)
+    }
+
+    private var focusedBoardContext: HolyMannaBoardContext {
+        HolyMannaBoardContext.focused(session: store.selectedSession)
+    }
+
+    private var sessionsNeedingHuman: [HolySession] {
+        store.sessions.filter { store.attentionPresentation(for: $0).kind == .needsUser }
+    }
+
+    private var combinedAttentionCount: Int {
+        HolyAttentionBadgeCounter.count(
+            github: store.inboxEngine.badgeCount,
+            boardAsks: boardModeStore.humanAttentionAskCount,
+            boardPeerIDs: boardModeStore.humanAttentionPeerIDs,
+            sessionIDs: sessionsNeedingHuman.map(\.harnessSessionID)
+        )
+    }
+
+    private var attentionButton: some View {
+        Button(action: openHighestPriorityAttention) {
+            HStack(spacing: 3) {
+                Image(systemName: "bell")
+                    .font(.system(size: 10, weight: .medium))
+                if let badge = HolyInboxBadge.label(for: combinedAttentionCount) {
+                    Text(badge)
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(HolyGhosttyTheme.bg)
+                        .padding(.horizontal, 4)
+                        .frame(height: 13)
+                        .background(Capsule(style: .continuous).fill(HolyGhosttyTheme.halo))
+                }
+            }
+            .frame(height: 22)
+            .padding(.horizontal, 5)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(combinedAttentionCount > 0 ? HolyGhosttyTheme.halo : HolyGhosttyTheme.textTertiary)
+        .accessibilityLabel("Your move")
+        .help("Your move across GitHub, Board, and sessions")
+    }
+
+    private var collapsedAttentionButton: some View {
+        Button(action: openHighestPriorityAttention) {
+            Image(systemName: "bell")
+                .font(.system(size: 11, weight: .medium))
+                .frame(width: 26, height: 24)
+                .overlay(alignment: .topTrailing) {
+                    if let badge = HolyInboxBadge.label(for: combinedAttentionCount) {
+                        Text(badge)
+                            .font(.system(size: 7, weight: .bold, design: .rounded))
+                            .foregroundStyle(HolyGhosttyTheme.bg)
+                            .padding(.horizontal, 3)
+                            .frame(height: 11)
+                            .background(Capsule(style: .continuous).fill(HolyGhosttyTheme.halo))
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(combinedAttentionCount > 0 ? HolyGhosttyTheme.halo : HolyGhosttyTheme.textTertiary)
+        .accessibilityLabel("Your move")
+        .help("Your move across GitHub, Board, and sessions")
+    }
+
+    private var boardModeButton: some View {
+        Button(
+            action: { showBoard() },
+            label: {
+                Image(systemName: "rectangle.3.group")
+                    .font(.system(size: 10, weight: .medium))
+                    .frame(width: 24, height: 22)
+            }
+        )
+        .buttonStyle(.plain)
+        .foregroundStyle(HolyGhosttyTheme.textSecondary)
+        .accessibilityLabel("Board")
+        .help("Board (Command-B)")
+    }
+
+    private func showBoard(sheet: HolyMannaBoardSheet? = nil) {
+        if let sheet {
+            boardModeStore.selectedSheet = sheet
+        }
+        boardModeStore.present(context: focusedBoardContext)
+    }
+
+    private func openHighestPriorityAttention() {
+        if boardModeStore.humanAttentionAskCount > 0 {
+            showBoard(sheet: .asks)
+        } else if let session = sessionsNeedingHuman.first {
+            focus(session)
+        } else {
+            store.toggleInboxPanel()
+        }
+    }
+
+    private func focusMannaPeer(_ identity: String) -> Bool {
+        guard let session = HolyHarnessSessionIdentity.uniqueMatch(
+            for: identity,
+            in: store.sessions,
+            identityOf: { $0.harnessSessionID }
+        ) else {
+            return false
+        }
+        store.selectSession(session.id)
+        return true
     }
 
     private func handleFocusedSurfaceChange(_ surfaceView: Ghostty.SurfaceView?) {

@@ -2,7 +2,7 @@ import Foundation
 
 enum HolyDatabaseSchema {
     static let filename = "holy-ghostty.sqlite3"
-    static let currentUserVersion: Int32 = 10
+    static let currentUserVersion: Int32 = 11
     static let busyTimeoutMilliseconds: Int32 = 5_000
 }
 
@@ -18,6 +18,7 @@ enum HolyDatabaseTable: String, CaseIterable, Hashable {
     case launchProfiles = "launch_profiles"
     case alerts = "alerts"
     case annotations = "annotations"
+    case boardDigestCache = "board_digest_cache"
 }
 
 struct HolyDatabaseMigration {
