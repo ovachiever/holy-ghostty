@@ -334,6 +334,37 @@ struct HolyClaudeUsageGuardTests {
         #expect(lines[2].contains("(stale 5m)"))
     }
 
+    @Test func probeHonorsRateLimitBackoffWithoutTouchingTheNetwork() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.installGuard(policy: policy)
+        let backoffUntil = Int(Date().timeIntervalSince1970) + Int(policy.pollSeconds) * 5
+        let held = latestJSON(percent: 40).replacingOccurrences(
+            of: "\"error\": null",
+            with: "\"error\": null, \"backoff_until\": \(backoffUntil)"
+        )
+        try fixture.write(held, to: fixture.paths.latestURL)
+        let before = try Data(contentsOf: fixture.paths.latestURL)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [fixture.paths.probeURL.path]
+        process.environment = [
+            "HOLY_USAGE_DIR": fixture.paths.usageDirectoryURL.path,
+            "HOLY_TMUX_BIN": "/usr/bin/true",
+            "HOME": fixture.root.path,
+            "PATH": "/usr/bin:/bin",
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+
+        // Backoff means: exit nonzero, serve the held snapshot, write nothing.
+        #expect(process.terminationStatus == 1)
+        #expect(try Data(contentsOf: fixture.paths.latestURL) == before)
+    }
+
     // MARK: - Helpers
 
     private func level(percent: Double) -> HolyClaudeUsageLevel? {

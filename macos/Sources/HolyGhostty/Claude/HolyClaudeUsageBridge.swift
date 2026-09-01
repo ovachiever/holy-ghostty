@@ -713,6 +713,21 @@ enum HolyClaudeUsageBridge {
         policy = load_policy(root)
         deadline = policy["poll_seconds"]
 
+        try:
+            with open(latest_path, "r", encoding="utf-8") as handle:
+                previous = json.load(handle)
+        except (OSError, ValueError):
+            previous = None
+        # A 429 from the endpoint set a backoff; honor it by serving the last
+        # snapshot instead of knocking again. --force (the app's manual
+        # Refresh) breaks through.
+        backoff = (previous or {}).get("backoff_until")
+        if isinstance(backoff, (int, float)) and backoff > now and "--force" not in sys.argv:
+            publish_tmux(root, previous, policy, now, deadline * KEYCHAIN_SHARE_OF_DEADLINE)
+            if "--print" in sys.argv:
+                sys.stdout.write(json.dumps(previous, indent=1) + "\n")
+            return 1
+
         account = read_account()
         snapshot = {
             "schema": SCHEMA,
@@ -755,15 +770,15 @@ enum HolyClaudeUsageBridge {
         else:
             # Keep the last good buckets visible, marked stale, so a transient
             # network failure does not blank the meter or silence the guard.
-            try:
-                with open(latest_path, "r", encoding="utf-8") as handle:
-                    previous = json.load(handle)
-                if previous.get("error") is None or previous.get("stale_since"):
-                    snapshot["buckets"] = previous.get("buckets", [])
-                    snapshot["extra_usage"] = previous.get("extra_usage")
-                    snapshot["stale_since"] = previous.get("stale_since") or previous.get("fetched_at")
-            except (OSError, ValueError):
-                pass
+            if previous and (previous.get("error") is None or previous.get("stale_since")):
+                snapshot["buckets"] = previous.get("buckets", [])
+                snapshot["extra_usage"] = previous.get("extra_usage")
+                snapshot["stale_since"] = previous.get("stale_since") or previous.get("fetched_at")
+            if "429" in (snapshot["error"] or ""):
+                # The endpoint judged the current cadence too hot. Five quiet
+                # poll periods drops the offered rate well under the one that
+                # tripped it while the guard stays within minutes of fresh.
+                snapshot["backoff_until"] = now + policy["poll_seconds"] * 5
 
         write_atomic(latest_path, json.dumps(snapshot, indent=1) + "\n")
         prune_session_files(root, now)

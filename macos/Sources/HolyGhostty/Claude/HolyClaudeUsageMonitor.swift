@@ -53,10 +53,11 @@ actor HolyClaudeUsageMonitor {
         handler = nil
     }
 
-    /// Runs the probe now instead of waiting for the next tick.
+    /// Runs the probe now instead of waiting for the next tick. The manual
+    /// refresh carries --force so it breaks through a 429 backoff.
     func refreshNow() {
         guard handler != nil else { return }
-        restartLoop()
+        restartLoop(forceFirstRun: true)
     }
 
     /// Reads the on-disk state without running the probe. Used right after a
@@ -66,16 +67,22 @@ actor HolyClaudeUsageMonitor {
         return Self.read(paths: paths, probeFailure: nil, now: .now)
     }
 
-    private func restartLoop() {
+    private func restartLoop(forceFirstRun: Bool = false) {
         loop?.cancel()
         generation &+= 1
         let myGeneration = generation
         guard let paths, let handler else { return }
         let policy = self.policy
         loop = Task { [weak self] in
+            var isFirstRun = true
             while !Task.isCancelled {
                 guard let self, await self.generation == myGeneration else { return }
-                let failure = await Self.runProbe(paths: paths, deadline: policy.pollSeconds)
+                let failure = await Self.runProbe(
+                    paths: paths,
+                    deadline: policy.pollSeconds,
+                    force: forceFirstRun && isFirstRun
+                )
+                isFirstRun = false
                 if Task.isCancelled { return }
                 let report = Self.read(paths: paths, probeFailure: failure, now: .now)
                 await handler(report)
@@ -88,13 +95,17 @@ actor HolyClaudeUsageMonitor {
     /// A non-zero exit is not a failure by itself: the probe writes its own
     /// error into the snapshot and exits 1 so shells can tell, and the reader
     /// surfaces that error text.
-    private static func runProbe(paths: HolyClaudeUsageBridgePaths, deadline: TimeInterval) async -> String? {
+    private static func runProbe(
+        paths: HolyClaudeUsageBridgePaths,
+        deadline: TimeInterval,
+        force: Bool = false
+    ) async -> String? {
         guard FileManager.default.isExecutableFile(atPath: paths.probeURL.path) else {
             return "usage probe is not installed"
         }
         let process = Process()
         process.executableURL = paths.probeURL
-        process.arguments = []
+        process.arguments = force ? ["--force"] : []
         process.environment = ProcessInfo.processInfo.environment.merging(
             ["HOLY_USAGE_DIR": paths.usageDirectoryURL.path]
         ) { _, new in new }
