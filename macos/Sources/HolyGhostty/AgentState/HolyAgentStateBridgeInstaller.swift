@@ -3,6 +3,7 @@ import Foundation
 enum HolyAgentStateBridgeInstallationState: Equatable {
     case notInstalled
     case installed
+    case needsRepair(String)
     case blocked(String)
 }
 
@@ -90,16 +91,20 @@ enum HolyAgentStateBridgeInstaller {
         paths: HolyAgentStateBridgePaths,
         fileManager: FileManager = .default
     ) throws -> HolyAgentStateBridgeInstallationState {
-        if let helper = try contentsIfPresent(at: paths.helperURL, fileManager: fileManager),
+        let helper = try contentsIfPresent(at: paths.helperURL, fileManager: fileManager)
+        let plugin = try contentsIfPresent(at: paths.openCodePluginURL, fileManager: fileManager)
+        let adapter = try contentsIfPresent(at: paths.codexNotifyAdapterURL, fileManager: fileManager)
+
+        if let helper,
            !HolyAgentStateBridge.isOwnedHelperScript(helper) {
             return .blocked(HolyAgentStateBridgeInstallerError.foreignHelper.localizedDescription)
         }
-        if let plugin = try contentsIfPresent(at: paths.openCodePluginURL, fileManager: fileManager),
+        if let plugin,
            !HolyAgentStateBridge.isOwnedOpenCodePlugin(plugin, helperURL: paths.helperURL) {
             return .blocked(HolyAgentStateBridgeInstallerError.foreignOpenCodePlugin.localizedDescription)
         }
-        if let adapter = try contentsIfPresent(at: paths.codexNotifyAdapterURL, fileManager: fileManager),
-           !HolyAgentStateBridge.isOwnedCodexNotifyAdapter(adapter, helperURL: paths.helperURL) {
+        if let adapter,
+            !HolyAgentStateBridge.isOwnedCodexNotifyAdapter(adapter, helperURL: paths.helperURL) {
             return .blocked(HolyAgentStateBridgeInstallerError.foreignCodexNotifyAdapter.localizedDescription)
         }
 
@@ -114,14 +119,6 @@ enum HolyAgentStateBridgeInstaller {
             return .blocked(error.localizedDescription)
         }
 
-        guard (try contentsIfPresent(at: paths.helperURL, fileManager: fileManager)) == HolyAgentStateBridge.helperScript,
-              (try contentsIfPresent(at: paths.openCodePluginURL, fileManager: fileManager))
-                == HolyAgentStateBridge.openCodePlugin(helperURL: paths.helperURL),
-              (try contentsIfPresent(at: paths.codexNotifyAdapterURL, fileManager: fileManager))
-                == HolyAgentStateBridge.codexNotifyAdapter(helperURL: paths.helperURL) else {
-            return .notInstalled
-        }
-
         let claude = try loadJSONObject(at: paths.claudeSettingsURL, fileManager: fileManager)
         let codex = try loadJSONObject(at: paths.codexHooksURL, fileManager: fileManager)
         let desiredClaude = try HolyAgentStateBridge.mergingClaudeSettings(
@@ -132,12 +129,35 @@ enum HolyAgentStateBridgeInstaller {
             codex,
             helperURL: paths.helperURL
         )
-        guard try canonicalJSON(claude) == canonicalJSON(desiredClaude),
-              try canonicalJSON(codex) == canonicalJSON(desiredCodex),
-              codexConfig == desiredCodexConfig else {
-            return .notInstalled
+        let filesAreCurrent = helper == HolyAgentStateBridge.helperScript
+            && plugin == HolyAgentStateBridge.openCodePlugin(helperURL: paths.helperURL)
+            && adapter == HolyAgentStateBridge.codexNotifyAdapter(helperURL: paths.helperURL)
+        let claudeHooksAreCurrent = try canonicalJSON(claude) == canonicalJSON(desiredClaude)
+        let codexHooksAreCurrent = try canonicalJSON(codex) == canonicalJSON(desiredCodex)
+        if filesAreCurrent,
+           claudeHooksAreCurrent,
+           codexHooksAreCurrent,
+           codexConfig == desiredCodexConfig {
+            return .installed
         }
-        return .installed
+
+        let hasOwnedFootprint = helper != nil
+            || plugin != nil
+            || adapter != nil
+            || containsOwnedHooks(
+                in: claude,
+                helperURL: paths.helperURL,
+                source: HolyAgentStateSource.claude
+            )
+            || containsOwnedHooks(
+                in: codex,
+                helperURL: paths.helperURL,
+                source: HolyAgentStateSource.codex
+            )
+        if hasOwnedFootprint {
+            return .needsRepair("Holy's agent-state bridge files or hooks are out of date")
+        }
+        return .notInstalled
     }
 
     static func install(
@@ -331,6 +351,28 @@ enum HolyAgentStateBridgeInstaller {
             root.removeValue(forKey: "hooks")
         } else {
             root["hooks"] = hooks
+        }
+    }
+
+    private static func containsOwnedHooks(
+        in root: [String: Any],
+        helperURL: URL,
+        source: String
+    ) -> Bool {
+        guard let hooks = root["hooks"] as? [String: Any] else { return false }
+        return hooks.values.contains { value in
+            guard let groups = value as? [[String: Any]] else { return false }
+            return groups.contains { group in
+                guard let handlers = group["hooks"] as? [[String: Any]] else { return false }
+                return handlers.contains { handler in
+                    guard let command = handler["command"] as? String else { return false }
+                    return HolyAgentStateBridge.isOwnedHookCommand(
+                        command,
+                        helperURL: helperURL,
+                        source: source
+                    ) || HolyAgentStateBridge.isOwnedWatcherHookCommand(command)
+                }
+            }
         }
     }
 

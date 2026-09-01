@@ -236,6 +236,9 @@ class AppDelegate: NSObject,
                 policy: HolyClaudeUsagePolicy.fromUserDefaults()
             )
         }
+        if case .needsRepair = HolyAgentStateBridgeInstaller.currentUserInstallationState() {
+            _ = HolyAgentStateBridgeInstaller.installForCurrentUser()
+        }
         refreshClaudeModelIndicatorMenu()
 
         // System settings overrides
@@ -1201,13 +1204,22 @@ class AppDelegate: NSObject,
 
     @objc
     private func toggleAgentStateIndicators(_ sender: Any?) {
-        switch HolyAgentStateBridgeInstaller.currentUserInstallationState() {
-        case .notInstalled:
+        let state = HolyAgentStateBridgeInstaller.currentUserInstallationState()
+        switch state {
+        case .notInstalled, .needsRepair:
             let alert = NSAlert()
             alert.alertStyle = .informational
-            alert.messageText = "Enable authoritative agent indicators?"
+            let isRepair: Bool
+            if case .needsRepair = state {
+                isRepair = true
+            } else {
+                isRepair = false
+            }
+            alert.messageText = isRepair
+                ? "Repair authoritative agent indicators?"
+                : "Enable authoritative agent indicators?"
             alert.informativeText = "Holy will add exact-owned lifecycle hooks for Claude Code and Codex, a Codex committed-turn notifier, and one exact-owned OpenCode plugin. They publish only state, source, time, and an opaque event token—never prompts or responses. Existing hooks and settings stay intact. A foreign Codex notifier is never overwritten."
-            alert.addButton(withTitle: "Enable")
+            alert.addButton(withTitle: isRepair ? "Repair" : "Enable")
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
 
@@ -1254,6 +1266,8 @@ class AppDelegate: NSObject,
         alert.alertStyle = .warning
         alert.messageText = "Could not update authoritative agent indicators"
         if case let .blocked(reason) = state {
+            alert.informativeText = reason
+        } else if case let .needsRepair(reason) = state {
             alert.informativeText = reason
         } else {
             alert.informativeText = "Holy left unrelated harness settings unchanged. Check the app log for the exact file error."
@@ -1360,6 +1374,8 @@ class AppDelegate: NSObject,
             menuAgentStateIndicators?.title = "Enable Authoritative Agent Indicators…"
         case .installed:
             menuAgentStateIndicators?.title = "Disable Authoritative Agent Indicators…"
+        case .needsRepair:
+            menuAgentStateIndicators?.title = "Repair Authoritative Agent Indicators…"
         case .blocked:
             menuAgentStateIndicators?.title = "Authoritative Agent Indicators Need Attention…"
         }

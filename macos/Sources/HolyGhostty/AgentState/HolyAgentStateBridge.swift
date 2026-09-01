@@ -183,7 +183,21 @@ enum HolyAgentStateBridge {
         _ contents: String,
         helperURL: URL
     ) -> Bool {
-        contents == codexNotifyAdapter(helperURL: helperURL)
+        let current = codexNotifyAdapter(helperURL: helperURL)
+        if contents == current {
+            return true
+        }
+        guard isPriorGenerationMarker(
+            in: contents,
+            lineIndex: 1,
+            markerPrefix: codexNotifyAdapterOwnershipMarkerPrefix
+        ) else {
+            return false
+        }
+
+        var lines = contents.split(separator: "\n", omittingEmptySubsequences: false)
+        lines[1] = Substring(codexNotifyAdapterOwnershipMarker)
+        return lines.joined(separator: "\n") == current
     }
 
     /// Arguments only: callers retain control of the exact tmux socket/server

@@ -136,26 +136,50 @@ struct HolyAgentStateBridgeInstallerTests {
         // previous generated plugin
 
         """
+        let priorAdapter = HolyAgentStateBridge.codexNotifyAdapter(
+            helperURL: fixture.paths.helperURL
+        ).replacingOccurrences(
+            of: HolyAgentStateBridge.codexNotifyAdapterOwnershipMarker,
+            with: "\(HolyAgentStateBridge.codexNotifyAdapterOwnershipMarkerPrefix)3"
+        )
         try fixture.write(priorHelper, to: fixture.paths.helperURL)
         try fixture.write(priorPlugin, to: fixture.paths.openCodePluginURL)
+        try fixture.write(priorAdapter, to: fixture.paths.codexNotifyAdapterURL)
 
-        #expect(try HolyAgentStateBridgeInstaller.installationState(paths: fixture.paths) == .notInstalled)
+        #expect(
+            try HolyAgentStateBridgeInstaller.installationState(paths: fixture.paths)
+                == .needsRepair("Holy's agent-state bridge files or hooks are out of date")
+        )
         #expect(try HolyAgentStateBridgeInstaller.install(paths: fixture.paths) == .installed)
         #expect(try String(contentsOf: fixture.paths.helperURL, encoding: .utf8) == HolyAgentStateBridge.helperScript)
         #expect(
             try String(contentsOf: fixture.paths.openCodePluginURL, encoding: .utf8)
                 == HolyAgentStateBridge.openCodePlugin(helperURL: fixture.paths.helperURL)
         )
+        #expect(
+            try String(contentsOf: fixture.paths.codexNotifyAdapterURL, encoding: .utf8)
+                == HolyAgentStateBridge.codexNotifyAdapter(helperURL: fixture.paths.helperURL)
+        )
 
         try HolyAgentStateBridgeInstaller.remove(paths: fixture.paths)
         #expect(!FileManager.default.fileExists(atPath: fixture.paths.helperURL.path))
         #expect(!FileManager.default.fileExists(atPath: fixture.paths.openCodePluginURL.path))
+        #expect(!FileManager.default.fileExists(atPath: fixture.paths.codexNotifyAdapterURL.path))
 
         try fixture.write(priorHelper, to: fixture.paths.helperURL)
         try fixture.write(priorPlugin, to: fixture.paths.openCodePluginURL)
+        try fixture.write(priorAdapter, to: fixture.paths.codexNotifyAdapterURL)
         try HolyAgentStateBridgeInstaller.remove(paths: fixture.paths)
         #expect(!FileManager.default.fileExists(atPath: fixture.paths.helperURL.path))
         #expect(!FileManager.default.fileExists(atPath: fixture.paths.openCodePluginURL.path))
+        #expect(!FileManager.default.fileExists(atPath: fixture.paths.codexNotifyAdapterURL.path))
+    }
+
+    @Test func emptyFootprintStillRequiresFirstTimeConsent() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+
+        #expect(try HolyAgentStateBridgeInstaller.installationState(paths: fixture.paths) == .notInstalled)
     }
 
     @Test func modifiedCurrentAndFutureMarkersFailClosed() throws {

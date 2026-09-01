@@ -448,6 +448,26 @@ struct HolyAgentStateBridgeTests {
         #expect(!HolyAgentStateBridge.isOwnedCodexNotifyAdapter(adapter + "# modified\n", helperURL: helperURL))
     }
 
+    @Test func priorCodexNotifyAdapterGenerationRemainsOwnedForUpgrade() {
+        let helperURL = URL(fileURLWithPath: "/tmp/Holy/agent-state-hook.sh")
+        let prior = HolyAgentStateBridge.codexNotifyAdapter(helperURL: helperURL)
+            .replacingOccurrences(
+                of: HolyAgentStateBridge.codexNotifyAdapterOwnershipMarker,
+                with: "\(HolyAgentStateBridge.codexNotifyAdapterOwnershipMarkerPrefix)3"
+            )
+
+        #expect(HolyAgentStateBridge.isOwnedCodexNotifyAdapter(prior, helperURL: helperURL))
+        #expect(
+            !HolyAgentStateBridge.isOwnedCodexNotifyAdapter(
+                prior.replacingOccurrences(
+                    of: "raise SystemExit(result.returncode)",
+                    with: "raise SystemExit(0)"
+                ),
+                helperURL: helperURL
+            )
+        )
+    }
+
     // Codex's documented agent-turn-complete payload carries turn-id (plus
     // message text) but NO thread-id — the adapter must accept the real
     // shape, or every Codex completion dies at validation (review finding #0).
