@@ -409,7 +409,12 @@ plus the clock — no model or effort in the bar. Both are set in
 retired custom `status-format[0]` so servers that carried the earlier
 centred layout heal on connect. An empty option collapses to clock-only. Warn buckets render as yellow chips, critical/capped as red, an
 active wrap-up prepends `⏸ WRAP UP`, staleness appends `(stale Nm)`.
-Disabling the guard clears the option (`clearTmuxUsageSegment`).
+Disabling the guard clears the option (`clearTmuxUsageSegment`). Both
+helpers treat a snapshot as owned by the account it was taken under: the
+probe skips the 429 backoff and the stale carry-forward when
+`~/.claude.json`'s `oauthAccount` no longer matches, and the guard drops a
+machine snapshot from a previous account, spawns a forced probe, and
+judges by the session's own windows until fresh numbers land.
 `HolyClaudeUsageDetailView` is reached from the roster's `…` menu
 (`Claude Usage…`, gated on installation) as a sheet with a Close button. The
 popover (`HolyClaudeUsageDetailView`) shows the level title, account and

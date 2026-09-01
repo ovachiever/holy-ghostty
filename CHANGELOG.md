@@ -37,7 +37,9 @@ pause, before one of them lands.
   and ETA per window with threshold ticks, sessions reporting their own
   windows, last-known numbers for every account Holy has seen, Refresh, and
   `Wrap up all sessions`, which treats every session as critical for one
-  lead window or until the keychain account changes.
+  lead window or until the keychain account changes. After `/login` to
+  another account, the previous account's snapshot is dropped at once
+  rather than served through a backoff.
 - The Claude Model Indicator status line now records each session's own
   5-hour and weekly windows to `usage/sessions/<session_id>.json` and shows
   `· 5h N% · wk N%` in the pane's printed status row (the bar's model

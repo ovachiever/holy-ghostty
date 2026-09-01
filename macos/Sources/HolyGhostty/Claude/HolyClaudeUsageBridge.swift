@@ -718,17 +718,30 @@ enum HolyClaudeUsageBridge {
                 previous = json.load(handle)
         except (OSError, ValueError):
             previous = None
+        account = read_account()
+        # A previous snapshot describes whichever account was signed in when
+        # it was taken. Once the keychain moves (/login), its numbers are
+        # someone else's headroom: neither the backoff nor the stale
+        # carry-forward may serve them.
+        previous_email = ((previous or {}).get("account") or {}).get("email")
+        account_changed = bool(
+            previous_email and account.get("email") and previous_email != account.get("email")
+        )
         # A 429 from the endpoint set a backoff; honor it by serving the last
         # snapshot instead of knocking again. --force (the app's manual
-        # Refresh) breaks through.
+        # Refresh) and an account change break through.
         backoff = (previous or {}).get("backoff_until")
-        if isinstance(backoff, (int, float)) and backoff > now and "--force" not in sys.argv:
+        if (
+            isinstance(backoff, (int, float))
+            and backoff > now
+            and "--force" not in sys.argv
+            and not account_changed
+        ):
             publish_tmux(root, previous, policy, now, deadline * KEYCHAIN_SHARE_OF_DEADLINE)
             if "--print" in sys.argv:
                 sys.stdout.write(json.dumps(previous, indent=1) + "\n")
             return 1
 
-        account = read_account()
         snapshot = {
             "schema": SCHEMA,
             "fetched_at": now,
@@ -770,7 +783,7 @@ enum HolyClaudeUsageBridge {
         else:
             # Keep the last good buckets visible, marked stale, so a transient
             # network failure does not blank the meter or silence the guard.
-            if previous and (previous.get("error") is None or previous.get("stale_since")):
+            if previous and not account_changed and (previous.get("error") is None or previous.get("stale_since")):
                 snapshot["buckets"] = previous.get("buckets", [])
                 snapshot["extra_usage"] = previous.get("extra_usage")
                 snapshot["stale_since"] = previous.get("stale_since") or previous.get("fetched_at")
@@ -962,13 +975,22 @@ enum HolyClaudeUsageBridge {
         return merged
 
 
-    def maybe_refresh(root, latest, policy, now):
+    def current_account_email():
+        """The account the keychain token belongs to, as Claude records it."""
+        config = read_json(os.path.expanduser("~/.claude.json"))
+        if not isinstance(config, dict):
+            return None
+        return (config.get("oauthAccount") or {}).get("emailAddress")
+
+
+    def maybe_refresh(root, latest, policy, now, force=False):
         """If Holy is not polling (snapshot stale), run the probe in the
         background so the next tool call sees fresh numbers. Rate-limited by a
-        stamp file so a burst of tool calls spawns one probe."""
+        stamp file so a burst of tool calls spawns one probe. `force` skips
+        the freshness check and breaks the probe through a 429 backoff."""
         fetched = (latest or {}).get("fetched_at")
         poll = policy["poll_seconds"]
-        if isinstance(fetched, (int, float)) and now - fetched <= poll * 2:
+        if not force and isinstance(fetched, (int, float)) and now - fetched <= poll * 2:
             return
         stamp = os.path.join(root, "refresh-requested")
         try:
@@ -983,7 +1005,7 @@ enum HolyClaudeUsageBridge {
             with open(stamp, "w", encoding="utf-8") as handle:
                 handle.write(str(now))
             subprocess.Popen(
-                [probe],
+                [probe] + (["--force"] if force else []),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -994,7 +1016,7 @@ enum HolyClaudeUsageBridge {
             pass
 
 
-    def wrap_up_request(root, latest, now):
+    def wrap_up_request(root, current_email, now):
         request = read_json(os.path.join(root, "wrap-up-requested.json"))
         if not isinstance(request, dict):
             return None
@@ -1002,10 +1024,9 @@ enum HolyClaudeUsageBridge {
         if not isinstance(expires, (int, float)) or expires <= now:
             return None
         wanted = request.get("account_email")
-        current = ((latest or {}).get("account") or {}).get("email")
         # The request was about one account; once the keychain moves on, the
         # sessions that follow it are on fresh headroom and must not be paused.
-        if wanted and current and wanted != current:
+        if wanted and current_email and wanted != current_email:
             return None
         return request
 
@@ -1027,8 +1048,8 @@ enum HolyClaudeUsageBridge {
         return "; ".join(parts) if parts else "no usage numbers available"
 
 
-    def message(level, reason, buckets, latest, now, wrap_up):
-        account = ((latest or {}).get("account") or {}).get("email") or "unknown account"
+    def message(level, reason, buckets, account_email, now, wrap_up):
+        account = account_email or "unknown account"
         summary = describe(buckets, now)
         if wrap_up:
             head = "HOLY USAGE GUARD — the user asked every session to pause now (%s)." % (wrap_up.get("reason") or "usage")
@@ -1114,11 +1135,21 @@ enum HolyClaudeUsageBridge {
 
         policy = load_policy(root)
         latest = read_json(os.path.join(root, "latest.json"))
-        maybe_refresh(root, latest, policy, now)
+        current_email = current_account_email()
+        latest_email = ((latest or {}).get("account") or {}).get("email")
+        if current_email and latest_email and current_email != latest_email:
+            # The keychain moved to another account since the last probe: its
+            # numbers describe someone else's headroom. Drop them, ask for a
+            # fresh read, and judge by this session's own windows meanwhile.
+            latest = None
+            maybe_refresh(root, None, policy, now, force=True)
+        else:
+            maybe_refresh(root, latest, policy, now)
+        account_email = current_email or latest_email
         own = session_buckets(root, session_id, now)
         buckets = merged_buckets(latest, own)
         level, _bucket, reason = assess(buckets, policy, now)
-        wrap_up = wrap_up_request(root, latest, now)
+        wrap_up = wrap_up_request(root, account_email, now)
         if wrap_up and LEVELS.index(level) < LEVELS.index("critical"):
             level = "critical"
             reason = wrap_up.get("reason") or "user requested pause"
@@ -1127,7 +1158,7 @@ enum HolyClaudeUsageBridge {
             clear_state(root, session_id)
             return 0
 
-        text = message(level, reason, buckets, latest, now, wrap_up)
+        text = message(level, reason, buckets, account_email, now, wrap_up)
         output = {"hookEventName": event or "PreToolUse"}
         if event == "PreToolUse" and level in ("critical", "capped") and tool_name in SPAWN_TOOLS:
             output["permissionDecision"] = "deny"

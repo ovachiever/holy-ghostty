@@ -242,6 +242,34 @@ struct HolyClaudeUsageGuardTests {
         #expect(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s3") == nil)
     }
 
+    @Test func guardDropsMachineSnapshotFromAPreviousAccount() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.installGuard(policy: policy)
+        // The keychain (as Claude records it) has moved to a second account,
+        // but the probe's last snapshot — critical — still belongs to the first.
+        try fixture.write(
+            #"{"oauthAccount": {"emailAddress": "second@example.com"}}"#,
+            to: fixture.root.appendingPathComponent(".claude.json")
+        )
+        try fixture.write(latestJSON(percent: policy.criticalPercent + 5), to: fixture.paths.latestURL)
+
+        // Someone else's headroom is not this account's emergency.
+        #expect(try fixture.runGuard(event: "PreToolUse", tool: "Agent", sessionID: "s5") == nil)
+        // And the guard asked the probe for a fresh read (forced through any backoff).
+        #expect(FileManager.default.fileExists(
+            atPath: fixture.paths.usageDirectoryURL.appendingPathComponent("refresh-requested").path
+        ))
+
+        // This session's own reading still counts, whichever account it came from.
+        try fixture.write(
+            sessionJSON(fiveHour: policy.criticalPercent + 1, resetsAt: Date().addingTimeInterval(3_600)),
+            to: fixture.paths.sessionsDirectoryURL.appendingPathComponent("abc-123.json")
+        )
+        let own = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "abc-123"))
+        #expect((own["additionalContext"] as? String)?.contains("second@example.com") == true)
+    }
+
     @Test func guardMirrorsSwiftEvaluatorAcrossFixtures() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
