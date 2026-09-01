@@ -225,6 +225,17 @@ class AppDelegate: NSObject,
         // workspace store. Gated — a no-op unless the file carries real dead
         // weight and the volume can hold the transient rewrite.
         HolyDatabaseCompactor.maintainAppDatabaseIfNeeded()
+        // Generated helpers are versioned with the app: refresh Holy-owned
+        // bridges the user already enabled so an app update never leaves a
+        // stale helper running. A fresh install still goes through the menu.
+        if HolyClaudeModelBridge.currentUserInstallationState() == .installed {
+            _ = HolyClaudeModelBridge.installForCurrentUser()
+        }
+        if case .needsRepair = HolyClaudeUsageBridge.currentUserInstallationState() {
+            _ = HolyClaudeUsageBridge.installForCurrentUser(
+                policy: HolyClaudeUsagePolicy.fromUserDefaults()
+            )
+        }
         refreshClaudeModelIndicatorMenu()
 
         // System settings overrides
