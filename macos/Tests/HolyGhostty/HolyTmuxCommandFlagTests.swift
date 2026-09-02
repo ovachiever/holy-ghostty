@@ -85,7 +85,7 @@ struct HolyTmuxCommandFlagTests {
         #expect(arguments.first == "-c")
         #expect(wrapper.contains("'ConnectTimeout=5'"))
         #expect(wrapper.contains("'BatchMode=yes'"))
-        #expect(wrapper.contains("exec '/usr/bin/ssh'"))
+        #expect(wrapper.contains("'/usr/bin/ssh'"))
         #expect(wrapper.contains("'--' 'erik@example-host'"))
     }
 
@@ -146,7 +146,7 @@ struct HolyTmuxCommandFlagTests {
         let remoteScript = command?.arguments.last ?? ""
 
         #expect(command?.executablePath == "/bin/zsh")
-        #expect(remoteScript.contains("exec '/usr/bin/ssh'"))
+        #expect(remoteScript.contains("'/usr/bin/ssh'"))
         #expect(remoteScript.contains("'--' 'remote.example'"))
         #expect(remoteScript.contains("unset TMUX TMUX_PANE"))
         #expect(!remoteScript.contains("unset TMUX TMUX_PANE TMUX_TMPDIR"))

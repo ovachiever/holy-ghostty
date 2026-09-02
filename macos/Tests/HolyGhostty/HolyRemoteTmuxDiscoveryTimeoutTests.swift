@@ -27,6 +27,17 @@ private func runIdentityDiscoveryTestShell(_ script: String) -> Int32 {
 // a runaway discovery process. A fast process must complete normally within a
 // generous cap.
 struct HolyRemoteTmuxDiscoveryTimeoutTests {
+    @Test func discoverySurfacesExplicitSSHInstanceSaturation() async {
+        let message = await HolyRemoteTmuxDiscoveryService.friendlySSHErrorForTesting(
+            destination: "studio",
+            exitCode: 255,
+            stderr: "kex_exchange_identification: read: Connection reset by peer"
+        )
+
+        #expect(message.contains("server instance limit is saturated"))
+        #expect(!message.contains("could not reach"))
+    }
+
     @Test func slowProcessIsCappedAndReportedAsUsefulTimeout() async {
         let start = Date()
         let error = await HolyRemoteTmuxDiscoveryService.runProcessWithTimeoutForTesting(

@@ -120,6 +120,23 @@ struct HolyTmuxLifecycleServiceTests {
         #expect(detail?.contains("Connection refused") == true)
     }
 
+    @Test func lifecycleExit255NamesSaturationInsteadOfClaimingUnreachability() throws {
+        let identity = try #require(HolyTmuxLiveIdentity(
+            transport: .init(kind: .ssh, hostLabel: "Remote", sshDestination: "studio"),
+            socketName: "holy",
+            sessionName: "demo"
+        ))
+        let failure = HolyTmuxLifecycleService.failureForTesting(
+            identity: identity,
+            exitCode: 255,
+            stderr: "kex_exchange_identification: read: Connection reset by peer"
+        )
+
+        #expect(failure.stage == .connect)
+        #expect(failure.message.contains("server instance limit is saturated"))
+        #expect(!failure.message.contains("could not reach"))
+    }
+
     // Cocoa 3584 was the field failure: an unmapped Foundation launch error
     // rendered as "(Cocoa error 3584.)" with every diagnostic coordinate
     // destroyed. The detailed rendering must preserve domain, code, and the
@@ -149,7 +166,8 @@ struct HolyTmuxLifecycleServiceTests {
         #expect(command.isRemote)
         #expect(command.executablePath == "/bin/zsh")
         let script = command.arguments.last ?? ""
-        #expect(script.contains("exec '/usr/bin/ssh'"))
+        #expect(script.contains("'/usr/bin/ssh'"))
+        #expect(script.contains("zsystem flock -e -t 0"))
         #expect(script.contains("'--' 'erik@example-host'"))
         #expect(script.contains("kill-session"))
         #expect(script.contains("=demo"))

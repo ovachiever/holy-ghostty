@@ -36,6 +36,10 @@ struct HolySSHTransportManagerTests {
         #expect(interactivePaths.isDisjoint(with: controlPaths))
         #expect(everyPath.count == HolySSHTransportManager.maximumConnectionCountPerDestination)
         #expect(controls.allSatisfy { $0.lane == .control })
+        #expect(try manager.controlPath(
+            destination: "STUDIO.BLUE-WREN.TS.NET",
+            purpose: .control
+        ) == controls.first?.controlPath)
     }
 
     @Test func wrapperChecksHealthLocksRecoveryAndCannotFallBackToRawTCP() throws {
@@ -58,7 +62,70 @@ struct HolySSHTransportManagerTests {
         #expect(script.contains("/bin/mkdir -- \"$holy_lock_path\""))
         #expect(script.contains("/bin/rm -f -- \"$holy_control_path\""))
         #expect(script.contains("holy_attempt >= 12"))
-        #expect(script.components(separatedBy: "'--' '\(destination)'").count - 1 == 3)
+        #expect(script.contains("zsystem flock -e -t 0"))
+        #expect(script.contains("SSH instance saturation"))
+        #expect(script.components(separatedBy: "'--' '\(destination)'").count - 1 == 2)
+    }
+
+    @Test func renderedAdmissionKeepsLifecycleSlotsOutsideTheSharedPool() throws {
+        let fixture = try HolySSHTransportTestFixture()
+        defer { fixture.destroy() }
+        let manager = fixture.manager()
+
+        let surface = try manager.command(
+            destination: "studio",
+            purpose: .interactive(sessionKey: "surface"),
+            remoteCommand: ["true"]
+        )
+        let discovery = try manager.command(
+            destination: "studio",
+            purpose: .control,
+            controlOperation: .discovery,
+            remoteCommand: ["true"]
+        )
+        let lifecycle = try manager.command(
+            destination: "studio",
+            purpose: .control,
+            controlOperation: .lifecycle,
+            remoteCommand: ["true"]
+        )
+        let lifecycleDiscovery = try manager.command(
+            destination: "studio",
+            purpose: .control,
+            controlOperation: .lifecycleDiscovery,
+            remoteCommand: ["true"]
+        )
+        let surfaceScript = try #require(surface.arguments.last)
+        let discoveryScript = try #require(discovery.arguments.last)
+        let lifecycleScript = try #require(lifecycle.arguments.last)
+        let lifecycleDiscoveryScript = try #require(lifecycleDiscovery.arguments.last)
+
+        #expect(surfaceScript.contains("for holy_slot_index in 0 1 2 3 4 5 6 7 8; do"))
+        #expect(discoveryScript.contains("for holy_slot_index in 0 1 2 3 4 5; do"))
+        #expect(lifecycleScript.contains("for holy_slot_index in 6 7 0 1 2 3 4 5; do"))
+        #expect(lifecycleDiscoveryScript.contains("for holy_slot_index in 6 7 0 1 2 3 4 5; do"))
+    }
+
+    @Test func syntheticKeyExchangeResetPrintsExplicitSaturationDiagnosis() throws {
+        let fixture = try HolySSHTransportTestFixture()
+        defer { fixture.destroy() }
+        let command = try fixture.manager().command(
+            destination: "studio",
+            purpose: .control,
+            controlOperation: .discovery,
+            remoteCommand: ["true"]
+        )
+        try Data().write(to: URL(fileURLWithPath: command.controlPath))
+
+        let result = fixture.runCapturing(
+            command,
+            clientFailure: "kex_exchange_identification: read: Connection reset by peer"
+        )
+
+        #expect(result.status == 255)
+        #expect(result.stderr.contains("SSH instance saturation"))
+        #expect(result.stderr.contains("server admission limit is saturated"))
+        #expect(!result.stderr.contains("could not reach"))
     }
 
     @Test func controlDirectoryIsForcedPrivate() throws {
@@ -178,7 +245,7 @@ struct HolySSHTransportManagerTests {
         let statuses = await withTaskGroup(of: Int32.self, returning: [Int32].self) { group in
             for command in commands {
                 group.addTask {
-                    fixture.run(command)
+                    await fixture.run(command)
                 }
             }
             var values: [Int32] = []
@@ -231,21 +298,53 @@ private final class HolySSHTransportTestFixture: @unchecked Sendable {
         )
     }
 
-    func run(_ command: HolySSHTransportCommand) -> Int32 {
+    func run(_ command: HolySSHTransportCommand) async -> Int32 {
         let process = Process()
         process.executableURL = command.executableURL
         process.arguments = command.arguments
         var environment = ProcessInfo.processInfo.environment
         environment["HOLY_FAKE_SSH_LOG"] = connectionLogURL.path
         process.environment = environment
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        return await withCheckedContinuation { continuation in
+            process.terminationHandler = { finishedProcess in
+                continuation.resume(returning: finishedProcess.terminationStatus)
+            }
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(returning: -1)
+            }
+        }
+    }
+
+    func runCapturing(
+        _ command: HolySSHTransportCommand,
+        clientFailure: String? = nil
+    ) -> (status: Int32, stderr: String) {
+        let process = Process()
+        process.executableURL = command.executableURL
+        process.arguments = command.arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOLY_FAKE_SSH_LOG"] = connectionLogURL.path
+        environment["HOLY_FAKE_SSH_CLIENT_FAILURE"] = clientFailure
+        process.environment = environment
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
         do {
             try process.run()
             process.waitUntilExit()
-            return process.terminationStatus
+            let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+            return (
+                process.terminationStatus,
+                String(bytes: stderrData, encoding: .utf8) ?? ""
+            )
         } catch {
-            return -1
+            return (-1, String(describing: error))
         }
     }
 
@@ -293,6 +392,10 @@ private final class HolySSHTransportTestFixture: @unchecked Sendable {
       exit 0
     fi
     [[ -f "$socket" ]] || exit 90
+    if [[ -n "$HOLY_FAKE_SSH_CLIENT_FAILURE" ]]; then
+      printf '%s\n' "$HOLY_FAKE_SSH_CLIENT_FAILURE" >&2
+      exit 255
+    fi
     exit 0
     """#
 }

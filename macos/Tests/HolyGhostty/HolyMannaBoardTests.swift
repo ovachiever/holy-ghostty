@@ -48,7 +48,10 @@ struct HolyMannaBoardTests {
 
         let wrapper = try #require(invocation.arguments.last)
         #expect(invocation.executablePath == "/bin/zsh")
-        #expect(wrapper.contains("exec '/usr/bin/ssh'"))
+        #expect(wrapper.contains("'/usr/bin/ssh'"))
+        #expect(wrapper.contains("zsystem flock -e"))
+        #expect(wrapper.contains("holy_ssh_error_file="))
+        #expect(wrapper.components(separatedBy: "'ControlMaster=no'").count == 2)
         #expect(wrapper.contains("'--' 'builder@[2001:db8::1]'"))
 
         #expect(throws: HolyMannaBoardClientError.launchFailed("invalid remote host")) {

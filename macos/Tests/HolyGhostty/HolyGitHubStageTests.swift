@@ -204,7 +204,9 @@ struct HolyGitHubStageTests {
         #expect(script.contains("'BatchMode=yes'"))
         #expect(script.contains("'ConnectTimeout=3'"))
         #expect(script.contains("'--' 'erik@studio'"))
-        #expect(script.contains("git -C '\"'\"'/Users/erik/Custom Coding/vms.io'\"'\"' remote get-url origin"))
+        #expect(script.contains("/Users/erik/Custom Coding/vms.io"))
+        #expect(script.contains("remote get-url origin"))
+        #expect(!script.contains("git -C /Users/erik/Custom Coding/vms.io"))
     }
 
     // MARK: - Pinned live capture (2026-08-13)

@@ -17,21 +17,21 @@ struct HolyRemoteAgentStateBridgeServiceTests {
         )
     }
 
-    @Test func commandPlanKeepsDestinationOutOfRemoteShellSource() throws {
+    @Test func commandPlanKeepsDestinationOutOfRemoteProgramAndUsesManagedRail() throws {
         let destination = "builder@[2001:db8::1]"
         let plan = try HolyRemoteAgentStateBridgeService.commandPlanForTesting(
             destination: destination
         )
         let wrapper = try #require(plan.arguments.last)
-        let finalInvocation = try #require(wrapper.components(separatedBy: "\nexec ").last)
         let destinationMarker = "'--' '\(destination)' "
-        let destinationRange = try #require(finalInvocation.range(of: destinationMarker))
-        let remotePayload = finalInvocation[destinationRange.upperBound...]
 
         #expect(plan.executablePath == "/bin/zsh")
-        #expect(wrapper.contains("exec '/usr/bin/ssh'"))
+        #expect(wrapper.contains("'/usr/bin/ssh'"))
+        #expect(wrapper.contains("zsystem flock -e"))
+        #expect(wrapper.contains("holy_ssh_error_file="))
+        #expect(wrapper.components(separatedBy: "'ControlMaster=no'").count == 2)
         #expect(wrapper.contains(destinationMarker))
-        #expect(!remotePayload.contains(destination))
+        #expect(!HolyRemoteAgentStateBridgeService.transactionProgramForTesting.contains(destination))
         #expect(wrapper.contains("'BatchMode=yes'"))
         #expect(wrapper.contains("'ConnectTimeout=5'"))
 

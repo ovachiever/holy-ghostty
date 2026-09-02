@@ -1,8 +1,13 @@
+import Dispatch
 import Foundation
 import OSLog
 
 actor HolyRemoteTmuxDiscoveryService {
     static let shared = HolyRemoteTmuxDiscoveryService()
+    private static let timeoutQueue = DispatchQueue(
+        label: "org.holyghostty.remote-discovery-timeout",
+        qos: .userInitiated
+    )
 
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "org.holyghostty.app",
@@ -29,11 +34,17 @@ actor HolyRemoteTmuxDiscoveryService {
         let normalizedHost = host.normalized()
         guard !normalizedHost.sshDestination.isEmpty else { return [] }
 
-        return try await discoverSessionsThrowing(
-            for: normalizedHost,
-            includeHiddenSessions: includeHiddenSessions
-        ) { host, socketName in
-            await runRemoteDiscovery(for: host, socketName: socketName, timeout: timeout)
+        return try await HolySSHAdmissionController.shared.withControlPermit(
+            for: normalizedHost.sshDestination,
+            operation: .discovery
+        ) {
+            try await self.discoverSessionsThrowing(
+                for: normalizedHost,
+                includeHiddenSessions: includeHiddenSessions,
+                usesSSH: true
+            ) { host, socketName in
+                await self.runRemoteDiscovery(for: host, socketName: socketName, timeout: timeout)
+            }
         }
     }
 
@@ -53,7 +64,8 @@ actor HolyRemoteTmuxDiscoveryService {
 
         return try await discoverSessionsThrowing(
             for: localHost,
-            includeHiddenSessions: includeHiddenSessions
+            includeHiddenSessions: includeHiddenSessions,
+            usesSSH: false
         ) { _, socketName in
             await runLocalDiscovery(socketName: socketName, timeout: timeout)
         }
@@ -72,16 +84,23 @@ actor HolyRemoteTmuxDiscoveryService {
         let normalizedHost = host.normalized()
         guard !normalizedHost.sshDestination.isEmpty else { return [] }
 
-        return try await discoverSessionsThrowing(
-            for: normalizedHost,
-            includeHiddenSessions: includeHiddenSessions
-        ) { host, socketName in
-            let script = self.identityDiscoveryScript(socketName: socketName)
-            return await self.runRemoteDiscovery(
-                for: host,
-                script: script,
-                timeout: timeout
-            )
+        return try await HolySSHAdmissionController.shared.withControlPermit(
+            for: normalizedHost.sshDestination,
+            operation: .lifecycleDiscovery
+        ) {
+            try await self.discoverSessionsThrowing(
+                for: normalizedHost,
+                includeHiddenSessions: includeHiddenSessions,
+                usesSSH: true
+            ) { host, socketName in
+                let script = await self.identityDiscoveryScript(socketName: socketName)
+                return await self.runRemoteDiscovery(
+                    for: host,
+                    script: script,
+                    timeout: timeout,
+                    controlOperation: .lifecycleDiscovery
+                )
+            }
         }
     }
 
@@ -101,7 +120,8 @@ actor HolyRemoteTmuxDiscoveryService {
 
         return try await discoverSessionsThrowing(
             for: localHost,
-            includeHiddenSessions: includeHiddenSessions
+            includeHiddenSessions: includeHiddenSessions,
+            usesSSH: false
         ) { _, socketName in
             let script = self.identityDiscoveryScript(socketName: socketName)
             return await self.runLocalDiscovery(script: script, timeout: timeout)
@@ -111,6 +131,7 @@ actor HolyRemoteTmuxDiscoveryService {
     private func discoverSessionsThrowing(
         for normalizedHost: HolyRemoteHostRecord,
         includeHiddenSessions: Bool,
+        usesSSH: Bool,
         using runDiscovery: (HolyRemoteHostRecord, String?) async -> HolyProcessRunOutcome
     ) async throws -> [HolyDiscoveredTmuxSession] {
         var discoveredSessions: [HolyDiscoveredTmuxSession] = []
@@ -122,7 +143,11 @@ actor HolyRemoteTmuxDiscoveryService {
             )
 
             guard result.exitCode == 0 else {
-                throw friendlyDiscoveryError(for: normalizedHost, result: result)
+                throw friendlyDiscoveryError(
+                    for: normalizedHost,
+                    result: result,
+                    usesSSH: usesSSH
+                )
             }
 
             if !result.stderr.holyTrimmed.isEmpty {
@@ -164,12 +189,14 @@ actor HolyRemoteTmuxDiscoveryService {
     private func runRemoteDiscovery(
         for host: HolyRemoteHostRecord,
         script: String,
-        timeout: TimeInterval?
+        timeout: TimeInterval?,
+        controlOperation: HolySSHControlOperation = .discovery
     ) async -> HolyProcessRunOutcome {
         let quotedScript = posixQuote(script)
         guard let command = try? HolySSHTransportManager.shared.command(
             destination: host.sshDestination,
             purpose: .control,
+            controlOperation: controlOperation,
             options: [
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=5",
@@ -294,8 +321,7 @@ actor HolyRemoteTmuxDiscoveryService {
             // stalled tmux server is SIGTERM'd and reported as a timeout so the
             // sweep stays bounded. Resume first so the termination handler can
             // never misreport our SIGTERM as a normal command failure.
-            Task.detached {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            Self.timeoutQueue.asyncAfter(deadline: .now() + timeout) {
                 resumeBox.resume(returning: .timedOut(
                     context: context,
                     seconds: timeout
@@ -857,20 +883,20 @@ actor HolyRemoteTmuxDiscoveryService {
 
     private func friendlyDiscoveryError(
         for host: HolyRemoteHostRecord,
-        result: HolyRemoteCommandResult
+        result: HolyRemoteCommandResult,
+        usesSSH: Bool
     ) -> NSError {
         let stderr = result.stderr.holyTrimmed
         let description: String
 
-        if stderr.localizedCaseInsensitiveContains("host key verification failed") {
-            description = "SSH trust failed for \(host.sshDestination). Run `ssh \(host.sshDestination)` in Terminal once and accept or refresh the host key."
-        } else if stderr.localizedCaseInsensitiveContains("could not resolve hostname") {
-            description = "Holy couldn't resolve \(host.sshDestination). Use a working SSH alias or reachable host name."
-        } else if stderr.localizedCaseInsensitiveContains("permission denied") {
-            description = "SSH login failed for \(host.sshDestination). Verify your SSH key or agent."
-        } else if stderr.localizedCaseInsensitiveContains("operation timed out")
-            || stderr.localizedCaseInsensitiveContains("connection timed out") {
-            description = "\(host.sshDestination) timed out. Check VPN/Tailscale reachability or choose another address."
+        if usesSSH, let diagnosis = HolySSHFailureDiagnosis.diagnose(
+            destination: host.sshDestination,
+            exitCode: result.exitCode,
+            stderr: result.stderr,
+            stdout: result.stdout
+        ) {
+            logger.error("\(diagnosis.logMessage, privacy: .public)")
+            description = diagnosis.userMessage
         } else if let stderr = stderr.nilIfEmpty {
             description = stderr
         } else {
@@ -1045,6 +1071,24 @@ extension HolyRemoteTmuxDiscoveryService {
 
     static func identityDiscoveryScriptForTesting(socketName: String?) async -> String {
         await shared.identityDiscoveryScript(socketName: socketName)
+    }
+
+    static func friendlySSHErrorForTesting(
+        destination: String,
+        exitCode: Int32,
+        stderr: String,
+        stdout: String = ""
+    ) async -> String {
+        let host = HolyRemoteHostRecord(
+            id: UUID(),
+            label: destination,
+            sshDestination: destination
+        )
+        return await shared.friendlyDiscoveryError(
+            for: host,
+            result: .init(stdout: stdout, stderr: stderr, exitCode: exitCode),
+            usesSSH: true
+        ).localizedDescription
     }
 }
 #endif

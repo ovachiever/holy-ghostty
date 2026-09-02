@@ -196,7 +196,7 @@ enum HolyTmuxCommandBuilder {
             ],
             remoteCommand: [shellCommand(["zsh", "-lc", localScript])]
         ).shellInvocation
-        let failureMessage = "Holy Ghostty could not reach \(destination). Reattach after SSH is reachable."
+        let failureMessage = "The SSH session to \(destination) ended. The classified failure is printed above; reattach after correcting that specific cause."
 
         return [
             terminalInputFlushCommand,

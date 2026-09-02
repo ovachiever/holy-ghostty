@@ -86,6 +86,7 @@ final class HolySSHTransportManager: @unchecked Sendable {
     func command(
         destination rawDestination: String,
         purpose: HolySSHTransportPurpose,
+        controlOperation: HolySSHControlOperation = .metadata,
         options: [String] = [],
         remoteCommand: [String]
     ) throws -> HolySSHTransportCommand {
@@ -98,10 +99,25 @@ final class HolySSHTransportManager: @unchecked Sendable {
 
         let lane = lane(for: purpose)
         let controlPath = controlPath(destination: destination, lane: lane)
+        let admissionPlan: HolySSHAdmissionShellPlan = switch purpose {
+        case .interactive:
+            .surface(
+                controlPath: controlPath,
+                destination: destination,
+                interactiveLaneCount: Self.interactiveLaneCount
+            )
+        case .control:
+            .control(
+                controlPath: controlPath,
+                destination: destination,
+                operation: controlOperation
+            )
+        }
         let wrapper = wrapperScript(
             destination: destination,
             lane: lane,
             controlPath: controlPath,
+            admissionPlan: admissionPlan,
             clientOptions: options,
             remoteCommand: remoteCommand
         )
@@ -159,7 +175,8 @@ final class HolySSHTransportManager: @unchecked Sendable {
     }
 
     private func controlPath(destination: String, lane: HolySSHTransportLane) -> String {
-        let digest = SHA256.hash(data: Data(destination.utf8))
+        let hostKey = HolySSHAdmissionController.hostKey(for: destination)
+        let digest = SHA256.hash(data: Data(hostKey.utf8))
             .prefix(12)
             .map { String(format: "%02x", $0) }
             .joined()
@@ -172,6 +189,7 @@ final class HolySSHTransportManager: @unchecked Sendable {
         destination: String,
         lane: HolySSHTransportLane,
         controlPath: String,
+        admissionPlan: HolySSHAdmissionShellPlan,
         clientOptions: [String],
         remoteCommand: [String]
     ) -> String {
@@ -201,13 +219,25 @@ final class HolySSHTransportManager: @unchecked Sendable {
             "-o", "ServerAliveCountMax=2",
             "-o", "TCPKeepAlive=no",
         ] + batchMode + ["--", destination])
-        let clientCommand = shellCommand([
+        let rawClientCommand = shellCommand([
             sshPath,
             "-S", controlPath,
             "-o", "ControlMaster=no",
             "-o", "ControlPath=\(controlPath)",
             "-o", "ProxyCommand=/usr/bin/false",
         ] + batchMode + clientOptions + ["--", destination] + remoteCommand)
+        let clientCommand = shellCommand([
+            "/bin/zsh", "-c",
+            clientRunnerScript(
+                destination: destination,
+                controlPath: controlPath,
+                clientCommand: rawClientCommand
+            ),
+        ])
+        let admittedClientCommand = admissionPlan.wrapping(clientCommand: clientCommand)
+        let bootstrapFailureReporter = HolySSHFailureDiagnosis.shellReporterScript(
+            destination: destination
+        )
 
         return """
         setopt NO_NOMATCH
@@ -257,13 +287,17 @@ final class HolySSHTransportManager: @unchecked Sendable {
         }
 
         holy_attempt=0
+        holy_last_bootstrap_evidence=''
         while ! holy_master_is_healthy; do
           holy_attempt=$((holy_attempt + 1))
           if holy_take_lock; then
             trap holy_release_lock EXIT HUP INT TERM
             if ! holy_master_is_healthy; then
               /bin/rm -f -- "$holy_control_path"
-              \(bootstrapCommand) || true
+              holy_bootstrap_evidence="$(\(bootstrapCommand) 2>&1)"
+              if [[ -n "$holy_bootstrap_evidence" ]]; then
+                holy_last_bootstrap_evidence="$holy_bootstrap_evidence"
+              fi
             fi
             holy_release_lock
             trap - EXIT HUP INT TERM
@@ -273,7 +307,12 @@ final class HolySSHTransportManager: @unchecked Sendable {
             break
           fi
           if (( holy_attempt >= 12 )); then
-            printf '%s\n' 'Holy could not establish its managed SSH transport after bounded retries.' >&2
+            holy_status=255
+            holy_ssh_evidence="$holy_last_bootstrap_evidence"
+            if [[ -n "$holy_ssh_evidence" ]]; then
+              printf '%s\n' "$holy_ssh_evidence" >&2
+            fi
+            \(bootstrapFailureReporter)
             exit 255
           fi
           case "$holy_attempt" in
@@ -285,7 +324,44 @@ final class HolySSHTransportManager: @unchecked Sendable {
           esac
         done
 
-        exec \(clientCommand)
+        \(admittedClientCommand)
+        """
+    }
+
+    private func clientRunnerScript(
+        destination: String,
+        controlPath: String,
+        clientCommand: String
+    ) -> String {
+        let failureReporter = HolySSHFailureDiagnosis.shellReporterScript(destination: destination)
+        return """
+        holy_ssh_error_file=\(posixQuote(controlPath + ".client-error")).$$
+        if [[ -L "$holy_ssh_error_file" ]]; then
+          printf '%s\n' 'Holy found an unsafe SSH diagnostic file; refusing to connect.' >&2
+          exit 255
+        fi
+        (umask 077; : > "$holy_ssh_error_file") || exit 255
+        holy_cleanup_ssh_error() {
+          /bin/rm -f -- "$holy_ssh_error_file"
+        }
+        trap holy_cleanup_ssh_error EXIT HUP INT TERM
+        \(clientCommand) 2> "$holy_ssh_error_file"
+        holy_status=$?
+        if [[ -n "$holy_admission_fd" ]]; then
+          zmodload zsh/system 2>/dev/null || true
+          zsystem flock -u "$holy_admission_fd" 2>/dev/null || true
+          unset holy_admission_fd
+        fi
+        holy_ssh_evidence="$(< "$holy_ssh_error_file")"
+        if [[ -n "$holy_ssh_evidence" ]]; then
+          printf '%s\n' "$holy_ssh_evidence" >&2
+        fi
+        if (( holy_status != 0 )); then
+          \(failureReporter)
+        fi
+        holy_cleanup_ssh_error
+        trap - EXIT HUP INT TERM
+        exit "$holy_status"
         """
     }
 

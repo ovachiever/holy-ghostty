@@ -1,5 +1,6 @@
-import Foundation
 import Darwin
+import Foundation
+import OSLog
 
 /// The stage of a tmux lifecycle command that produced a failure. Reported to
 /// the user verbatim so a field failure names the layer that broke instead of
@@ -36,7 +37,7 @@ struct HolyTmuxLifecycleFailure: Error, Sendable, Equatable {
         case .launch:
             summary = "The tmux helper process could not be launched"
         case .connect:
-            summary = "SSH could not reach the host to run tmux"
+            summary = "SSH transport failed before tmux ran"
         case .kill:
             summary = "tmux could not kill the session"
         case .verify:
@@ -98,6 +99,11 @@ enum HolyTmuxLiveness: Sendable, Equatable {
 enum HolyTmuxLifecycleService {
     static let defaultKillTimeout: TimeInterval = 12
     static let defaultProbeTimeout: TimeInterval = 8
+
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "org.holyghostty.app",
+        category: "HolyTmuxLifecycle"
+    )
 
     /// Kills the exact identity and returns only after a polled inventory
     /// proves the session absent (or reports the precise failure stage).
@@ -198,6 +204,29 @@ enum HolyTmuxLifecycleService {
     private static func run(
         command: HolyTmuxLifecycleCommand,
         identity: HolyTmuxLiveIdentity,
+        timeout: TimeInterval
+    ) async -> RunOutcome {
+        guard command.isRemote,
+              let destination = identity.transport.sshDestination?.holyLifecycleServiceTrimmed.nilIfEmpty else {
+            return await runAdmitted(command: command, timeout: timeout)
+        }
+
+        do {
+            return try await HolySSHAdmissionController.shared.withControlPermit(
+                for: destination,
+                operation: .lifecycle
+            ) {
+                await runAdmitted(command: command, timeout: timeout)
+            }
+        } catch {
+            return .launchFailed(
+                description: "SSH lifecycle work was cancelled while waiting for reserved capacity."
+            )
+        }
+    }
+
+    private static func runAdmitted(
+        command: HolyTmuxLifecycleCommand,
         timeout: TimeInterval
     ) async -> RunOutcome {
         var attempt = 0
@@ -308,11 +337,35 @@ enum HolyTmuxLifecycleService {
     ) -> HolyTmuxLifecycleFailure {
         let (markedStage, detail) = HolyTmuxLifecycleCommand.parseStage(fromStderr: result.stderr)
         var stage = markedStage ?? fallbackStage
+        let diagnosis = isRemote
+            ? identity.transport.sshDestination.flatMap {
+                HolySSHFailureDiagnosis.diagnose(
+                    destination: $0,
+                    exitCode: result.exitCode,
+                    stderr: result.stderr,
+                    stdout: result.stdout,
+                    remoteCommandStarted: markedStage != nil
+                )
+            }
+            : nil
+        if let diagnosis {
+            logger.error("\(diagnosis.logMessage, privacy: .public)")
+        }
         // ssh reserves exit 255 for its own failures; the script never ran,
         // so a missing stage marker plus 255 on a remote transport means the
         // connection itself broke.
         if isRemote, markedStage == nil, result.exitCode == 255 {
             stage = .connect
+        }
+
+        if stage == .connect, let diagnosis {
+            return .init(
+                stage: stage,
+                socketName: identity.socketName,
+                target: HolyTmuxLifecycleCommand.exactTarget(for: identity),
+                stderr: nil,
+                underlyingDescription: diagnosis.userMessage
+            )
         }
 
         let stderrDetail = detail?.holyLifecycleServiceTrimmed.nilIfEmpty
@@ -424,6 +477,7 @@ struct HolyTmuxLifecycleCommand: Sendable {
             guard let transport = try? HolySSHTransportManager.shared.command(
                 destination: destination,
                 purpose: .control,
+                controlOperation: .lifecycle,
                 options: [
                     "-o", "BatchMode=yes",
                     "-o", "ConnectTimeout=5",
@@ -533,6 +587,24 @@ struct HolyTmuxLifecycleCommand: Sendable {
         return "'\(escaped)'"
     }
 }
+
+#if DEBUG
+extension HolyTmuxLifecycleService {
+    static func failureForTesting(
+        identity: HolyTmuxLiveIdentity,
+        exitCode: Int32,
+        stderr: String,
+        stdout: String = ""
+    ) -> HolyTmuxLifecycleFailure {
+        failure(
+            from: .init(stdout: stdout, stderr: stderr, exitCode: exitCode),
+            fallbackStage: .kill,
+            identity: identity,
+            isRemote: identity.transport.isRemote
+        )
+    }
+}
+#endif
 
 private enum HolyTmuxLifecycleServiceRunOutcome {
     case completed(stdout: String, stderr: String, exitCode: Int32)
