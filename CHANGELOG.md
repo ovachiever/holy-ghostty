@@ -29,6 +29,8 @@ pause, before one of them lands.
   credits, and lifetime stats; the green bar gains a `⌁ codex` chip
   group, the newest session rollout file serves as last-known when the
   RPC fails, and codex windows never trigger the Claude wrap-up guard.
+  Banked rate-limit reset credits ride the codex group as a dim ↻N
+  counter.
 
 - Claude Usage Guard (`Enable Claude Usage Guard…`, beside the Claude Model
   Indicator): a Holy-owned probe reads the signed-in account's OAuth token

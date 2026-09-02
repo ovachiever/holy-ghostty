@@ -832,7 +832,7 @@ enum HolyClaudeUsageBridge {
         return label or "?"
 
 
-    def compose_segment(buckets, policy, now, stale_seconds=None, wrap_up=False):
+    def compose_segment(buckets, policy, now, stale_seconds=None, wrap_up=False, codex_resets=None):
         """The green-bar segment, one ⌁-prefixed group per vendor. Styled for
         tmux's stock black-on-green bar: calm windows stay plain, a warn
         window becomes a yellow chip, critical/capped a red one. The identical
@@ -863,7 +863,13 @@ enum HolyClaudeUsageBridge {
             parts.append("#[dim]⌁ claude#[nodim] " + " · ".join(claude_chips))
         codex_chips = chips_for([b for b in buckets if is_codex(b) and b.get("bar", True)])
         if codex_chips:
-            parts.append("#[dim]⌁ codex#[nodim] " + " · ".join(codex_chips))
+            group = "#[dim]⌁ codex#[nodim] " + " · ".join(codex_chips)
+            # The reset-credit counter: how many free window refills are
+            # banked. Rendered whenever the RPC reports a number, so a spent
+            # last credit shows ↻0 rather than silently vanishing.
+            if isinstance(codex_resets, (int, float)) and not isinstance(codex_resets, bool):
+                group += " #[dim]↻%d#[nodim]" % int(codex_resets)
+            parts.append(group)
         if not parts:
             return ""
         segment = "  ".join(parts)
@@ -895,6 +901,7 @@ enum HolyClaudeUsageBridge {
         segment = compose_segment(
             snapshot.get("buckets") or [], policy, now,
             stale_seconds=stale_seconds, wrap_up=wrap,
+            codex_resets=(snapshot.get("codex") or {}).get("reset_credits"),
         )
         socket = os.environ.get("HOLY_TMUX_SOCKET", "holy")
         try:

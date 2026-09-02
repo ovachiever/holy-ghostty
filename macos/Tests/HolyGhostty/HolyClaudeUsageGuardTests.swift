@@ -388,8 +388,9 @@ struct HolyClaudeUsageGuardTests {
         policy = {"warn_percent": \(policy.warnPercent), "critical_percent": \(policy.criticalPercent),
                   "lead_minutes": \(policy.leadMinutes), "poll_seconds": \(policy.pollSeconds)}
         claude = [{"key": "session", "label": "Session (5h)", "percent": 30.0}]
-        print(module["compose_segment"](claude + buckets, policy, now))
+        print(module["compose_segment"](claude + buckets, policy, now, codex_resets=1))
         print(json.dumps(module["codex_fallback_buckets"](now)))
+        print(module["compose_segment"](claude + buckets, policy, now))
         """
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
@@ -432,6 +433,12 @@ struct HolyClaudeUsageGuardTests {
         #expect(fallback.count == 1)
         #expect(fallback[0]["key"] as? String == "codex:codex:primary")
         #expect((fallback[0]["percent"] as? NSNumber)?.doubleValue == 41.0)
+
+        // The banked reset-credit counter rides the codex group; without a
+        // reported number it is absent, never a phantom zero.
+        #expect(lines[1].contains("↻1"))
+        #expect(lines.count >= 4)
+        #expect(!lines[3].contains("↻"))
     }
 
     @Test func guardNeverActsOnCodexBuckets() throws {
