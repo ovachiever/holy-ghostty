@@ -104,7 +104,16 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
             )
                 .environmentObject(ghostty)
         )
+        // The hosting view must not drive the window's size: the workspace
+        // root is geometry-driven, so its fitting size is tiny, and letting
+        // it size the window collapsed the frame to minSize and saved that
+        // (Erik, 2026-09-02). The saved frame, else the default, decides.
+        hostingController.sizingOptions = []
         window.contentViewController = hostingController
+        if !window.setFrameUsingName("HolyGhosttyWorkspaceWindow") {
+            window.setContentSize(NSSize(width: 1580, height: 980))
+            window.center()
+        }
 
         super.init(window: window)
         window.holyWorkspaceController = self
