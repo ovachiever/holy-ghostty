@@ -103,9 +103,10 @@ enum HolyMannaBoardMetrics {
     static let metaLabelWidth: CGFloat = 76 // .inspector .meta grid
     static let debugLabelWidth: CGFloat = 160 // .kv grid
     static let chipRadius: CGFloat = 9 // .chip border-radius
-    /// The list column holds a 72-character digest at 12px mono beside its
-    /// fixed columns and the inspector; wider windows center the cockpit
-    /// instead of stretching the digest across the screen.
+    /// The page's `--measure`: it centers the cockpit at 1440px on wide
+    /// windows. Holy does not apply it — both faces fill the pane column
+    /// like the terminal (Erik, 2026-09-02) — but the token stays for
+    /// reference against styles.css.
     static let measure: CGFloat = 1440
     static let pillTracking: CGFloat = 0.06 * bodySize // letter-spacing .06em
     static let trackColumnMaxCharacters = 30 // COLS.board track max

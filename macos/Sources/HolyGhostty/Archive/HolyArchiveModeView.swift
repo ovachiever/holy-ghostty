@@ -64,8 +64,10 @@ struct HolyArchiveModeView: View {
 
     // MARK: - Layout arithmetic
 
+    /// The page centers its cockpit at 1440px; Holy fills the pane column
+    /// edge to edge, like the terminal it stands in for (Erik, 2026-09-02).
     private func pagePadding(_ width: CGFloat) -> CGFloat {
-        max(Metrics.s4, (width - Metrics.measure) / 2)
+        Metrics.s4
     }
 
     private func inspectorWidth(_ width: CGFloat) -> CGFloat {
