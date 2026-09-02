@@ -78,6 +78,11 @@ enum HolyDatabaseMigrator {
             label: "Content-addressed Board digest cache",
             statements: schemaV11
         ),
+        .init(
+            version: 12,
+            label: "Native session archive, search, and researcher",
+            statements: schemaV12
+        ),
     ]
 
     private static let schemaV1: [String] = [
@@ -529,5 +534,248 @@ enum HolyDatabaseMigrator {
         CREATE INDEX IF NOT EXISTS board_digest_cache_last_used_at_idx
         ON board_digest_cache(last_used_at);
         """,
+    ]
+
+    /// Archive owns its index inside Holy's database. The `archive_` prefix
+    /// keeps provider conversations distinct from live workspace rows while
+    /// still letting archive resume and crash restore join them through the
+    /// stable harness session id.
+    private static let schemaV12: [String] = [
+        """
+        CREATE TABLE IF NOT EXISTS archive_index_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS archive_sessions (
+            id TEXT PRIMARY KEY,
+            harness TEXT NOT NULL,
+            raw_path TEXT NOT NULL,
+            project_path TEXT,
+            project_name TEXT NOT NULL,
+            title TEXT NOT NULL,
+            first_prompt_preview TEXT NOT NULL,
+            last_prompt_preview TEXT NOT NULL,
+            last_response_preview TEXT NOT NULL,
+            timestamp REAL NOT NULL,
+            timestamp_end REAL,
+            is_child INTEGER NOT NULL DEFAULT 0,
+            child_type TEXT,
+            parent_id TEXT,
+            model TEXT,
+            tool_calls_json TEXT NOT NULL DEFAULT '[]',
+            tokens_used INTEGER,
+            summary TEXT,
+            content_hash TEXT NOT NULL,
+            extra_json TEXT NOT NULL DEFAULT '{}',
+            resume_command TEXT,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            turn_count INTEGER NOT NULL DEFAULT 0,
+            file_mtime REAL NOT NULL,
+            indexed_at REAL NOT NULL,
+            auto_tags_json TEXT NOT NULL DEFAULT '[]',
+            FOREIGN KEY (parent_id) REFERENCES archive_sessions(id) ON DELETE SET NULL
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS archive_sessions_recency_idx
+        ON archive_sessions(COALESCE(timestamp_end, timestamp) DESC);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS archive_sessions_project_idx
+        ON archive_sessions(project_path, harness, is_child);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS archive_sessions_file_idx
+        ON archive_sessions(raw_path);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS archive_sessions_parent_idx
+        ON archive_sessions(parent_id);
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS archive_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp REAL,
+            sequence INTEGER NOT NULL,
+            has_code INTEGER NOT NULL DEFAULT 0,
+            tool_mentions_json TEXT NOT NULL DEFAULT '[]',
+            FOREIGN KEY (session_id) REFERENCES archive_sessions(id) ON DELETE CASCADE
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS archive_messages_session_sequence_idx
+        ON archive_messages(session_id, sequence);
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS archive_chunks (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            message_id TEXT,
+            chunk_index INTEGER NOT NULL,
+            chunk_type TEXT NOT NULL,
+            content TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            embedding BLOB,
+            embedding_model TEXT,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES archive_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (message_id) REFERENCES archive_messages(id) ON DELETE SET NULL
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS archive_chunks_session_type_idx
+        ON archive_chunks(session_id, chunk_type, chunk_index);
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS archive_search_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            query TEXT NOT NULL,
+            result_count INTEGER NOT NULL,
+            top_session_ids_json TEXT NOT NULL,
+            search_time_ms REAL NOT NULL,
+            timestamp REAL NOT NULL
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS archive_search_history_timestamp_idx
+        ON archive_search_history(timestamp DESC);
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS archive_project_stats (
+            project_path TEXT PRIMARY KEY,
+            project_name TEXT NOT NULL,
+            total_sessions INTEGER NOT NULL,
+            parent_sessions INTEGER NOT NULL,
+            child_sessions INTEGER NOT NULL,
+            first_session_time REAL,
+            last_session_time REAL,
+            harness_counts_json TEXT NOT NULL,
+            total_messages INTEGER NOT NULL,
+            common_tags_json TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS archive_summaries (
+            session_id TEXT PRIMARY KEY,
+            summary TEXT NOT NULL,
+            model TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES archive_sessions(id) ON DELETE CASCADE
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS archive_annotations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            timestamp REAL NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('tag', 'note')),
+            value TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'manual',
+            FOREIGN KEY (session_id) REFERENCES archive_sessions(id) ON DELETE CASCADE
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS archive_annotations_session_idx
+        ON archive_annotations(session_id, timestamp DESC);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS archive_annotations_type_value_idx
+        ON archive_annotations(type, value COLLATE NOCASE);
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS archive_research_chats (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            backend TEXT NOT NULL,
+            model TEXT NOT NULL,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS archive_research_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            tool_call_json TEXT,
+            tool_output_json TEXT,
+            cited_session_ids_json TEXT NOT NULL DEFAULT '[]',
+            created_at REAL NOT NULL,
+            FOREIGN KEY (chat_id) REFERENCES archive_research_chats(id) ON DELETE CASCADE,
+            UNIQUE(chat_id, sequence)
+        );
+        """,
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS archive_messages_fts USING fts5(
+            content,
+            content='archive_messages',
+            content_rowid='rowid',
+            tokenize='porter unicode61 remove_diacritics 1'
+        );
+        """,
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS archive_sessions_fts USING fts5(
+            first_prompt_preview,
+            project_name,
+            auto_tags_json,
+            content='archive_sessions',
+            content_rowid='rowid',
+            tokenize='porter unicode61 remove_diacritics 1'
+        );
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS archive_messages_ai AFTER INSERT ON archive_messages BEGIN
+            INSERT INTO archive_messages_fts(rowid, content) VALUES (new.rowid, new.content);
+        END;
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS archive_messages_ad AFTER DELETE ON archive_messages BEGIN
+            INSERT INTO archive_messages_fts(archive_messages_fts, rowid, content)
+            VALUES ('delete', old.rowid, old.content);
+        END;
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS archive_messages_au AFTER UPDATE ON archive_messages BEGIN
+            INSERT INTO archive_messages_fts(archive_messages_fts, rowid, content)
+            VALUES ('delete', old.rowid, old.content);
+            INSERT INTO archive_messages_fts(rowid, content) VALUES (new.rowid, new.content);
+        END;
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS archive_sessions_ai AFTER INSERT ON archive_sessions BEGIN
+            INSERT INTO archive_sessions_fts(rowid, first_prompt_preview, project_name, auto_tags_json)
+            VALUES (new.rowid, new.first_prompt_preview, new.project_name, new.auto_tags_json);
+        END;
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS archive_sessions_ad AFTER DELETE ON archive_sessions BEGIN
+            INSERT INTO archive_sessions_fts(
+                archive_sessions_fts, rowid, first_prompt_preview, project_name, auto_tags_json
+            ) VALUES ('delete', old.rowid, old.first_prompt_preview, old.project_name, old.auto_tags_json);
+        END;
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS archive_sessions_au AFTER UPDATE ON archive_sessions BEGIN
+            INSERT INTO archive_sessions_fts(
+                archive_sessions_fts, rowid, first_prompt_preview, project_name, auto_tags_json
+            ) VALUES ('delete', old.rowid, old.first_prompt_preview, old.project_name, old.auto_tags_json);
+            INSERT INTO archive_sessions_fts(rowid, first_prompt_preview, project_name, auto_tags_json)
+            VALUES (new.rowid, new.first_prompt_preview, new.project_name, new.auto_tags_json);
+        END;
+        """,
+        "INSERT INTO archive_messages_fts(archive_messages_fts) VALUES ('rebuild');",
+        "INSERT INTO archive_sessions_fts(archive_sessions_fts) VALUES ('rebuild');",
     ]
 }

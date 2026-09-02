@@ -125,6 +125,7 @@ struct HolyWorkspaceRootView: View {
     @EnvironmentObject private var ghostty: Ghostty.App
     @ObservedObject var store: HolyWorkspaceStore
     @ObservedObject var boardModeStore: HolyMannaBoardModeStore
+    @ObservedObject var archiveModeStore: HolyArchiveModeStore
     @State private var diffCompareSessionIDRaw: String?
     @State private var lastFocusedSurface: Weak<Ghostty.SurfaceView>?
     @FocusState private var workspaceFocused: Bool
@@ -139,7 +140,9 @@ struct HolyWorkspaceRootView: View {
         ZStack {
             HolyGhosttyBackdrop()
             workspaceContent
-            if !boardModeStore.isPresented, let selectedSession = store.selectedSession {
+            if !boardModeStore.isPresented,
+               !archiveModeStore.isPresented,
+               let selectedSession = store.selectedSession {
                 TerminalCommandPaletteView(
                     surfaceView: selectedSession.surfaceView,
                     isPresented: $store.commandPaletteIsShowing,
@@ -203,12 +206,12 @@ struct HolyWorkspaceRootView: View {
         .onAppear {
             workspaceFocused = true
             boardModeStore.prepare(context: focusedBoardContext)
-            if !boardModeStore.isPresented {
+            if !boardModeStore.isPresented, !archiveModeStore.isPresented {
                 focusSelectedSession()
             }
         }
         .onChange(of: store.selectedSessionID) { _ in
-            guard !boardModeStore.isPresented else { return }
+            guard !boardModeStore.isPresented, !archiveModeStore.isPresented else { return }
             boardModeStore.prepare(context: focusedBoardContext)
             focusSelectedSession()
         }
@@ -217,8 +220,13 @@ struct HolyWorkspaceRootView: View {
             focusSelectedSession()
         }
         .onChange(of: boardModeStore.isPresented) { isPresented in
-            if !isPresented {
+            if !isPresented, !archiveModeStore.isPresented {
                 boardModeStore.prepare(context: focusedBoardContext)
+                focusSelectedSession()
+            }
+        }
+        .onChange(of: archiveModeStore.isPresented) { isPresented in
+            if !isPresented, !boardModeStore.isPresented {
                 focusSelectedSession()
             }
         }
@@ -231,7 +239,12 @@ struct HolyWorkspaceRootView: View {
     private var workspaceContent: some View {
         GeometryReader { geometry in
             Group {
-                if boardModeStore.isPresented {
+                if archiveModeStore.isPresented {
+                    HolyArchiveModeView(
+                        store: archiveModeStore,
+                        onDismiss: { archiveModeStore.dismiss() }
+                    )
+                } else if boardModeStore.isPresented {
                     HolyMannaBoardView(
                         store: boardModeStore,
                         onDismiss: { boardModeStore.dismiss() },
@@ -547,6 +560,7 @@ struct HolyWorkspaceRootView: View {
             Spacer(minLength: 6)
 
             HStack(spacing: 3) {
+                archiveModeButton
                 boardModeButton
                 HolyInboxToggleButton(store: store, engine: store.inboxEngine)
             }
@@ -593,6 +607,9 @@ struct HolyWorkspaceRootView: View {
 
             collapsedRailButton(title: "Board (Command-B)", systemName: "rectangle.3.group") {
                 showBoard()
+            }
+            collapsedRailButton(title: "Archive (Command-Shift-A)", systemName: "archivebox") {
+                showArchive()
             }
             HolyInboxToggleButton(store: store, engine: store.inboxEngine)
         }
@@ -1108,7 +1125,7 @@ struct HolyWorkspaceRootView: View {
     }
 
     private func focusSelectedSession() {
-        guard !boardModeStore.isPresented else { return }
+        guard !boardModeStore.isPresented, !archiveModeStore.isPresented else { return }
         guard let session = store.selectedSession else { return }
         lastFocusedSurface = Weak(session.surfaceView)
         Ghostty.moveFocus(to: session.surfaceView)
@@ -1117,8 +1134,6 @@ struct HolyWorkspaceRootView: View {
     private var focusedBoardContext: HolyMannaBoardContext {
         HolyMannaBoardContext.focused(session: store.selectedSession)
     }
-
-
     private var boardModeButton: some View {
         Button(
             action: { showBoard() },
@@ -1134,11 +1149,32 @@ struct HolyWorkspaceRootView: View {
         .help("Board (Command-B)")
     }
 
+    private var archiveModeButton: some View {
+        Button(
+            action: { showArchive() },
+            label: {
+                Image(systemName: "archivebox")
+                    .font(.system(size: 10, weight: .medium))
+                    .frame(width: 24, height: 22)
+            }
+        )
+        .buttonStyle(.plain)
+        .foregroundStyle(HolyGhosttyTheme.textSecondary)
+        .accessibilityLabel("Archive")
+        .help("Archive (Command-Shift-A)")
+    }
+
     private func showBoard(sheet: HolyMannaBoardSheet? = nil) {
+        archiveModeStore.dismiss()
         if let sheet {
             boardModeStore.selectedSheet = sheet
         }
         boardModeStore.present(context: focusedBoardContext)
+    }
+
+    private func showArchive() {
+        boardModeStore.dismiss()
+        archiveModeStore.present()
     }
 
     private func focusMannaPeer(_ identity: String) -> Bool {

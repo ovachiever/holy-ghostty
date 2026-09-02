@@ -332,6 +332,12 @@
                                     <action selector="toggleBoardMode:" target="-1" id="bMd-4d-Ax2"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Archive Mode" keyEquivalent="a" id="aRc-4d-Bx1">
+                                <modifierMask key="keyEquivalentModifierMask" shift="YES" command="YES"/>
+                                <connections>
+                                    <action selector="toggleArchiveMode:" target="-1" id="aRc-4d-Ax2"/>
+                                </connections>
+                            </menuItem>
                             <menuItem title="Inbox Panel" keyEquivalent="p" id="hIp-4d-Bx1">
                                 <connections>
                                     <action selector="toggleInboxPanel:" target="-1" id="hIp-4d-Ax2"/>

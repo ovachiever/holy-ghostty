@@ -47,6 +47,7 @@ private final class HolyWorkspaceWindow: NSWindow {
 final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate {
     let workspaceStore: HolyWorkspaceStore
     let boardModeStore: HolyMannaBoardModeStore
+    let archiveModeStore: HolyArchiveModeStore
 
     init(
         ghostty: Ghostty.App,
@@ -62,6 +63,21 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         self.boardModeStore = HolyMannaBoardModeStore(
             usageAssessmentProvider: { workspaceStore.claudeUsageAssessment }
         )
+        self.archiveModeStore = HolyArchiveModeStore { session in
+            guard let runtime = session.harness.runtime,
+                  let command = HolyRestoreCommandBuilder.renderedResumeCommand(
+                    runtime: runtime,
+                    providerSessionID: session.id
+                  ) else { return false }
+            var spec = HolySessionLaunchSpec.interactiveTmuxShell(title: session.displayTitle)
+            spec.runtime = runtime
+            spec.objective = "Resume archived \(session.harness.displayName) conversation \(session.shortID)"
+            spec.workingDirectory = session.projectPath
+            spec.command = command
+            spec.initialInput = nil
+            spec.providerSessionID = session.id
+            return workspaceStore.createSession(with: spec, origin: .directLaunch) != nil
+        }
 
         let window = HolyWorkspaceWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1580, height: 980),
@@ -83,7 +99,8 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         let hostingController = NSHostingController(
             rootView: HolyWorkspaceRootView(
                 store: workspaceStore,
-                boardModeStore: boardModeStore
+                boardModeStore: boardModeStore,
+                archiveModeStore: archiveModeStore
             )
                 .environmentObject(ghostty)
         )
@@ -134,7 +151,9 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        if !boardModeStore.isPresented, let selected = workspaceStore.selectedSession {
+        if !boardModeStore.isPresented,
+           !archiveModeStore.isPresented,
+           let selected = workspaceStore.selectedSession {
             Ghostty.moveFocus(to: selected.surfaceView)
         }
     }
@@ -181,6 +200,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     @discardableResult
     func closeSelectedSessionIfAvailable() -> Bool {
         guard !boardModeStore.isPresented,
+              !archiveModeStore.isPresented,
               let selected = workspaceStore.selectedSession else { return false }
         workspaceStore.close(selected)
         return true
@@ -201,7 +221,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     }
 
     func toggleCommandPalette() {
-        guard !boardModeStore.isPresented else { return }
+        guard !boardModeStore.isPresented, !archiveModeStore.isPresented else { return }
         workspaceStore.commandPaletteIsShowing.toggle()
     }
 
@@ -228,6 +248,18 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
 
         let relevantFlags = event.modifierFlags.intersection([.command, .option, .control, .shift])
 
+        if key == "a", relevantFlags == [.command, .shift] {
+            boardModeStore.dismiss()
+            archiveModeStore.toggle()
+            workspaceStore.commandPaletteIsShowing = false
+            return true
+        }
+
+        if archiveModeStore.isPresented {
+            let textInputActive = window?.firstResponder is NSTextView
+            return archiveModeStore.handleKeyEquivalent(event, textInputActive: textInputActive)
+        }
+
         if event.keyCode == HolyWorkspaceKeyCode.escape,
            relevantFlags.isEmpty,
            boardModeStore.isPresented {
@@ -236,6 +268,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         }
 
         if key == "b", relevantFlags == .command {
+            archiveModeStore.dismiss()
             boardModeStore.toggle(context: .focused(session: workspaceStore.selectedSession))
             workspaceStore.commandPaletteIsShowing = false
             return true
@@ -282,7 +315,17 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     /// First-responder target of View > Board Mode. Keyboard and menu entry
     /// share the same full-screen workspace face and focused board.
     @objc func toggleBoardMode(_ sender: Any?) {
+        archiveModeStore.dismiss()
         boardModeStore.toggle(context: .focused(session: workspaceStore.selectedSession))
+        workspaceStore.commandPaletteIsShowing = false
+    }
+
+    /// First-responder target of View > Archive Mode. Archive is a third
+    /// full-width workspace face, mutually exclusive with Board and terminal
+    /// focus, and resumes conversations directly into this controller's roster.
+    @objc func toggleArchiveMode(_ sender: Any?) {
+        boardModeStore.dismiss()
+        archiveModeStore.toggle()
         workspaceStore.commandPaletteIsShowing = false
     }
 
@@ -331,6 +374,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
 
     func windowDidBecomeKey(_ notification: Notification) {
         guard !boardModeStore.isPresented,
+              !archiveModeStore.isPresented,
               let selected = workspaceStore.selectedSession else { return }
         Ghostty.moveFocus(to: selected.surfaceView)
     }

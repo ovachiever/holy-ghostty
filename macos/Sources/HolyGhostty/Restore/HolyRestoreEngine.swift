@@ -932,11 +932,16 @@ final class HolyRestoreEngine: ObservableObject {
             row.plannedLaunchSpec.runtime.rawValue,
             spec: row.plannedLaunchSpec
         )
-        guard let resumeCommand = HolyRestoreCommandBuilder.renderedResumeCommand(
+        // Candidate resume commands are evidence for the human-facing
+        // archive, never executable shell source. Re-render the invocation
+        // from the validated runtime and provider id so an indexed command
+        // cannot smuggle shell syntax into a restored tmux pane.
+        let resumeCommand = HolyRestoreCommandBuilder.renderedResumeCommand(
             runtime: row.plannedLaunchSpec.runtime,
             providerSessionID: providerSessionID,
             executablePath: discovery.pinnedArgvPath
-        ) else {
+        )
+        guard let resumeCommand else {
             updateRow(rowID) {
                 $0.phase = .failed("No exact resume command exists for this runtime and id.")
             }

@@ -42,6 +42,16 @@ struct HolyRestoreResolveCandidate: Equatable, Sendable, Identifiable {
     let id: String
     let timestampEnd: Int
     let preview: String
+    /// Provider-owned command, preserved verbatim by the in-process archive
+    /// resolver. Older external payloads may omit it.
+    let resumeCommand: String?
+
+    init(id: String, timestampEnd: Int, preview: String, resumeCommand: String? = nil) {
+        self.id = id
+        self.timestampEnd = timestampEnd
+        self.preview = preview
+        self.resumeCommand = resumeCommand
+    }
 }
 
 /// A successfully parsed resolve payload. `confidence` is law: "exact"
@@ -85,7 +95,12 @@ struct HolyRestoreResolution: Equatable, Sendable {
             resumeCommand: payload.resumeCommand,
             confidence: confidence,
             candidates: (payload.candidates ?? []).map {
-                .init(id: $0.id, timestampEnd: $0.timestampEnd, preview: $0.preview ?? "")
+                .init(
+                    id: $0.id,
+                    timestampEnd: $0.timestampEnd,
+                    preview: $0.preview ?? "",
+                    resumeCommand: $0.resumeCommand
+                )
             }
         )
     }
@@ -116,11 +131,13 @@ struct HolyRestoreResolution: Equatable, Sendable {
         let id: String
         let timestampEnd: Int
         let preview: String?
+        let resumeCommand: String?
 
         enum CodingKeys: String, CodingKey {
             case id
             case timestampEnd = "timestamp_end"
             case preview
+            case resumeCommand = "resume_command"
         }
     }
 }
@@ -204,7 +221,12 @@ struct HolyRestoreBatchResolution: Equatable, Sendable {
                 harness: result.harness,
                 runtime: result.runtime,
                 candidates: (result.candidates ?? []).map {
-                    .init(id: $0.id, timestampEnd: $0.timestampEnd, preview: $0.preview ?? "")
+                    .init(
+                        id: $0.id,
+                        timestampEnd: $0.timestampEnd,
+                        preview: $0.preview ?? "",
+                        resumeCommand: $0.resumeCommand
+                    )
                 },
                 error: result.error
             )
@@ -227,11 +249,13 @@ struct HolyRestoreBatchResolution: Equatable, Sendable {
         let id: String
         let timestampEnd: Int
         let preview: String?
+        let resumeCommand: String?
 
         enum CodingKeys: String, CodingKey {
             case id
             case timestampEnd = "timestamp_end"
             case preview
+            case resumeCommand = "resume_command"
         }
     }
 }

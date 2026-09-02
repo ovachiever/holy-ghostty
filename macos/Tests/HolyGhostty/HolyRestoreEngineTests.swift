@@ -287,9 +287,10 @@ struct HolyRestoreEngineTests {
     private func candidate(
         _ id: String,
         end: Int = lastActivity,
-        preview: String = "preview"
+        preview: String = "preview",
+        resumeCommand: String? = nil
     ) -> HolyRestoreResolveCandidate {
-        .init(id: id, timestampEnd: end, preview: preview)
+        .init(id: id, timestampEnd: end, preview: preview, resumeCommand: resumeCommand)
     }
 
     private func makeEngine(
@@ -416,6 +417,22 @@ struct HolyRestoreEngineTests {
         await engine.restoreAll()
 
         // The server PATH is the pane's PATH, so the bare name resolves there.
+        #expect(tmux.createdSpecs.compactMap(\.command) == ["'claude' '--resume' 'aaa-111'"])
+    }
+
+    @Test func providerResumeCommandIsEvidenceNeverExecutableShellSource() async throws {
+        let resolver = FakeBatchResolver(candidatesByCwd: [
+            "/tmp/lane-a": [candidate(
+                "aaa-111",
+                resumeCommand: "claude --resume aaa-111; touch /tmp/provider-command-ran"
+            )],
+        ])
+        let (engine, _, tmux) = makeEngine(archives: [archived()], resolver: resolver)
+
+        engine.buildPlan()
+        await engine.runPreflight()
+        await engine.restoreAll()
+
         #expect(tmux.createdSpecs.compactMap(\.command) == ["'claude' '--resume' 'aaa-111'"])
     }
 

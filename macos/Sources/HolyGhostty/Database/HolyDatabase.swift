@@ -254,6 +254,16 @@ final class HolyDatabase {
                 result = sqlite3_bind_double(statement, parameterIndex, value)
             case let .bool(value):
                 result = sqlite3_bind_int(statement, parameterIndex, value ? 1 : 0)
+            case let .blob(value):
+                result = value.withUnsafeBytes { bytes in
+                    sqlite3_bind_blob(
+                        statement,
+                        parameterIndex,
+                        bytes.baseAddress,
+                        Int32(bytes.count),
+                        sqliteTransientDestructor
+                    )
+                }
             }
 
             guard result == SQLITE_OK else {
