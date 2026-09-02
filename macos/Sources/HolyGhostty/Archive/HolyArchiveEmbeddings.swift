@@ -80,18 +80,27 @@ struct HolyOpenAIEmbeddingProvider: HolyArchiveEmbeddingProviding {
         guard let apiKey = apiKey?.holyArchiveNilIfBlank else {
             throw HolyArchiveEmbeddingError.unavailable("OPENAI_API_KEY is not set.")
         }
-        let body: [String: Any] = [
-            "model": model,
-            "input": bounded(texts),
-            "encoding_format": "float",
-        ]
-        let payload = try await HolyArchiveHTTP.postJSON(
-            endpoint: endpoint,
-            headers: ["Authorization": "Bearer \(apiKey)"],
-            body: body,
-            provider: displayName,
-            timeout: 30
-        )
+        // The API counts tokens, and code tokenizes far denser than prose,
+        // so a character bound is only a first guess: when the API says an
+        // input is still too long, halve every input and ask again.
+        var inputs = HolyArchiveEmbeddingInputBounds.bounded(texts)
+        var payload: [String: Any]
+        while true {
+            do {
+                payload = try await HolyArchiveHTTP.postJSON(
+                    endpoint: endpoint,
+                    headers: ["Authorization": "Bearer \(apiKey)"],
+                    body: ["model": model, "input": inputs, "encoding_format": "float"],
+                    provider: displayName,
+                    timeout: 30
+                )
+                break
+            } catch let error as HolyArchiveEmbeddingError {
+                guard HolyArchiveEmbeddingInputBounds.isInputTooLong(error),
+                      let halved = HolyArchiveEmbeddingInputBounds.halved(inputs) else { throw error }
+                inputs = halved
+            }
+        }
         guard let rows = payload["data"] as? [[String: Any]] else {
             throw HolyArchiveEmbeddingError.invalidResponse("OpenAI data was missing.")
         }
@@ -198,8 +207,41 @@ struct HolyCohereEmbeddingProvider: HolyArchiveEmbeddingProviding {
     }
 }
 
+/// How much text an embedding request may carry per input.
+enum HolyArchiveEmbeddingInputBounds {
+    /// OpenAI's embedding models accept 8,192 tokens per input; the API says
+    /// so itself when refused ("maximum input length is 8192 tokens",
+    /// observed 2026-09-02) and its model reference lists the same ceiling.
+    static let maximumInputTokens = 8_192
+    /// Prose tokenizes near four characters per token, code and JSON near
+    /// two; the bound assumes the dense case so a tool dump does not overrun.
+    static let denseCharactersPerToken = 2
+    /// The shortest input still worth embedding; halving stops here.
+    static let minimumCharacters = 256
+
+    static var maximumCharacters: Int { maximumInputTokens * denseCharactersPerToken }
+
+    static func bounded(_ texts: [String], limit: Int = maximumCharacters) -> [String] {
+        texts.map { String($0.prefix(limit)) }
+    }
+
+    /// The provider's own verdict that an input is over its token ceiling.
+    static func isInputTooLong(_ error: HolyArchiveEmbeddingError) -> Bool {
+        guard case let .requestFailed(_, status, detail) = error, status == 400 else { return false }
+        return detail.localizedCaseInsensitiveContains("maximum input length")
+            || detail.localizedCaseInsensitiveContains("maximum context length")
+    }
+
+    /// Every input cut to half its longest peer, or nil once nothing can shrink.
+    static func halved(_ texts: [String]) -> [String]? {
+        let longest = texts.map(\.count).max() ?? 0
+        guard longest > minimumCharacters else { return nil }
+        return bounded(texts, limit: max(minimumCharacters, longest / 2))
+    }
+}
+
 private func bounded(_ texts: [String]) -> [String] {
-    texts.map { String($0.prefix(24_000)) }
+    HolyArchiveEmbeddingInputBounds.bounded(texts)
 }
 
 private enum HolyArchiveHTTP {

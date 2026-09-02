@@ -122,6 +122,44 @@ struct HolyArchivePresentationTests {
     }
 }
 
+/// The embedding input bound and the halving retry the OpenAI provider
+/// uses when the API refuses an input as too long.
+struct HolyArchiveEmbeddingBoundsTests {
+    typealias Bounds = HolyArchiveEmbeddingInputBounds
+
+    @Test func boundAssumesDenseTokenization() {
+        #expect(Bounds.maximumCharacters == 8_192 * 2)
+        let long = String(repeating: "x", count: 30_000)
+        #expect(Bounds.bounded([long, "short"]) == [String(repeating: "x", count: Bounds.maximumCharacters), "short"])
+    }
+
+    @Test func onlyTheProvidersTooLongVerdictTriggersHalving() {
+        let tooLong = HolyArchiveEmbeddingError.requestFailed(
+            provider: "OpenAI", status: 400,
+            detail: #"{"error": {"message": "Invalid 'input[1]': maximum input length is 8192 tokens."}}"#
+        )
+        #expect(Bounds.isInputTooLong(tooLong))
+        #expect(!Bounds.isInputTooLong(.requestFailed(provider: "OpenAI", status: 400, detail: "bad model")))
+        #expect(!Bounds.isInputTooLong(.requestFailed(provider: "OpenAI", status: 429, detail: "maximum input length")))
+        #expect(!Bounds.isInputTooLong(.unavailable("no key")))
+    }
+
+    @Test func halvingShrinksUntilNothingCanShrink() {
+        let inputs = [String(repeating: "a", count: 8_000), "tiny"]
+        let once = Bounds.halved(inputs)
+        #expect(once?.map(\.count) == [4_000, 4])
+        var current = inputs
+        var rounds = 0
+        while let next = Bounds.halved(current) {
+            current = next
+            rounds += 1
+        }
+        #expect(current[0].count == Bounds.minimumCharacters)
+        #expect(rounds == 5)
+        #expect(Bounds.halved(["short", "also short"]) == nil)
+    }
+}
+
 enum ArchiveFixtures {
     static func session(
         id: String,
