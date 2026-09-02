@@ -70,14 +70,15 @@ struct HolyInboxPanelView: View {
     /// in the focused repository.
     @State private var lensText = ""
 
-    /// The right dock has exactly two GitHub scopes: the focused repository
-    /// and the global sweep.
+    /// The right dock has exactly two GitHub scopes: the global sweep and
+    /// the focused repository. The sweep is the default and sits first
+    /// (Erik, 2026-09-02): what needs you across everything, then here.
     enum Tab: String, CaseIterable {
-        case project
         case all
+        case project
     }
 
-    @State private var tab: Tab = .project
+    @State private var tab: Tab = .all
     /// The focused session's GitHub slug, resolved async per selection.
     @State private var focusedSlug: String?
 
@@ -119,8 +120,8 @@ struct HolyInboxPanelView: View {
 
     private var tabPicker: some View {
         HStack(spacing: 2) {
-            tabButton(.project, title: focusedProjectName ?? "This project")
             tabButton(.all, title: "All")
+            tabButton(.project, title: focusedProjectName ?? "This project")
             Spacer()
         }
         .padding(.horizontal, 10)
