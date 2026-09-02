@@ -326,10 +326,22 @@ struct HolyMannaWave: Decodable, Equatable, Identifiable, Sendable {
 }
 
 struct HolyMannaTrack: Decodable, Equatable, Identifiable, Sendable {
-    let id: String
+    // The core emits a synthetic "(no track)" bucket for untracked items with
+    // id: null and status: null; both must stay optional or the whole state
+    // payload fails to decode on any board that has untracked items.
+    let trackID: String?
     let title: String
-    let status: String
+    let status: String?
     let items: [HolyMannaBoardItem]
+
+    var id: String { trackID ?? "(no track)" }
+
+    enum CodingKeys: String, CodingKey {
+        case trackID = "id"
+        case title
+        case status
+        case items
+    }
 }
 
 struct HolyMannaPeer: Decodable, Equatable, Identifiable, Sendable {

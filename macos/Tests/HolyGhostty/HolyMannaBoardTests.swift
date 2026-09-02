@@ -440,3 +440,19 @@ private enum HolyMannaBoardFixtures {
         """
     }
 }
+
+struct HolyMannaTrackDecodeRegressionTests {
+    // The core emits a synthetic "(no track)" bucket (id: null, status: null)
+    // on any board with untracked items; the state decode must survive it.
+    @Test func noTrackBucketWithNullIdentityDecodes() throws {
+        let json = """
+        [{"id": null, "status": null, "title": "(no track)", "items": []},
+         {"id": "mn-9a97cc", "status": "open", "title": "TRACK: One Ledger, Two Faces", "items": []}]
+        """
+        let tracks = try JSONDecoder().decode([HolyMannaTrack].self, from: Data(json.utf8))
+        #expect(tracks[0].trackID == nil)
+        #expect(tracks[0].status == nil)
+        #expect(tracks[0].id == "(no track)")
+        #expect(tracks[1].id == "mn-9a97cc")
+    }
+}
