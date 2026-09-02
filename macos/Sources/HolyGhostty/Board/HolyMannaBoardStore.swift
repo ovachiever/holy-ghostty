@@ -145,6 +145,11 @@ final class HolyMannaBoardModeStore: ObservableObject {
             selectedPeerID = nil
             digestText = nil
             digestFailure = nil
+            // A session chosen while the board is on screen is a request
+            // for that session's board; the estate returns only if it has none.
+            if isPresented {
+                surface = context.boardRoot == nil ? .estate : .board
+            }
         }
         requestRefresh(force: contextChanged || state == nil)
         loadActorID()

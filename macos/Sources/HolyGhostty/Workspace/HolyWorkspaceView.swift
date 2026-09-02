@@ -211,8 +211,11 @@ struct HolyWorkspaceRootView: View {
             }
         }
         .onChange(of: store.selectedSessionID) { _ in
-            guard !boardModeStore.isPresented, !archiveModeStore.isPresented else { return }
+            guard !archiveModeStore.isPresented else { return }
             boardModeStore.prepare(context: focusedBoardContext)
+            // The board follows the selected session; the terminal only
+            // takes keyboard focus back when it is the thing on screen.
+            guard !boardModeStore.isPresented else { return }
             focusSelectedSession()
         }
         .onChange(of: selectedSessionObjectIdentifier) { _ in
@@ -235,33 +238,13 @@ struct HolyWorkspaceRootView: View {
 
     // MARK: - Helpers
 
-    @ViewBuilder
+    /// The roster and the right panel stay in place whatever the pane area
+    /// shows: terminal panes, the board, or the archive (Erik, 2026-09-02:
+    /// "the left menu always stays in place and visible").
     private var workspaceContent: some View {
-        GeometryReader { geometry in
-            Group {
-                if archiveModeStore.isPresented {
-                    HolyArchiveModeView(
-                        store: archiveModeStore,
-                        onDismiss: { archiveModeStore.dismiss() }
-                    )
-                } else if boardModeStore.isPresented {
-                    HolyMannaBoardView(
-                        store: boardModeStore,
-                        onDismiss: { boardModeStore.dismiss() },
-                        onFocusPeer: focusMannaPeer
-                    )
-                } else {
-                    standardContent
-                }
-            }
-                .frame(
-                    width: max(0, geometry.size.width),
-                    height: max(0, geometry.size.height)
-                )
-                .clipped()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .clipped()
+        standardContent
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
     }
 
     private var standardContent: some View {
@@ -344,7 +327,27 @@ struct HolyWorkspaceRootView: View {
         }
     }
 
+    @ViewBuilder
     private var mainWorkspaceContent: some View {
+        if archiveModeStore.isPresented {
+            HolyArchiveModeView(
+                store: archiveModeStore,
+                onDismiss: { archiveModeStore.dismiss() }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if boardModeStore.isPresented {
+            HolyMannaBoardView(
+                store: boardModeStore,
+                onDismiss: { boardModeStore.dismiss() },
+                onFocusPeer: focusMannaPeer
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            terminalPaneContent
+        }
+    }
+
+    private var terminalPaneContent: some View {
         VStack(spacing: 0) {
             if store.shouldOfferCrashRestore {
                 // Parents only in the headline count; helper shells are
