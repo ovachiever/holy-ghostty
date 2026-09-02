@@ -7,7 +7,7 @@ base_commit: b5ffc3a81634ed9f0e847b02457011b542096982
 scope: '[P1][KERNEL] Zone-leak watch: catch the kalloc.1024 leaker and build the Apple feedback packet'
 inputs:
 - 'Kernel-panic/SSH-saturation joint diagnosis 2026-09-02 (forwarded MacBook agent analysis + Studio-side verification this session). Receipts: /System/Library/LaunchDaemons/ssh.plist inetdCompatibility.Instances=42 VERIFIED via plutil; panic-base+socd-2026-08-26-201523 panicString: zalloc zone map exhausted, zone data.kalloc.1024, 20G / 21,184,272 elements; Sep-1 file is the watchdog stub.'
-binding: sha256:58ddef5b8d34e7b329f2d9e58d9819f6bee2bc62a7ce16c63cf68f811a342a76
+binding: sha256:b9e1ed642c4b1852fca738e77c4aced28fc6fda27303682b5619400a36ccc13f
 ---
 
 # Handoff: [P1][KERNEL] Zone-leak watch: catch the kalloc.1024 leaker and build the Apple feedback packet
@@ -87,6 +87,17 @@ the only later behavior change is the 30-minute guard in the interactive
 report command. A follow-up administrator dialog to synchronize that
 report-only change was canceled, so it was not retried. The scheduled sampler
 does not call `report`, and the repo report reads the installed log safely.
+
+### Pinned feedback inputs
+
+- `/Library/Logs/DiagnosticReports/panic-base+socd-2026-08-26-201523.000.panic`
+  is 63,608 bytes with SHA-256
+  `f42fca390ff1060fbcd16196cbfa6a046ff2566481e2e535805777bf73ac19c4`.
+  This is the full `data.kalloc.1024` zone-exhaustion panic.
+- `/Library/Logs/DiagnosticReports/panic-base-2026-09-01-095508.panic` is
+  949 bytes with SHA-256
+  `f62e386d6eb9a6beb6532a64c25f6e56ec9ddf766f12bbe3b20030ac10355f3e`.
+  This is the later watchdog stub, not a second full panic narrative.
 
 ### Needed next
 
