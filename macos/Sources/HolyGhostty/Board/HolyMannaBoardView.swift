@@ -140,8 +140,12 @@ struct HolyMannaBoardView: View {
         .overlay(alignment: .bottom) { rule }
     }
 
+    /// `terminal › estate › board`: the outermost crumb is the way out. The
+    /// page has no such link because a browser tab is its own exit.
     private var crumb: some View {
         HStack(spacing: 0) {
+            terminalCrumb
+            separator("›")
             linkButton("estate") { store.showEstate() }
             separator("›")
             Text(store.boardName)
@@ -157,6 +161,12 @@ struct HolyMannaBoardView: View {
         .foregroundStyle(Palette.muted)
         .lineLimit(1)
         .fixedSize()
+    }
+
+    private var terminalCrumb: some View {
+        linkButton("‹ terminal") { onDismiss() }
+            .help("Return to the terminal (Escape)")
+            .accessibilityLabel("Return to terminal")
     }
 
     private var tabs: some View {
@@ -200,7 +210,16 @@ struct HolyMannaBoardView: View {
             .textFieldStyle(.plain)
             .focused($grepFocused)
             .padding(.horizontal, Metrics.s2)
-            .frame(width: Metrics.grepFieldWidth, height: Metrics.grepFieldHeight)
+            // The page fixes the bar at 400px; here it yields down to half
+            // that when the crumb and tabs need the room, so the right
+            // cluster and the inspector never leave the window.
+            .frame(
+                minWidth: Metrics.grepFieldWidth / 2,
+                idealWidth: Metrics.grepFieldWidth,
+                maxWidth: Metrics.grepFieldWidth,
+                minHeight: Metrics.grepFieldHeight,
+                maxHeight: Metrics.grepFieldHeight
+            )
             .background(Palette.surface)
             .overlay(Rectangle().stroke(grepFocused ? Palette.blue : Palette.line, lineWidth: 1))
             .padding(.leading, Metrics.s6 - Metrics.s4)
@@ -1198,9 +1217,15 @@ struct HolyMannaBoardView: View {
     private func estateSurface(width: CGFloat) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: Metrics.s4) {
-                Text("estate")
-                    .fontWeight(.semibold)
-                    .foregroundStyle(Palette.text)
+                HStack(spacing: 0) {
+                    terminalCrumb
+                    separator("›")
+                    Text("estate")
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Palette.text)
+                }
+                .lineLimit(1)
+                .fixedSize()
                 Spacer(minLength: 0)
                 topbarRight
             }
