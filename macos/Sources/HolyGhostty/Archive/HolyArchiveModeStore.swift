@@ -95,6 +95,7 @@ final class HolyArchiveModeStore: ObservableObject {
 
     init(
         registry: HolyArchiveProviderRegistry = .init(),
+        databaseURL: URL = HolyDatabasePaths.databaseURL,
         resumeHandler: @escaping @MainActor (HolyArchiveSession) -> Bool
     ) {
         self.registry = registry
@@ -103,7 +104,7 @@ final class HolyArchiveModeStore: ObservableObject {
             ?? HolyIntelligenceRole.deep.defaultModel
         self.reasoningEffort = UserDefaults.standard.string(forKey: "holy.archive.research.effort") ?? "xhigh"
         do {
-            let repository = try HolyArchiveRepository()
+            let repository = try HolyArchiveRepository(databaseURL: databaseURL)
             let search = HolyArchiveHybridSearch(repository: repository)
             let tools = HolyArchiveResearchTools(
                 repository: repository, search: search, registry: registry
@@ -152,6 +153,15 @@ final class HolyArchiveModeStore: ObservableObject {
         searchResponse?.matchingChildrenByParentID.values.reduce(0) { $0 + $1.count } ?? 0
     }
 
+    /// True while the list shows search results rather than the newest sessions.
+    var isSearchActive: Bool {
+        searchResponse != nil
+    }
+
+    var childCountForSelectedParent: Int {
+        selectedParent.flatMap { childCountsByParentID[$0.id] } ?? 0
+    }
+
     func present() {
         isPresented = true
         if !didPrepare {
@@ -180,7 +190,10 @@ final class HolyArchiveModeStore: ObservableObject {
         isLoading = true
         statusMessage = "Loading indexed sessions..."
         refreshSessions()
-        incrementalIndex()
+        // Nothing to discover means nothing to index or migrate.
+        if !registry.availableProviders.isEmpty {
+            incrementalIndex()
+        }
         refreshRecentChats()
     }
 

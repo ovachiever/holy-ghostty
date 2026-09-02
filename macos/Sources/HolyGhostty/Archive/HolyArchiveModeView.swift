@@ -1,307 +1,417 @@
 import AppKit
 import SwiftUI
 
-private enum HolyArchivePalette {
-    static let background = Color(red: 0.039, green: 0.039, blue: 0.051)
-    static let raisedInk = Color(red: 0.071, green: 0.071, blue: 0.090)
-    static let paper = Color(red: 0.847, green: 0.851, blue: 0.824)
-    static let metadata = Color(red: 0.553, green: 0.576, blue: 0.612)
-    static let gold = Color(red: 0.878, green: 0.749, blue: 0.349)
-    static let rule = Color.white.opacity(0.085)
-    static let danger = Color(red: 0.95, green: 0.43, blue: 0.39)
+private typealias Palette = HolyMannaBoardPalette
+private typealias Metrics = HolyMannaBoardMetrics
+private typealias Present = HolyArchivePresentation
+private typealias Board = HolyMannaBoardPresentation
 
-    static func provider(_ harness: HolyArchiveHarness) -> Color {
-        switch harness {
-        case .claudeCode: Color(red: 0.84, green: 0.48, blue: 0.30)
-        case .codex: Color(red: 0.38, green: 0.76, blue: 0.60)
-        case .droid: Color(red: 0.48, green: 0.66, blue: 0.92)
-        case .cursor: Color(red: 0.72, green: 0.63, blue: 0.92)
-        case .opencode: Color(red: 0.45, green: 0.78, blue: 0.84)
-        }
-    }
-}
+/// index.js SPIN, one frame every 120 ms.
+private let spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+private let spinnerInterval: TimeInterval = 0.12
 
+/// Archive mode: the agent-sessions browser, native, in the board cockpit's
+/// dress. What it does follows the TUI (agent_sessions/app.py); how it looks
+/// follows the board, so Holy's two faces read as one design.
 struct HolyArchiveModeView: View {
     @ObservedObject var store: HolyArchiveModeStore
     let onDismiss: () -> Void
+
+    @AppStorage("holy.archive.inspectorWidth.v1") private var storedInspectorWidth = Double(HolyArchiveMetrics.inspectorDefaultWidth)
     @FocusState private var searchFocused: Bool
     @FocusState private var researchFocused: Bool
-    @State private var annotationSheetPresented = false
+    @FocusState private var findFocused: Bool
+    @State private var inspectorDragStartWidth: CGFloat?
+    @State private var resizerHovered = false
+    @State private var hoveredRowID: String?
+    @State private var copiedLabel: String?
+    @State private var copiedResetTask: Task<Void, Never>?
 
     var body: some View {
-        ZStack {
-            HolyArchivePalette.background.ignoresSafeArea()
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            let showsInspector = width > Metrics.compactBreakpoint && !store.chatIsFullscreen
             VStack(spacing: 0) {
-                masthead
-                filterBar
-                Divider().overlay(HolyArchivePalette.rule)
-                archiveBody
-                statusBar
-            }
-            if store.chatIsPresented, store.chatIsFullscreen {
-                researchPanel
-                    .background(HolyArchivePalette.background)
-                    .transition(.opacity)
-                    .zIndex(10)
+                topbar(width: width, inspectorWidth: inspectorWidth(width), showsInspector: showsInspector)
+                HStack(spacing: 0) {
+                    sheetColumn
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if showsInspector {
+                        resizer(currentWidth: inspectorWidth(width))
+                        inspector
+                            .frame(width: inspectorWidth(width))
+                            .frame(maxHeight: .infinity)
+                            .background(Palette.surface)
+                    }
+                }
+                .padding(.horizontal, pagePadding(width))
+                strip(width: width)
             }
         }
-        .foregroundStyle(HolyArchivePalette.paper)
-        .font(.system(size: 12))
-        .sheet(isPresented: $annotationSheetPresented) { annotationSheet }
-        .alert(
-            "Archive needs attention",
-            isPresented: Binding(
-                get: { store.errorMessage != nil },
-                set: { if !$0 { store.clearError() } }
-            )
-        ) {
-            Button("OK", role: .cancel) { store.clearError() }
-        } message: {
-            Text(store.errorMessage ?? "Unknown archive error.")
-        }
-        .onChange(of: store.annotationMode) { mode in annotationSheetPresented = mode != nil }
-        .onChange(of: annotationSheetPresented) { if !$0 { store.cancelAnnotation() } }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Palette.bg)
+        .font(mono())
+        .foregroundStyle(Palette.text)
         .onChange(of: store.searchFocusNonce) { _ in searchFocused = true }
         .onChange(of: store.researchFocusNonce) { _ in researchFocused = true }
+        .onChange(of: store.annotationMode) { mode in
+            if mode != nil { searchFocused = true }
+        }
+        .onChange(of: store.transcriptFindIsPresented) { presented in
+            if presented { findFocused = true }
+        }
     }
 
-    private var masthead: some View {
-        HStack(spacing: 14) {
-            Button(action: onDismiss) {
-                Image(systemName: "chevron.backward")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 24, height: 24)
+    // MARK: - Layout arithmetic
+
+    private func pagePadding(_ width: CGFloat) -> CGFloat {
+        max(Metrics.s4, (width - Metrics.measure) / 2)
+    }
+
+    private func inspectorWidth(_ width: CGFloat) -> CGFloat {
+        if width <= Metrics.narrowBreakpoint { return Metrics.inspectorNarrowWidth }
+        return min(Metrics.inspectorMaximumWidth, max(Metrics.inspectorMinimumWidth, CGFloat(storedInspectorWidth)))
+    }
+
+    private func mono(_ size: CGFloat = Metrics.bodySize, weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: .monospaced)
+    }
+
+    // MARK: - Topbar
+
+    private func topbar(width: CGFloat, inspectorWidth: CGFloat, showsInspector: Bool) -> some View {
+        HStack(spacing: Metrics.s4) {
+            HStack(spacing: 0) {
+                linkButton("‹ terminal") { onDismiss() }
+                    .help("Return to the terminal (Escape)")
+                separator("›")
+                Text("archive")
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Palette.text)
             }
+            .foregroundStyle(Palette.muted)
+            .lineLimit(1)
+            .fixedSize()
+            tabs.fixedSize()
+            searchField
+            Spacer(minLength: 0)
+            topbarRight
+                .frame(width: showsInspector ? inspectorWidth : nil, alignment: .trailing)
+                .padding(.leading, showsInspector ? Metrics.s4 : 0)
+        }
+        .padding(.horizontal, pagePadding(width))
+        .frame(height: Metrics.topbarHeight)
+        .padding(.top, Metrics.titlebarInset)
+        .background(Palette.surface)
+        .overlay(alignment: .bottom) { rule }
+    }
+
+    /// sessions | research — the TUI's `?` opens the researcher; here it is
+    /// also a tab beside the crumb.
+    private var tabs: some View {
+        HStack(spacing: 0) {
+            tab("sessions", active: !store.chatIsPresented) {
+                if store.chatIsPresented { store.toggleChat() }
+            }
+            tab("research", active: store.chatIsPresented) {
+                store.showOrFocusChat()
+            }
+        }
+    }
+
+    private func tab(_ title: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .foregroundStyle(active ? Palette.text : Palette.muted)
+                .padding(.horizontal, Metrics.s3)
+                .frame(height: Metrics.topbarHeight)
+                .overlay(alignment: .bottom) {
+                    Rectangle().fill(active ? Palette.text : Color.clear).frame(height: 2)
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The search bar doubles as the annotation input, as the TUI's does:
+    /// Ctrl+T / Ctrl+N swap its placeholder and its submit.
+    private var searchField: some View {
+        let annotating = store.annotationMode != nil
+        let placeholder = store.annotationMode?.placeholder
+            ?? "search · / · harness: project: after: before: #tag:"
+        return TextField(placeholder, text: annotating ? $store.annotationDraft : $store.query)
+            .textFieldStyle(.plain)
+            .focused($searchFocused)
+            .onSubmit {
+                if annotating { store.saveAnnotation() } else { store.performSearch() }
+            }
+            .padding(.horizontal, Metrics.s2)
+            .frame(
+                minWidth: Metrics.grepFieldWidth / 2,
+                idealWidth: Metrics.grepFieldWidth,
+                maxWidth: Metrics.grepFieldWidth,
+                minHeight: Metrics.grepFieldHeight,
+                maxHeight: Metrics.grepFieldHeight
+            )
+            .background(Palette.surface)
+            .overlay(Rectangle().stroke(
+                annotating ? Palette.amber : (searchFocused ? Palette.blue : Palette.line),
+                lineWidth: 1
+            ))
+            .padding(.leading, Metrics.s6 - Metrics.s4)
+    }
+
+    /// N sessions | ● indexed | reindex ▾ — the mark spins while the archive
+    /// is being read.
+    private var topbarRight: some View {
+        HStack(spacing: Metrics.s1) {
+            Text("\(store.totalParentCount) sessions")
+            separator("|")
+            if store.isIndexing {
+                spinner
+                Text("indexing")
+            } else {
+                Text("●").foregroundStyle(Palette.green)
+                Text("indexed")
+            }
+            separator("|")
+            Menu {
+                Button("incremental update") { store.incrementalIndex() }
+                Button("full reindex") { store.fullReindex() }
+                Button("generate missing embeddings") { store.generateMissingEmbeddings() }
+            } label: {
+                Text("reindex ▾").foregroundStyle(store.isIndexing ? Palette.faint : Palette.blue)
+            }
+            .menuStyle(.button)
             .buttonStyle(.plain)
-            .foregroundStyle(HolyArchivePalette.metadata)
-            .help("Return to workspace (Escape)")
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(store.isIndexing)
+        }
+        .foregroundStyle(Palette.muted)
+        .lineLimit(1)
+    }
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text("ARCHIVE")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .tracking(2.4)
-                    .foregroundStyle(HolyArchivePalette.gold)
-                Text("Conversations across every harness")
-                    .font(.system(size: 11))
-                    .foregroundStyle(HolyArchivePalette.metadata)
+    private var spinner: some View {
+        TimelineView(.periodic(from: .now, by: spinnerInterval)) { timeline in
+            let frame = Int(timeline.date.timeIntervalSinceReferenceDate / spinnerInterval) % spinnerFrames.count
+            Text(spinnerFrames[frame]).foregroundStyle(Palette.green)
+        }
+    }
+
+    // MARK: - Sheet column
+
+    @ViewBuilder
+    private var sheetColumn: some View {
+        if store.chatIsPresented {
+            researchSheet
+        } else {
+            sessionsSheet
+        }
+    }
+
+    private var sessionsSheet: some View {
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                chips
+                sessionList
+                    .frame(maxHeight: .infinity)
+                rule
+                childrenPane
+                    .frame(height: store.children.isEmpty
+                        ? nil
+                        : geometry.size.height * HolyArchiveMetrics.childPaneFraction)
             }
+            .padding(.trailing, Metrics.s4)
+        }
+    }
 
-            Spacer(minLength: 20)
-
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(searchFocused ? HolyArchivePalette.gold : HolyArchivePalette.metadata)
-                TextField(
-                    "Search, or use harness: project: after: before: #tag:",
-                    text: $store.query
-                )
-                .textFieldStyle(.plain)
-                .focused($searchFocused)
-                .font(.system(size: 12, design: .monospaced))
-                .onSubmit { store.performSearch() }
-                if !store.query.isEmpty {
-                    Button { store.clearSearch() } label: {
-                        Image(systemName: "xmark.circle.fill")
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(HolyArchivePalette.metadata)
+    /// app.py filter bar: `[●All] [○🧠Claude Code] …`, hidden with a single
+    /// provider; the sort chip appears in search mode (`s` cycles it).
+    private var chips: some View {
+        HStack(spacing: Metrics.s2) {
+            if store.availableHarnesses.count > 1 {
+                filterChip("all", harness: nil)
+                ForEach(store.availableHarnesses) { harness in
+                    filterChip(harness.displayName.lowercased(), harness: harness)
                 }
             }
-            .padding(.horizontal, 10)
-            .frame(width: 510, height: 30)
-            .background(HolyArchivePalette.raisedInk)
-            .overlay(Rectangle().stroke(searchFocused ? HolyArchivePalette.gold.opacity(0.55) : HolyArchivePalette.rule))
-
-            Button { store.toggleChat() } label: {
-                Label("Research", systemImage: "text.magnifyingglass")
+            if store.isSearchActive {
+                Button { store.cycleSort() } label: {
+                    chipLabel("\(store.sort.label) ▾", active: true, dot: nil)
+                }
+                .buttonStyle(.plain)
+                .help("cycle the sort (s)")
             }
-            .buttonStyle(HolyArchiveTextButtonStyle(accented: store.chatIsPresented))
-            .help("Archive researcher (?)")
-
-            Menu {
-                Button("Incremental update") { store.incrementalIndex() }
-                Button("Full reindex") { store.fullReindex() }
-                Button("Generate missing embeddings") { store.generateMissingEmbeddings() }
-            } label: {
-                Image(systemName: store.isIndexing ? "arrow.triangle.2.circlepath" : "ellipsis")
-                    .frame(width: 24, height: 24)
-            }
-            .menuStyle(.borderlessButton)
-            .disabled(store.isIndexing)
-            .help("Archive maintenance")
+            Spacer(minLength: 0)
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 14)
-        .padding(.top, 27)
-        .padding(.bottom, 10)
-        .background(HolyArchivePalette.background)
+        .padding(.top, Metrics.s2)
+        .padding(.bottom, Metrics.s1)
+    }
+
+    private func filterChip(_ label: String, harness: HolyArchiveHarness?) -> some View {
+        let active = store.providerFilter == harness
+        let color = harness.map { Palette.wordColor(forClass: Present.colorClass(for: $0)) } ?? Palette.text
+        return Button {
+            store.setProviderFilter(harness)
+        } label: {
+            chipLabel(label, active: active, dot: active ? color : Palette.faint)
+        }
+        .buttonStyle(.plain)
+        .help("filter by harness (f cycles)")
+    }
+
+    private func chipLabel(_ text: String, active: Bool, dot: Color?) -> some View {
+        HStack(spacing: Metrics.s1) {
+            if let dot {
+                Text(active ? "●" : "○").foregroundStyle(dot)
+            }
+            Text(text).foregroundStyle(active ? Palette.text : Palette.muted)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: Metrics.chipRadius, style: .continuous)
+                .fill(active ? Palette.raised : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Metrics.chipRadius, style: .continuous)
+                .stroke(active ? Palette.lineStrong : Palette.line, lineWidth: 1)
+        )
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder
-    private var filterBar: some View {
-        if store.availableHarnesses.count > 1 {
-            HStack(spacing: 16) {
-                Text("FILTER")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .tracking(1.2)
-                    .foregroundStyle(HolyArchivePalette.metadata)
-                providerFilter(label: "All", harness: nil)
-                ForEach(store.availableHarnesses) { harness in
-                    providerFilter(label: harness.displayName, harness: harness)
-                }
-                Spacer()
-                Text("\(store.totalParentCount.formatted()) sessions")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(HolyArchivePalette.metadata)
+    private var sessionList: some View {
+        let head = Present.listHead(
+            query: store.query,
+            filter: store.providerFilter,
+            shown: store.sessions.count,
+            total: store.isSearchActive ? store.sessions.count : store.totalParentCount,
+            sort: store.sort,
+            matchingChildren: store.matchingChildCount
+        )
+        let columns = Present.columns(for: store.sessions, childCounts: store.childCountsByParentID)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: Metrics.columnGap) {
+                Color.clear.frame(width: Metrics.stripeColumnWidth)
+                columnLabel("date").frame(width: columns.date, alignment: .leading)
+                columnLabel("harness").frame(width: columns.harness, alignment: .leading)
+                columnLabel("project").frame(width: columns.project, alignment: .leading)
+                columnLabel("summary").frame(maxWidth: .infinity, alignment: .leading)
+                columnLabel("sub").frame(width: columns.children, alignment: .trailing)
             }
-            .padding(.horizontal, 18)
-            .frame(height: 34)
-        }
-    }
-
-    private func providerFilter(label: String, harness: HolyArchiveHarness?) -> some View {
-        let active = store.providerFilter == harness
-        return Button { store.setProviderFilter(harness) } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(active ? (harness.map(HolyArchivePalette.provider) ?? HolyArchivePalette.gold) : .clear)
-                    .overlay(Circle().stroke(harness.map(HolyArchivePalette.provider) ?? HolyArchivePalette.metadata, lineWidth: 1))
-                    .frame(width: 7, height: 7)
-                if let harness { Image(systemName: harness.icon).font(.system(size: 9)) }
-                Text(label)
-                    .font(.system(size: 10, weight: active ? .semibold : .regular, design: .monospaced))
+            .frame(height: Metrics.columnHeaderHeight)
+            .overlay(alignment: .bottom) { rule }
+            sheetHead(head.prompt, count: head.count) {
+                if store.isSearching { spinner }
             }
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(active ? HolyArchivePalette.paper : HolyArchivePalette.metadata)
-    }
-
-    private var archiveBody: some View {
-        GeometryReader { geometry in
-            HStack(spacing: 0) {
-                leftColumn
-                    .frame(width: geometry.size.width * 0.55)
-                Rectangle().fill(HolyArchivePalette.rule).frame(width: 1)
-                detailColumn
-                    .frame(width: max(0, geometry.size.width * 0.45 - 1))
-            }
-        }
-    }
-
-    private var leftColumn: some View {
-        GeometryReader { geometry in
-            VStack(spacing: 0) {
-                sectionHeader(store.headerTitle) {
-                    if store.isSearching { ProgressView().controlSize(.small) }
-                    if store.query.holyArchiveNilIfBlank != nil {
-                        Button(store.sort.label) { store.cycleSort() }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(HolyArchivePalette.metadata)
-                    }
-                }
-                parentList
-                    .frame(height: geometry.size.height * (store.chatIsPresented ? 0.48 : 0.60) - 30)
-                Rectangle().fill(HolyArchivePalette.rule).frame(height: 1)
-                if store.chatIsPresented {
-                    researchPanel
+            if store.sessions.isEmpty {
+                if store.isLoading {
+                    buildingLine("loading indexed sessions…")
+                } else if store.isSearchActive {
+                    emptyLine("no sessions matched")
                 } else {
-                    childPane
+                    emptyState
                 }
-            }
-        }
-    }
-
-    private var parentList: some View {
-        Group {
-            if store.sessions.isEmpty, !store.isLoading {
-                emptyState
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 0) {
-                            ForEach(store.sessions) { session in
-                                HolyArchiveSessionRow(
-                                    session: session,
-                                    childCount: childCount(for: session),
-                                    selected: store.selectedSessionID == session.id
-                                )
-                                .id(session.id)
-                                .contentShape(Rectangle())
-                                .onTapGesture { store.selectParent(session.id) }
-                                .contextMenu {
-                                    Button("Copy resume command") {
-                                        store.selectParent(session.id)
-                                        store.copyResumeCommand()
-                                    }
-                                    Button("Resume in roster") {
-                                        store.selectParent(session.id)
-                                        store.resumeSelected()
-                                    }
-                                    Button("Open transcript") {
-                                        store.selectParent(session.id)
-                                        store.showTranscript()
-                                    }
-                                }
+                            ForEach(Array(store.sessions.enumerated()), id: \.element.id) { index, session in
+                                sessionRow(session, index: index, columns: columns)
+                                    .id(session.id)
                             }
                         }
                     }
                     .onChange(of: store.selectedSessionID) { id in
-                        if let id { withAnimation(.easeOut(duration: 0.14)) { proxy.scrollTo(id, anchor: .center) } }
+                        if let id { proxy.scrollTo(id, anchor: .center) }
                     }
                 }
             }
         }
-        .background(HolyArchivePalette.background)
     }
 
-    private var childPane: some View {
-        VStack(spacing: 0) {
-            sectionHeader(
-                store.query.holyArchiveNilIfBlank == nil
-                    ? "Sub-agents (\(store.children.count))"
-                    : "Matching Sub-agents (\(store.children.count))"
-            ) {
+    /// widgets.py ParentSessionItem: date · icon · project[:12] · (n) · description.
+    private func sessionRow(_ session: HolyArchiveSession, index: Int, columns: HolyArchiveColumnWidths) -> some View {
+        let selected = store.selectedSessionID == session.id && store.selectedChildID == nil
+        let row = Present.rowText(for: session)
+        let cls = Present.colorClass(for: session.harness)
+        let children = store.childCountsByParentID[session.id] ?? 0
+        return HStack(alignment: .center, spacing: Metrics.columnGap) {
+            stripe(cls)
+            Text(Present.dateStamp(session.activityAt))
+                .foregroundStyle(Palette.faint)
+                .lineLimit(1)
+                .frame(width: columns.date, alignment: .leading)
+            Text(Present.shortLabel(for: session.harness))
+                .foregroundStyle(Palette.wordColor(forClass: cls))
+                .lineLimit(1)
+                .frame(width: columns.harness, alignment: .leading)
+            Text(Present.projectLabel(session))
+                .foregroundStyle(Palette.text)
+                .lineLimit(1)
+                .frame(width: columns.project, alignment: .leading)
+                .help(session.projectPath ?? session.projectName)
+            Text(row.text)
+                .foregroundStyle(row.isFallback ? Palette.muted : Palette.text)
+                .lineLimit(2)
+                .lineSpacing(Metrics.bodySize * (Metrics.digestLineHeight - 1))
+                .padding(.vertical, Metrics.s1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(Present.childCountText(children))
+                .foregroundStyle(children > 0 ? Palette.amber : Palette.faint)
+                .lineLimit(1)
+                .frame(width: columns.children, alignment: .trailing)
+        }
+        .frame(minHeight: Metrics.rowHeight)
+        .background(rowBackground(selected: selected, hovered: hoveredRowID == session.id, even: index % 2 == 1))
+        .overlay(alignment: .leading) {
+            if selected { Rectangle().fill(Palette.select).frame(width: Metrics.selectionEdgeWidth) }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { store.selectParent(session.id) }
+        .onHover { hovering in setHover(session.id, hovering) }
+        .contextMenu {
+            Button("copy resume command") {
+                store.selectParent(session.id)
+                store.copyResumeCommand()
+            }
+            Button("resume in roster") {
+                store.selectParent(session.id)
+                store.resumeSelected()
+            }
+            Button("open transcript") {
+                store.selectParent(session.id)
+                store.showTranscript()
+            }
+        }
+    }
+
+    /// widgets.py SubagentSessionItem: ★ · child_type · first prompt.
+    private var childrenPane: some View {
+        let head = Present.childrenHead(searching: store.isSearchActive, count: store.children.count)
+        let columns = Present.childColumns(for: store.children)
+        return VStack(alignment: .leading, spacing: 0) {
+            sheetHead(head.prompt, count: head.count) {
                 if store.children.isEmpty {
-                    Text("explicit lineage only")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(HolyArchivePalette.metadata.opacity(0.65))
+                    Text("explicit lineage only").foregroundStyle(Palette.faint)
                 }
             }
             if store.children.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "arrow.triangle.branch")
-                    Text("No explicit child sessions")
-                }
-                .foregroundStyle(HolyArchivePalette.metadata.opacity(0.55))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                emptyLine("no explicit child sessions")
             } else {
+                HStack(spacing: Metrics.columnGap) {
+                    Color.clear.frame(width: Metrics.stripeColumnWidth)
+                    columnLabel("type").frame(width: columns.type, alignment: .leading)
+                    columnLabel("first prompt").frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(height: Metrics.columnHeaderHeight)
+                .overlay(alignment: .bottom) { rule }
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(store.children) { child in
-                            HStack(spacing: 10) {
-                                Text(child.extra["selected"] == "true" ? "★" : "  ")
-                                    .foregroundStyle(HolyArchivePalette.gold)
-                                Text(child.childType ?? "sub-agent")
-                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(HolyArchivePalette.provider(child.harness))
-                                    .frame(width: 118, alignment: .leading)
-                                Rectangle().fill(HolyArchivePalette.rule).frame(width: 1, height: 19)
-                                Text(child.firstPrompt.holyArchiveNilIfBlank ?? "(no prompt)")
-                                    .lineLimit(2)
-                                    .foregroundStyle(HolyArchivePalette.paper.opacity(0.8))
-                                Spacer(minLength: 0)
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
-                            .background(store.selectedChildID == child.id ? HolyArchivePalette.raisedInk : .clear)
-                            .overlay(alignment: .leading) {
-                                if store.selectedChildID == child.id {
-                                    Rectangle().fill(HolyArchivePalette.gold).frame(width: 2)
-                                }
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture { store.selectChild(child.id) }
+                        ForEach(Array(store.children.enumerated()), id: \.element.id) { index, child in
+                            childRow(child, index: index, columns: columns)
                         }
                     }
                 }
@@ -309,240 +419,413 @@ struct HolyArchiveModeView: View {
         }
     }
 
-    private var detailColumn: some View {
-        Group {
-            if store.transcriptIsPresented {
-                transcriptView
-            } else if let session = store.selectedSession {
-                sessionDetail(session)
-            } else {
-                VStack(spacing: 10) {
-                    Image(systemName: "archivebox")
-                        .font(.system(size: 26, weight: .ultraLight))
-                    Text("Select a conversation")
-                }
-                .foregroundStyle(HolyArchivePalette.metadata)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+    private func childRow(_ child: HolyArchiveSession, index: Int, columns: HolyArchiveChildColumnWidths) -> some View {
+        let selected = store.selectedChildID == child.id
+        let highlighted = child.extra["selected"] == "true"
+        return HStack(alignment: .center, spacing: Metrics.columnGap) {
+            stripe(highlighted ? "decision" : Present.colorClass(for: child.harness))
+            Text(child.childType ?? "sub-agent")
+                .foregroundStyle(Palette.blue)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: columns.type, alignment: .leading)
+            Text(Present.flatten(HolyArchiveText.firstRealLine(in: child.firstPrompt) ?? "(no prompt)"))
+                .foregroundStyle(Palette.text)
+                .lineLimit(2)
+                .padding(.vertical, Metrics.s1)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(HolyArchivePalette.background)
+        .frame(minHeight: Metrics.rowHeight)
+        .background(rowBackground(selected: selected, hovered: hoveredRowID == child.id, even: index % 2 == 1))
+        .overlay(alignment: .leading) {
+            if selected { Rectangle().fill(Palette.select).frame(width: Metrics.selectionEdgeWidth) }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { store.selectChild(child.id) }
+        .onHover { hovering in setHover(child.id, hovering) }
     }
 
-    private func sessionDetail(_ session: HolyArchiveSession) -> some View {
+    /// app.py: "No sessions found!" plus every checked provider's directory.
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: Metrics.s1) {
+            emptyLine("no sessions found")
+            ForEach(store.registry.providers, id: \.harness) { provider in
+                HStack(spacing: Metrics.columnGap) {
+                    stripe(Present.colorClass(for: provider.harness))
+                    Text(Present.shortLabel(for: provider.harness))
+                        .foregroundStyle(Palette.wordColor(forClass: Present.colorClass(for: provider.harness)))
+                    Text(provider.sessionsDirectory.path)
+                        .foregroundStyle(Palette.faint)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(provider.isAvailable ? "present" : "absent")
+                        .foregroundStyle(provider.isAvailable ? Palette.green : Palette.faint)
+                }
+                .frame(minHeight: Metrics.rowHeight)
+            }
+        }
+    }
+
+    // MARK: - Research sheet
+
+    private var researchSheet: some View {
         VStack(spacing: 0) {
-            sectionHeader("Session Details") {
-                Button { store.generateTitle() } label: {
-                    Label(store.isGeneratingTitle ? "Naming..." : "Name", systemImage: "sparkles")
+            sheetHead("agent-sessions chat", count: store.selectedChatID == nil ? "new" : "") {
+                if store.isResearching {
+                    spinner
+                    Text("thinking…").foregroundStyle(Palette.faint)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(HolyArchivePalette.metadata)
-                .disabled(store.isGeneratingTitle)
-            }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    detailLedger(session)
-                    if !store.annotations.isEmpty { annotationLedger }
-                    if let match = store.selectedSearchResult { matchLedger(match) }
-                    excerpt("First Prompt", session.firstPrompt, limit: 2_000)
-                    excerpt("Last Response", session.lastResponse, limit: session.isChild ? 1_000 : 2_000)
-                    resumeLedger(session)
-                }
-            }
-            detailActionBar(session)
-        }
-    }
-
-    private func detailLedger(_ session: HolyArchiveSession) -> some View {
-        VStack(spacing: 0) {
-            ledgerRow("Harness") {
-                Label(session.harness.displayName, systemImage: session.harness.icon)
-                    .foregroundStyle(HolyArchivePalette.provider(session.harness))
-            }
-            ledgerRow("Type") {
-                Text(session.isChild ? "SUB-AGENT · \(session.childType ?? "unknown")" : "PARENT SESSION · \(childCount(for: session)) sub-agents")
-            }
-            ledgerRow("Title") { Text(String(session.displayTitle.prefix(50))) }
-            ledgerRow("Path") { Text(session.projectPath ?? "Unknown").textSelection(.enabled) }
-            ledgerRow("Date") { Text(Self.longDate(session.activityAt)) }
-            ledgerRow("Model") { Text(session.model ?? "Unknown") }
-            ledgerRow("Session ID") {
-                Text(session.id).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
-            }
-        }
-    }
-
-    private var annotationLedger: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("ANNOTATIONS")
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .tracking(1.1)
-                .foregroundStyle(HolyArchivePalette.metadata)
-            let tags = store.annotations.filter { $0.kind == .tag }
-            if !tags.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(tags) { tag in
-                        Text("[\(tag.value)]")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(HolyArchivePalette.provider(store.selectedSession?.harness ?? .codex))
-                            .contextMenu { Button("Delete tag", role: .destructive) { store.deleteAnnotation(tag) } }
+                Spacer(minLength: 0)
+                HolyMannaFlowLayout(spacing: Metrics.s3) {
+                    linkButton("[copy]") { store.copyResearchTranscript() }
+                    linkButton("[new]") { store.newChat() }
+                    linkButton("[recent]") {
+                        store.refreshRecentChats()
+                        store.chatHistoryIsPresented.toggle()
+                    }
+                    Button { store.deleteSelectedChat() } label: {
+                        Text("[delete]").foregroundStyle(store.selectedChatID == nil ? Palette.faint : Palette.red)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(store.selectedChatID == nil)
+                    linkButton(store.chatIsFullscreen ? "[windowed]" : "[fullscreen]") {
+                        store.chatIsFullscreen.toggle()
                     }
                 }
             }
-            ForEach(store.annotations.filter { $0.kind == .note }) { note in
-                HStack(alignment: .firstTextBaseline, spacing: 9) {
-                    Text(Self.shortDate(note.timestamp))
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(HolyArchivePalette.metadata)
-                    Text(note.value).textSelection(.enabled)
-                }
-                .contextMenu { Button("Delete note", role: .destructive) { store.deleteAnnotation(note) } }
-            }
-        }
-        .padding(16)
-        .overlay(alignment: .bottom) { Rectangle().fill(HolyArchivePalette.rule).frame(height: 1) }
-    }
-
-    private func matchLedger(_ match: HolyArchiveSearchResult) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("SEARCH MATCH")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .tracking(1.1)
-                    .foregroundStyle(HolyArchivePalette.metadata)
-                Spacer()
-                Text("\(match.matchSource.rawValue) · \(match.score.formatted(.number.precision(.fractionLength(2))))")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(HolyArchivePalette.gold)
-            }
-            Text(match.matchSnippet ?? "Matched indexed metadata.")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(HolyArchivePalette.paper.opacity(0.82))
-                .textSelection(.enabled)
-        }
-        .padding(16)
-        .background(HolyArchivePalette.gold.opacity(0.035))
-        .overlay(alignment: .bottom) { Rectangle().fill(HolyArchivePalette.rule).frame(height: 1) }
-    }
-
-    private func excerpt(_ title: String, _ text: String, limit: Int) -> some View {
-        let truncated = text.count > limit
-        let value = String(text.prefix(limit)) + (truncated ? "\n... (truncated)" : "")
-        return VStack(alignment: .leading, spacing: 9) {
-            Text(title.uppercased())
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .tracking(1.1)
-                .foregroundStyle(HolyArchivePalette.metadata)
-            Text(value.holyArchiveNilIfBlank ?? "(empty)")
-                .font(.system(size: 12))
-                .lineSpacing(3)
-                .foregroundStyle(HolyArchivePalette.paper.opacity(0.88))
-                .textSelection(.enabled)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .overlay(alignment: .bottom) { Rectangle().fill(HolyArchivePalette.rule).frame(height: 1) }
-    }
-
-    private func resumeLedger(_ session: HolyArchiveSession) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text("RESUME COMMAND")
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .tracking(1.1)
-                .foregroundStyle(HolyArchivePalette.metadata)
-            Text(session.resumeCommand ?? "No safe resume command for this provider.")
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(session.resumeCommand == nil ? HolyArchivePalette.metadata : HolyArchivePalette.paper)
-                .textSelection(.enabled)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(red: 0.09, green: 0.16, blue: 0.27))
-        }
-        .padding(16)
-    }
-
-    private func detailActionBar(_ session: HolyArchiveSession) -> some View {
-        HStack(spacing: 16) {
-            Button("Copy command") { store.copyResumeCommand() }
-                .disabled(session.resumeCommand == nil)
-            Button("Resume in roster") { store.resumeSelected() }
-                .disabled(session.resumeCommand == nil || session.harness.runtime == nil)
-            Button("Transcript") { store.showTranscript() }
-            Spacer()
-            Button("Tag") {
-                store.beginAnnotation(.tag)
-                annotationSheetPresented = true
-            }
-            Button("Note") {
-                store.beginAnnotation(.note)
-                annotationSheetPresented = true
-            }
-        }
-        .buttonStyle(HolyArchiveTextButtonStyle())
-        .padding(.horizontal, 14)
-        .frame(height: 42)
-        .overlay(alignment: .top) { Rectangle().fill(HolyArchivePalette.rule).frame(height: 1) }
-    }
-
-    private var transcriptView: some View {
-        VStack(spacing: 0) {
-            sectionHeader("Transcript · \(store.selectedSession?.shortID ?? "")") {
-                Button("Copy all") { store.copyTranscript() }.buttonStyle(.plain)
-                Button("Find") { store.showTranscriptFind() }.buttonStyle(.plain)
-                Button("Done") { store.closeTranscript() }.buttonStyle(.plain)
-            }
-            if store.transcriptFindIsPresented {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                    TextField("Find in transcript", text: $store.transcriptFindQuery)
-                        .textFieldStyle(.plain)
-                        .onChange(of: store.transcriptFindQuery) { _ in store.recomputeFind() }
-                        .onSubmit { store.nextFindMatch() }
-                    Text(store.findMatchCount == 0 ? "no matches" : "\(store.findMatchIndex + 1)/\(store.findMatchCount)")
-                        .font(.system(size: 9, design: .monospaced))
-                    Button { store.nextFindMatch(-1) } label: { Image(systemName: "chevron.up") }
-                    Button { store.nextFindMatch() } label: { Image(systemName: "chevron.down") }
-                    Button { store.transcriptFindIsPresented = false } label: { Image(systemName: "xmark") }
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(HolyArchivePalette.metadata)
-                .padding(.horizontal, 12)
-                .frame(height: 34)
-                .background(HolyArchivePalette.raisedInk)
+            if store.chatHistoryIsPresented {
+                chatHistory
             }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        transcriptHeader
-                        ForEach(Array(store.transcript.enumerated()), id: \.element.id) { index, message in
-                            HolyArchiveTranscriptMessageView(
-                                index: index + 1,
-                                message: message,
-                                find: store.transcriptFindQuery
-                            )
-                            .id(message.id)
-                            .background {
-                                GeometryReader { geometry in
-                                    Color.clear.preference(
-                                        key: HolyArchiveTranscriptFramePreferenceKey.self,
-                                        value: [message.id: geometry.frame(in: .named("archive-transcript"))]
-                                    )
-                                }
+                        if store.researchMessages.isEmpty {
+                            VStack(alignment: .leading, spacing: Metrics.s2) {
+                                Text("ask across the archive").foregroundStyle(Palette.text)
+                                Text("The researcher can scope projects and tags, search content, read full messages, follow pagination, and return exact citations with resume commands.")
+                                    .foregroundStyle(Palette.muted)
+                                    .lineSpacing(Metrics.bodySize * (Metrics.bodyLineHeight - 1))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.vertical, Metrics.s3)
+                        }
+                        ForEach(store.researchMessages) { message in
+                            HolyArchiveResearchMessageView(message: message, onCitation: store.openCitation)
+                                .id(message.id)
+                        }
+                    }
+                }
+                .onChange(of: store.researchMessages.count) { _ in
+                    if let id = store.researchMessages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+                }
+            }
+            HStack(spacing: Metrics.s3) {
+                Text("model").foregroundStyle(Palette.muted)
+                TextField("model", text: $store.researchModel)
+                    .textFieldStyle(.plain)
+                    .frame(width: Metrics.columnWidth(contentCharacters: 24, headerCharacters: 5))
+                    .onChange(of: store.researchModel) { UserDefaults.standard.set($0, forKey: "holy.intelligence.deep.model") }
+                Text("effort").foregroundStyle(Palette.muted)
+                Picker("", selection: $store.reasoningEffort) {
+                    ForEach(["low", "medium", "high", "xhigh"], id: \.self) { Text($0).tag($0) }
+                }
+                .labelsHidden()
+                .fixedSize()
+                .onChange(of: store.reasoningEffort) { UserDefaults.standard.set($0, forKey: "holy.archive.research.effort") }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, Metrics.s2)
+            .overlay(alignment: .top) { rule }
+            HStack(spacing: Metrics.s2) {
+                TextField("ask the archive researcher", text: $store.researchDraft)
+                    .textFieldStyle(.plain)
+                    .focused($researchFocused)
+                    .onSubmit { store.submitResearch() }
+                    .disabled(store.isResearching)
+                    .padding(.horizontal, Metrics.s2)
+                    .frame(height: Metrics.grepFieldHeight)
+                    .background(Palette.surface)
+                    .overlay(Rectangle().stroke(researchFocused ? Palette.blue : Palette.line, lineWidth: 1))
+                Button {
+                    store.submitResearch()
+                } label: {
+                    Text("[send]").foregroundStyle(
+                        store.isResearching || store.researchDraft.holyArchiveNilIfBlank == nil ? Palette.faint : Palette.green
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(store.isResearching || store.researchDraft.holyArchiveNilIfBlank == nil)
+            }
+            .padding(.vertical, Metrics.s2)
+        }
+        .padding(.trailing, Metrics.s4)
+    }
+
+    private var chatHistory: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(store.recentChats.enumerated()), id: \.element.id) { index, chat in
+                HStack(spacing: Metrics.columnGap) {
+                    stripe(store.selectedChatID == chat.id ? "active" : "muted")
+                    Text(chat.title).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                    Text(Present.dateStamp(chat.updatedAt)).foregroundStyle(Palette.faint)
+                }
+                .frame(minHeight: Metrics.rowHeight)
+                .background(rowBackground(selected: store.selectedChatID == chat.id, hovered: false, even: index % 2 == 1))
+                .contentShape(Rectangle())
+                .onTapGesture { store.loadChat(chat.id) }
+            }
+        }
+        .overlay(alignment: .bottom) { rule }
+    }
+
+    // MARK: - Inspector
+
+    @ViewBuilder
+    private var inspector: some View {
+        if store.transcriptIsPresented {
+            transcriptView
+        } else if let session = store.selectedSession {
+            inspectorScroll { sessionDetail(session) }
+        } else {
+            emptyLine("select a session").padding(Metrics.s4)
+        }
+    }
+
+    private func inspectorScroll<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        let body = content()
+        return GeometryReader { proxy in
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: Metrics.s3) {
+                    body
+                }
+                .padding(Metrics.s4)
+                .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .topLeading)
+            }
+        }
+    }
+
+    /// widgets.py SessionDetailPanel.show_session, section by section.
+    @ViewBuilder
+    private func sessionDetail(_ session: HolyArchiveSession) -> some View {
+        let cls = Present.colorClass(for: session.harness)
+        let childCount = session.isChild ? 0 : store.childCountForSelectedParent
+        HStack(spacing: Metrics.s2) {
+            pill(session.harness.displayName, color: Palette.wordColor(forClass: cls))
+            Text(Present.typeLine(for: session, childCount: childCount)).foregroundStyle(Palette.muted)
+        }
+        .lineLimit(1)
+
+        Text(Present.rowText(for: session).text)
+            .font(mono(Metrics.headingSize, weight: .semibold))
+            .lineSpacing(Metrics.headingSize * 0.4)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+
+        Grid(alignment: .topLeading, horizontalSpacing: Metrics.s2, verticalSpacing: Metrics.s1) {
+            metaRow("harness") {
+                Text(session.harness.displayName).fontWeight(.medium).foregroundStyle(Palette.wordColor(forClass: cls))
+            }
+            metaRow("type") { metaValue(Present.typeLine(for: session, childCount: childCount)) }
+            metaRow("title") { metaValue(Present.detailTitle(for: session)) }
+            metaRow("path") { metaValue(session.projectPath ?? "Unknown") }
+            metaRow("date") { metaValue(Present.longDate(session.modifiedAt)) }
+            metaRow("model") {
+                Text(session.model ?? "Unknown").fontWeight(.medium).foregroundStyle(Palette.amber)
+            }
+            metaRow("session id") { metaValue(session.id) }
+            let tags = store.annotations.filter { $0.kind == .tag }
+            if !tags.isEmpty {
+                metaRow("tags") {
+                    HolyMannaFlowLayout(spacing: Metrics.s2) {
+                        ForEach(tags) { tag in
+                            Text("[\(tag.value)]")
+                                .foregroundStyle(Palette.blue)
+                                .contextMenu { Button("delete tag", role: .destructive) { store.deleteAnnotation(tag) } }
+                        }
+                    }
+                }
+            }
+            let notes = store.annotations.filter { $0.kind == .note }
+            if !notes.isEmpty {
+                metaRow("notes") {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(notes) { note in
+                            (Text(Present.dateStamp(note.timestamp)).foregroundColor(Palette.faint)
+                                + Text(" \(note.value)").foregroundColor(Palette.text))
+                                .fontWeight(.medium)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .contextMenu { Button("delete note", role: .destructive) { store.deleteAnnotation(note) } }
+                        }
+                    }
+                }
+            }
+        }
+
+        if store.isSearchActive, let match = store.selectedSearchResult {
+            VStack(alignment: .leading, spacing: Metrics.s2) {
+                HStack(spacing: Metrics.s2) {
+                    columnLabel("search match")
+                    Text("\(match.matchSource.rawValue) · \(match.score.formatted(.number.precision(.fractionLength(2))))")
+                        .foregroundStyle(Palette.amber)
+                }
+                Text(match.matchSnippet ?? "matched indexed metadata")
+                    .foregroundStyle(Palette.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            .padding(.vertical, Metrics.s2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .top) { rule }
+            .overlay(alignment: .bottom) { rule }
+        }
+
+        excerptBlock(
+            "first prompt",
+            Present.excerpt(session.firstPrompt, limit: HolyArchiveMetrics.promptCharacters, empty: "(no prompt found)")
+        )
+        excerptBlock(
+            "last response",
+            Present.excerpt(session.lastResponse, limit: Present.responseLimit(for: session), empty: "(no response found)")
+        )
+
+        VStack(alignment: .leading, spacing: Metrics.s2) {
+            columnLabel("resume command")
+            Text(session.resumeCommand ?? "no safe resume command for this provider")
+                .foregroundStyle(session.resumeCommand == nil ? Palette.faint : Palette.text)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(Metrics.s2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Palette.raised)
+            Text("enter copy · r resume · tab panes").foregroundStyle(Palette.faint)
+        }
+
+        Spacer(minLength: 0)
+
+        VStack(alignment: .leading, spacing: Metrics.s2) {
+            HolyMannaFlowLayout(spacing: Metrics.s3) {
+                Text("copy:").foregroundStyle(Palette.muted)
+                if let command = session.resumeCommand {
+                    copyButton("command") { (command, "resume command") }
+                }
+                copyButton("id") { (session.id, session.id) }
+                if let path = session.projectPath {
+                    copyButton("path") { (path, path) }
+                }
+            }
+            HolyMannaFlowLayout(spacing: Metrics.s3) {
+                Text("act:").foregroundStyle(Palette.muted)
+                actButton("resume", enabled: session.resumeCommand != nil && session.harness.runtime != nil) {
+                    store.resumeSelected()
+                }
+                actButton("transcript", enabled: true) { store.showTranscript() }
+                actButton(store.isGeneratingTitle ? "naming…" : "name", enabled: !store.isGeneratingTitle) {
+                    store.generateTitle()
+                }
+                actButton("tag", enabled: true) { store.beginAnnotation(.tag) }
+                actButton("note", enabled: true) { store.beginAnnotation(.note) }
+            }
+        }
+        .padding(.top, Metrics.s2)
+        .overlay(alignment: .top) { rule }
+    }
+
+    private func excerptBlock(_ label: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.s2) {
+            columnLabel(label)
+            Text(text)
+                .foregroundStyle(text.hasPrefix("(") ? Palette.faint : Palette.text)
+                .lineSpacing(Metrics.bodySize * (Metrics.bodyLineHeight - 1))
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .padding(.vertical, Metrics.s2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .top) { rule }
+    }
+
+    // MARK: - Transcript
+
+    private var transcriptView: some View {
+        VStack(spacing: 0) {
+            HolyMannaFlowLayout(spacing: Metrics.s3) {
+                (Text("$ ").foregroundColor(Palette.green)
+                    + Text("agent-sessions transcript").fontWeight(.semibold).foregroundColor(Palette.text)
+                    + Text(" \(store.transcript.count)").foregroundColor(Palette.faint))
+                linkButton("[copy all]") { store.copyTranscript() }
+                linkButton("[find]") { store.showTranscriptFind() }
+                linkButton("[done]") { store.closeTranscript() }
+            }
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, Metrics.s4)
+            .padding(.top, Metrics.s3)
+            .padding(.bottom, Metrics.s1)
+            if store.transcriptFindIsPresented {
+                HStack(spacing: Metrics.s2) {
+                    TextField("find in transcript", text: $store.transcriptFindQuery)
+                        .textFieldStyle(.plain)
+                        .focused($findFocused)
+                        .onChange(of: store.transcriptFindQuery) { _ in store.recomputeFind() }
+                        .onSubmit { store.nextFindMatch() }
+                        .padding(.horizontal, Metrics.s2)
+                        .frame(height: Metrics.grepFieldHeight)
+                        .background(Palette.surface)
+                        .overlay(Rectangle().stroke(findFocused ? Palette.blue : Palette.line, lineWidth: 1))
+                    Text(store.findMatchCount == 0 ? "no matches" : "\(store.findMatchIndex + 1)/\(store.findMatchCount)")
+                        .foregroundStyle(Palette.faint)
+                        .lineLimit(1)
+                    linkButton("[↑]") { store.nextFindMatch(-1) }
+                    linkButton("[↓]") { store.nextFindMatch() }
+                    linkButton("[×]") {
+                        store.transcriptFindIsPresented = false
+                        store.transcriptFindQuery = ""
+                        store.recomputeFind()
+                    }
+                }
+                .padding(.horizontal, Metrics.s4)
+                .padding(.vertical, Metrics.s1)
+            }
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text("session  \(store.selectedSession?.id ?? "unknown")")
+                            Text("path     \(store.selectedSession?.projectPath ?? "unknown")")
+                            Text("messages \(store.transcript.count)")
+                            if store.transcript.isEmpty {
+                                Text(store.statusMessage == "Loading transcript..." ? "loading…" : "(no messages found)")
                             }
                         }
-                        Text("END OF TRANSCRIPT")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .tracking(1.2)
-                            .foregroundStyle(HolyArchivePalette.metadata)
-                            .padding(18)
+                        .foregroundStyle(Palette.faint)
+                        .padding(.vertical, Metrics.s2)
+                        .overlay(alignment: .bottom) { rule }
+                        ForEach(Array(store.transcript.enumerated()), id: \.element.id) { index, message in
+                            HolyArchiveTranscriptMessageView(index: index + 1, message: message, find: store.transcriptFindQuery)
+                                .id(message.id)
+                                .background {
+                                    GeometryReader { geometry in
+                                        Color.clear.preference(
+                                            key: HolyArchiveTranscriptFramePreferenceKey.self,
+                                            value: [message.id: geometry.frame(in: .named("archive-transcript"))]
+                                        )
+                                    }
+                                }
+                        }
+                        if !store.transcript.isEmpty {
+                            Text("━ end of transcript ━  \(Present.transcriptLegend)")
+                                .foregroundStyle(Palette.faint)
+                                .padding(.vertical, Metrics.s3)
+                        }
                     }
+                    .padding(.horizontal, Metrics.s4)
                 }
                 .coordinateSpace(name: "archive-transcript")
                 .onPreferenceChange(HolyArchiveTranscriptFramePreferenceKey.self) { frames in
                     store.visibleTranscriptMessageID = frames
                         .filter { $0.value.maxY > 0 }
-                        .min { left, right in
-                            max(0, left.value.minY) < max(0, right.value.minY)
-                        }?.key
+                        .min { left, right in max(0, left.value.minY) < max(0, right.value.minY) }?
+                        .key
                 }
                 .onChange(of: store.findMatchIndex) { _ in
                     if let id = transcriptTargetMessageID {
@@ -551,19 +834,6 @@ struct HolyArchiveModeView: View {
                 }
             }
         }
-    }
-
-    private var transcriptHeader: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Session: \(store.selectedSession?.id ?? "Unknown")")
-            Text("Path: \(store.selectedSession?.projectPath ?? "Unknown")")
-            Text("Messages: \(store.transcript.count)")
-        }
-        .font(.system(size: 10, design: .monospaced))
-        .foregroundStyle(HolyArchivePalette.metadata)
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .bottom) { Rectangle().fill(HolyArchivePalette.rule).frame(height: 1) }
     }
 
     private var transcriptTargetMessageID: String? {
@@ -577,249 +847,188 @@ struct HolyArchiveModeView: View {
         return nil
     }
 
-    private var researchPanel: some View {
-        VStack(spacing: 0) {
-            sectionHeader("Research \(store.selectedChatID == nil ? "(new)" : "")") {
-                if store.isResearching {
-                    ProgressView().controlSize(.small)
-                    Text("thinking...")
-                }
-                Button { store.chatIsFullscreen.toggle() } label: {
-                    Image(systemName: store.chatIsFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                }
-                .buttonStyle(.plain)
-                Button { store.toggleChat() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(.plain)
-            }
-            if store.chatHistoryIsPresented { chatHistory }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(store.researchMessages) { message in
-                            HolyArchiveResearchMessageView(message: message, onCitation: store.openCitation)
-                                .id(message.id)
-                        }
-                        if store.researchMessages.isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("Ask across the archive")
-                                    .font(.system(size: 15, weight: .medium))
-                                Text("The researcher can scope projects and tags, search content, read full messages, follow pagination, and return exact citations with resume commands.")
-                                    .foregroundStyle(HolyArchivePalette.metadata)
-                                    .lineSpacing(3)
-                            }
-                            .padding(16)
-                        }
+    // MARK: - Resizer and strip
+
+    private func resizer(currentWidth: CGFloat) -> some View {
+        Rectangle()
+            .fill(resizerHovered || inspectorDragStartWidth != nil ? Palette.lineStrong : Color.clear)
+            .frame(width: Metrics.resizerWidth)
+            .overlay(alignment: .leading) { Rectangle().fill(Palette.line).frame(width: 1) }
+            .contentShape(Rectangle())
+            .onHover { resizerHovered = $0 }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        let start = inspectorDragStartWidth ?? currentWidth
+                        inspectorDragStartWidth = start
+                        let proposed = start - value.translation.width
+                        storedInspectorWidth = Double(
+                            min(Metrics.inspectorMaximumWidth, max(Metrics.inspectorMinimumWidth, proposed.rounded()))
+                        )
                     }
-                }
-                .onChange(of: store.researchMessages.count) { _ in
-                    if let id = store.researchMessages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
-                }
+                    .onEnded { _ in inspectorDragStartWidth = nil }
+            )
+            .onTapGesture(count: 2) {
+                storedInspectorWidth = Double(HolyArchiveMetrics.inspectorDefaultWidth)
             }
-            chatControls
-            HStack(spacing: 8) {
-                TextField("Ask the archive researcher", text: $store.researchDraft)
-                    .textFieldStyle(.plain)
-                    .focused($researchFocused)
-                    .onSubmit { store.submitResearch() }
-                    .disabled(store.isResearching)
-                Button("Send") { store.submitResearch() }
-                    .buttonStyle(HolyArchiveTextButtonStyle(accented: true))
-                    .disabled(store.isResearching || store.researchDraft.holyArchiveNilIfBlank == nil)
-            }
-            .padding(10)
-            .background(HolyArchivePalette.raisedInk)
-        }
+            .help("drag · double-click to reset")
     }
 
-    private var chatControls: some View {
-        HStack(spacing: 12) {
-            Button("Copy") { store.copyResearchTranscript() }
-            Button("New") { store.newChat() }
-            Button("Recent") {
-                store.refreshRecentChats()
-                store.chatHistoryIsPresented.toggle()
-            }
-            Button("Delete", role: .destructive) { store.deleteSelectedChat() }
-                .disabled(store.selectedChatID == nil)
-            Spacer()
-            TextField("Model", text: $store.researchModel)
-                .textFieldStyle(.plain)
-                .font(.system(size: 9, design: .monospaced))
-                .frame(width: 90)
-                .onChange(of: store.researchModel) { UserDefaults.standard.set($0, forKey: "holy.intelligence.deep.model") }
-            Picker("", selection: $store.reasoningEffort) {
-                ForEach(["low", "medium", "high", "xhigh"], id: \.self) { Text($0).tag($0) }
-            }
-            .labelsHidden()
-            .frame(width: 72)
-            .onChange(of: store.reasoningEffort) { UserDefaults.standard.set($0, forKey: "holy.archive.research.effort") }
-        }
-        .buttonStyle(.plain)
-        .font(.system(size: 9, design: .monospaced))
-        .foregroundStyle(HolyArchivePalette.metadata)
-        .padding(.horizontal, 10)
-        .frame(height: 30)
-        .overlay(alignment: .top) { Rectangle().fill(HolyArchivePalette.rule).frame(height: 1) }
-    }
-
-    private var chatHistory: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(store.recentChats) { chat in
-                    Button { store.loadChat(chat.id) } label: {
-                        HStack {
-                            Text(chat.title).lineLimit(1)
-                            Spacer()
-                            Text(Self.shortDate(chat.updatedAt))
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundStyle(HolyArchivePalette.metadata)
-                        }
-                        .padding(.horizontal, 10)
-                        .frame(height: 28)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-        .frame(height: 150)
-        .background(HolyArchivePalette.raisedInk)
-        .overlay(Rectangle().stroke(HolyArchivePalette.rule))
-    }
-
-    private var statusBar: some View {
-        HStack(spacing: 12) {
+    /// Status on the left (indexing, the TUI's toasts, errors), the key
+    /// legend on the right.
+    private func strip(width: CGFloat) -> some View {
+        HStack(spacing: Metrics.s4) {
             if let progress = store.indexProgress {
-                ProgressView(value: Double(progress.completed), total: Double(max(1, progress.total)))
-                    .progressViewStyle(.linear)
-                    .frame(width: 120)
-                Text("\(progress.phase.rawValue): \(progress.detail)")
+                spinner
+                Text("\(progress.phase.rawValue) \(progress.completed)/\(max(progress.total, progress.completed)) · \(progress.detail)")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else if let error = store.errorMessage {
+                Text(error).foregroundStyle(Palette.red).lineLimit(1).truncationMode(.middle).help(error)
+                linkButton("dismiss") { store.clearError() }
             } else if let status = store.statusMessage {
-                Text(status)
-            } else {
-                Text("Return copy · R resume · T transcript · / search · ? research · Esc back")
+                Text(status).lineLimit(1).truncationMode(.middle)
             }
             if let semantic = store.semanticStatus {
-                Rectangle().fill(HolyArchivePalette.rule).frame(width: 1, height: 12)
-                Text(semantic).lineLimit(1)
+                Text(semantic).foregroundStyle(Palette.faint).lineLimit(1)
             }
-            Spacer()
-            Text("HOLY DB · NATIVE")
-                .tracking(1)
-                .foregroundStyle(HolyArchivePalette.gold.opacity(0.72))
-        }
-        .font(.system(size: 9, design: .monospaced))
-        .foregroundStyle(HolyArchivePalette.metadata)
-        .padding(.horizontal, 14)
-        .frame(height: 28)
-        .overlay(alignment: .top) { Rectangle().fill(HolyArchivePalette.rule).frame(height: 1) }
-    }
-
-    private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("No sessions found")
-                .font(.system(size: 17, weight: .medium))
-            ForEach(store.registry.providers, id: \.harness) { provider in
-                HStack(spacing: 8) {
-                    Image(systemName: provider.harness.icon)
-                        .foregroundStyle(HolyArchivePalette.provider(provider.harness))
-                    Text(provider.harness.displayName)
-                    Text(provider.sessionsDirectory.path)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(HolyArchivePalette.metadata)
-                        .lineLimit(1)
-                    Spacer()
-                    Image(systemName: provider.isAvailable ? "checkmark.circle" : "xmark.circle")
-                        .foregroundStyle(provider.isAvailable ? HolyArchivePalette.gold : HolyArchivePalette.metadata)
-                }
-            }
-        }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private var annotationSheet: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text(store.annotationMode == .tag ? "Tag this session" : "Add a session note")
-                .font(.system(size: 17, weight: .semibold))
-            TextField(store.annotationMode?.placeholder ?? "Annotation", text: $store.annotationDraft)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit {
-                    store.saveAnnotation()
-                    annotationSheetPresented = false
-                }
-            HStack {
-                Spacer()
-                Button("Cancel", role: .cancel) { annotationSheetPresented = false }
-                Button("Save") {
-                    store.saveAnnotation()
-                    annotationSheetPresented = false
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(store.annotationDraft.holyArchiveNilIfBlank == nil)
-            }
-        }
-        .padding(24)
-        .frame(width: 440)
-    }
-
-    private func sectionHeader<Trailing: View>(
-        _ title: String,
-        @ViewBuilder trailing: () -> Trailing
-    ) -> some View {
-        HStack(spacing: 10) {
-            Text(title.uppercased())
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .tracking(1.05)
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            trailing()
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(HolyArchivePalette.metadata)
-        }
-        .foregroundStyle(HolyArchivePalette.metadata)
-        .padding(.horizontal, 13)
-        .frame(height: 30)
-        .background(HolyArchivePalette.raisedInk.opacity(0.65))
-        .overlay(alignment: .bottom) { Rectangle().fill(HolyArchivePalette.rule).frame(height: 1) }
-    }
-
-    private func ledgerRow<Content: View>(
-        _ label: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(label.uppercased())
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .tracking(0.7)
-                .foregroundStyle(HolyArchivePalette.metadata)
-                .frame(width: 82, alignment: .leading)
-            content()
-                .font(.system(size: 11))
-                .foregroundStyle(HolyArchivePalette.paper)
             Spacer(minLength: 0)
+            Text(store.transcriptIsPresented ? Present.transcriptLegend : Present.keyLegend)
+                .foregroundStyle(Palette.faint)
+                .lineLimit(1)
+                .layoutPriority(-1)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 7)
-        .overlay(alignment: .bottom) { Rectangle().fill(HolyArchivePalette.rule.opacity(0.55)).frame(height: 1) }
+        .foregroundStyle(Palette.muted)
+        .padding(.horizontal, pagePadding(width))
+        .frame(height: Metrics.stripHeight)
+        .background(Palette.surface)
+        .overlay(alignment: .top) { rule }
     }
 
-    private func childCount(for session: HolyArchiveSession) -> Int {
-        store.childCountsByParentID[session.id] ?? 0
+    // MARK: - Shared chrome
+
+    private var rule: some View {
+        Rectangle().fill(Palette.line).frame(height: 1)
     }
 
-    private static func longDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        return formatter.string(from: date)
+    private func separator(_ glyph: String) -> some View {
+        Text(glyph).foregroundStyle(Palette.faint).padding(.horizontal, Metrics.s1)
     }
 
-    private static func shortDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "MM-dd HH:mm"
-        return formatter.string(from: date)
+    private func linkButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).foregroundStyle(Palette.blue).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func actButton(_ verb: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text("[\(verb)]").foregroundStyle(enabled ? Palette.green : Palette.faint).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+
+    private func copyButton(_ label: String, payload: @escaping () -> (text: String, note: String)?) -> some View {
+        let copied = copiedLabel == label
+        return Button {
+            guard let payload = payload() else { return }
+            copy(payload.text, note: payload.note, label: label)
+        } label: {
+            Text(copied ? "[copied]" : "[\(label)]")
+                .foregroundStyle(copied ? Palette.green : Palette.blue)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func sheetHead<Trailing: View>(_ prompt: String, count: String, @ViewBuilder trailing: () -> Trailing) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Metrics.s2) {
+            (Text("$ ").foregroundColor(Palette.green)
+                + Text(prompt).fontWeight(.semibold).foregroundColor(Palette.text))
+            Text(count).foregroundStyle(Palette.faint)
+            trailing()
+        }
+        .lineLimit(1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, Metrics.s3)
+        .padding(.bottom, Metrics.s1)
+    }
+
+    private func columnLabel(_ text: String) -> some View {
+        Text(text.uppercased())
+            .tracking(Metrics.pillTracking)
+            .foregroundStyle(Palette.faint)
+            .lineLimit(1)
+    }
+
+    private func pill(_ word: String, color: Color) -> some View {
+        Text(word.uppercased()).tracking(Metrics.pillTracking).foregroundStyle(color).lineLimit(1)
+    }
+
+    private func emptyLine(_ text: String) -> some View {
+        Text(text)
+            .foregroundStyle(Palette.faint)
+            .padding(Metrics.s2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func buildingLine(_ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Metrics.s2) {
+            spinner
+            Text(text).foregroundStyle(Palette.muted)
+        }
+        .padding(.vertical, Metrics.s2)
+    }
+
+    private func metaRow<Value: View>(_ label: String, @ViewBuilder value: () -> Value) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(Palette.muted)
+                .frame(width: Metrics.metaLabelWidth, alignment: .leading)
+            value().frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func metaValue(_ text: String) -> some View {
+        Text(text)
+            .fontWeight(.medium)
+            .foregroundStyle(Palette.text)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+    }
+
+    private func stripe(_ cls: String) -> some View {
+        Rectangle()
+            .fill(Palette.stripeColor(forClass: cls))
+            .frame(width: Metrics.stripeWidth, height: Metrics.stripeHeight)
+            .frame(width: Metrics.stripeColumnWidth, alignment: .leading)
+    }
+
+    private func rowBackground(selected: Bool, hovered: Bool, even: Bool) -> Color {
+        if selected || hovered { return Palette.raised }
+        return even ? Palette.zebra : Color.clear
+    }
+
+    private func setHover(_ id: String, _ hovering: Bool) {
+        if hovering {
+            hoveredRowID = id
+        } else if hoveredRowID == id {
+            hoveredRowID = nil
+        }
+    }
+
+    private func copy(_ text: String, note: String, label: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        copiedLabel = label
+        copiedResetTask?.cancel()
+        copiedResetTask = Task {
+            try? await Task.sleep(for: .seconds(Metrics.copiedFlashSeconds))
+            guard !Task.isCancelled else { return }
+            copiedLabel = nil
+        }
     }
 }
 
@@ -831,87 +1040,36 @@ private struct HolyArchiveTranscriptFramePreferenceKey: PreferenceKey {
     }
 }
 
-private struct HolyArchiveSessionRow: View {
-    let session: HolyArchiveSession
-    let childCount: Int
-    let selected: Bool
-    @State private var hovered = false
-
-    var body: some View {
-        HStack(spacing: 9) {
-            Text(date)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(HolyArchivePalette.metadata)
-                .frame(width: 74, alignment: .leading)
-            Rectangle().fill(HolyArchivePalette.rule).frame(width: 1, height: 25)
-            Image(systemName: session.harness.icon)
-                .font(.system(size: 10))
-                .foregroundStyle(HolyArchivePalette.provider(session.harness))
-                .frame(width: 12)
-            Text(String(session.projectName.prefix(12)))
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(HolyArchivePalette.provider(session.harness).opacity(0.88))
-                .frame(width: 86, alignment: .leading)
-            Rectangle().fill(HolyArchivePalette.rule).frame(width: 1, height: 25)
-            if childCount > 0 {
-                Text("(\(childCount))")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundStyle(HolyArchivePalette.gold)
-            }
-            Text(session.displayTitle.replacingOccurrences(of: "\n", with: " "))
-                .font(.system(size: 11, weight: session.summary == nil ? .regular : .semibold))
-                .foregroundStyle(session.summary == nil ? HolyArchivePalette.paper.opacity(0.67) : HolyArchivePalette.paper)
-                .lineLimit(2)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 8)
-        .background(selected ? HolyArchivePalette.raisedInk : (hovered ? Color.white.opacity(0.025) : .clear))
-        .overlay(alignment: .leading) {
-            if selected { Rectangle().fill(HolyArchivePalette.gold).frame(width: 2) }
-        }
-        .overlay(alignment: .bottom) { Rectangle().fill(HolyArchivePalette.rule.opacity(0.45)).frame(height: 1) }
-        .onHover { hovered = $0 }
-    }
-
-    private var date: String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "MM-dd HH:mm"
-        return formatter.string(from: session.activityAt)
-    }
-}
-
+/// widgets.py build_message_text: `[i] User` green, `Assistant` magenta,
+/// the body in a gutter; here the gutter is the cockpit's rule.
 private struct HolyArchiveTranscriptMessageView: View {
     let index: Int
     let message: HolyArchiveMessage
     let find: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("[\(index)]")
+        VStack(alignment: .leading, spacing: HolyMannaBoardMetrics.s1) {
+            HStack(spacing: HolyMannaBoardMetrics.s2) {
+                Text("[\(index)]").foregroundStyle(HolyMannaBoardPalette.faint)
                 Text(message.role.rawValue.uppercased())
+                    .tracking(HolyMannaBoardMetrics.pillTracking)
                     .foregroundStyle(roleColor)
-                Rectangle().fill(HolyArchivePalette.rule).frame(height: 1)
+                Rectangle().fill(HolyMannaBoardPalette.line).frame(height: 1)
             }
-            .font(.system(size: 9, weight: .bold, design: .monospaced))
             Text(highlighted)
-                .font(.system(size: 12, design: .monospaced))
-                .lineSpacing(3)
+                .lineSpacing(HolyMannaBoardMetrics.bodySize * (HolyMannaBoardMetrics.bodyLineHeight - 1))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(16)
-        .overlay(alignment: .bottom) { Rectangle().fill(HolyArchivePalette.rule).frame(height: 1) }
+        .padding(.vertical, HolyMannaBoardMetrics.s2)
     }
 
     private var roleColor: Color {
         switch message.role {
-        case .user: Color(red: 0.45, green: 0.82, blue: 0.57)
-        case .assistant: Color(red: 0.82, green: 0.55, blue: 0.86)
-        case .tool: Color(red: 0.50, green: 0.72, blue: 0.92)
-        default: HolyArchivePalette.metadata
+        case .user: HolyMannaBoardPalette.green
+        case .assistant: HolyMannaBoardPalette.violet
+        case .tool: HolyMannaBoardPalette.blue
+        default: HolyMannaBoardPalette.muted
         }
     }
 
@@ -921,78 +1079,69 @@ private struct HolyArchiveTranscriptMessageView: View {
         for range in HolyArchiveTranscriptFind.ranges(of: find, in: message.content) {
             guard let lower = AttributedString.Index(range.lowerBound, within: result),
                   let upper = AttributedString.Index(range.upperBound, within: result) else { continue }
-            result[lower..<upper].backgroundColor = NSColor.systemYellow.withAlphaComponent(0.28)
+            result[lower..<upper].backgroundColor = NSColor(HolyMannaBoardPalette.select).withAlphaComponent(0.35)
             result[lower..<upper].foregroundColor = NSColor.white
         }
         return result
     }
 }
 
+/// chat_widgets.py: your turns, the researcher's answers, tool calls folded.
 private struct HolyArchiveResearchMessageView: View {
     let message: HolyArchiveResearchMessage
     let onCitation: (String) -> Void
     @State private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: HolyMannaBoardMetrics.s1) {
             if message.toolCallJSON != nil || message.role == .tool {
-                DisclosureGroup(isExpanded: $expanded) {
-                    Text(message.content)
-                        .font(.system(size: 9, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding(.top, 6)
+                Button {
+                    expanded.toggle()
                 } label: {
-                    Text(message.role == .tool ? "TOOL OUTPUT" : "TOOL CALL")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundStyle(HolyArchivePalette.metadata)
+                    Text((expanded ? "▾ " : "▸ ") + (message.role == .tool ? "TOOL OUTPUT" : "TOOL CALL"))
+                        .tracking(HolyMannaBoardMetrics.pillTracking)
+                        .foregroundStyle(HolyMannaBoardPalette.faint)
+                        .contentShape(Rectangle())
                 }
-                .contextMenu { Button("Copy") { copy(message.content) } }
+                .buttonStyle(.plain)
+                if expanded {
+                    Text(message.content)
+                        .foregroundStyle(HolyMannaBoardPalette.muted)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } else {
                 Text(message.role == .user ? "YOU" : "ASSISTANT")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .tracking(0.8)
-                    .foregroundStyle(message.role == .user ? HolyArchivePalette.gold : HolyArchivePalette.metadata)
+                    .tracking(HolyMannaBoardMetrics.pillTracking)
+                    .foregroundStyle(message.role == .user ? HolyMannaBoardPalette.amber : HolyMannaBoardPalette.faint)
                 Text(message.content)
-                    .lineSpacing(3)
+                    .foregroundStyle(HolyMannaBoardPalette.text)
+                    .lineSpacing(HolyMannaBoardMetrics.bodySize * (HolyMannaBoardMetrics.bodyLineHeight - 1))
                     .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
                 if !message.citedSessionIDs.isEmpty {
-                    HStack(spacing: 7) {
-                        Text("REFS")
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .foregroundStyle(HolyArchivePalette.metadata)
+                    HolyMannaFlowLayout(spacing: HolyMannaBoardMetrics.s2) {
+                        Text("refs:").foregroundStyle(HolyMannaBoardPalette.muted)
                         ForEach(message.citedSessionIDs, id: \.self) { id in
-                            Button(String(id.prefix(8))) { onCitation(id) }
-                                .buttonStyle(.plain)
-                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(HolyArchivePalette.gold)
+                            Button {
+                                onCitation(id)
+                            } label: {
+                                Text("[\(String(id.prefix(8)))]").foregroundStyle(HolyMannaBoardPalette.blue)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
             }
         }
-        .padding(12)
+        .padding(.vertical, HolyMannaBoardMetrics.s2)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(message.role == .user ? HolyArchivePalette.gold.opacity(0.025) : .clear)
-        .overlay(alignment: .bottom) { Rectangle().fill(HolyArchivePalette.rule.opacity(0.55)).frame(height: 1) }
-        .contextMenu { Button("Copy") { copy(message.content) } }
-    }
-
-    private func copy(_ value: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-    }
-}
-
-private struct HolyArchiveTextButtonStyle: ButtonStyle {
-    var accented = false
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-            .foregroundStyle(accented ? HolyArchivePalette.background : HolyArchivePalette.metadata)
-            .padding(.horizontal, 9)
-            .frame(height: 26)
-            .background(accented ? HolyArchivePalette.gold.opacity(configuration.isPressed ? 0.75 : 0.92) : HolyArchivePalette.raisedInk)
-            .overlay(Rectangle().stroke(accented ? HolyArchivePalette.gold : HolyArchivePalette.rule))
+        .overlay(alignment: .bottom) { Rectangle().fill(HolyMannaBoardPalette.line).frame(height: 1) }
+        .contextMenu {
+            Button("copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(message.content, forType: .string)
+            }
+        }
     }
 }

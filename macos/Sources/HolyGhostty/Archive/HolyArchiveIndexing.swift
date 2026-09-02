@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 struct HolyArchiveLegacySummary: Equatable, Sendable {
     let sessionID: String
@@ -31,11 +32,44 @@ enum HolyArchiveLegacySummaryImporter {
         return entries
     }
 
+    /// agent-sessions writes every summary it generates to the `summaries`
+    /// table of its SQLite index (index/database.py); the JSON sidecars are
+    /// the older caches it migrates from. Read-only, and an index without
+    /// the table (an older agent-sessions) contributes nothing.
+    static func load(fromDatabase url: URL) throws -> [HolyArchiveLegacySummary] {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        let database = try HolyDatabase.open(at: url, readOnly: true)
+        let tables = try database.scalarInt64(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'summaries';"
+        )
+        guard tables > 0 else { return [] }
+        var entries: [HolyArchiveLegacySummary] = []
+        try database.query(
+            "SELECT session_id, summary, COALESCE(content_hash, '') FROM summaries WHERE summary IS NOT NULL AND TRIM(summary) <> '';"
+        ) { statement in
+            guard let id = sqlite3_column_text(statement, 0),
+                  let summary = sqlite3_column_text(statement, 1) else { return }
+            let hash = sqlite3_column_text(statement, 2).map { String(cString: $0) } ?? ""
+            entries.append(.init(
+                sessionID: String(cString: id),
+                summary: String(cString: summary),
+                contentHash: hash
+            ))
+        }
+        return entries
+    }
+
     static func migrate(
         repository: HolyArchiveRepository,
-        from urls: [URL] = defaultURLs
+        from urls: [URL] = defaultURLs,
+        databases: [URL] = defaultDatabaseURLs
     ) throws -> Int {
-        try repository.importLegacySummaries(load(from: urls))
+        var entries: [HolyArchiveLegacySummary] = []
+        for database in databases {
+            entries += try load(fromDatabase: database)
+        }
+        entries += load(from: urls)
+        return try repository.importLegacySummaries(entries)
     }
 
     private static var defaultURLs: [URL] {
@@ -44,6 +78,11 @@ enum HolyArchiveLegacySummaryImporter {
             home.appendingPathComponent(".factory/session-summaries.json"),
             home.appendingPathComponent(".cache/agent-sessions/summaries.json"),
         ]
+    }
+
+    /// index/database.py DEFAULT_DB_PATH.
+    private static var defaultDatabaseURLs: [URL] {
+        [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cache/agent-sessions/sessions.db")]
     }
 }
 

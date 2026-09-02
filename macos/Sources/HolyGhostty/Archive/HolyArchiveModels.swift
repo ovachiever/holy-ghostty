@@ -107,7 +107,7 @@ struct HolyArchiveSession: Codable, Identifiable, Equatable, Sendable {
 
     var displayTitle: String {
         if let summary = summary?.holyArchiveNilIfBlank { return summary }
-        if let first = firstPrompt.holyArchiveFirstLine?.holyArchiveNilIfBlank { return first }
+        if let first = HolyArchiveText.firstRealLine(in: firstPrompt) { return first }
         if let title = title.holyArchiveNilIfBlank { return title }
         return "Untitled session"
     }
@@ -349,6 +349,7 @@ enum HolyArchiveText {
     static let skipPrefixes = [
         "[Request interrupted",
         "<local-command-caveat>",
+        "<local-command-stdout>",
         "<command-name>",
         "<command-message>",
         "<command-instruction>",
@@ -361,6 +362,17 @@ enum HolyArchiveText {
     static func isMetaMessage(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return skipPrefixes.contains { trimmed.hasPrefix($0) }
+    }
+
+    /// The first line of a prompt that is not harness chatter: what a row
+    /// shows when no summary exists, and what a title falls back to.
+    static func firstRealLine(in value: String) -> String? {
+        for line in value.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || isMetaMessage(trimmed) { continue }
+            return trimmed
+        }
+        return nil
     }
 
     static func firstRealPrompt(in messages: [HolyArchiveMessage]) -> String {
