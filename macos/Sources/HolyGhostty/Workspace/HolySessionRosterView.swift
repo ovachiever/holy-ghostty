@@ -340,30 +340,11 @@ struct HolySessionRosterView: View {
         .help("More")
     }
 
+    /// Actions first, then the filter row: the section needs no name
+    /// (Erik, 2026-09-02: "remove TMUX SESSIONS wording … add the label
+    /// Filter: to the left").
     private var sessionToolbar: some View {
         VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
-                Label {
-                    Text("TMUX Sessions")
-                        .font(.system(size: 10, weight: .semibold))
-                        .textCase(.uppercase)
-                        .tracking(0.6)
-                } icon: {
-                    Image(systemName: "rectangle.stack")
-                        .font(.system(size: 10, weight: .medium))
-                }
-                .foregroundStyle(HolyGhosttyTheme.textTertiary)
-
-                Spacer(minLength: 4)
-
-                layoutSwitcher
-
-                Text("\(store.sessions.count)")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                    .lineLimit(1)
-            }
-
             HStack(spacing: 6) {
                 rosterActionButton(
                     title: "New",
@@ -395,6 +376,21 @@ struct HolySessionRosterView: View {
                     help: "Open local and remote tmux hosts",
                     action: onPresentRemoteHosts
                 )
+            }
+
+            HStack(spacing: 6) {
+                Text("Filter:")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+
+                layoutSwitcher
+
+                Spacer(minLength: 4)
+
+                Text("\(store.sessions.count)")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                    .lineLimit(1)
             }
         }
         .padding(.horizontal, 10)
