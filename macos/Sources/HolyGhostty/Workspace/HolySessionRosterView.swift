@@ -25,7 +25,7 @@ struct HolySessionRosterView: View {
 
     private var sections: [HolyRosterSection] {
         switch layout {
-        case .classic, .calm:
+        case .classic:
             return runtimeSections
         case .triage:
             return triageSections
@@ -543,7 +543,6 @@ private struct HolyRosterSection: Identifiable {
 
 enum HolyRosterLayout: String, CaseIterable, Identifiable {
     case classic
-    case calm
     case triage
     case focus
 
@@ -552,7 +551,6 @@ enum HolyRosterLayout: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .classic: return "Classic"
-        case .calm:    return "Calm"
         case .triage:  return "Triage"
         case .focus:   return "Focus"
         }
@@ -561,7 +559,6 @@ enum HolyRosterLayout: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .classic: return "rectangle.3.group"
-        case .calm:    return "moon"
         case .triage:  return "arrow.up.arrow.down"
         case .focus:   return "star"
         }
@@ -570,7 +567,6 @@ enum HolyRosterLayout: String, CaseIterable, Identifiable {
     var helpText: String {
         switch self {
         case .classic: return "Grouped by agent, canonical status vocabulary"
-        case .calm:    return "Same exact indicators with less surrounding detail"
         case .triage:  return "Lanes by status: what needs you floats up"
         case .focus:   return "Pinned Today sessions on top, the rest dimmed"
         }
