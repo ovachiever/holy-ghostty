@@ -513,9 +513,10 @@ struct HolyWorkspaceRootView: View {
             Text("Panes:")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                .padding(.trailing, 6)
+                .padding(.trailing, 4)
 
-            HStack(spacing: 3) {
+            // Tight enough that Panes and Sort share one footer row.
+            HStack(spacing: 0) {
                 layoutControlButton(
                     title: "Single",
                     systemName: "rectangle",
@@ -572,7 +573,10 @@ struct HolyWorkspaceRootView: View {
 
             // The roster filter and the session count, bottom right
             // (Erik, 2026-09-02); the three faces moved up beside the actions.
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
+                Text("Sort:")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
                 HolyRosterLayoutSwitcher()
                 Text("\(store.sessions.count)")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -788,7 +792,7 @@ struct HolyWorkspaceRootView: View {
                 .font(.system(size: 10, weight: .medium))
                 .symbolVariant(isActive ? .fill : .none)
                 .rotationEffect(rotation)
-                .frame(width: 24, height: 22)
+                .frame(width: 20, height: 22)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(isActive ? HolyGhosttyTheme.halo.opacity(0.14) : Color.clear)
