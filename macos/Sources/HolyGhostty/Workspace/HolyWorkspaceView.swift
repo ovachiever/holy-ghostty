@@ -455,17 +455,40 @@ struct HolyWorkspaceRootView: View {
         }
     }
 
+    /// The footer must survive any roster width down to `rosterMinWidth`:
+    /// an oversized SwiftUI child overflows its frame centred, clipping both
+    /// edges, so the row degrades explicitly instead — full row, then the
+    /// row without the phase text, then the same row made scrollable.
     private var leftRailViewControls: some View {
+        ViewThatFits(in: .horizontal) {
+            railControlsRow(showsStatus: true)
+            railControlsRow(showsStatus: false)
+            ScrollView(.horizontal, showsIndicators: false) {
+                railControlsRow(showsStatus: false)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(HolyGhosttyTheme.bgElevated)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(HolyGhosttyTheme.border)
+                .frame(height: 0.5)
+        }
+    }
+
+    private func railControlsRow(showsStatus: Bool) -> some View {
         HStack(spacing: 0) {
-            if let selected = store.selectedSession {
+            if showsStatus, let selected = store.selectedSession {
                 Text(selected.compactStatusText)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(statusColor(for: selected.phase))
                     .lineLimit(1)
-                    .frame(width: 70, alignment: .leading)
+                    .fixedSize()
                     .help(selected.activityHelpText)
 
-                Spacer(minLength: 16)
+                Spacer(minLength: 12)
             }
 
             HStack(spacing: 3) {
@@ -521,22 +544,13 @@ struct HolyWorkspaceRootView: View {
                 }
             }
 
-            Spacer(minLength: 0)
+            Spacer(minLength: 6)
 
             HStack(spacing: 3) {
                 attentionButton
                 boardModeButton
                 HolyInboxToggleButton(store: store, engine: store.inboxEngine, showsBadge: false)
             }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(HolyGhosttyTheme.bgElevated)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(HolyGhosttyTheme.border)
-                .frame(height: 0.5)
         }
     }
 

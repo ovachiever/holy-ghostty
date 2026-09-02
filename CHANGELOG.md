@@ -8,6 +8,15 @@ The cap no longer kills the swarm: the Claude Usage Guard watches the three
 claude.ai Max windows and tells every running session to checkpoint, then
 pause, before one of them lands.
 
+### Fixed
+
+- The left-rail footer no longer clips when the roster is narrow: the new
+  attention bell, board toggle, and inbox tray plus a fifth layout button
+  had outgrown the row, and an oversized row clips both edges ("Ready"
+  losing its head). The footer now degrades explicitly — full row, then
+  without the phase text, then scrollable — and the phase text sizes to
+  its content instead of reserving a fixed 70 points.
+
 ### Added
 
 - Claude Usage Guard (`Enable Claude Usage Guard…`, beside the Claude Model
