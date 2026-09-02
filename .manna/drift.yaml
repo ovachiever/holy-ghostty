@@ -1,5 +1,5 @@
-generated_at: "2026-08-21T19:49:56Z"
-session: 6e040306-1877-4113-b974-ce3e45bfb87e
+generated_at: "2026-08-31T21:10:05Z"
+session: a2391f79-b106-471d-815f-6148e6305b7f
 findings:
 - kind: landed_open
   issue_id: mn-9a6145
@@ -66,11 +66,6 @@ findings:
   detail: referenced by landed commit trailer but status is open
   evidence: 3ce096d8dd2e
   proposed_fix: review the commits; if the work landed, claim and done mn-13a213
-- kind: blocker_desync
-  issue_id: mn-569b91
-  detail: all blockers resolved but status is still blocked
-  evidence: mn-495322 (done)
-  proposed_fix: remove resolved blockers to unblock
 - kind: stale_dream
   issue_id: mn-cb681f
   detail: open dream older than 14 days
@@ -201,11 +196,36 @@ findings:
   issue_id: mn-b7efa6
   detail: referenced id does not exist on this board
   evidence: .dev/sweep-20260821/backup-round2/holy-ghostty/sources/external/02-HOLY-PANEL.md.source:3
+- kind: doc_reference
+  issue_id: mn-b7efa6
+  detail: referenced id does not exist on this board
+  evidence: .zpc/.state/counsel/relit-1788187724/sweep-les-7b19e7.txt:9
+- kind: doc_reference
+  issue_id: mn-7dfdb0
+  detail: referenced id does not exist on this board
+  evidence: .zpc/.state/counsel/relit-1788187724/sweep-les-7b19e7.txt:54
+- kind: doc_reference
+  issue_id: mn-b7efa6
+  detail: referenced id does not exist on this board
+  evidence: .zpc/.state/counsel/relit-1788187724/brief-les-7b19e7.md:77
+- kind: doc_reference
+  issue_id: mn-7dfdb0
+  detail: referenced id does not exist on this board
+  evidence: .zpc/.state/counsel/relit-1788187724/brief-les-7b19e7.md:122
 - kind: prompt_pairing
   issue_id: mn-fe1b48
   detail: prompt pointer .handoff/44-mn-fe1b48-sessions-panel-right-hand-utility-surface-hosting-agent-sessions.md does not resolve to claiming file .handoff/45b44-mn-a98f88-handoff-wiring-end-to-end-resume-verification.md
   evidence: .handoff/45b44-mn-a98f88-handoff-wiring-end-to-end-resume-verification.md
   proposed_fix: repoint --prompt or drop the stale claim
+- kind: handoff_presentation
+  detail: .manna/handoff-order.yaml is not normalized to the current active paired item set
+  evidence: handoff_order
+  proposed_fix: agent-do manna sync
+- kind: handoff_presentation
+  issue_id: mn-b864b4
+  detail: handoff path is .handoff/mn-b864b4-post-incident-gaps-clear-readopt-wipes-attention-metadata-no-re-k.md, expected .handoff/66-mn-b864b4-post-incident-gaps-clear-readopt-wipes-attention-metadata-no-re-k.md
+  evidence: handoff_filename
+  proposed_fix: agent-do manna sync
 - kind: handoff_presentation
   detail: .handoff/README.md does not match current board priority
   evidence: handoff_index
