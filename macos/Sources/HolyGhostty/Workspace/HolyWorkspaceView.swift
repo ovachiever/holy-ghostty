@@ -608,7 +608,7 @@ struct HolyWorkspaceRootView: View {
                 store.presentRemoteHosts()
             }
 
-            collapsedRailButton(title: "Board (Command-B)", systemName: "rectangle.3.group") {
+            collapsedRailButton(title: "Board (Command-B)", systemName: "scroll") {
                 showBoard()
             }
             collapsedRailButton(title: "Archive (Command-Shift-A)", systemName: "archivebox") {
@@ -1141,7 +1141,7 @@ struct HolyWorkspaceRootView: View {
         Button(
             action: { showBoard() },
             label: {
-                Image(systemName: "rectangle.3.group")
+                Image(systemName: "scroll")
                     .font(.system(size: 10, weight: .medium))
                     .frame(width: 24, height: 22)
             }
