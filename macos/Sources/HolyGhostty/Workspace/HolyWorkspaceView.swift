@@ -547,9 +547,8 @@ struct HolyWorkspaceRootView: View {
             Spacer(minLength: 6)
 
             HStack(spacing: 3) {
-                attentionButton
                 boardModeButton
-                HolyInboxToggleButton(store: store, engine: store.inboxEngine, showsBadge: false)
+                HolyInboxToggleButton(store: store, engine: store.inboxEngine)
             }
         }
     }
@@ -592,11 +591,10 @@ struct HolyWorkspaceRootView: View {
                 store.presentRemoteHosts()
             }
 
-            collapsedAttentionButton
             collapsedRailButton(title: "Board (Command-B)", systemName: "rectangle.3.group") {
                 showBoard()
             }
-            HolyInboxToggleButton(store: store, engine: store.inboxEngine, showsBadge: false)
+            HolyInboxToggleButton(store: store, engine: store.inboxEngine)
         }
         .padding(.top, HolyWorkspaceLayout.titlebarControlInset + 8)
         .padding(.bottom, 10)
@@ -1120,63 +1118,6 @@ struct HolyWorkspaceRootView: View {
         HolyMannaBoardContext.focused(session: store.selectedSession)
     }
 
-    private var sessionsNeedingHuman: [HolySession] {
-        store.sessions.filter { store.attentionPresentation(for: $0).kind == .needsUser }
-    }
-
-    private var combinedAttentionCount: Int {
-        HolyAttentionBadgeCounter.count(
-            github: store.inboxEngine.badgeCount,
-            boardAsks: boardModeStore.humanAttentionAskCount,
-            boardPeerIDs: boardModeStore.humanAttentionPeerIDs,
-            sessionIDs: sessionsNeedingHuman.map(\.harnessSessionID)
-        )
-    }
-
-    private var attentionButton: some View {
-        Button(action: openHighestPriorityAttention) {
-            HStack(spacing: 3) {
-                Image(systemName: "bell")
-                    .font(.system(size: 10, weight: .medium))
-                if let badge = HolyInboxBadge.label(for: combinedAttentionCount) {
-                    Text(badge)
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundStyle(HolyGhosttyTheme.bg)
-                        .padding(.horizontal, 4)
-                        .frame(height: 13)
-                        .background(Capsule(style: .continuous).fill(HolyGhosttyTheme.halo))
-                }
-            }
-            .frame(height: 22)
-            .padding(.horizontal, 5)
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(combinedAttentionCount > 0 ? HolyGhosttyTheme.halo : HolyGhosttyTheme.textTertiary)
-        .accessibilityLabel("Your move")
-        .help("Your move across GitHub, Board, and sessions")
-    }
-
-    private var collapsedAttentionButton: some View {
-        Button(action: openHighestPriorityAttention) {
-            Image(systemName: "bell")
-                .font(.system(size: 11, weight: .medium))
-                .frame(width: 26, height: 24)
-                .overlay(alignment: .topTrailing) {
-                    if let badge = HolyInboxBadge.label(for: combinedAttentionCount) {
-                        Text(badge)
-                            .font(.system(size: 7, weight: .bold, design: .rounded))
-                            .foregroundStyle(HolyGhosttyTheme.bg)
-                            .padding(.horizontal, 3)
-                            .frame(height: 11)
-                            .background(Capsule(style: .continuous).fill(HolyGhosttyTheme.halo))
-                    }
-                }
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(combinedAttentionCount > 0 ? HolyGhosttyTheme.halo : HolyGhosttyTheme.textTertiary)
-        .accessibilityLabel("Your move")
-        .help("Your move across GitHub, Board, and sessions")
-    }
 
     private var boardModeButton: some View {
         Button(
@@ -1198,16 +1139,6 @@ struct HolyWorkspaceRootView: View {
             boardModeStore.selectedSheet = sheet
         }
         boardModeStore.present(context: focusedBoardContext)
-    }
-
-    private func openHighestPriorityAttention() {
-        if boardModeStore.humanAttentionAskCount > 0 {
-            showBoard(sheet: .asks)
-        } else if let session = sessionsNeedingHuman.first {
-            focus(session)
-        } else {
-            store.toggleInboxPanel()
-        }
     }
 
     private func focusMannaPeer(_ identity: String) -> Bool {

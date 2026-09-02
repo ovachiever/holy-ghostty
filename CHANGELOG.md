@@ -16,6 +16,9 @@ pause, before one of them lands.
   losing its head). The footer now degrades explicitly — full row, then
   without the phase text, then scrollable — and the phase text sizes to
   its content instead of reserving a fixed 70 points.
+- The footer attention bell is gone (Erik's ruling: it duplicated the
+  inbox). The inbox tray carries the notification badge again, in both
+  the expanded footer and the collapsed rail.
 
 ### Added
 
