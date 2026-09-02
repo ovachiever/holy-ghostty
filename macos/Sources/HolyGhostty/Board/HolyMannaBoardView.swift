@@ -24,6 +24,7 @@ struct HolyMannaBoardView: View {
 
     @AppStorage("holy.board.inspectorWidth.v1") private var storedInspectorWidth = Double(Metrics.inspectorDefaultWidth)
     @AppStorage("holy.board.summaryOpen.v1") private var summaryOpen = true
+    @AppStorage("holy.board.columns.v1") private var columnOverridesJSON = ""
     @FocusState private var grepFocused: Bool
     @State private var inspectorDragStartWidth: CGFloat?
     @State private var resizerHovered = false
@@ -237,12 +238,12 @@ struct HolyMannaBoardView: View {
                     .foregroundStyle(store.isLive ? Palette.green : Palette.faint)
                 Text(Present.connectionLabel(
                     isLive: store.isLive,
-                    isRefreshing: store.isRefreshing,
-                    hasState: store.state != nil,
-                    failed: store.boardFailure != nil
+                    isRefreshing: store.surface == .estate ? store.isEstateRefreshing : store.isRefreshing,
+                    hasState: store.surface == .estate ? store.estate != nil : store.state != nil,
+                    failed: store.surface == .estate ? store.estateFailure != nil : store.boardFailure != nil
                 ))
                 separator("|")
-                if store.isRefreshing {
+                if store.surface == .estate ? store.isEstateRefreshing : store.isRefreshing {
                     Text("reading…").foregroundStyle(Palette.faint)
                 } else {
                     linkButton("refresh") { store.requestRefresh(force: true) }
@@ -277,7 +278,14 @@ struct HolyMannaBoardView: View {
         if let state = store.state {
             let sections = store.boardSections
             let showsAge = store.boardFilter == .recent
-            let columns = Present.boardColumns(for: sections.flatMap(\.items), showsAge: showsAge)
+            let fitted = Present.boardColumns(for: sections.flatMap(\.items), showsAge: showsAge)
+            let overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
+            let columns = HolyMannaBoardColumnWidths(
+                id: overrides.width("id", fitted: fitted.id),
+                track: overrides.width("track", fitted: fitted.track),
+                state: overrides.width("state", fitted: fitted.state),
+                priority: overrides.width("#", fitted: fitted.priority)
+            )
             let dimFallback = state.all.contains { !Present.isFallbackText($0) }
             boardColumnHeader(columns, showsAge: showsAge)
             ForEach(sections) { section in
@@ -354,14 +362,42 @@ struct HolyMannaBoardView: View {
     private func boardColumnHeader(_ columns: HolyMannaBoardColumnWidths, showsAge: Bool) -> some View {
         HStack(spacing: Metrics.columnGap) {
             Color.clear.frame(width: Metrics.stripeColumnWidth)
-            columnLabel("id").frame(width: columns.id, alignment: .leading)
+            resizableHeader("id", width: columns.id)
             columnLabel("digest").frame(maxWidth: .infinity, alignment: .leading)
-            columnLabel("track").frame(width: columns.track, alignment: .leading)
-            columnLabel("state").frame(width: columns.state, alignment: .leading)
-            columnLabel(showsAge ? "age" : "#").frame(width: columns.priority, alignment: .trailing)
+            resizableHeader("track", width: columns.track)
+            resizableHeader("state", width: columns.state)
+            resizableHeader("#", label: showsAge ? "age" : "#", width: columns.priority, alignment: .trailing)
         }
         .frame(height: Metrics.columnHeaderHeight)
         .overlay(alignment: .bottom) { rule }
+    }
+
+    /// A fixed column's header with its drag grip at the right edge; the
+    /// dragged width persists per column, double-click returns the fit.
+    private func resizableHeader(_ column: String, label: String? = nil, width: CGFloat, alignment: Alignment = .leading) -> some View {
+        columnLabel(label ?? column)
+            .frame(width: width, alignment: alignment)
+            .overlay(alignment: .trailing) {
+                HolyLedgerColumnGrip(
+                    column: column,
+                    currentWidth: width,
+                    minimumWidth: Metrics.columnWidth(
+                        contentCharacters: HolyLedgerColumnGrip.minimumCharacters,
+                        headerCharacters: (label ?? column).count
+                    ),
+                    onResize: { newWidth in
+                        var overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
+                        overrides.set(column, width: newWidth)
+                        columnOverridesJSON = overrides.json
+                    },
+                    onReset: {
+                        var overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
+                        overrides.reset(column)
+                        columnOverridesJSON = overrides.json
+                    }
+                )
+                .offset(x: Metrics.columnGap / 2 + HolyLedgerColumnGrip.width / 2)
+            }
     }
 
     /// One ledger line: stripe · id · digest · track · state · #.

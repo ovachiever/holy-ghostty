@@ -318,7 +318,7 @@ struct HolyMannaBoardTests {
         // A session outside any board: the estate, with the CLI's own reason.
         store.present(context: .init(boardRoot: "/srv/nowhere", remoteHost: "builder@example.com"))
         #expect(store.surface == .board)
-        for _ in 0 ..< 400 where store.isRefreshing {
+        for _ in 0 ..< 400 where store.isRefreshing || store.estate == nil {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         #expect(!store.isRefreshing)
@@ -347,6 +347,14 @@ struct HolyMannaBoardTests {
         store.dismiss()
         store.present(context: .init(boardRoot: nil, remoteHost: nil))
         #expect(store.surface == .estate)
+        #expect(store.state == nil)
+
+        // Coming back to a board already read shows it at once, from the
+        // cache, while the refresh runs behind it.
+        store.prepare(context: .init(boardRoot: "/srv/holy-ghostty", remoteHost: "builder@example.com"))
+        #expect(store.surface == .board)
+        #expect(store.state?.name == "holy-ghostty")
+        #expect(store.selectedItemID == "mn-live001")
         store.dismiss()
     }
 

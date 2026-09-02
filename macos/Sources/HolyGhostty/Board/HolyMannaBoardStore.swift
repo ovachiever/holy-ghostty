@@ -21,7 +21,11 @@ final class HolyMannaBoardModeStore: ObservableObject {
     @Published private(set) var estate: HolyMannaEstatePayload?
     @Published private(set) var boardFailure: String?
     @Published private(set) var estateFailure: String?
+    /// A read of the focused board is in flight (the topbar's "reading…").
     @Published private(set) var isRefreshing = false
+    @Published private(set) var isEstateRefreshing = false
+    /// When the surface on screen last landed a read: the board's own stamp
+    /// on the board, the estate's on the estate.
     @Published private(set) var lastRefreshedAt: Date?
     @Published var selectedItemID: String?
     @Published var selectedPeerID: String?
@@ -46,8 +50,13 @@ final class HolyMannaBoardModeStore: ObservableObject {
     private let client: HolyMannaBoardClient
     private let digestService: any HolyMannaBoardDigesting
     private let usageAssessmentProvider: () -> HolyClaudeUsageAssessment
-    private var refreshGeneration = UUID()
-    private var refreshTask: Task<Void, Never>?
+    /// Every board read that lands is kept, keyed by host and root, so a
+    /// board seen once shows instantly and refreshes behind its own rows.
+    private var stateCache: [String: HolyMannaStatePayload] = [:]
+    private var stateRefreshedAt: [String: Date] = [:]
+    private var stateReadsInFlight: Set<String> = []
+    private var estateRefreshedAt: Date?
+    private var estateReadInFlight = false
     private var digestTask: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
@@ -130,6 +139,9 @@ final class HolyMannaBoardModeStore: ObservableObject {
         loadSelectedDigest()
         mutationMessage = nil
         mutationFailure = nil
+        if surface == .estate {
+            requestEstateRefresh(force: estate == nil)
+        }
         startLiveRefresh()
     }
 
@@ -137,21 +149,27 @@ final class HolyMannaBoardModeStore: ObservableObject {
         let contextChanged = self.context != context
         self.context = context
         if contextChanged {
-            // A different root is a different board: never show the old
-            // board's rows under the new board's name while it reads.
-            state = nil
+            // A different root is a different board: show what was last
+            // read for it, at once, and never the old board's rows under
+            // the new board's name.
+            state = stateCache[Self.cacheKey(context)]
             boardFailure = nil
-            selectedItemID = nil
             selectedPeerID = nil
+            selectedItemID = nil
             digestText = nil
             digestFailure = nil
+            lastRefreshedAt = stateRefreshedAt[Self.cacheKey(context)]
+            if let state {
+                selectedItemID = Self.defaultSelection(in: state)
+            }
             // A session chosen while the board is on screen is a request
             // for that session's board; the estate returns only if it has none.
             if isPresented {
                 surface = context.boardRoot == nil ? .estate : .board
+                loadSelectedDigest()
             }
         }
-        requestRefresh(force: contextChanged || state == nil)
+        requestStateRefresh(force: contextChanged || state == nil)
         loadActorID()
     }
 
@@ -175,6 +193,8 @@ final class HolyMannaBoardModeStore: ObservableObject {
     func showEstate() {
         surface = .estate
         selectedSheet = .board
+        lastRefreshedAt = estateRefreshedAt
+        requestEstateRefresh(force: estate == nil)
     }
 
     func selectSheet(_ sheet: HolyMannaBoardSheet) {
@@ -221,16 +241,18 @@ final class HolyMannaBoardModeStore: ObservableObject {
         let next = context.selecting(boardRoot: board.root)
         if next != context {
             context = next
-            state = nil
+            state = stateCache[Self.cacheKey(next)]
             boardFailure = nil
-            selectedItemID = nil
             selectedPeerID = nil
+            selectedItemID = state.flatMap(Self.defaultSelection)
             digestText = nil
             digestFailure = nil
         }
         surface = .board
         selectedSheet = .board
-        requestRefresh(force: true)
+        lastRefreshedAt = stateRefreshedAt[Self.cacheKey(context)]
+        loadSelectedDigest()
+        requestStateRefresh(force: state == nil)
     }
 
     // MARK: Keys
@@ -250,25 +272,60 @@ final class HolyMannaBoardModeStore: ObservableObject {
 
     // MARK: Refresh
 
+    /// The refresh button: the face on screen, and the estate only when it
+    /// is the face on screen (its read costs far more than a board's).
     func requestRefresh(force: Bool = false) {
-        if !force,
-           let lastRefreshedAt,
-           Date.now.timeIntervalSince(lastRefreshedAt) < 10 {
+        requestStateRefresh(force: force)
+        if surface == .estate {
+            requestEstateRefresh(force: force)
+        }
+    }
+
+    /// Read the focused board. A read already running for the same root is
+    /// left to finish; a finished read is always kept, so switching away
+    /// and back never throws work away or spawns a second CLI.
+    func requestStateRefresh(force: Bool = false) {
+        let context = context
+        guard context.boardRoot != nil else {
+            isRefreshing = false
             return
         }
-        refreshTask?.cancel()
-        let generation = UUID()
-        refreshGeneration = generation
-        let context = context
+        let key = Self.cacheKey(context)
+        if !force,
+           let refreshedAt = stateRefreshedAt[key],
+           Date.now.timeIntervalSince(refreshedAt) < 10 {
+            return
+        }
+        guard stateReadsInFlight.insert(key).inserted else {
+            if key == Self.cacheKey(self.context) { isRefreshing = true }
+            return
+        }
         isRefreshing = true
 
-        refreshTask = Task { [weak self] in
+        Task { [weak self] in
+            let result = await Self.capture { [client] in try await client.state(for: context) }
             guard let self else { return }
-            async let stateResult = Self.capture { try await self.client.state(for: context) }
-            async let estateResult = Self.capture { try await self.client.estate(for: context) }
-            let results = await (stateResult, estateResult)
-            guard !Task.isCancelled, self.refreshGeneration == generation else { return }
-            self.apply(stateResult: results.0, estateResult: results.1, for: context)
+            self.stateReadsInFlight.remove(key)
+            self.applyState(result, for: context, key: key)
+        }
+    }
+
+    func requestEstateRefresh(force: Bool = false) {
+        if !force,
+           let estateRefreshedAt,
+           Date.now.timeIntervalSince(estateRefreshedAt) < 10 {
+            return
+        }
+        guard !estateReadInFlight else { return }
+        estateReadInFlight = true
+        isEstateRefreshing = true
+        let context = context
+
+        Task { [weak self] in
+            let result = await Self.capture { [client] in try await client.estate(for: context) }
+            guard let self else { return }
+            self.estateReadInFlight = false
+            self.applyEstate(result)
         }
     }
 
@@ -284,6 +341,16 @@ final class HolyMannaBoardModeStore: ObservableObject {
                 self.requestRefresh(force: true)
             }
         }
+    }
+
+    static func cacheKey(_ context: HolyMannaBoardContext) -> String {
+        "\(context.remoteHost ?? "local"):\(context.boardRoot ?? "")"
+    }
+
+    private static func defaultSelection(in payload: HolyMannaStatePayload) -> String? {
+        payload.now.first?.id
+            ?? payload.next.first?.id
+            ?? payload.waves.first?.items.first?.id
     }
 
     // MARK: Mutations
@@ -331,7 +398,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
                     : "\(mutation.label) completed in \(receipts.count) verified CLI steps."
                 self.mutationMessage = message
                 self.showToast(message)
-                self.requestRefresh(force: true)
+                self.requestStateRefresh(force: true)
             } catch {
                 self.isMutating = false
                 self.activeMutation = nil
@@ -341,7 +408,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
                 // Multi-step actions can fail after an earlier CLI verb
                 // succeeded. Re-read canonical state instead of leaving a
                 // stale pre-action picture on screen.
-                self.requestRefresh(force: true)
+                self.requestStateRefresh(force: true)
             }
         }
     }
@@ -384,19 +451,22 @@ final class HolyMannaBoardModeStore: ObservableObject {
 
     // MARK: Apply
 
-    private func apply(
-        stateResult: Result<HolyMannaStatePayload, Error>,
-        estateResult: Result<HolyMannaEstatePayload, Error>,
-        for refreshed: HolyMannaBoardContext
+    private func applyState(
+        _ result: Result<HolyMannaStatePayload, Error>,
+        for refreshed: HolyMannaBoardContext,
+        key: String
     ) {
-        switch stateResult {
+        let isCurrent = key == Self.cacheKey(context)
+        switch result {
         case let .success(payload):
+            stateCache[key] = payload
+            stateRefreshedAt[key] = .now
+            guard isCurrent else { return }
             state = payload
             boardFailure = nil
+            lastRefreshedAt = stateRefreshedAt[key]
             if selectedPeerID == nil, payload.item(id: selectedItemID) == nil {
-                selectedItemID = payload.now.first?.id
-                    ?? payload.next.first?.id
-                    ?? payload.waves.first?.items.first?.id
+                selectedItemID = Self.defaultSelection(in: payload)
             }
             if let selectedPeerID, payload.peer(id: selectedPeerID) == nil {
                 self.selectedPeerID = nil
@@ -405,28 +475,36 @@ final class HolyMannaBoardModeStore: ObservableObject {
                 loadSelectedDigest()
             }
         case let .failure(error):
+            guard isCurrent else { return }
             boardFailure = error.localizedDescription
             // No usable board for this root: the estate is the honest
             // surface, with the failure printed on it. A transient failure
             // on a board already on screen keeps the board and reports.
             if state == nil || state?.root != refreshed.boardRoot {
                 state = nil
+                stateCache[key] = nil
                 if isPresented {
                     surface = .estate
+                    requestEstateRefresh(force: estate == nil)
                 }
             }
         }
+        isRefreshing = false
+    }
 
-        switch estateResult {
+    private func applyEstate(_ result: Result<HolyMannaEstatePayload, Error>) {
+        switch result {
         case let .success(payload):
             estate = payload
             estateFailure = nil
+            estateRefreshedAt = .now
+            if surface == .estate {
+                lastRefreshedAt = estateRefreshedAt
+            }
         case let .failure(error):
             estateFailure = error.localizedDescription
         }
-
-        isRefreshing = false
-        lastRefreshedAt = .now
+        isEstateRefreshing = false
     }
 
     private func loadActorID() {
