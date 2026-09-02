@@ -558,9 +558,9 @@ enum HolyRosterLayout: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
-        case .classic: return "rectangle.3.group"
-        case .triage:  return "arrow.up.arrow.down"
-        case .focus:   return "star"
+        case .classic: return "person.2"
+        case .triage:  return "arrow.up.to.line"
+        case .focus:   return "pin"
         }
     }
 
