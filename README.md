@@ -340,6 +340,31 @@ Build only the shared Ghostty core:
 scripts/build-holy-ghostty-core.sh build
 ```
 
+## Studio Host Guards
+
+The Mac Studio has an explicit host-side guard install for SSH capacity and
+kernel-zone leak receipts. This is separate from the application installer:
+
+```bash
+scripts/test-holy-studio-guards.sh
+sudo scripts/install-holy-studio-guards.sh
+scripts/holy-kernel-zone-watch.sh report
+```
+
+The installer adds `MaxSessions 110` through the stock
+`/etc/ssh/sshd_config.d/` include, then proves the effective value with
+`sshd -T`. It hash-checks the main SSH configuration and Apple's sealed
+`ssh.plist` before and after the install, and does not restart active SSH
+connections.
+
+The root launch daemon samples every `data.kalloc.*` size class once an hour.
+Each TSV row includes the boot identity, current element count, derived bytes,
+concurrent `ssh`/`sshd`/`tmux` counts, and the visible launchd SSH counters.
+The report command isolates the latest boot and calculates the
+`data.kalloc.1024` growth rate. It withholds an hourly rate until samples span
+at least 30 minutes, so startup jitter cannot masquerade as a leak. It does not
+tune kernel limits.
+
 ## Data Locations
 
 Local app bundle identifier:
@@ -367,6 +392,14 @@ User Claude state is outside the repo and is not managed by Holy Ghostty:
 
 ```text
 ~/.claude
+```
+
+Mac Studio host-guard receipts:
+
+```text
+/Library/Logs/Holy Ghostty/kernel-zone-watch/samples.tsv
+/Library/Logs/Holy Ghostty/kernel-zone-watch/errors.log
+/Library/Logs/Holy Ghostty/kernel-zone-watch/install-receipt.txt
 ```
 
 ## Repository Layout
