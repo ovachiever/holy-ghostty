@@ -148,6 +148,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
 
     func showAndActivate() {
         showWindow(nil)
+        constrainToVisibleScreen()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
@@ -372,7 +373,20 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         workspaceStore.selectSession(surfaceView.id)
     }
 
+    /// A frame restored from another display arrangement can leave the
+    /// title bar above the menu bar, where nothing can grab it (Erik,
+    /// 2026-09-02: a 920×620 frame saved on a 2560×1410 screen came back on
+    /// a shorter one). AppKit's own constraint keeps the title bar on screen.
+    private func constrainToVisibleScreen() {
+        guard let window, let screen = window.screen ?? NSScreen.main else { return }
+        let constrained = window.constrainFrameRect(window.frame, to: screen)
+        if constrained != window.frame {
+            window.setFrame(constrained, display: true)
+        }
+    }
+
     func windowDidBecomeKey(_ notification: Notification) {
+        constrainToVisibleScreen()
         guard !boardModeStore.isPresented,
               !archiveModeStore.isPresented,
               let selected = workspaceStore.selectedSession else { return }
