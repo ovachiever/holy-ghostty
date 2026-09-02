@@ -265,6 +265,9 @@ struct HolyWorkspaceRootView: View {
                                 paneSlotsBySessionID: store.paneSlotsBySessionID,
                                 onPresentRemoteHosts: { store.presentRemoteHosts() },
                                 onPresentHistory: { store.presentHistory() },
+                                onPresentArchive: { showArchive() },
+                                onPresentBoard: { showBoard() },
+                                inboxEngine: store.inboxEngine,
                                 onToggleCollapse: { toggleRosterCollapsed() }
                             )
                             .frame(maxHeight: .infinity)
@@ -507,6 +510,11 @@ struct HolyWorkspaceRootView: View {
                 Spacer(minLength: 12)
             }
 
+            Text("Panes:")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                .padding(.trailing, 6)
+
             HStack(spacing: 3) {
                 layoutControlButton(
                     title: "Single",
@@ -562,10 +570,14 @@ struct HolyWorkspaceRootView: View {
 
             Spacer(minLength: 6)
 
-            HStack(spacing: 3) {
-                archiveModeButton
-                boardModeButton
-                HolyInboxToggleButton(store: store, engine: store.inboxEngine)
+            // The roster filter and the session count, bottom right
+            // (Erik, 2026-09-02); the three faces moved up beside the actions.
+            HStack(spacing: 6) {
+                HolyRosterLayoutSwitcher()
+                Text("\(store.sessions.count)")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                    .lineLimit(1)
             }
         }
     }
@@ -1137,36 +1149,6 @@ struct HolyWorkspaceRootView: View {
     private var focusedBoardContext: HolyMannaBoardContext {
         HolyMannaBoardContext.focused(session: store.selectedSession)
     }
-    private var boardModeButton: some View {
-        Button(
-            action: { showBoard() },
-            label: {
-                Image(systemName: "scroll")
-                    .font(.system(size: 10, weight: .medium))
-                    .frame(width: 24, height: 22)
-            }
-        )
-        .buttonStyle(.plain)
-        .foregroundStyle(HolyGhosttyTheme.textSecondary)
-        .accessibilityLabel("Board")
-        .help("Board (Command-B)")
-    }
-
-    private var archiveModeButton: some View {
-        Button(
-            action: { showArchive() },
-            label: {
-                Image(systemName: "archivebox")
-                    .font(.system(size: 10, weight: .medium))
-                    .frame(width: 24, height: 22)
-            }
-        )
-        .buttonStyle(.plain)
-        .foregroundStyle(HolyGhosttyTheme.textSecondary)
-        .accessibilityLabel("Archive")
-        .help("Archive (Command-Shift-A)")
-    }
-
     private func showBoard(sheet: HolyMannaBoardSheet? = nil) {
         archiveModeStore.dismiss()
         if let sheet {

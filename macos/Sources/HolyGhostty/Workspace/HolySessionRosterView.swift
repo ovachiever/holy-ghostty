@@ -10,6 +10,11 @@ struct HolySessionRosterView: View {
     var paneSlotsBySessionID: [UUID: Int] = [:]
     var onPresentRemoteHosts: () -> Void = {}
     var onPresentHistory: () -> Void = {}
+    /// The three faces beside the actions: archive, board, and the GitHub
+    /// inbox (Erik, 2026-09-02: named like New / Clear, under them).
+    var onPresentArchive: () -> Void = {}
+    var onPresentBoard: () -> Void = {}
+    var inboxEngine: HolyInboxEngine?
     var onToggleCollapse: (() -> Void)?
 
     @AppStorage("holy.workspace.rosterLayout.v1") private var rosterLayoutRaw = HolyRosterLayout.classic.rawValue
@@ -379,57 +384,29 @@ struct HolySessionRosterView: View {
             }
 
             HStack(spacing: 6) {
-                Text("Filter:")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                rosterActionButton(
+                    title: "Archive",
+                    symbol: "archivebox",
+                    help: "Archive (Command-Shift-A)",
+                    action: onPresentArchive
+                )
 
-                layoutSwitcher
+                rosterActionButton(
+                    title: "Board",
+                    symbol: "scroll",
+                    help: "Board (Command-B)",
+                    action: onPresentBoard
+                )
 
-                Spacer(minLength: 4)
-
-                Text("\(store.sessions.count)")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                    .lineLimit(1)
+                if let inboxEngine {
+                    HolyInboxRosterButton(store: store, engine: inboxEngine)
+                }
             }
         }
         .padding(.horizontal, 10)
         .padding(.top, 8)
         .padding(.bottom, 8)
         .background(HolyGhosttyTheme.bgElevated)
-    }
-
-    // Four-way roster layout switcher — one tap, visible active state.
-    private var layoutSwitcher: some View {
-        HStack(spacing: 1) {
-            ForEach(HolyRosterLayout.allCases) { option in
-                let isActive = layout == option
-                Button {
-                    rosterLayoutRaw = option.rawValue
-                } label: {
-                    Image(systemName: option.symbol)
-                        .font(.system(size: 9.5, weight: .semibold))
-                        .foregroundStyle(isActive ? HolyGhosttyTheme.halo : HolyGhosttyTheme.textTertiary)
-                        .frame(width: 20, height: 18)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(isActive ? HolyGhosttyTheme.halo.opacity(0.16) : Color.clear)
-                        )
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("\(option.displayName) — \(option.helpText)")
-            }
-        }
-        .padding(2)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(HolyGhosttyTheme.bg)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(HolyGhosttyTheme.borderActive, lineWidth: 0.5)
-        )
     }
 
     private func rosterActionButton(
@@ -1772,5 +1749,84 @@ private extension String {
 
     var nilIfEmpty: String? {
         isEmpty ? nil : self
+    }
+}
+
+
+/// Four-way roster layout switcher — one tap, visible active state. Lives
+/// in the left rail's footer beside the pane buttons.
+struct HolyRosterLayoutSwitcher: View {
+    @AppStorage("holy.workspace.rosterLayout.v1") private var rosterLayoutRaw = HolyRosterLayout.classic.rawValue
+
+    private var layout: HolyRosterLayout {
+        HolyRosterLayout(rawValue: rosterLayoutRaw) ?? .classic
+    }
+
+    var body: some View {
+        HStack(spacing: 1) {
+            ForEach(HolyRosterLayout.allCases) { option in
+                let isActive = layout == option
+                Button {
+                    rosterLayoutRaw = option.rawValue
+                } label: {
+                    Image(systemName: option.symbol)
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(isActive ? HolyGhosttyTheme.halo : HolyGhosttyTheme.textTertiary)
+                        .frame(width: 20, height: 18)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(isActive ? HolyGhosttyTheme.halo.opacity(0.16) : Color.clear)
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("\(option.displayName) — \(option.helpText)")
+            }
+        }
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(HolyGhosttyTheme.bg)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(HolyGhosttyTheme.borderActive, lineWidth: 0.5)
+        )
+    }
+}
+
+/// The inbox as a named roster action, with the tray's live badge and its
+/// open state; observes the engine so the count moves on its own.
+struct HolyInboxRosterButton: View {
+    @ObservedObject var store: HolyWorkspaceStore
+    @ObservedObject var engine: HolyInboxEngine
+
+    var body: some View {
+        let isOpen = store.rightPanelSelection == .inbox
+        Button {
+            store.toggleInboxPanel()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "tray")
+                    .font(.system(size: 10, weight: .medium))
+                    .symbolVariant(isOpen ? .fill : .none)
+                Text("Inbox")
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                if let badge = HolyInboxBadge.label(for: engine.badgeCount) {
+                    Text(badge)
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(HolyGhosttyTheme.bg)
+                        .padding(.horizontal, 4)
+                        .frame(height: 13)
+                        .background(Capsule(style: .continuous).fill(HolyGhosttyTheme.halo))
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(HolyRosterActionButtonStyle())
+        .foregroundStyle(isOpen ? HolyGhosttyTheme.halo : HolyGhosttyTheme.textSecondary)
+        .help("GitHub attention (⌘P)")
     }
 }
