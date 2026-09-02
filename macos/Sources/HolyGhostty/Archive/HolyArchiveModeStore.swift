@@ -191,7 +191,12 @@ final class HolyArchiveModeStore: ObservableObject {
         statusMessage = "Loading indexed sessions..."
         refreshSessions()
         // Nothing to discover means nothing to index or migrate.
-        if !registry.availableProviders.isEmpty {
+        // Auto-ingest is opt-in until archive writes stop contending with the
+        // UI's database writer (see the P0 contention item): the initial
+        // 79k-session ingest into the shared file starves session persistence
+        // behind SQLite's single WAL writer and freezes the app.
+        if !registry.availableProviders.isEmpty,
+           UserDefaults.standard.bool(forKey: "holy.archive.autoIndex") {
             incrementalIndex()
         }
         refreshRecentChats()
