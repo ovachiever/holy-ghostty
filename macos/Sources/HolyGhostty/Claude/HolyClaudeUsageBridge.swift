@@ -512,6 +512,12 @@ enum HolyClaudeUsageBridge {
     def codex_binary():
         override = os.environ.get("HOLY_CODEX_BIN")
         candidates = [override] if override else []
+        # Prefer the vendored native binary: the npm bin/codex is a Node
+        # shim, and the app's environment has no node on PATH.
+        for root in ("~/.nvm/versions/node/*/lib/node_modules", "/opt/homebrew/lib/node_modules", "/usr/local/lib/node_modules"):
+            candidates += sorted(glob.glob(os.path.expanduser(
+                root + "/@openai/codex/node_modules/@openai/codex-*/vendor/*/bin/codex"
+            )), reverse=True)
         candidates += sorted(
             glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/codex")), reverse=True
         )
@@ -533,12 +539,17 @@ enum HolyClaudeUsageBridge {
         if not binary:
             return None, None
         try:
+            # A shim binary resolves `node` from its own directory; make sure
+            # that directory is on PATH even in the app's minimal environment.
+            env = dict(os.environ)
+            env["PATH"] = (env.get("PATH", "/usr/bin:/bin") + os.pathsep + os.path.dirname(binary))
             proc = subprocess.Popen(
                 [binary, "app-server"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                env=env,
             )
         except OSError:
             return None, None
