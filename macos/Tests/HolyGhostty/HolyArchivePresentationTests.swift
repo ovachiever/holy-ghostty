@@ -44,7 +44,7 @@ struct HolyArchivePresentationTests {
         #expect(Present.colorClass(for: .droid) == "ready")
         #expect(Present.childCountText(0) == "·")
         #expect(Present.childCountText(3) == "3")
-        #expect(Present.projectLabel(ArchiveFixtures.session(id: "p", projectName: "versova-supply-intelligence")) == "versova-supp")
+        #expect(Present.projectLabel(ArchiveFixtures.session(id: "p", projectName: "versova-supply-intelligence")) == "versova-supply-intelligence")
     }
 
     @Test func listHeadsFollowTheParentHeaderStrings() {
@@ -82,7 +82,7 @@ struct HolyArchivePresentationTests {
             ArchiveFixtures.session(id: "b", harness: .opencode, projectName: "a-long-project-name"),
         ]
         let widths = Present.columns(for: sessions, childCounts: ["a": 12])
-        #expect(widths.project >= HolyMannaBoardMetrics.columnWidth(contentCharacters: 12, headerCharacters: 7))
+        #expect(widths.project >= HolyMannaBoardMetrics.columnWidth(contentCharacters: "a-long-project-name".count, headerCharacters: 7))
         #expect(widths.harness >= HolyMannaBoardMetrics.columnWidth(contentCharacters: "opencode".count, headerCharacters: 7))
         #expect(widths.children >= HolyMannaBoardMetrics.columnWidth(contentCharacters: 2, headerCharacters: 3))
         let childWidths = Present.childColumns(for: [ArchiveFixtures.session(id: "c", child: true, childType: "a-very-long-child-type-name")])
@@ -119,6 +119,23 @@ struct HolyArchivePresentationTests {
         let imported = try HolyArchiveLegacySummaryImporter.migrate(repository: repository, from: [], databases: [indexURL])
         #expect(imported == 1)
         #expect(try repository.session(id: "s1")?.summary == "Reviewed handoff order manifest")
+    }
+}
+
+/// Dragged column widths persist per column and fall back to the fit.
+struct HolyLedgerColumnOverridesTests {
+    @Test func overridesRoundTripAndFallBackToTheFit() {
+        var overrides = HolyLedgerColumnOverrides(json: "")
+        #expect(overrides.width("project", fitted: 120) == 120)
+        overrides.set("project", width: 240)
+        #expect(overrides.width("project", fitted: 120) == 240)
+        let restored = HolyLedgerColumnOverrides(json: overrides.json)
+        #expect(restored.width("project", fitted: 120) == 240)
+        #expect(restored.width("date", fitted: 90) == 90)
+        var reset = restored
+        reset.reset("project")
+        #expect(reset.width("project", fitted: 120) == 120)
+        #expect(HolyLedgerColumnOverrides(json: "not json").width("x", fitted: 7) == 7)
     }
 }
 

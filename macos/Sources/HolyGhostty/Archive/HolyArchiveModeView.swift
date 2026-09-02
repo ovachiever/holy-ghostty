@@ -18,6 +18,7 @@ struct HolyArchiveModeView: View {
     let onDismiss: () -> Void
 
     @AppStorage("holy.archive.inspectorWidth.v1") private var storedInspectorWidth = Double(HolyArchiveMetrics.inspectorDefaultWidth)
+    @AppStorage("holy.archive.columns.v1") private var columnOverridesJSON = ""
     @FocusState private var searchFocused: Bool
     @FocusState private var researchFocused: Bool
     @FocusState private var findFocused: Bool
@@ -293,15 +294,22 @@ struct HolyArchiveModeView: View {
             sort: store.sort,
             matchingChildren: store.matchingChildCount
         )
-        let columns = Present.columns(for: store.sessions, childCounts: store.childCountsByParentID)
+        let fitted = Present.columns(for: store.sessions, childCounts: store.childCountsByParentID)
+        let overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
+        let columns = HolyArchiveColumnWidths(
+            date: overrides.width("date", fitted: fitted.date),
+            harness: overrides.width("harness", fitted: fitted.harness),
+            project: overrides.width("project", fitted: fitted.project),
+            children: overrides.width("sub", fitted: fitted.children)
+        )
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Metrics.columnGap) {
                 Color.clear.frame(width: Metrics.stripeColumnWidth)
-                columnLabel("date").frame(width: columns.date, alignment: .leading)
-                columnLabel("harness").frame(width: columns.harness, alignment: .leading)
-                columnLabel("project").frame(width: columns.project, alignment: .leading)
+                resizableHeader("date", width: columns.date)
+                resizableHeader("harness", width: columns.harness)
+                resizableHeader("project", width: columns.project)
                 columnLabel("summary").frame(maxWidth: .infinity, alignment: .leading)
-                columnLabel("sub").frame(width: columns.children, alignment: .trailing)
+                resizableHeader("sub", width: columns.children, alignment: .trailing)
             }
             .frame(height: Metrics.columnHeaderHeight)
             .overlay(alignment: .bottom) { rule }
@@ -353,6 +361,7 @@ struct HolyArchiveModeView: View {
             Text(Present.projectLabel(session))
                 .foregroundStyle(Palette.text)
                 .lineLimit(1)
+                .truncationMode(.tail)
                 .frame(width: columns.project, alignment: .leading)
                 .help(session.projectPath ?? session.projectName)
             Text(row.text)
@@ -963,6 +972,33 @@ struct HolyArchiveModeView: View {
             .tracking(Metrics.pillTracking)
             .foregroundStyle(Palette.faint)
             .lineLimit(1)
+    }
+
+    /// A fixed column's header with its drag grip at the right edge.
+    private func resizableHeader(_ column: String, width: CGFloat, alignment: Alignment = .leading) -> some View {
+        columnLabel(column)
+            .frame(width: width, alignment: alignment)
+            .overlay(alignment: .trailing) {
+                HolyLedgerColumnGrip(
+                    column: column,
+                    currentWidth: width,
+                    minimumWidth: HolyMannaBoardMetrics.columnWidth(
+                        contentCharacters: HolyLedgerColumnGrip.minimumCharacters,
+                        headerCharacters: column.count
+                    ),
+                    onResize: { newWidth in
+                        var overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
+                        overrides.set(column, width: newWidth)
+                        columnOverridesJSON = overrides.json
+                    },
+                    onReset: {
+                        var overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
+                        overrides.reset(column)
+                        columnOverridesJSON = overrides.json
+                    }
+                )
+                .offset(x: Metrics.columnGap / 2 + HolyLedgerColumnGrip.width / 2)
+            }
     }
 
     private func pill(_ word: String, color: Color) -> some View {

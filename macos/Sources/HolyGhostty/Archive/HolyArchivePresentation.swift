@@ -15,7 +15,7 @@ enum HolyArchiveMetrics {
     static let inspectorDefaultWidth: CGFloat = 440
     /// styles.py: parent list 60%, sub-agent pane 40% of the left column.
     static let childPaneFraction: CGFloat = 0.4
-    static let projectCharacters = 12 // widgets.py project[:12]
+    static let projectCharacters = 12 // widgets.py project[:12]; the native column fits the whole name
     static let detailTitleCharacters = 50 // truncate(display_title, 50)
     static let promptCharacters = 2_000 // first prompt / parent last response cap
     static let childResponseCharacters = 1_000 // child last response cap
@@ -114,8 +114,11 @@ enum HolyArchivePresentation {
             .joined(separator: " ")
     }
 
+    /// The TUI clips projects at 12 characters; here the column fits the
+    /// whole name and the user narrows it by dragging (Erik, 2026-09-02:
+    /// "never cut off project").
     static func projectLabel(_ session: HolyArchiveSession) -> String {
-        String(session.projectName.prefix(HolyArchiveMetrics.projectCharacters))
+        session.projectName
     }
 
     static func childCountText(_ count: Int) -> String {
