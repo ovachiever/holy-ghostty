@@ -421,15 +421,24 @@ struct HolyTmuxLifecycleCommand: Sendable {
     private static func command(for identity: HolyTmuxLiveIdentity, script: String) -> Self {
         if identity.transport.isRemote {
             let destination = identity.transport.sshDestination?.holyLifecycleServiceTrimmed.nilIfEmpty ?? ""
-            return .init(
-                executablePath: "/usr/bin/env",
-                arguments: [
-                    "ssh",
+            guard let transport = try? HolySSHTransportManager.shared.command(
+                destination: destination,
+                purpose: .control,
+                options: [
                     "-o", "BatchMode=yes",
                     "-o", "ConnectTimeout=5",
-                    destination,
-                    "zsh", "-lc", posixQuote(script),
                 ],
+                remoteCommand: ["zsh", "-lc", posixQuote(script)]
+            ) else {
+                return .init(
+                    executablePath: "/usr/bin/false",
+                    arguments: [],
+                    isRemote: true
+                )
+            }
+            return .init(
+                executablePath: transport.executablePath,
+                arguments: transport.arguments,
                 isRemote: true
             )
         }

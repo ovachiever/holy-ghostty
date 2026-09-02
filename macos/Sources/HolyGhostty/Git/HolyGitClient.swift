@@ -80,9 +80,10 @@ actor HolyGitClient {
         printf '%s\\x1f%s\\x1f%s' "$worktree_path" "$common_git_directory" "$status_output"
         """
 
-        return runProcess(
-            executablePath: "/usr/bin/ssh",
-            arguments: [
+        guard let command = try? HolySSHTransportManager.shared.command(
+            destination: destination,
+            purpose: .control,
+            options: [
                 "-o",
                 "BatchMode=yes",
                 "-o",
@@ -91,11 +92,18 @@ actor HolyGitClient {
                 "ServerAliveInterval=5",
                 "-o",
                 "ServerAliveCountMax=1",
-                destination,
+            ],
+            remoteCommand: [
                 "zsh",
                 "-lc",
                 script,
             ]
+        ) else {
+            return nil
+        }
+        return runProcess(
+            executablePath: command.executablePath,
+            arguments: command.arguments
         )
     }
 

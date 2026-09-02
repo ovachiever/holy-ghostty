@@ -167,21 +167,26 @@ actor HolyRemoteTmuxDiscoveryService {
         timeout: TimeInterval?
     ) async -> HolyProcessRunOutcome {
         let quotedScript = posixQuote(script)
+        guard let command = try? HolySSHTransportManager.shared.command(
+            destination: host.sshDestination,
+            purpose: .control,
+            options: [
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                "-o", "ServerAliveInterval=5",
+                "-o", "ServerAliveCountMax=1",
+            ],
+            remoteCommand: ["zsh -lc \(quotedScript)"]
+        ) else {
+            return .launchFailed(
+                context: host.sshDestination,
+                description: HolySSHTransportError.invalidDestination.localizedDescription
+            )
+        }
         return await run(context: host.sshDestination, timeout: timeout) {
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-            process.arguments = [
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=5",
-                "-o",
-                "ServerAliveInterval=5",
-                "-o",
-                "ServerAliveCountMax=1",
-                host.sshDestination,
-                "zsh -lc \(quotedScript)"
-            ]
+            process.executableURL = command.executableURL
+            process.arguments = command.arguments
             return process
         }
     }

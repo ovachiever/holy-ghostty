@@ -232,12 +232,14 @@ struct HolyTmuxSessionMetadataSyncTests {
         let remoteCommand = try #require(
             HolyTmuxSessionMetadataUpdateCommand.command(for: remote, payload: payload)
         )
-        #expect(remoteCommand.executableURL.path == "/usr/bin/ssh")
-        #expect(remoteCommand.arguments.contains("BatchMode=yes"))
-        #expect(remoteCommand.arguments.contains("ConnectTimeout=5"))
-        #expect(remoteCommand.arguments.contains("ConnectionAttempts=1"))
-        #expect(remoteCommand.arguments.contains("ServerAliveInterval=5"))
-        #expect(remoteCommand.arguments.contains("ServerAliveCountMax=1"))
+        let wrapper = try #require(remoteCommand.arguments.last)
+        #expect(remoteCommand.executableURL.path == "/bin/zsh")
+        #expect(wrapper.contains("'BatchMode=yes'"))
+        #expect(wrapper.contains("'ConnectTimeout=5'"))
+        #expect(wrapper.contains("'ConnectionAttempts=1'"))
+        #expect(wrapper.contains("'ServerAliveInterval=5'"))
+        #expect(wrapper.contains("'ServerAliveCountMax=1'"))
+        #expect(wrapper.contains("'--' 'studio'"))
     }
 
     @Test(.enabled(if: holyTmuxAvailableForSessionMetadataTests))

@@ -83,7 +83,21 @@ enum HolyTmuxCommandBuilder {
                 return shellCommand(["zsh", "-lc", localScript])
             }
 
-            return shellCommand(["zsh", "-lc", remoteLaunchWrapper(destination: destination, localScript: localScript)])
+            let sessionKey = [
+                launchSpec.tmux?.socketName?.holyTrimmed.nilIfEmpty ?? "default",
+                launchSpec.tmux?.sessionName?.holyTrimmed.nilIfEmpty ?? launchSpec.resolvedTitle,
+            ].joined(separator: ":")
+            guard let remoteWrapper = try? remoteLaunchWrapper(
+                destination: destination,
+                sessionKey: sessionKey,
+                localScript: localScript
+            ) else {
+                return nil
+            }
+            return shellCommand([
+                "zsh", "-lc",
+                remoteWrapper,
+            ])
         }
 
         return shellCommand(["zsh", "-lc", localScript])
@@ -165,16 +179,23 @@ enum HolyTmuxCommandBuilder {
     if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then tmux if-shell -F -t "$TMUX_PANE" '#{==:#{@holy_model_source},claude}' "set-option -pu -t '$TMUX_PANE' @holy_model_label ; set-option -pu -t '$TMUX_PANE' @holy_model_source" 2>/dev/null || true; fi
     """
 
-    private static func remoteLaunchWrapper(destination: String, localScript: String) -> String {
-        let sshCommand = shellCommand([
-            "ssh", "-tt",
-            "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=4",
-            "-o", "TCPKeepAlive=no",
-            "-o", "ConnectTimeout=8",
-            destination,
-            shellCommand(["zsh", "-lc", localScript]),
-        ])
+    private static func remoteLaunchWrapper(
+        destination: String,
+        sessionKey: String,
+        localScript: String
+    ) throws -> String {
+        let sshCommand = try HolySSHTransportManager.shared.command(
+            destination: destination,
+            purpose: .interactive(sessionKey: sessionKey),
+            options: [
+                "-tt",
+                "-o", "ServerAliveInterval=15",
+                "-o", "ServerAliveCountMax=4",
+                "-o", "TCPKeepAlive=no",
+                "-o", "ConnectTimeout=8",
+            ],
+            remoteCommand: [shellCommand(["zsh", "-lc", localScript])]
+        ).shellInvocation
         let failureMessage = "Holy Ghostty could not reach \(destination). Reattach after SSH is reachable."
 
         return [
@@ -499,17 +520,23 @@ struct HolyTmuxModelLabelUpdateCommand: Sendable, Equatable {
                 return nil
             }
 
-            return .init(
-                executableURL: URL(fileURLWithPath: "/usr/bin/ssh"),
-                arguments: [
+            guard let command = try? HolySSHTransportManager.shared.command(
+                destination: destination,
+                purpose: .control,
+                options: [
                     "-o", "BatchMode=yes",
                     "-o", "ConnectTimeout=5",
                     "-o", "ConnectionAttempts=1",
                     "-o", "ServerAliveInterval=5",
                     "-o", "ServerAliveCountMax=1",
-                    destination,
-                    "zsh -lc \(posixQuote(tmuxScript))",
-                ]
+                ],
+                remoteCommand: ["zsh -lc \(posixQuote(tmuxScript))"]
+            ) else {
+                return nil
+            }
+            return .init(
+                executableURL: command.executableURL,
+                arguments: command.arguments
             )
         }
 
@@ -586,8 +613,16 @@ private extension String {
 
 #if DEBUG
 extension HolyTmuxCommandBuilder {
-    static func remoteLaunchWrapperForTesting(destination: String, localScript: String) -> String {
-        remoteLaunchWrapper(destination: destination, localScript: localScript)
+    static func remoteLaunchWrapperForTesting(
+        destination: String,
+        sessionKey: String = "test-session",
+        localScript: String
+    ) throws -> String {
+        try remoteLaunchWrapper(
+            destination: destination,
+            sessionKey: sessionKey,
+            localScript: localScript
+        )
     }
 
     static var managedTmuxStatusRightForTesting: String {

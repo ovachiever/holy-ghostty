@@ -248,8 +248,6 @@ struct HolyMannaBoardClient: Sendable {
             "-o", "ConnectTimeout=5",
             "-o", "ServerAliveInterval=5",
             "-o", "ServerAliveCountMax=1",
-            "--",
-            remoteHost,
         ]
         let command = (["agent-do"] + arguments).map(posixQuote).joined(separator: " ")
         let rootedCommand = context.boardRoot.map { "cd -- \(posixQuote($0)) && exec \(command)" } ?? "exec \(command)"
@@ -262,9 +260,15 @@ struct HolyMannaBoardClient: Sendable {
             export MANNA_SESSION_TOKEN=\(posixQuote(identity.token))
             \(rootedCommand)
             """
+            let transport = try HolySSHTransportManager.shared.command(
+                destination: remoteHost,
+                purpose: .control,
+                options: sshArguments,
+                remoteCommand: ["zsh -l -s"]
+            )
             return .init(
-                executablePath: "/usr/bin/ssh",
-                arguments: sshArguments + ["zsh -l -s"],
+                executablePath: transport.executablePath,
+                arguments: transport.arguments,
                 currentDirectoryPath: nil,
                 environment: [:],
                 stdin: Data(script.utf8),
@@ -272,9 +276,15 @@ struct HolyMannaBoardClient: Sendable {
             )
         }
 
+        let transport = try HolySSHTransportManager.shared.command(
+            destination: remoteHost,
+            purpose: .control,
+            options: sshArguments,
+            remoteCommand: ["zsh -lc \(posixQuote(rootedCommand))"]
+        )
         return .init(
-            executablePath: "/usr/bin/ssh",
-            arguments: sshArguments + ["zsh -lc \(posixQuote(rootedCommand))"],
+            executablePath: transport.executablePath,
+            arguments: transport.arguments,
             currentDirectoryPath: nil,
             environment: [:],
             stdin: nil,

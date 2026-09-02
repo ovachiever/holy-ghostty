@@ -147,9 +147,10 @@ struct HolyTmuxLifecycleServiceTests {
         let command = HolyTmuxLifecycleCommand.killCommand(for: identity)
 
         #expect(command.isRemote)
-        #expect(command.executablePath == "/usr/bin/env")
-        #expect(command.arguments.contains("erik@example-host"))
+        #expect(command.executablePath == "/bin/zsh")
         let script = command.arguments.last ?? ""
+        #expect(script.contains("exec '/usr/bin/ssh'"))
+        #expect(script.contains("'--' 'erik@example-host'"))
         #expect(script.contains("kill-session"))
         #expect(script.contains("=demo"))
         #expect(script.contains("-L"))

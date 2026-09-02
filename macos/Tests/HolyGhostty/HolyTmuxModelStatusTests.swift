@@ -97,17 +97,17 @@ struct HolyTmuxModelStatusTests {
                 label: "Opus 4.8 · max"
             )
         )
-        let remoteScript = try #require(command.arguments.last)
+        let wrapper = try #require(command.arguments.last)
 
-        #expect(command.executableURL.path == "/usr/bin/ssh")
-        #expect(command.arguments.contains("BatchMode=yes"))
-        #expect(command.arguments.contains("ConnectTimeout=5"))
-        #expect(command.arguments.contains("ServerAliveInterval=5"))
-        #expect(command.arguments.contains("ServerAliveCountMax=1"))
-        #expect(command.arguments.contains("erik@studio"))
-        #expect(remoteScript.hasPrefix("zsh -lc '"))
-        #expect(remoteScript.contains("@holy_model_label"))
-        #expect(remoteScript.contains("=remote-model-session:"))
+        #expect(command.executableURL.path == "/bin/zsh")
+        #expect(wrapper.contains("'BatchMode=yes'"))
+        #expect(wrapper.contains("'ConnectTimeout=5'"))
+        #expect(wrapper.contains("'ServerAliveInterval=5'"))
+        #expect(wrapper.contains("'ServerAliveCountMax=1'"))
+        #expect(wrapper.contains("'--' 'erik@studio'"))
+        #expect(wrapper.contains("'zsh -lc "))
+        #expect(wrapper.contains("@holy_model_label"))
+        #expect(wrapper.contains("=remote-model-session:"))
     }
 
     @Test func terminalControlCharactersCannotEnterTmuxFormatValue() throws {

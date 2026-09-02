@@ -4566,22 +4566,27 @@ private struct HolyTmuxClientDetachCommand: Sendable {
         return make(destination: destination, socketName: tmux.socketName?.holyTerminatorTrimmed.nilIfEmpty, sessionName: sessionName)
     }
 
-    static func make(destination: String, socketName: String?, sessionName: String) -> Self {
+    static func make(destination: String, socketName: String?, sessionName: String) -> Self? {
         var tmuxArguments = ["tmux"]
         if let socketName {
             tmuxArguments += ["-L", socketName]
         }
         tmuxArguments += ["detach-client", "-s", sessionName]
 
-        return Self(
-            executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-            arguments: [
-                "ssh",
+        guard let command = try? HolySSHTransportManager.shared.command(
+            destination: destination,
+            purpose: .control,
+            options: [
                 "-o", "ConnectTimeout=5",
                 "-o", "BatchMode=yes",
-                destination,
-                "zsh", "-lc", shellCommand(tmuxArguments),
-            ]
+            ],
+            remoteCommand: ["zsh", "-lc", shellCommand(tmuxArguments)]
+        ) else {
+            return nil
+        }
+        return Self(
+            executableURL: command.executableURL,
+            arguments: command.arguments
         )
     }
 
@@ -4638,9 +4643,16 @@ private struct HolyTmuxSessionTitleUpdateCommand: Sendable {
                 return nil
             }
 
+            guard let command = try? HolySSHTransportManager.shared.command(
+                destination: destination,
+                purpose: .control,
+                remoteCommand: ["zsh", "-lc", shellCommand(tmuxArguments)]
+            ) else {
+                return nil
+            }
             return Self(
-                executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-                arguments: ["ssh", destination, "zsh", "-lc", shellCommand(tmuxArguments)]
+                executableURL: command.executableURL,
+                arguments: command.arguments
             )
         }
 
@@ -4826,7 +4838,7 @@ extension HolyWorkspaceStore {
             destination: destination,
             socketName: socketName,
             sessionName: sessionName
-        ).arguments
+        )?.arguments ?? []
     }
 
     static func terminationCommandForTesting(

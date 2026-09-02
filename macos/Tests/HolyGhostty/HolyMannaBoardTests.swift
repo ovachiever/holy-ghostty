@@ -46,9 +46,10 @@ struct HolyMannaBoardTests {
             identity: nil
         )
 
-        let destinationIndex = try #require(invocation.arguments.firstIndex(of: "builder@[2001:db8::1]"))
-        #expect(invocation.arguments[destinationIndex - 1] == "--")
-        #expect(invocation.executablePath == "/usr/bin/ssh")
+        let wrapper = try #require(invocation.arguments.last)
+        #expect(invocation.executablePath == "/bin/zsh")
+        #expect(wrapper.contains("exec '/usr/bin/ssh'"))
+        #expect(wrapper.contains("'--' 'builder@[2001:db8::1]'"))
 
         #expect(throws: HolyMannaBoardClientError.launchFailed("invalid remote host")) {
             _ = try HolyMannaBoardClient.remoteInvocation(

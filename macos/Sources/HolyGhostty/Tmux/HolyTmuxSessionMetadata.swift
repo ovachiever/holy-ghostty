@@ -311,17 +311,23 @@ struct HolyTmuxSessionMetadataUpdateCommand: Sendable, Equatable {
                 .holyMetadataTrimmed.nilIfEmpty else {
                 return nil
             }
-            return .init(
-                executableURL: URL(fileURLWithPath: "/usr/bin/ssh"),
-                arguments: [
+            guard let command = try? HolySSHTransportManager.shared.command(
+                destination: destination,
+                purpose: .control,
+                options: [
                     "-o", "BatchMode=yes",
                     "-o", "ConnectTimeout=5",
                     "-o", "ConnectionAttempts=1",
                     "-o", "ServerAliveInterval=5",
                     "-o", "ServerAliveCountMax=1",
-                    destination,
-                    "zsh -lc \(posixQuote(tmuxScript))",
-                ]
+                ],
+                remoteCommand: ["zsh -lc \(posixQuote(tmuxScript))"]
+            ) else {
+                return nil
+            }
+            return .init(
+                executableURL: command.executableURL,
+                arguments: command.arguments
             )
         }
 

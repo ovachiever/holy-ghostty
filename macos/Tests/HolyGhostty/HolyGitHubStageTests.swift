@@ -193,17 +193,18 @@ struct HolyGitHubStageTests {
 
     // MARK: - Remote slug rail
 
-    @Test func remoteSlugQueryRidesTheBatchModeRailWithAQuotedRoot() {
-        let arguments = HolyGitHubRepoSlugResolver.sshArguments(
+    @Test func remoteSlugQueryRidesTheManagedBatchModeRailWithAQuotedRoot() throws {
+        let command = try HolyGitHubRepoSlugResolver.sshCommand(
             destination: "erik@studio",
             root: "/Users/erik/Custom Coding/vms.io"
         )
-        #expect(arguments == [
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=3",
-            "erik@studio",
-            "git -C '/Users/erik/Custom Coding/vms.io' remote get-url origin",
-        ])
+        let script = try #require(command.arguments.last)
+        #expect(command.executablePath == "/bin/zsh")
+        #expect(command.lane == .control)
+        #expect(script.contains("'BatchMode=yes'"))
+        #expect(script.contains("'ConnectTimeout=3'"))
+        #expect(script.contains("'--' 'erik@studio'"))
+        #expect(script.contains("git -C '\"'\"'/Users/erik/Custom Coding/vms.io'\"'\"' remote get-url origin"))
     }
 
     // MARK: - Pinned live capture (2026-08-13)

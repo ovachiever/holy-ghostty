@@ -94,13 +94,13 @@ actor HolyRemoteAgentStateBridgeService {
             throw HolyRemoteAgentStateBridgeServiceError.outputTooLarge
         }
 
-        let plan = Self.commandPlan(destination: destination, program: Self.transactionProgram)
+        let plan = try Self.commandPlan(destination: destination, program: Self.transactionProgram)
         let outcome = await Self.run(plan: plan, stdin: request, timeout: Self.transactionTimeout)
         return try Self.decodeTransactionResult(outcome)
     }
 
     private func remoteHome(destination: String) async throws -> String {
-        let plan = Self.commandPlan(destination: destination, program: Self.homeProbeProgram)
+        let plan = try Self.commandPlan(destination: destination, program: Self.homeProbeProgram)
         let outcome = await Self.run(plan: plan, stdin: nil, timeout: Self.probeTimeout)
         let data = try Self.completedStdout(from: outcome)
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -218,18 +218,22 @@ actor HolyRemoteAgentStateBridgeService {
         let arguments: [String]
     }
 
-    private static func commandPlan(destination: String, program: String) -> CommandPlan {
-        .init(
-            executablePath: "/usr/bin/ssh",
-            arguments: [
+    private static func commandPlan(destination: String, program: String) throws -> CommandPlan {
+        let command = try HolySSHTransportManager.shared.command(
+            destination: destination,
+            purpose: .control,
+            options: [
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=5",
                 "-o", "ConnectionAttempts=1",
                 "-o", "ServerAliveInterval=5",
                 "-o", "ServerAliveCountMax=1",
-                destination,
-                "/usr/bin/env python3 -c \(posixQuote(program))",
-            ]
+            ],
+            remoteCommand: ["/usr/bin/env python3 -c \(posixQuote(program))"]
+        )
+        return .init(
+            executablePath: command.executablePath,
+            arguments: command.arguments
         )
     }
 
@@ -975,7 +979,7 @@ extension HolyRemoteAgentStateBridgeService {
     static var transactionProgramForTesting: String { transactionProgram }
 
     static func commandPlanForTesting(destination: String) throws -> CommandPlan {
-        commandPlan(destination: try validatedDestination(destination), program: transactionProgram)
+        try commandPlan(destination: try validatedDestination(destination), program: transactionProgram)
     }
 
     static func runTransactionForTesting(

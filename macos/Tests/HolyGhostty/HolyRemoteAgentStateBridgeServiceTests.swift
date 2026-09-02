@@ -22,13 +22,18 @@ struct HolyRemoteAgentStateBridgeServiceTests {
         let plan = try HolyRemoteAgentStateBridgeService.commandPlanForTesting(
             destination: destination
         )
+        let wrapper = try #require(plan.arguments.last)
+        let finalInvocation = try #require(wrapper.components(separatedBy: "\nexec ").last)
+        let destinationMarker = "'--' '\(destination)' "
+        let destinationRange = try #require(finalInvocation.range(of: destinationMarker))
+        let remotePayload = finalInvocation[destinationRange.upperBound...]
 
-        #expect(plan.executablePath == "/usr/bin/ssh")
-        #expect(plan.arguments.contains(destination))
-        #expect(plan.arguments[plan.arguments.count - 2] == destination)
-        #expect(!plan.arguments.last!.contains(destination))
-        #expect(plan.arguments.contains("BatchMode=yes"))
-        #expect(plan.arguments.contains("ConnectTimeout=5"))
+        #expect(plan.executablePath == "/bin/zsh")
+        #expect(wrapper.contains("exec '/usr/bin/ssh'"))
+        #expect(wrapper.contains(destinationMarker))
+        #expect(!remotePayload.contains(destination))
+        #expect(wrapper.contains("'BatchMode=yes'"))
+        #expect(wrapper.contains("'ConnectTimeout=5'"))
 
         #expect(throws: HolyRemoteAgentStateBridgeServiceError.invalidDestination) {
             _ = try HolyRemoteAgentStateBridgeService.commandPlanForTesting(

@@ -1356,20 +1356,22 @@ private final class HolyTmuxRecoveryValidator {
 
     private func remoteSessionListResult(sshDestination: String, socketName: String?) -> SessionListResult {
         let remoteCommand = "zsh -lc \(posixQuote(tmuxListScript(socketName: socketName)))"
+        guard let transport = try? HolySSHTransportManager.shared.command(
+            destination: sshDestination,
+            purpose: .control,
+            options: [
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=3",
+                "-o", "ServerAliveInterval=3",
+                "-o", "ServerAliveCountMax=1",
+            ],
+            remoteCommand: [remoteCommand]
+        ) else {
+            return .unavailable("Invalid SSH destination.")
+        }
         guard let result = runCommand(
-            executablePath: "/usr/bin/ssh",
-            arguments: [
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=3",
-                "-o",
-                "ServerAliveInterval=3",
-                "-o",
-                "ServerAliveCountMax=1",
-                sshDestination,
-                remoteCommand,
-            ]
+            executablePath: transport.executablePath,
+            arguments: transport.arguments
         ) else {
             return .unavailable("Failed to launch SSH tmux probe.")
         }

@@ -100,8 +100,9 @@ struct HolyTmuxAgentStateMonitorTests {
         let plan = try HolyTmuxAgentStateMonitor.commandPlan(for: endpoint)
         let command = try #require(plan.arguments.last)
 
-        #expect(plan.executablePath == "/usr/bin/ssh")
-        #expect(plan.arguments.contains("build@example.test"))
+        #expect(plan.executablePath == "/bin/zsh")
+        #expect(command.contains("exec '/usr/bin/ssh'"))
+        #expect(command.contains("'--' 'build@example.test'"))
         #expect(command.components(separatedBy: "list-panes").count == 2)
         #expect(command.contains("holy"))
         #expect(command.contains("prod"))

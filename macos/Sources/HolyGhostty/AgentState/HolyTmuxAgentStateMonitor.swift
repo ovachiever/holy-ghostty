@@ -383,16 +383,20 @@ extension HolyTmuxAgentStateMonitor {
                 .joined(separator: " ")
             let script = "unset TMUX TMUX_PANE TMUX_TMPDIR; exec \(command)"
 
-            return CommandPlan(
-                executablePath: "/usr/bin/ssh",
-                arguments: [
+            let transport = try HolySSHTransportManager.shared.command(
+                destination: destination,
+                purpose: .control,
+                options: [
                     "-o", "BatchMode=yes",
                     "-o", "ConnectTimeout=1",
                     "-o", "ServerAliveInterval=1",
                     "-o", "ServerAliveCountMax=1",
-                    destination,
-                    "zsh -lc \(posixQuote(script))",
                 ],
+                remoteCommand: ["zsh -lc \(posixQuote(script))"]
+            )
+            return CommandPlan(
+                executablePath: transport.executablePath,
+                arguments: transport.arguments,
                 scrubLocalTmuxEnvironment: false
             )
         }

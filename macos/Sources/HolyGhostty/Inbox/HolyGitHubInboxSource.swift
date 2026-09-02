@@ -219,16 +219,22 @@ actor HolyGitHubRepoSlugResolver {
 
     private var cache: [Key: String?] = [:]
 
-    /// The exact remote invocation, pure for tests: single-quoted root
-    /// survives spaces; BatchMode never prompts; a dead host fails in 3s.
-    nonisolated static func sshArguments(destination: String, root: String) -> [String] {
+    /// The exact managed remote invocation: single-quoted root survives
+    /// spaces; BatchMode never prompts; a dead host fails in 3s.
+    nonisolated static func sshCommand(
+        destination: String,
+        root: String
+    ) throws -> HolySSHTransportCommand {
         let quotedRoot = "'" + root.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
-        return [
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=3",
-            destination,
-            "git -C \(quotedRoot) remote get-url origin",
-        ]
+        return try HolySSHTransportManager.shared.command(
+            destination: destination,
+            purpose: .control,
+            options: [
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=3",
+            ],
+            remoteCommand: ["git -C \(quotedRoot) remote get-url origin"]
+        )
     }
 
     private static let logger = Logger(
@@ -244,9 +250,13 @@ actor HolyGitHubRepoSlugResolver {
 
         let result: HolyRestoreProcessResult
         if let sshDestination {
+            guard let command = try? Self.sshCommand(destination: sshDestination, root: root) else {
+                Self.logger.error("slug query rejected an invalid SSH destination")
+                return nil
+            }
             result = await HolyRestoreProcessRunner.run(
-                executablePath: "/usr/bin/ssh",
-                arguments: Self.sshArguments(destination: sshDestination, root: root),
+                executablePath: command.executablePath,
+                arguments: command.arguments,
                 timeout: 10
             )
         } else {

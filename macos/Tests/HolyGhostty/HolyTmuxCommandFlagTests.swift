@@ -59,8 +59,8 @@ struct HolyTmuxCommandFlagTests {
     // The long-lived attach ssh needs keepalives so post-sleep zombie panes
     // are detected in ~60s instead of never, and a bounded connect timeout
     // so reattach attempts fail fast instead of hanging on kernel TCP.
-    @Test func remoteAttachWrapperCarriesKeepaliveFlags() {
-        let wrapper = HolyTmuxCommandBuilder.remoteLaunchWrapperForTesting(
+    @Test func remoteAttachWrapperCarriesKeepaliveFlags() throws {
+        let wrapper = try HolyTmuxCommandBuilder.remoteLaunchWrapperForTesting(
             destination: "erik@example-host",
             localScript: "exec tmux attach -t demo"
         )
@@ -81,9 +81,12 @@ struct HolyTmuxCommandFlagTests {
             socketName: "holy",
             sessionName: "demo"
         )
-        #expect(arguments.contains("ConnectTimeout=5"))
-        #expect(arguments.contains("BatchMode=yes"))
-        #expect(arguments.first == "ssh")
+        let wrapper = arguments.last ?? ""
+        #expect(arguments.first == "-c")
+        #expect(wrapper.contains("'ConnectTimeout=5'"))
+        #expect(wrapper.contains("'BatchMode=yes'"))
+        #expect(wrapper.contains("exec '/usr/bin/ssh'"))
+        #expect(wrapper.contains("'--' 'erik@example-host'"))
     }
 
     // A Dock/Finder launch does not inherit Homebrew's bin directory. Local
@@ -142,7 +145,9 @@ struct HolyTmuxCommandFlagTests {
         )
         let remoteScript = command?.arguments.last ?? ""
 
-        #expect(command?.executablePath == "/usr/bin/env")
+        #expect(command?.executablePath == "/bin/zsh")
+        #expect(remoteScript.contains("exec '/usr/bin/ssh'"))
+        #expect(remoteScript.contains("'--' 'remote.example'"))
         #expect(remoteScript.contains("unset TMUX TMUX_PANE"))
         #expect(!remoteScript.contains("unset TMUX TMUX_PANE TMUX_TMPDIR"))
         #expect(remoteScript.contains("kill-session"))
