@@ -409,7 +409,21 @@ plus the clock — no model or effort in the bar. Both are set in
 retired custom `status-format[0]` so servers that carried the earlier
 centred layout heal on connect. An empty option collapses to clock-only. Warn buckets render as yellow chips, critical/capped as red, an
 active wrap-up prepends `⏸ WRAP UP`, staleness appends `(stale Nm)`.
-Disabling the guard clears the option (`clearTmuxUsageSegment`). Both
+Codex. `collect_codex` in the probe spawns `codex app-server` (binary
+from `HOLY_CODEX_BIN`, nvm globs, or Homebrew), performs the JSON-RPC
+handshake, and calls `account/rateLimits/read` plus `account/usage/read`
+— no model tokens are spent. Every limit id in `rateLimitsByLimitId`
+becomes buckets keyed `codex:<limitId>:<primary|secondary>` with a
+`short` chip label and a `bar` flag (model chips ride the bar only while
+their percent is nonzero); plan, spend-control state, reset credits, and
+the lifetime summary land under `codex` in the snapshot. On RPC failure
+`codex_fallback_buckets` tails the newest `~/.codex/sessions` rollout
+(override `HOLY_CODEX_HOME`) for the last recorded snake_case
+`rate_limits` snapshot. Codex fetch is independent of the Anthropic
+account, survives Claude's stale carry-forward, and shares the history
+projection. The guard hook drops `codex:` buckets from its machine merge:
+another vendor's headroom never pauses a Claude session or denies its
+spawns. Disabling the guard clears the option (`clearTmuxUsageSegment`). Both
 helpers treat a snapshot as owned by the account it was taken under: the
 probe skips the 429 backoff and the stale carry-forward when
 `~/.claude.json`'s `oauthAccount` no longer matches, and the guard drops a

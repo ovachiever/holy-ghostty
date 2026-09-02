@@ -22,6 +22,14 @@ pause, before one of them lands.
 
 ### Added
 
+- Codex usage gauge beside the Claude one: the probe queries
+  `codex app-server` (`account/rateLimits/read`, `account/usage/read`) at
+  zero token cost for the weekly window and every per-model limit —
+  future models appear dynamically — plus plan, spend control, reset
+  credits, and lifetime stats; the green bar gains a `⌁ codex` chip
+  group, the newest session rollout file serves as last-known when the
+  RPC fails, and codex windows never trigger the Claude wrap-up guard.
+
 - Claude Usage Guard (`Enable Claude Usage Guard…`, beside the Claude Model
   Indicator): a Holy-owned probe reads the signed-in account's OAuth token
   from the keychain over a pipe, polls Anthropic's usage endpoint once a

@@ -208,6 +208,15 @@ app. Thresholds and cadence are
 `defaults write org.holyghostty.app holy.claudeUsage.warnPercent|criticalPercent|leadMinutes|pollSeconds`;
 Holy writes them to `usage/policy.json` so the hook applies the same numbers.
 
+The gauge also reads Codex: the probe asks `codex app-server` (the
+JSON-RPC `account/rateLimits/read` method — no tokens spent, auth handled
+by codex itself) for the account's windows and every per-model limit the
+endpoint reports, so a future top model appears without a code change.
+The bar gains a `⌁ codex wk 8%` group, with per-model chips shown while
+they carry usage; if the RPC fails, the newest session rollout file's
+recorded snapshot serves as last-known. Codex numbers never trigger the
+wrap-up guard — that hook speaks only to Claude sessions.
+
 The numbers live in the green tmux bar itself, on the right beside the
 clock: a `⌁ claude 5h 30% · wk 41% · Fable 79%` segment,
 identical in every session because it is machine-global, published by the

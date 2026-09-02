@@ -174,6 +174,10 @@ happens.
 
 ### What you see
 
+The gauge covers Codex too: a `⌁ codex` chip group with the weekly
+window and any per-model limits currently in use (each model the endpoint
+reports, dynamically). Codex windows never pause Claude sessions.
+
 The green tmux bar reads: session name and the quoted pane title on the
 left, and on the right `⌁ claude 5h 30% · wk 41% · Fable 79%` beside the
 clock — the same in

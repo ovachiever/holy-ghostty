@@ -122,27 +122,37 @@ extension HolyWorkspaceStore {
         account: HolyClaudeUsageAccount?,
         now: Date
     ) {
+        let isCodex = bucket.key.hasPrefix("codex:")
+        let vendor = isCodex ? "Codex" : "Claude"
         let title: String
         switch level {
         case .normal:
             return
         case .warn:
-            title = "Claude usage approaching cap"
+            title = "\(vendor) usage approaching cap"
         case .critical:
-            title = "Claude usage cap imminent — switch accounts"
+            title = isCodex
+                ? "Codex usage cap imminent"
+                : "Claude usage cap imminent — switch accounts"
             NSApp.requestUserAttention(.criticalRequest)
         case .capped:
-            title = "Claude usage capped — workers will die"
+            title = isCodex
+                ? "Codex usage capped"
+                : "Claude usage capped — workers will die"
             NSApp.requestUserAttention(.criticalRequest)
         }
         var bodyParts = [reason]
         bodyParts.append(HolyClaudeUsageFormatting.detail(for: bucket, now: now))
-        if let email = account?.email {
+        if !isCodex, let email = account?.email {
             bodyParts.append("account \(email)")
         }
-        bodyParts.append(level >= .critical
-            ? "Sessions are being told to pause with a note. Run /login on an account with headroom."
-            : "Sessions are being told to checkpoint. Consider switching accounts before the cap.")
+        // The guard hook speaks only to Claude sessions; codex lanes get the
+        // human, not an injected instruction.
+        bodyParts.append(isCodex
+            ? "Codex lanes will hit this wall on their own; wind them down or spend a reset credit."
+            : (level >= .critical
+                ? "Sessions are being told to pause with a note. Run /login on an account with headroom."
+                : "Sessions are being told to checkpoint. Consider switching accounts before the cap."))
         let body = bodyParts.joined(separator: " · ")
 
         let content = UNMutableNotificationContent()

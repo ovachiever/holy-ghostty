@@ -362,6 +362,97 @@ struct HolyClaudeUsageGuardTests {
         #expect(lines[2].contains("(stale 5m)"))
     }
 
+    @Test func probeNormalizesCodexAndGroupsItsChips() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.installGuard(policy: policy)
+        // A rollout tail in the codex snake_case shape, for the fallback path.
+        let rolloutDir = fixture.root.appendingPathComponent(".codex-home/sessions/2026/09/02")
+        try fixture.write(
+            #"{"timestamp":"2026-09-02T12:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":41.0,"window_minutes":10080,"resets_at":1788786264},"secondary":null,"plan_type":"pro"}}}"#,
+            to: rolloutDir.appendingPathComponent("rollout-2026-09-02T12-00-00-abc.jsonl")
+        )
+        let harness = """
+        import runpy, sys, json, os, time
+        module = runpy.run_path(sys.argv[1], run_name="probe_test")
+        now = time.time()
+        raw = {"rateLimitsByLimitId": {
+            "codex": {"limitId": "codex", "limitName": None,
+                      "primary": {"usedPercent": 8, "windowDurationMins": 10080, "resetsAt": 1788786264}},
+            "codex_topmodel": {"limitId": "codex_topmodel", "limitName": "GPT-5.6-Sol",
+                               "primary": {"usedPercent": 12, "windowDurationMins": 300, "resetsAt": 1788385515},
+                               "secondary": {"usedPercent": 0, "windowDurationMins": 10080, "resetsAt": 1788972315}},
+        }}
+        buckets = module["normalize_codex"](raw)
+        print(json.dumps(buckets))
+        policy = {"warn_percent": \(policy.warnPercent), "critical_percent": \(policy.criticalPercent),
+                  "lead_minutes": \(policy.leadMinutes), "poll_seconds": \(policy.pollSeconds)}
+        claude = [{"key": "session", "label": "Session (5h)", "percent": 30.0}]
+        print(module["compose_segment"](claude + buckets, policy, now))
+        print(json.dumps(module["codex_fallback_buckets"](now)))
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", harness, fixture.paths.probeURL.path]
+        process.environment = [
+            "HOLY_CODEX_HOME": fixture.root.appendingPathComponent(".codex-home").path,
+            "PATH": "/usr/bin:/bin",
+        ]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        #expect(lines.count >= 3)
+
+        // Dynamic model naming: whatever limit ids arrive get buckets.
+        let buckets = try #require(try JSONSerialization.jsonObject(with: Data(lines[0].utf8)) as? [[String: Any]])
+        let keys = buckets.compactMap { $0["key"] as? String }
+        #expect(keys.contains("codex:codex:primary"))
+        #expect(keys.contains("codex:codex_topmodel:primary"))
+        #expect(keys.contains("codex:codex_topmodel:secondary"))
+        let top = try #require(buckets.first { $0["key"] as? String == "codex:codex_topmodel:primary" })
+        #expect(top["short"] as? String == "5.6-Sol 5h")
+        #expect(top["label"] as? String == "Codex GPT-5.6-Sol (5h)")
+        #expect(top["window_seconds"] as? Int == 300 * 60)
+
+        // The bar groups by vendor and hides zero-percent model chips.
+        #expect(lines[1].contains("⌁ claude"))
+        #expect(lines[1].contains("⌁ codex"))
+        #expect(lines[1].contains("wk 8%%"))
+        #expect(lines[1].contains("5.6-Sol 5h 12%%"))
+        #expect(!lines[1].contains("5.6-Sol wk"))
+        #expect(lines[1].range(of: "⌁ claude")!.lowerBound < lines[1].range(of: "⌁ codex")!.lowerBound)
+
+        // The rollout fallback parses the snake_case snapshot.
+        let fallback = try #require(try JSONSerialization.jsonObject(with: Data(lines[2].utf8)) as? [[String: Any]])
+        #expect(fallback.count == 1)
+        #expect(fallback[0]["key"] as? String == "codex:codex:primary")
+        #expect((fallback[0]["percent"] as? NSNumber)?.doubleValue == 41.0)
+    }
+
+    @Test func guardNeverActsOnCodexBuckets() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.installGuard(policy: policy)
+        let resets = Int(Date().timeIntervalSince1970) + 3_600
+        try fixture.write("""
+        {"schema": 1, "fetched_at": \(Int(Date().timeIntervalSince1970)),
+         "account": {"email": "erik@example.com"},
+         "buckets": [
+           {"key": "session", "label": "Session (5h)", "percent": 10, "severity": "normal", "resets_at": \(resets), "window_seconds": 18000, "is_active": true},
+           {"key": "codex:codex:primary", "label": "Codex (week)", "percent": 99, "severity": null, "resets_at": \(resets), "window_seconds": 604800, "is_active": true}
+         ],
+         "extra_usage": {"enabled": false}, "error": null}
+        """, to: fixture.paths.latestURL)
+        // A capped codex window must not pause Claude work or deny spawns.
+        #expect(try fixture.runGuard(event: "PreToolUse", tool: "Agent", sessionID: "s9") == nil)
+        #expect(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s9") == nil)
+    }
+
     @Test func probeHonorsRateLimitBackoffWithoutTouchingTheNetwork() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

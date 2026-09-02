@@ -285,11 +285,13 @@ enum HolyClaudeUsageBridge {
     # usage guard hook both read. The token never leaves this process: it is read
     # from `security` over a pipe and sent only as a request header, never placed
     # in a command line.
+    import glob
     import json
     import os
     import re
     import subprocess
     import sys
+    import threading
     import time
     import urllib.error
     import urllib.request
@@ -494,6 +496,226 @@ enum HolyClaudeUsageBridge {
         return None
 
 
+    def sanitize_plain(text):
+        """Text bound for the tmux #{E:...} sink: plain alphabet only."""
+        return re.sub(r"[^A-Za-z0-9 ._+-]", "", str(text or ""))[:48]
+
+
+    def _window_short(minutes):
+        if minutes == 300:
+            return "5h"
+        if minutes == 10080:
+            return "wk"
+        return "%dm" % int(minutes or 0)
+
+
+    def codex_binary():
+        override = os.environ.get("HOLY_CODEX_BIN")
+        candidates = [override] if override else []
+        candidates += sorted(
+            glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/codex")), reverse=True
+        )
+        candidates += ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
+        for candidate in candidates:
+            if candidate and os.access(candidate, os.X_OK):
+                return candidate
+        from shutil import which
+        return which("codex")
+
+
+    def codex_rpc(deadline_seconds):
+        """One codex app-server round trip: rate limits plus the usage summary.
+
+        The app server answers from codex's own auth (token refresh included)
+        without spending any model tokens. Marked experimental upstream, so
+        every failure degrades to (None, None) and the rollout fallback."""
+        binary = codex_binary()
+        if not binary:
+            return None, None
+        try:
+            proc = subprocess.Popen(
+                [binary, "app-server"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        except OSError:
+            return None, None
+        replies = {}
+
+        def reader():
+            try:
+                for line in proc.stdout:
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(message, dict) and "id" in message:
+                        replies[message["id"]] = message
+            except Exception:
+                pass
+
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+        try:
+            def send(request_id, method, params):
+                proc.stdin.write(json.dumps({
+                    "jsonrpc": "2.0", "id": request_id, "method": method, "params": params,
+                }) + "\n")
+                proc.stdin.flush()
+
+            deadline = time.time() + deadline_seconds
+            send(1, "initialize", {"clientInfo": {
+                "name": "holy-ghostty-usage", "title": "Holy Ghostty", "version": "1",
+            }})
+            while 1 not in replies and time.time() < deadline:
+                time.sleep(0.05)
+            if 1 not in replies:
+                return None, None
+            send(2, "account/rateLimits/read", {})
+            send(3, "account/usage/read", {})
+            while 2 not in replies and time.time() < deadline:
+                time.sleep(0.05)
+            limits = (replies.get(2) or {}).get("result")
+            # The usage summary is garnish: take it only if it is already in.
+            usage = (replies.get(3) or {}).get("result")
+            return (limits if isinstance(limits, dict) else None,
+                    usage if isinstance(usage, dict) else None)
+        except (OSError, ValueError):
+            return None, None
+        finally:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+
+    def _codex_bucket(limit_id, slot, name, percent, minutes, resets_at):
+        window = _window_short(minutes)
+        if limit_id == "codex":
+            label = "Codex (%s)" % ("week" if window == "wk" else window)
+            short, on_bar = window, True
+        else:
+            display = name or sanitize_plain(limit_id)
+            model = display[4:] if display.upper().startswith("GPT-") else display
+            label = "Codex %s (%s)" % (display, "week" if window == "wk" else window)
+            # Model chips earn bar space only while they carry real usage;
+            # the popover always lists them all.
+            short, on_bar = "%s %s" % (model, window), percent > 0
+        return {
+            "key": "codex:%s:%s" % (sanitize_plain(limit_id) or "limit", slot),
+            "label": label,
+            "percent": float(percent),
+            "severity": None,
+            "resets_at": int(resets_at) if isinstance(resets_at, (int, float)) else None,
+            "window_seconds": int(minutes or 0) * 60,
+            "is_active": percent > 0,
+            "short": short,
+            "bar": on_bar,
+        }
+
+
+    def normalize_codex(raw):
+        """rateLimits/read result (camelCase) into buckets, dynamically: every
+        limit id the endpoint reports is rendered, so a future top model
+        appears without a code change."""
+        limits = raw.get("rateLimitsByLimitId") or {}
+        if not limits and isinstance(raw.get("rateLimits"), dict):
+            limits = {"codex": raw["rateLimits"]}
+        buckets = []
+        for limit_id in sorted(limits):
+            entry = limits[limit_id] or {}
+            name = sanitize_plain(entry.get("limitName") or "")
+            for slot in ("primary", "secondary"):
+                window = entry.get(slot)
+                if not isinstance(window, dict):
+                    continue
+                percent = _number(window.get("usedPercent"))
+                if percent is None:
+                    continue
+                buckets.append(_codex_bucket(
+                    limit_id, slot, name, percent,
+                    window.get("windowDurationMins") or 0, window.get("resetsAt"),
+                ))
+        return buckets
+
+
+    def codex_fallback_buckets(now):
+        """Last-known snapshot from the newest session rollout file: codex
+        writes rate_limits (snake_case) on every token_count event."""
+        home = os.path.expanduser(os.environ.get("HOLY_CODEX_HOME", "~/.codex"))
+        pattern = os.path.join(home, "sessions", "*", "*", "*", "rollout-*.jsonl")
+        newest, newest_mtime = None, 0
+        for path in glob.glob(pattern):
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if mtime > newest_mtime:
+                newest, newest_mtime = path, mtime
+        if newest is None or now - newest_mtime > WEEKLY_WINDOW_SECONDS:
+            return []
+        try:
+            with open(newest, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - 262144))
+                tail = handle.read().decode("utf-8", "replace")
+        except OSError:
+            return []
+        snapshot = None
+        for line in tail.split("\n"):
+            if '"rate_limits"' not in line:
+                continue
+            try:
+                payload = json.loads(line).get("payload") or {}
+            except ValueError:
+                continue
+            if isinstance(payload.get("rate_limits"), dict):
+                snapshot = payload["rate_limits"]
+        if snapshot is None:
+            return []
+        buckets = []
+        limit_id = sanitize_plain(snapshot.get("limit_id") or "codex") or "codex"
+        name = sanitize_plain(snapshot.get("limit_name") or "")
+        for slot in ("primary", "secondary"):
+            window = snapshot.get(slot)
+            if not isinstance(window, dict):
+                continue
+            percent = _number(window.get("used_percent"))
+            if percent is None:
+                continue
+            buckets.append(_codex_bucket(
+                limit_id, slot, name, percent,
+                window.get("window_minutes") or 0, window.get("resets_at"),
+            ))
+        return buckets
+
+
+    def collect_codex(now, deadline_seconds):
+        """(buckets, meta): live RPC first, rollout tail as the fallback, and
+        an honest ([], None) when there is no codex on this machine at all."""
+        raw, usage = codex_rpc(deadline_seconds)
+        if raw is None:
+            buckets = codex_fallback_buckets(now)
+            if not buckets:
+                return [], None
+            return buckets, {"source": "rollout", "stale_since": now}
+        limits = raw.get("rateLimits") or {}
+        summary = (usage or {}).get("summary") if isinstance(usage, dict) else None
+        meta = {
+            "source": "rpc",
+            "plan": sanitize_plain(limits.get("planType") or "") or None,
+            "spend_control_reached": bool(limits.get("spendControlReached")),
+            "reset_credits": ((raw.get("rateLimitResetCredits") or {}).get("availableCount")),
+            "summary": {
+                key: summary.get(key)
+                for key in ("lifetimeTokens", "peakDailyTokens", "currentStreakDays")
+            } if isinstance(summary, dict) else None,
+        }
+        return normalize_codex(raw), meta
+
+
     def load_history(path, now):
         samples = []
         try:
@@ -600,29 +822,40 @@ enum HolyClaudeUsageBridge {
 
 
     def compose_segment(buckets, policy, now, stale_seconds=None, wrap_up=False):
-        """The centred green-bar segment. Styled for tmux's stock black-on-green
-        status bar: calm windows stay plain, a warn window becomes a yellow
-        chip, critical/capped a red one. The ⌁ prefix and the identical value
-        in every session mark it as machine-global, not this session's."""
-        chips = []
-        for bucket in buckets:
-            percent = bucket.get("percent")
-            if not isinstance(percent, (int, float)):
-                continue
-            # tmux strftimes the fully expanded status line, so a literal
-            # percent sign must arrive doubled or it is eaten as a (bad)
-            # conversion. The sanitized label alphabet excludes %.
-            text = "%s %d%%%%" % (short_label(bucket.get("key") or "?"), int(round(percent)))
-            level = bucket_level(bucket, policy, now)
-            if level in ("critical", "capped"):
-                chips.append("#[fg=white,bg=red,bold] %s #[default]" % text)
-            elif level == "warn":
-                chips.append("#[fg=black,bg=yellow,bold] %s #[default]" % text)
-            else:
-                chips.append(text)
-        if not chips:
+        """The green-bar segment, one ⌁-prefixed group per vendor. Styled for
+        tmux's stock black-on-green bar: calm windows stay plain, a warn
+        window becomes a yellow chip, critical/capped a red one. The identical
+        value in every session marks it as machine-global, not this session's."""
+        def chips_for(group):
+            chips = []
+            for bucket in group:
+                percent = bucket.get("percent")
+                if not isinstance(percent, (int, float)):
+                    continue
+                # tmux strftimes the fully expanded status line, so a literal
+                # percent sign must arrive doubled or it is eaten as a (bad)
+                # conversion. The sanitized label alphabet excludes %.
+                short = bucket.get("short") or short_label(bucket.get("key") or "?")
+                text = "%s %d%%%%" % (short, int(round(percent)))
+                level = bucket_level(bucket, policy, now)
+                if level in ("critical", "capped"):
+                    chips.append("#[fg=white,bg=red,bold] %s #[default]" % text)
+                elif level == "warn":
+                    chips.append("#[fg=black,bg=yellow,bold] %s #[default]" % text)
+                else:
+                    chips.append(text)
+            return chips
+        is_codex = lambda b: (b.get("key") or "").startswith("codex:")
+        parts = []
+        claude_chips = chips_for([b for b in buckets if not is_codex(b)])
+        if claude_chips:
+            parts.append("#[dim]⌁ claude#[nodim] " + " · ".join(claude_chips))
+        codex_chips = chips_for([b for b in buckets if is_codex(b) and b.get("bar", True)])
+        if codex_chips:
+            parts.append("#[dim]⌁ codex#[nodim] " + " · ".join(codex_chips))
+        if not parts:
             return ""
-        segment = "#[dim]⌁ claude#[nodim] " + " · ".join(chips)
+        segment = "  ".join(parts)
         if wrap_up:
             segment = "#[fg=white,bg=red,bold] ⏸ WRAP UP #[default] " + segment
         if isinstance(stale_seconds, (int, float)) and stale_seconds > 0:
@@ -767,6 +1000,18 @@ enum HolyClaudeUsageBridge {
                 snapshot["buckets"] = buckets
                 snapshot["extra_usage"] = extra
 
+        # Codex rides the same snapshot but is a different vendor: its fetch
+        # is independent of the Anthropic account and of Claude's errors, and
+        # its history projection reuses the same sample rows.
+        codex_buckets, codex_meta = collect_codex(now, max(5.0, deadline * KEYCHAIN_SHARE_OF_DEADLINE))
+        if codex_buckets:
+            project(codex_buckets, load_history(history_path, now), account.get("email"), now)
+            snapshot["buckets"] = [
+                b for b in snapshot["buckets"] if not (b.get("key") or "").startswith("codex:")
+            ] + codex_buckets
+        if codex_meta is not None:
+            snapshot["codex"] = codex_meta
+
         if snapshot["error"] is None:
             sample = {
                 "t": now,
@@ -784,7 +1029,16 @@ enum HolyClaudeUsageBridge {
             # Keep the last good buckets visible, marked stale, so a transient
             # network failure does not blank the meter or silence the guard.
             if previous and not account_changed and (previous.get("error") is None or previous.get("stale_since")):
-                snapshot["buckets"] = previous.get("buckets", [])
+                # Carry the Claude buckets forward but keep this run's fresh
+                # codex readings: the vendors fail independently.
+                fresh_codex = [
+                    b for b in snapshot["buckets"] if (b.get("key") or "").startswith("codex:")
+                ]
+                carried = [
+                    b for b in previous.get("buckets", [])
+                    if not (b.get("key") or "").startswith("codex:")
+                ]
+                snapshot["buckets"] = carried + fresh_codex
                 snapshot["extra_usage"] = previous.get("extra_usage")
                 snapshot["stale_since"] = previous.get("stale_since") or previous.get("fetched_at")
             if "429" in (snapshot["error"] or ""):
@@ -967,7 +1221,12 @@ enum HolyClaudeUsageBridge {
         own_keys = {b["key"] for b in own}
         merged = list(own)
         for bucket in (latest or {}).get("buckets") or []:
-            if bucket.get("key") in own_keys:
+            key = bucket.get("key") or ""
+            if key in own_keys:
+                continue
+            if key.startswith("codex:"):
+                # Codex headroom is another vendor's meter: it must never
+                # pause a Claude session or deny its subagent spawns.
                 continue
             copy = dict(bucket)
             copy["source"] = "machine"
