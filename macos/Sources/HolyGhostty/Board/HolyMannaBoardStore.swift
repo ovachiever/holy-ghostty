@@ -1,16 +1,22 @@
 import Foundation
 import SwiftUI
 
-struct HolyMannaBoardItemSection: Identifiable, Equatable, Sendable {
-    let id: String
-    let title: String?
-    let items: [HolyMannaBoardItem]
+/// Which face the board mode shows: the estate table (every registered
+/// board) or one board's cockpit.
+enum HolyMannaBoardSurface: Equatable, Sendable {
+    case estate
+    case board
 }
 
 @MainActor
 final class HolyMannaBoardModeStore: ObservableObject {
     @Published private(set) var isPresented = false
-    @Published var selectedSheet: HolyMannaBoardSheet = .now
+    @Published private(set) var surface: HolyMannaBoardSurface = .board
+    @Published var selectedSheet: HolyMannaBoardSheet = .board
+    @Published var boardFilter: HolyMannaBoardFilter = .live
+    /// A track id, `HolyMannaBoardPresentation.untrackedFilter`, or nil for every track.
+    @Published var trackFilter: String?
+    @Published var grep = ""
     @Published private(set) var state: HolyMannaStatePayload?
     @Published private(set) var estate: HolyMannaEstatePayload?
     @Published private(set) var boardFailure: String?
@@ -18,16 +24,23 @@ final class HolyMannaBoardModeStore: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastRefreshedAt: Date?
     @Published var selectedItemID: String?
+    @Published var selectedPeerID: String?
     @Published private(set) var actorID: String?
     @Published var pendingMutation: HolyMannaMutation?
+    @Published private(set) var activeMutation: HolyMannaMutation?
     @Published private(set) var isMutating = false
     @Published private(set) var mutationMessage: String?
     @Published private(set) var mutationFailure: String?
+    @Published private(set) var toast: String?
     @Published private(set) var digestText: String?
     @Published private(set) var digestModel: String?
     @Published private(set) var digestWasCached = false
     @Published private(set) var digestFailure: String?
     @Published private(set) var isDigestLoading = false
+    /// Incremented when a key (⌘F, /) asks the grep field to take focus.
+    @Published private(set) var grepFocusRequest = 0
+    /// Mirrored from the view so key handling knows whether "/" is typing.
+    @Published var isGrepFocused = false
 
     private(set) var context = HolyMannaBoardContext(boardRoot: nil, remoteHost: nil)
     private let client: HolyMannaBoardClient
@@ -36,6 +49,8 @@ final class HolyMannaBoardModeStore: ObservableObject {
     private var refreshGeneration = UUID()
     private var refreshTask: Task<Void, Never>?
     private var digestTask: Task<Void, Never>?
+    private var liveTask: Task<Void, Never>?
+    private var toastTask: Task<Void, Never>?
     private var digestCache: [String: HolyMannaDigestResult] = [:]
 
     init(
@@ -50,65 +65,53 @@ final class HolyMannaBoardModeStore: ObservableObject {
         self.usageAssessmentProvider = usageAssessmentProvider
     }
 
+    // MARK: Derived
+
     var selectedItem: HolyMannaBoardItem? {
         state?.item(id: selectedItemID)
+    }
+
+    var selectedPeer: HolyMannaPeer? {
+        state?.peer(id: selectedPeerID)
     }
 
     var boardName: String {
         state?.name
             ?? context.boardRoot.map { URL(fileURLWithPath: $0).lastPathComponent }
-            ?? "Board"
+            ?? "board"
     }
 
+    /// The estate in serve's order; missing boards trail, dimmed.
     var sortedEstateBoards: [HolyMannaEstateBoard] {
-        (estate?.boards ?? [])
-            .filter(\.exists)
-            .sorted { lhs, rhs in
-                if lhs.needsYou != rhs.needsYou { return lhs.needsYou > rhs.needsYou }
-                if lhs.activeCount != rhs.activeCount { return lhs.activeCount > rhs.activeCount }
-                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-            }
+        HolyMannaBoardPresentation.estateRows(estate?.boards ?? [])
     }
 
-    var itemSections: [HolyMannaBoardItemSection] {
+    var boardSections: [HolyMannaBoardSectionModel] {
         guard let state else { return [] }
-        switch selectedSheet {
-        case .now:
-            return [.init(id: "now", title: nil, items: state.now)]
-        case .next:
-            return [.init(id: "next", title: nil, items: state.next)]
-        case .waves:
-            return state.waves.map {
-                .init(id: "wave:\($0.wave)", title: "Wave \($0.wave)", items: $0.items)
-            }
-        case .dreams:
-            return [.init(id: "dreams", title: nil, items: state.dreams)]
-        case .decisions:
-            return [.init(id: "decisions", title: nil, items: state.decisions)]
-        case .asks, .coordination:
-            return []
-        }
+        return HolyMannaBoardPresentation.sections(
+            state: state,
+            filter: boardFilter,
+            track: trackFilter,
+            grep: grep
+        )
     }
 
-    var sheetCount: Int {
-        guard let state else { return 0 }
-        switch selectedSheet {
-        case .now: return state.now.count
-        case .next: return state.next.count
-        case .waves: return state.waves.reduce(0) { $0 + $1.items.count }
-        case .asks: return state.asks.count
-        case .coordination:
-            return state.peers.count + state.coord.claims.count + state.coord.needs.count + state.coord.drops.count
-        case .dreams: return state.dreams.count
-        case .decisions: return state.decisions.count
-        }
+    var inboxRows: [HolyMannaInboxRowModel] {
+        guard let state else { return [] }
+        return HolyMannaBoardPresentation.inboxRows(state: state, grep: grep)
+    }
+
+    /// True while the board is being re-read on the visible cadence and its
+    /// last read landed: the topbar's lit mark.
+    var isLive: Bool {
+        liveTask != nil && state != nil && boardFailure == nil
     }
 
     /// Badge-worthy board asks only. A ready backlog remains visible in the
-    /// Asks sheet without turning routine availability into alarm noise.
+    /// inbox without turning routine availability into alarm noise.
     var humanAttentionAskCount: Int {
         state?.asks.filter { ask in
-            ask.verb != "launch" && ask.kind != "document"
+            ask.verb != "launch" && ask.kind != "document" && ask.kind != "drop"
         }.count ?? 0
     }
 
@@ -118,19 +121,28 @@ final class HolyMannaBoardModeStore: ObservableObject {
         } ?? []
     }
 
+    // MARK: Presentation lifecycle
+
     func present(context: HolyMannaBoardContext) {
         isPresented = true
+        surface = context.boardRoot == nil ? .estate : .board
         prepare(context: context)
         loadSelectedDigest()
         mutationMessage = nil
         mutationFailure = nil
+        startLiveRefresh()
     }
 
     func prepare(context: HolyMannaBoardContext) {
         let contextChanged = self.context != context
         self.context = context
         if contextChanged {
+            // A different root is a different board: never show the old
+            // board's rows under the new board's name while it reads.
+            state = nil
+            boardFailure = nil
             selectedItemID = nil
+            selectedPeerID = nil
             digestText = nil
             digestFailure = nil
         }
@@ -150,31 +162,88 @@ final class HolyMannaBoardModeStore: ObservableObject {
         isPresented = false
         pendingMutation = nil
         digestTask?.cancel()
+        liveTask?.cancel()
+        liveTask = nil
+    }
+
+    /// The crumb's "estate": the table of every board, the board kept warm.
+    func showEstate() {
+        surface = .estate
+        selectedSheet = .board
     }
 
     func selectSheet(_ sheet: HolyMannaBoardSheet) {
         selectedSheet = sheet
-        if sheet != .asks && sheet != .coordination {
-            let visibleIDs = Set(itemSections.flatMap(\.items).map(\.id))
-            if !visibleIDs.contains(selectedItemID ?? "") {
-                selectItem(itemSections.first?.items.first?.id)
-            }
-        }
+    }
+
+    func selectFilter(_ filter: HolyMannaBoardFilter) {
+        boardFilter = filter
     }
 
     func selectItem(_ id: String?) {
         selectedItemID = id
+        if id != nil {
+            selectedPeerID = nil
+        }
         loadSelectedDigest()
+    }
+
+    func selectPeer(_ id: String?) {
+        selectedPeerID = id
+        if id != nil {
+            selectedItemID = nil
+            digestTask?.cancel()
+            isDigestLoading = false
+        }
+    }
+
+    /// Follow an inbox row to what it is about.
+    func follow(_ target: HolyMannaAsk.Target) {
+        switch target {
+        case let .item(id):
+            selectedSheet = .board
+            selectItem(id)
+        case let .peer(id):
+            selectedSheet = .coordination
+            selectPeer(id)
+        case let .sheet(sheet):
+            selectedSheet = sheet
+        }
     }
 
     func selectEstateBoard(_ board: HolyMannaEstateBoard) {
         guard board.exists else { return }
-        context = context.selecting(boardRoot: board.root)
-        selectedItemID = nil
-        digestText = nil
-        digestFailure = nil
+        let next = context.selecting(boardRoot: board.root)
+        if next != context {
+            context = next
+            state = nil
+            boardFailure = nil
+            selectedItemID = nil
+            selectedPeerID = nil
+            digestText = nil
+            digestFailure = nil
+        }
+        surface = .board
+        selectedSheet = .board
         requestRefresh(force: true)
     }
+
+    // MARK: Keys
+
+    func requestGrepFocus() {
+        grepFocusRequest += 1
+    }
+
+    /// Escape while the grep field has focus clears the filter instead of
+    /// leaving the board. Returns true when it consumed the key.
+    func consumeEscape() -> Bool {
+        guard isGrepFocused else { return false }
+        grep = ""
+        isGrepFocused = false
+        return true
+    }
+
+    // MARK: Refresh
 
     func requestRefresh(force: Bool = false) {
         if !force,
@@ -194,9 +263,25 @@ final class HolyMannaBoardModeStore: ObservableObject {
             async let estateResult = Self.capture { try await self.client.estate(for: context) }
             let results = await (stateResult, estateResult)
             guard !Task.isCancelled, self.refreshGeneration == generation else { return }
-            self.apply(stateResult: results.0, estateResult: results.1)
+            self.apply(stateResult: results.0, estateResult: results.1, for: context)
         }
     }
+
+    /// While the board is on screen it re-reads on the same cadence a
+    /// visible inbox panel polls at; the topbar's mark is lit only then.
+    private func startLiveRefresh() {
+        liveTask?.cancel()
+        let interval = HolyInboxEngine.pollInterval(panelVisible: true)
+        liveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(interval))
+                guard !Task.isCancelled, let self, self.isPresented else { return }
+                self.requestRefresh(force: true)
+            }
+        }
+    }
+
+    // MARK: Mutations
 
     func requestMutation(_ mutation: HolyMannaMutation) {
         guard !isMutating else { return }
@@ -210,10 +295,21 @@ final class HolyMannaBoardModeStore: ObservableObject {
         mutationFailure = nil
     }
 
+    func showToast(_ text: String) {
+        toastTask?.cancel()
+        toast = text
+        toastTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(HolyMannaBoardMetrics.toastSeconds))
+            guard !Task.isCancelled else { return }
+            self?.toast = nil
+        }
+    }
+
     func confirmPendingMutation() {
         guard let mutation = pendingMutation, !isMutating else { return }
         pendingMutation = nil
         isMutating = true
+        activeMutation = mutation
         mutationFailure = nil
         mutationMessage = nil
         let context = context
@@ -223,15 +319,20 @@ final class HolyMannaBoardModeStore: ObservableObject {
             do {
                 let receipts = try await self.client.perform(mutation, in: context)
                 self.isMutating = false
+                self.activeMutation = nil
                 guard self.context == context else { return }
-                self.mutationMessage = receipts.count == 1
+                let message = receipts.count == 1
                     ? "\(mutation.label) completed."
                     : "\(mutation.label) completed in \(receipts.count) verified CLI steps."
+                self.mutationMessage = message
+                self.showToast(message)
                 self.requestRefresh(force: true)
             } catch {
                 self.isMutating = false
+                self.activeMutation = nil
                 guard self.context == context else { return }
                 self.mutationFailure = error.localizedDescription
+                self.showToast("refused: \(error.localizedDescription)")
                 // Multi-step actions can fail after an earlier CLI verb
                 // succeeded. Re-read canonical state instead of leaving a
                 // stale pre-action picture on screen.
@@ -258,24 +359,57 @@ final class HolyMannaBoardModeStore: ObservableObject {
         return actions
     }
 
+    /// The handoff document for an item, read from the board's own tree; a
+    /// remote board yields only the path.
+    func handoffCopy(for item: HolyMannaBoardItem) -> (text: String, note: String)? {
+        guard let prompt = item.prompt, !prompt.isEmpty else { return nil }
+        guard context.remoteHost == nil, let root = context.boardRoot else {
+            return (prompt, "handoff path \(prompt)")
+        }
+        let url = prompt.hasPrefix("/")
+            ? URL(fileURLWithPath: prompt)
+            : URL(fileURLWithPath: root).appendingPathComponent(prompt)
+        guard let data = FileManager.default.contents(atPath: url.path),
+              let content = String(data: data, encoding: .utf8),
+              !content.isEmpty else {
+            return (prompt, "handoff path \(prompt)")
+        }
+        return (content, "handoff \(prompt) (\(content.count) chars)")
+    }
+
+    // MARK: Apply
+
     private func apply(
         stateResult: Result<HolyMannaStatePayload, Error>,
-        estateResult: Result<HolyMannaEstatePayload, Error>
+        estateResult: Result<HolyMannaEstatePayload, Error>,
+        for refreshed: HolyMannaBoardContext
     ) {
         switch stateResult {
         case let .success(payload):
             state = payload
             boardFailure = nil
-            if payload.item(id: selectedItemID) == nil {
+            if selectedPeerID == nil, payload.item(id: selectedItemID) == nil {
                 selectedItemID = payload.now.first?.id
                     ?? payload.next.first?.id
                     ?? payload.waves.first?.items.first?.id
+            }
+            if let selectedPeerID, payload.peer(id: selectedPeerID) == nil {
+                self.selectedPeerID = nil
             }
             if isPresented {
                 loadSelectedDigest()
             }
         case let .failure(error):
             boardFailure = error.localizedDescription
+            // No usable board for this root: the estate is the honest
+            // surface, with the failure printed on it. A transient failure
+            // on a board already on screen keeps the board and reports.
+            if state == nil || state?.root != refreshed.boardRoot {
+                state = nil
+                if isPresented {
+                    surface = .estate
+                }
+            }
         }
 
         switch estateResult {

@@ -22,13 +22,17 @@ enum HolyMannaBoardClientError: LocalizedError, Equatable {
     case timedOut(String)
     case outputTooLarge(String)
     case commandFailed(command: String, code: Int32, detail: String?)
-    case invalidPayload(command: String)
-    case rejectedPayload(command: String)
+    /// The output was not the canonical JSON contract; `detail` names the
+    /// first field the decoder tripped on, so a shape mismatch is diagnosable.
+    case invalidPayload(command: String, detail: String)
+    /// The command ran and answered `{"success": false, "error": …}`: its
+    /// own words, plus the directory it was asked about.
+    case rejected(command: String, error: String, directory: String?)
 
     var errorDescription: String? {
         switch self {
         case .noFocusedBoard:
-            "Select a session with a repository or working directory, or choose a board from the estate strip."
+            "Select a session with a repository or working directory, or choose a board from the estate."
         case .localBinaryMissing:
             "The agent-do CLI was not found in the runtime environment Holy uses."
         case let .launchFailed(detail):
@@ -39,12 +43,29 @@ enum HolyMannaBoardClientError: LocalizedError, Equatable {
             "\(command) exceeded Holy's 8 MB structured-output limit."
         case let .commandFailed(command, code, detail):
             "\(command) exited with status \(code)." + (detail.map { " \($0)" } ?? "")
-        case let .invalidPayload(command):
-            "\(command) returned data outside the canonical JSON contract."
-        case let .rejectedPayload(command):
-            "\(command) returned success=false."
+        case let .invalidPayload(command, detail):
+            "\(command) returned data outside the canonical JSON contract: \(detail)"
+        case let .rejected(command, error, directory):
+            "\(command) refused: \(error)" + (directory.map { " (in \($0))" } ?? "")
         }
     }
+
+    /// True when the directory simply holds no board: the estate is the
+    /// honest surface, not an alarm.
+    var meansNoBoardHere: Bool {
+        switch self {
+        case .noFocusedBoard: true
+        case let .rejected(_, error, _): error.localizedCaseInsensitiveContains("not initialized")
+        default: false
+        }
+    }
+}
+
+/// The first thing every manna reply is read as. A refusal carries only
+/// these two keys; a full payload carries `success: true` and the rest.
+private struct HolyMannaReplyEnvelope: Decodable {
+    let success: Bool?
+    let error: String?
 }
 
 struct HolyMannaMutationReceipt: Equatable, Sendable {
@@ -85,11 +106,18 @@ struct HolyMannaBoardClient: Sendable {
             identity: nil
         )
         let output = try await checkedRun(invocation, timeout: Self.stateTimeout)
-        guard let payload = try? JSONDecoder().decode(HolyMannaStatePayload.self, from: Data(output.stdout.utf8)) else {
-            throw HolyMannaBoardClientError.invalidPayload(command: invocation.displayCommand)
-        }
+        let payload = try Self.decodeReply(
+            HolyMannaStatePayload.self,
+            from: output.stdout,
+            command: invocation.displayCommand,
+            directory: Self.directoryDescription(invocation: invocation, context: context)
+        )
         guard payload.success else {
-            throw HolyMannaBoardClientError.rejectedPayload(command: invocation.displayCommand)
+            throw HolyMannaBoardClientError.rejected(
+                command: invocation.displayCommand,
+                error: "the reply carried success=false without a reason",
+                directory: Self.directoryDescription(invocation: invocation, context: context)
+            )
         }
         return payload
     }
@@ -102,10 +130,78 @@ struct HolyMannaBoardClient: Sendable {
             identity: nil
         )
         let output = try await checkedRun(invocation, timeout: Self.estateTimeout)
-        guard let payload = try? JSONDecoder().decode(HolyMannaEstatePayload.self, from: Data(output.stdout.utf8)) else {
-            throw HolyMannaBoardClientError.invalidPayload(command: invocation.displayCommand)
+        return try Self.decodeReply(
+            HolyMannaEstatePayload.self,
+            from: output.stdout,
+            command: invocation.displayCommand,
+            directory: Self.directoryDescription(invocation: invocation, context: context)
+        )
+    }
+
+    /// Decode the `{success, error}` envelope first so a refusal surfaces in
+    /// the CLI's own words; only a successful reply is held to the full
+    /// contract, and a contract miss names the field that failed.
+    static func decodeReply<Payload: Decodable>(
+        _ type: Payload.Type,
+        from stdout: String,
+        command: String,
+        directory: String?
+    ) throws -> Payload {
+        let data = Data(stdout.utf8)
+        let decoder = JSONDecoder()
+        let envelope: HolyMannaReplyEnvelope
+        do {
+            envelope = try decoder.decode(HolyMannaReplyEnvelope.self, from: data)
+        } catch {
+            throw HolyMannaBoardClientError.invalidPayload(command: command, detail: describe(error))
         }
-        return payload
+        if envelope.success == false {
+            throw HolyMannaBoardClientError.rejected(
+                command: command,
+                error: envelope.error ?? "the command reported failure without a reason",
+                directory: directory
+            )
+        }
+        do {
+            return try decoder.decode(Payload.self, from: data)
+        } catch {
+            throw HolyMannaBoardClientError.invalidPayload(command: command, detail: describe(error))
+        }
+    }
+
+    /// A DecodingError in one line: what went wrong and where.
+    static func describe(_ error: Error) -> String {
+        guard let decodingError = error as? DecodingError else {
+            return error.localizedDescription
+        }
+        func path(_ context: DecodingError.Context) -> String {
+            let joined = context.codingPath.map { key in
+                key.intValue.map { "[\($0)]" } ?? key.stringValue
+            }.joined(separator: ".")
+            return joined.isEmpty ? "the root" : joined
+        }
+        switch decodingError {
+        case let .keyNotFound(key, context):
+            return "missing key '\(key.stringValue)' at \(path(context))"
+        case let .typeMismatch(type, context):
+            return "expected \(type) at \(path(context)): \(context.debugDescription)"
+        case let .valueNotFound(type, context):
+            return "null where \(type) was required at \(path(context))"
+        case let .dataCorrupted(context):
+            return "unreadable data at \(path(context)): \(context.debugDescription)"
+        @unknown default:
+            return String(describing: decodingError)
+        }
+    }
+
+    private static func directoryDescription(
+        invocation: HolyMannaProcessInvocation,
+        context: HolyMannaBoardContext
+    ) -> String? {
+        if let host = context.remoteHost {
+            return "\(host):\(context.boardRoot ?? "~")"
+        }
+        return invocation.currentDirectoryPath ?? context.boardRoot
     }
 
     func perform(

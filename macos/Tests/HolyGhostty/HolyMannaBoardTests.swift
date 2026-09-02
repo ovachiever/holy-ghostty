@@ -24,7 +24,8 @@ struct HolyMannaBoardTests {
         #expect(state.name == "holy-ghostty")
         #expect(state.now.map(\.id) == ["mn-live001"])
         #expect(state.coord.drops.first?.paths == [".handoff/live.md"])
-        #expect(state.asks.map(\.verb) == ["grant", "close"])
+        #expect(state.asks.map(\.verb) == ["grant", "close", "read"])
+        #expect(state.asks.first?.detail == "“Approve the final action”")
         #expect(estate.boards.first?.needsYou == 1)
         #expect(estate.totals.needsYou == 1)
         #expect(invocations.count == 2)
@@ -225,6 +226,143 @@ struct HolyMannaBoardTests {
         #expect(!HolyMannaMutation.claim("mn-live001").isDestructive)
     }
 
+    @Test func refusalEnvelopeSurfacesTheCliErrorAndTheDirectoryTried() async throws {
+        let client = HolyMannaBoardClient { _, _ in
+            .init(stdout: HolyMannaBoardFixtures.storageNotInitialized, stderr: "", exitCode: 0)
+        }
+        let context = HolyMannaBoardContext(boardRoot: "/srv/nowhere", remoteHost: "builder@example.com")
+
+        await #expect(throws: HolyMannaBoardClientError.rejected(
+            command: "builder@example.com: agent-do manna state --json",
+            error: "Storage not initialized. Run 'manna-core init' first.",
+            directory: "builder@example.com:/srv/nowhere"
+        )) {
+            _ = try await client.state(for: context)
+        }
+
+        do {
+            _ = try await client.state(for: context)
+            Issue.record("a refusal must throw")
+        } catch let error as HolyMannaBoardClientError {
+            // The regression: the honest refusal used to be masked by the
+            // contract message because the full payload was decoded first.
+            let description = error.localizedDescription
+            #expect(description.contains("Storage not initialized"))
+            #expect(description.contains("/srv/nowhere"))
+            #expect(!description.contains("canonical JSON contract"))
+            #expect(error.meansNoBoardHere)
+        }
+    }
+
+    @Test func contractMismatchNamesTheFieldThatFailed() async throws {
+        let client = HolyMannaBoardClient { _, _ in
+            .init(stdout: #"{"success": true, "generated_at": "2026-09-02T14:00:00Z", "name": "x"}"#, stderr: "", exitCode: 0)
+        }
+        let context = HolyMannaBoardContext(boardRoot: "/srv/holy-ghostty", remoteHost: "builder@example.com")
+
+        do {
+            _ = try await client.state(for: context)
+            Issue.record("a contract miss must throw")
+        } catch let error as HolyMannaBoardClientError {
+            guard case let .invalidPayload(command, detail) = error else {
+                Issue.record("expected invalidPayload, got \(error)")
+                return
+            }
+            #expect(command == "builder@example.com: agent-do manna state --json")
+            #expect(detail.contains("missing key 'root'"))
+            #expect(!error.meansNoBoardHere)
+        }
+
+        let garbage = HolyMannaBoardClient { _, _ in
+            .init(stdout: "not json at all", stderr: "", exitCode: 0)
+        }
+        do {
+            _ = try await garbage.estate(for: context)
+            Issue.record("garbage must throw")
+        } catch let error as HolyMannaBoardClientError {
+            guard case .invalidPayload = error else {
+                Issue.record("expected invalidPayload, got \(error)")
+                return
+            }
+        }
+    }
+
+    @Test func estateRefusalIsSurfacedInItsOwnWords() async throws {
+        let client = HolyMannaBoardClient { _, _ in
+            .init(stdout: #"{"success": false, "error": "estate read failed: registry unreadable"}"#, stderr: "", exitCode: 0)
+        }
+        await #expect(throws: HolyMannaBoardClientError.rejected(
+            command: "builder@example.com: agent-do manna estate --json",
+            error: "estate read failed: registry unreadable",
+            directory: "builder@example.com:/srv/holy-ghostty"
+        )) {
+            _ = try await client.estate(for: .init(boardRoot: "/srv/holy-ghostty", remoteHost: "builder@example.com"))
+        }
+    }
+
+    @Test @MainActor func presentingWithoutABoardLandsOnTheEstate() async throws {
+        let client = HolyMannaBoardClient { invocation, _ in
+            if invocation.displayCommand.contains("estate") {
+                return .init(stdout: HolyMannaBoardFixtures.estate, stderr: "", exitCode: 0)
+            }
+            let rooted = invocation.arguments.joined(separator: " ").contains("/srv/holy-ghostty")
+            return .init(
+                stdout: rooted ? HolyMannaBoardFixtures.state : HolyMannaBoardFixtures.storageNotInitialized,
+                stderr: "",
+                exitCode: 0
+            )
+        }
+        let store = HolyMannaBoardModeStore(client: client, digestService: HolyMannaDigestRecorder())
+
+        // A session outside any board: the estate, with the CLI's own reason.
+        store.present(context: .init(boardRoot: "/srv/nowhere", remoteHost: "builder@example.com"))
+        #expect(store.surface == .board)
+        for _ in 0 ..< 400 where store.isRefreshing {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(!store.isRefreshing)
+        #expect(store.surface == .estate)
+        #expect(store.state == nil)
+        #expect(store.boardFailure?.contains("Storage not initialized") == true)
+        #expect(store.boardFailure?.contains("/srv/nowhere") == true)
+        #expect(store.estate?.boards.count == 1)
+
+        // Picking a board from the estate reads it and shows it.
+        let board = try #require(store.sortedEstateBoards.first)
+        store.selectEstateBoard(board)
+        #expect(store.surface == .board)
+        for _ in 0 ..< 400 where store.state == nil {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(store.state?.name == "holy-ghostty")
+        #expect(store.boardFailure == nil)
+        #expect(store.selectedItemID == "mn-live001")
+
+        // The crumb's estate keeps the board warm; a session with no
+        // directory at all lands on the estate without waiting.
+        store.showEstate()
+        #expect(store.surface == .estate)
+        #expect(store.state != nil)
+        store.dismiss()
+        store.present(context: .init(boardRoot: nil, remoteHost: nil))
+        #expect(store.surface == .estate)
+        store.dismiss()
+    }
+
+    @Test @MainActor func grepEscapeClearsTheFilterInsteadOfLeavingTheBoard() {
+        let store = HolyMannaBoardModeStore(digestService: HolyMannaDigestRecorder())
+        store.grep = "board"
+        #expect(!store.consumeEscape())
+        #expect(store.grep == "board")
+        store.isGrepFocused = true
+        #expect(store.consumeEscape())
+        #expect(store.grep.isEmpty)
+        #expect(!store.isGrepFocused)
+        let before = store.grepFocusRequest
+        store.requestGrepFocus()
+        #expect(store.grepFocusRequest == before + 1)
+    }
+
     private func temporaryDirectory(named prefix: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
@@ -261,6 +399,9 @@ private actor HolyMannaDigestRecorder: HolyMannaBoardDigesting {
 }
 
 private enum HolyMannaBoardFixtures {
+    /// What `manna state --json` prints in a directory with no board.
+    static let storageNotInitialized = #"{"success":false,"error":"Storage not initialized. Run 'manna-core init' first."}"#
+
     static let state = """
     {
       "success": true,

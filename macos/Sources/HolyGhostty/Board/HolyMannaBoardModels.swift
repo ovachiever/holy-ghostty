@@ -1,25 +1,24 @@
 import Foundation
 
 enum HolyMannaBoardSheet: String, CaseIterable, Identifiable, Sendable {
-    case now
-    case next
-    case waves
+    /// The web's "inbox" tab: asks only — who/what · the ask · the verb.
     case asks
+    case board
     case coordination
-    case dreams
-    case decisions
+    /// Toggled from the strip, never a tab.
+    case debug
 
     var id: String { rawValue }
 
+    /// The three tabs beside the crumb, in the web's order.
+    static let tabs: [HolyMannaBoardSheet] = [.asks, .board, .coordination]
+
     var title: String {
         switch self {
-        case .now: "Now"
-        case .next: "Next"
-        case .waves: "Waiting in waves"
-        case .asks: "Asks"
-        case .coordination: "Coordination"
-        case .dreams: "Dreams"
-        case .decisions: "Decisions"
+        case .asks: "inbox"
+        case .board: "board"
+        case .coordination: "coordination"
+        case .debug: "debug"
         }
     }
 }
@@ -63,6 +62,11 @@ struct HolyMannaStatePayload: Decodable, Equatable, Sendable {
     let drift: HolyMannaDrift
     let git: HolyMannaGitSummary
     let board: HolyMannaBoardMetadata
+    /// Every row on the board, done and tracks included: the done and recent
+    /// filters read it. Older cores omit it.
+    let all: [HolyMannaBoardItem]
+    /// Blocked rows the wave layering could not place.
+    let unlayered: [HolyMannaBoardItem]
 
     enum CodingKeys: String, CodingKey {
         case success
@@ -84,11 +88,38 @@ struct HolyMannaStatePayload: Decodable, Equatable, Sendable {
         case drift
         case git
         case board
+        case all
+        case unlayered
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        success = try container.decode(Bool.self, forKey: .success)
+        generatedAt = try container.decode(String.self, forKey: .generatedAt)
+        name = try container.decode(String.self, forKey: .name)
+        root = try container.decode(String.self, forKey: .root)
+        total = try container.decode(Int.self, forKey: .total)
+        counts = try container.decode([String: Int].self, forKey: .counts)
+        statusCounts = try container.decode([String: Int].self, forKey: .statusCounts)
+        now = try container.decode([HolyMannaBoardItem].self, forKey: .now)
+        next = try container.decode([HolyMannaBoardItem].self, forKey: .next)
+        waves = try container.decode([HolyMannaWave].self, forKey: .waves)
+        dreams = try container.decode([HolyMannaBoardItem].self, forKey: .dreams)
+        decisions = try container.decode([HolyMannaBoardItem].self, forKey: .decisions)
+        tracks = try container.decode([HolyMannaTrack].self, forKey: .tracks)
+        peers = try container.decode([HolyMannaPeer].self, forKey: .peers)
+        attention = try container.decode([String: Int].self, forKey: .attention)
+        coord = try container.decode(HolyMannaCoordination.self, forKey: .coord)
+        drift = try container.decode(HolyMannaDrift.self, forKey: .drift)
+        git = try container.decode(HolyMannaGitSummary.self, forKey: .git)
+        board = try container.decode(HolyMannaBoardMetadata.self, forKey: .board)
+        all = try container.decodeIfPresent([HolyMannaBoardItem].self, forKey: .all) ?? []
+        unlayered = try container.decodeIfPresent([HolyMannaBoardItem].self, forKey: .unlayered) ?? []
     }
 
     var allVisibleItems: [HolyMannaBoardItem] {
         var seen = Set<String>()
-        return (now + next + waves.flatMap(\.items) + dreams + decisions + tracks.flatMap(\.items))
+        return (now + next + waves.flatMap(\.items) + unlayered + dreams + decisions + tracks.flatMap(\.items) + all)
             .filter { seen.insert($0.id).inserted }
     }
 
@@ -97,17 +128,37 @@ struct HolyMannaStatePayload: Decodable, Equatable, Sendable {
         return allVisibleItems.first { $0.id == id }
     }
 
+    func peer(id: String?) -> HolyMannaPeer? {
+        guard let id else { return nil }
+        return peers.first { $0.agentID == id }
+    }
+
+    /// The coordination tab's badge: sessions waiting on a person or failed.
+    var attentionCount: Int {
+        attention["needs-user", default: 0] + attention["failed", default: 0]
+    }
+
+    /// app.js inboxRows: every row is who/what · the ask · the verb you
+    /// perform, ranked by verb. Title carries the who/what, detail the ask.
     var asks: [HolyMannaAsk] {
         var result: [HolyMannaAsk] = []
 
         for peer in peers where peer.attention == "needs-user" || peer.attention == "failed" {
             let prompt = peer.pulse?.latestPrompt?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let failed = peer.attention == "failed"
+            let detail: String? = if failed {
+                peer.goal ?? "failed"
+            } else if let prompt, !prompt.isEmpty {
+                "“\(HolyMannaBoardPresentation.clip(prompt, HolyMannaBoardMetrics.promptQuoteCharacters))”"
+            } else {
+                peer.goal ?? "waiting on you"
+            }
             result.append(.init(
                 id: "peer:\(peer.agentID)",
-                kind: peer.attention == "failed" ? "failed" : "peer",
+                kind: failed ? "failed" : "peer",
                 title: peer.displayName,
-                detail: prompt?.isEmpty == false ? prompt : (peer.goal ?? "Waiting for a person"),
-                verb: peer.attention == "failed" ? "fix" : "grant",
+                detail: detail,
+                verb: failed ? "fix" : "grant",
                 target: .peer(peer.agentID),
                 action: nil
             ))
@@ -117,8 +168,8 @@ struct HolyMannaStatePayload: Decodable, Equatable, Sendable {
             result.append(.init(
                 id: "decision:\(item.id)",
                 kind: "decision",
-                title: item.titlePlain,
-                detail: item.id,
+                title: HolyMannaBoardPresentation.rowText(item),
+                detail: nil,
                 verb: "rule",
                 target: .item(item.id),
                 action: nil
@@ -129,7 +180,7 @@ struct HolyMannaStatePayload: Decodable, Equatable, Sendable {
             result.append(.init(
                 id: "contention:\(contention.paths.joined(separator: "|")):\(contention.owners.joined(separator: "|"))",
                 kind: "contention",
-                title: contention.paths.isEmpty ? "Overlapping work" : contention.paths.joined(separator: ", "),
+                title: contention.paths.isEmpty ? "overlapping work" : contention.paths.joined(separator: ", "),
                 detail: contention.owners.isEmpty ? nil : contention.owners.joined(separator: " and "),
                 verb: "split",
                 target: .sheet(.coordination),
@@ -137,8 +188,8 @@ struct HolyMannaStatePayload: Decodable, Equatable, Sendable {
             ))
         }
 
-        var needsSafeRepair = false
-        var needsSync = false
+        var handoffsBehind = 0
+        var safeRepairs = 0
         for finding in drift.findings {
             switch finding.kind {
             case "landed_open":
@@ -146,19 +197,20 @@ struct HolyMannaStatePayload: Decodable, Equatable, Sendable {
                 result.append(.init(
                     id: "landed:\(issueID)",
                     kind: "landed",
-                    title: item(id: issueID)?.titlePlain ?? issueID,
-                    detail: finding.evidence.map { "Landed in \($0), still open" },
+                    title: item(id: issueID).map(HolyMannaBoardPresentation.rowText) ?? issueID,
+                    detail: "landed in \(finding.evidence ?? "a commit"), still open",
                     verb: "close",
                     target: .item(issueID),
                     action: .close(issueID)
                 ))
             case "stale_dream":
                 guard let issueID = finding.issueID else { continue }
+                let since = finding.evidence.map { $0.replacingOccurrences(of: "created_at ", with: "") }
                 result.append(.init(
                     id: "dream:\(issueID)",
                     kind: "dream",
-                    title: item(id: issueID)?.titlePlain ?? issueID,
-                    detail: finding.evidence,
+                    title: item(id: issueID).map(HolyMannaBoardPresentation.rowText) ?? issueID,
+                    detail: "parked since \(since ?? "a while")",
                     verb: "rule",
                     target: .item(issueID),
                     action: nil
@@ -167,41 +219,53 @@ struct HolyMannaStatePayload: Decodable, Equatable, Sendable {
                 result.append(.init(
                     id: "drift:\(finding.kind):\(finding.issueID ?? finding.evidence ?? finding.detail ?? "unidentified")",
                     kind: "document",
-                    title: finding.detail ?? "A document names missing work",
+                    title: finding.detail ?? "a document names a missing item",
                     detail: finding.evidence,
                     verb: "fix doc",
-                    target: .sheet(.asks),
+                    target: .sheet(.debug),
                     action: nil
                 ))
             case "handoff_presentation":
-                needsSync = true
+                handoffsBehind += 1
             case "stale_claim", "blocker_desync":
-                needsSafeRepair = true
+                safeRepairs += 1
             default:
                 continue
             }
         }
 
-        if needsSync {
+        if handoffsBehind > 0 {
             result.append(.init(
                 id: "board:sync",
                 kind: "handoffs",
-                title: "Work-order presentation is behind the ledger",
-                detail: "Regenerate filenames and the handoff index from canonical board state.",
+                title: "\(handoffsBehind) work-order filename\(handoffsBehind == 1 ? "" : "s") behind their priority",
+                detail: nil,
                 verb: "sync",
-                target: .sheet(.asks),
+                target: .sheet(.debug),
                 action: .sync
             ))
         }
-        if needsSafeRepair {
+        if safeRepairs > 0 {
             result.append(.init(
                 id: "board:repair",
                 kind: "repair",
-                title: "Safe board repairs are ready",
-                detail: "Release dead claims and remove blockers whose dependencies are complete.",
+                title: "\(safeRepairs) safe repair\(safeRepairs == 1 ? "" : "s") (dead claims, resolved blockers)",
+                detail: nil,
                 verb: "apply",
-                target: .sheet(.asks),
+                target: .sheet(.debug),
                 action: .fix
+            ))
+        }
+
+        for drop in coord.drops {
+            result.append(.init(
+                id: "drop:\(drop.id)",
+                kind: "drop",
+                title: drop.paths.isEmpty ? "note" : drop.paths.joined(separator: ", "),
+                detail: "\(HolyMannaBoardPresentation.clip(drop.note, HolyMannaBoardMetrics.dropNoteCharacters)) · from \(drop.owner ?? "unknown")",
+                verb: "read",
+                target: .sheet(.coordination),
+                action: nil
             ))
         }
 
@@ -209,15 +273,15 @@ struct HolyMannaStatePayload: Decodable, Equatable, Sendable {
             result.append(.init(
                 id: "ready:\(first.id)",
                 kind: "ready",
-                title: first.titlePlain,
-                detail: first.order.map { "Priority #\($0 + 1)" },
+                title: HolyMannaBoardPresentation.rowText(first),
+                detail: "priority #\((first.order ?? 0) + 1)",
                 verb: "launch",
                 target: .item(first.id),
                 action: nil
             ))
         }
 
-        let rank = ["grant", "fix", "rule", "split", "close", "apply", "sync", "fix doc", "launch"]
+        let rank = HolyMannaAsk.verbRank
         return result.sorted { lhs, rhs in
             (rank.firstIndex(of: lhs.verb) ?? rank.count) < (rank.firstIndex(of: rhs.verb) ?? rank.count)
         }
@@ -249,6 +313,9 @@ struct HolyMannaBoardItem: Decodable, Equatable, Identifiable, Sendable {
     let handoffDigest: String?
     let handoffExists: Bool?
     let source: String?
+    /// A one-line digest attached by the serve daemon; the CLI's own state
+    /// carries none today, and the title stands in (dimmed) when absent.
+    let digest: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -275,6 +342,7 @@ struct HolyMannaBoardItem: Decodable, Equatable, Identifiable, Sendable {
         case handoffDigest = "handoff_digest"
         case handoffExists = "handoff_exists"
         case source
+        case digest
     }
 }
 
@@ -475,11 +543,15 @@ struct HolyMannaCoordDrop: Decodable, Equatable, Identifiable, Sendable {
     let paths: [String]
     let note: String?
     let owner: String?
+    let recipient: String?
+    let createdAt: String?
 
     enum CodingKeys: String, CodingKey {
         case path
         case note
         case owner
+        case recipient = "for"
+        case createdAt = "created_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -493,6 +565,8 @@ struct HolyMannaCoordDrop: Decodable, Equatable, Identifiable, Sendable {
         }
         note = try container.decodeIfPresent(String.self, forKey: .note)
         owner = try container.decodeIfPresent(String.self, forKey: .owner)
+        recipient = try container.decodeIfPresent(String.self, forKey: .recipient)
+        createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
     }
 
     var id: String { "\(owner ?? "unknown"):\(paths.joined(separator: "|")):\(note ?? "")" }
@@ -660,6 +734,15 @@ struct HolyMannaAsk: Equatable, Identifiable, Sendable {
     let verb: String
     let target: Target
     let action: HolyMannaMutation?
+
+    /// app.js VERB_RANK: the inbox's order of urgency.
+    static let verbRank = ["grant", "fix", "rule", "split", "close", "apply", "sync", "fix doc", "read", "launch"]
+
+    /// The item a rule ask is about, when it is one.
+    var itemID: String? {
+        if case let .item(id) = target { return id }
+        return nil
+    }
 }
 
 enum HolyMannaMutation: Equatable, Identifiable, Sendable {
@@ -684,6 +767,21 @@ enum HolyMannaMutation: Equatable, Identifiable, Sendable {
         case let .unblock(issueID, blockerID): "unblock:\(issueID):\(blockerID)"
         case .sync: "sync"
         case .fix: "fix"
+        }
+    }
+
+    /// The word the action row prints inside brackets.
+    var verb: String {
+        switch self {
+        case .claim: "claim"
+        case .done: "done"
+        case .abandon: "abandon"
+        case .close: "close"
+        case .promote: "promote"
+        case .delete: "delete"
+        case let .unblock(_, blockerID): "unblock \(HolyMannaBoardPresentation.shortID(blockerID))"
+        case .sync: "sync"
+        case .fix: "apply"
         }
     }
 
