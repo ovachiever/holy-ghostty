@@ -58,3 +58,4 @@ GhosttyKit.xcframework.debug-backup/
 .manna/transactions/
 !.handoff/
 !.handoff/**
+!.manna/federation.yaml
