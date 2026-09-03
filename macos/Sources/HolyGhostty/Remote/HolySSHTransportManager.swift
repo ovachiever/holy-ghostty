@@ -191,8 +191,13 @@ final class HolySSHTransportManager: @unchecked Sendable {
 
     private func controlPath(destination: String, lane: HolySSHTransportLane) throws -> String {
         let hostKey = HolySSHAdmissionController.hostKey(for: destination)
+        // 16 bytes (128 bits) of digest: a running mux master ignores the
+        // destination argument, so two hosts colliding on this name would
+        // silently share a connection — collision resistance is a security
+        // property here, not hygiene. The short ~/.holy/ssh base leaves
+        // ample room under controlPathByteLimit even with long usernames.
         let digest = SHA256.hash(data: Data(hostKey.utf8))
-            .prefix(4)
+            .prefix(16)
             .map { String(format: "%02x", $0) }
             .joined()
         let path = controlDirectoryURL
