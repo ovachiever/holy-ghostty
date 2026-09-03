@@ -1839,12 +1839,27 @@ final class HolySession: ObservableObject, Identifiable {
 
     private static func agentWaitingEvidence(runtime: HolySessionRuntime, lines: [String]) -> String? {
         guard isAgentRuntime(runtime) else { return nil }
-        guard lines.suffix(8).contains(where: isAgentPromptLine) else { return nil }
+        let recent = lines.suffix(8)
+        guard recent.contains(where: isAgentPromptLine) else { return nil }
+
+        // Claude's "← N agents" footer reports background presence. Those
+        // agents can outlive the foreground turn, so the count is not a request
+        // for input and cannot turn an idle composer into approval activity.
+        guard !recent.contains(where: isAgentPresenceFooterLine) else { return nil }
 
         // Never echo the prompt line itself: it carries the user's draft, and
         // that text flows into telemetry detail where words like "confirmed"
         // or "allow" masquerade as the agent requesting approval.
         return "Prompt is ready for your next message"
+    }
+
+    private static func isAgentPresenceFooterLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("⏵⏵") else { return false }
+        return trimmed.range(
+            of: #"^⏵⏵\s+auto mode on(?:\s+\([^)]*\))?\s*·\s*←\s*[0-9]+\s+agents?\s*$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
     }
 
     private static func agentPlanningQuestionEvidence(runtime: HolySessionRuntime, lines: [String]) -> String? {
@@ -2032,7 +2047,8 @@ final class HolySession: ObservableObject, Identifiable {
 
     private static func isAgentFooterLine(_ line: String) -> Bool {
         let lower = line.lowercased()
-        return lower.range(of: #"\bgpt-[0-9a-z][0-9a-z.\-]*\b"#, options: .regularExpression) != nil
+        return isAgentPresenceFooterLine(line)
+            || lower.range(of: #"\bgpt-[0-9a-z][0-9a-z.\-]*\b"#, options: .regularExpression) != nil
             || lower.contains("tokens")
             || lower.contains("context left")
     }

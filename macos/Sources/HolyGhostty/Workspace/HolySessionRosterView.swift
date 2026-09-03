@@ -580,7 +580,7 @@ private enum HolyRosterTriageLane: String, CaseIterable {
 
     init(kind: HolySessionAttentionKind) {
         switch kind {
-        case .needsUser, .unread:
+        case .conflict, .needsUser, .unread:
             self = .needsYou
         case .working:
             self = .working
@@ -1103,7 +1103,13 @@ private struct HolyRosterRow: View {
     // Age = time since the agent last produced output. Shown only once a
     // session has aged past an hour, so fresh rows stay uncluttered.
     private func ageLabelText(asOf now: Date) -> String? {
-        let seconds = now.timeIntervalSince(session.activityAt)
+        let isConflict = attention.kind == .conflict
+        let anchor = isConflict
+            ? attention.becameAvailableAt ?? session.activityAt
+            : session.activityAt
+        let seconds = max(0, now.timeIntervalSince(anchor))
+        if isConflict, seconds < 60 { return "<1m" }
+        if isConflict, seconds < 3_600 { return "\(max(1, Int(seconds / 60)))m" }
         guard seconds >= 3600 else { return nil }
         let hours = Int(seconds / 3600)
         if hours < 24 { return "\(hours)h" }
@@ -1186,7 +1192,11 @@ private struct HolyRosterRow: View {
                     .monospacedDigit()
                     .foregroundStyle(HolyGhosttyTheme.textTertiary)
                     .opacity(isSelected ? 0.95 : 0.7)
-                    .help("Last activity \(text) ago")
+                    .help(
+                        attention.kind == .conflict
+                            ? "Agent state conflict began \(text) ago"
+                            : "Last activity \(text) ago"
+                    )
             }
         }
     }
@@ -1268,6 +1278,8 @@ enum HolyAgentPalette {
 extension HolySessionAttentionKind {
     var holyColor: Color {
         switch self {
+        case .conflict:
+            return HolyGhosttyTheme.danger
         case .working:
             return HolyAgentPalette.workingBlue
         case .needsUser:
@@ -1502,6 +1514,12 @@ private struct HolyAgentStatusOrb: View {
 
     var body: some View {
         switch state {
+        case .conflict:
+            HolyAgentStaticOrb(
+                color: HolyGhosttyTheme.danger,
+                symbol: "exclamationmark.triangle.fill",
+                opacity: 1
+            )
         case .working:
             if isAnimated {
                 HolyAgentWorkingSpinner(size: 13, lineWidth: 2)

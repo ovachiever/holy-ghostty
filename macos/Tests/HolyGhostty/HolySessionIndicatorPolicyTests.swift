@@ -5,8 +5,9 @@ import Testing
 struct HolySessionIndicatorPolicyTests {
     private let now = Date(timeIntervalSince1970: 1_750_000_000)
 
-    @Test func vocabularyIsExactlyTheSixCanonicalStates() {
+    @Test func vocabularyIncludesExplicitWireConflictState() {
         #expect(Set(HolySessionAttentionKind.allCases) == Set([
+            .conflict,
             .working,
             .needsUser,
             .unread,
@@ -330,7 +331,8 @@ struct HolySessionIndicatorPolicyTests {
         lastUsedAgo: TimeInterval = 0,
         producerProcessAlive: Bool? = nil,
         producerOutputAgo: TimeInterval? = nil,
-        lastActivityAgo: TimeInterval? = nil
+        lastActivityAgo: TimeInterval? = nil,
+        scrapePhase: HolySessionPhase? = nil
     ) -> HolySessionAttentionKind {
         HolySessionIndicatorPolicy.kind(for: .init(
             lifecycle: lifecycle,
@@ -342,6 +344,7 @@ struct HolySessionIndicatorPolicyTests {
             producerProcessAlive: producerProcessAlive,
             producerLastOutputAt: producerOutputAgo.map { now.addingTimeInterval(-$0) },
             lastActivityAt: lastActivityAgo.map { now.addingTimeInterval(-$0) },
+            scrapePhase: scrapePhase,
             now: now
         ))
     }
@@ -424,29 +427,31 @@ struct HolySessionIndicatorPolicyTests {
         #expect(metadata.lastSeenAt == seenAt)
     }
 
-    // Process evidence may extend or invalidate a working claim, never
-    // create one (mn-8cec74).
+    // Process evidence may invalidate a working claim, never create or renew
+    // one. Only a newer hook envelope renews the lease.
     @Test func deadProducerInvalidatesAWorkingClaimWithinItsLease() {
         #expect(kind(lifecycle: .working, occurredAgo: 60, producerProcessAlive: false) == .usedToday)
         #expect(kind(lifecycle: .working, occurredAgo: 60, producerProcessAlive: true) == .working)
         #expect(kind(lifecycle: .working, occurredAgo: 60, producerProcessAlive: nil) == .working)
     }
 
-    // Extension demands a live process AND fresh pane output: a working TUI
-    // redraws continuously, while a process idling at its prompt goes static
-    // (Erik's ghost-spinner report, 2026-07-21).
-    @Test func liveProducerExtendsAWorkingClaimOnlyWhileOutputStaysFresh() {
+    // Erik's live repro 2026-09-03: claude.exe and fresh window activity
+    // survived a lost Stop hook. Neither is hook traffic, so neither may renew
+    // the 30-minute authoritative working lease.
+    @Test func processAndPaneActivityCannotRenewAWorkingLease() {
         #expect(kind(
             lifecycle: .working,
             occurredAgo: 31 * 60,
             producerProcessAlive: true,
-            producerOutputAgo: 30
-        ) == .working)
+            producerOutputAgo: 30,
+            scrapePhase: .active
+        ) == .usedToday)
         #expect(kind(
             lifecycle: .working,
             occurredAgo: 31 * 60,
             producerProcessAlive: true,
-            producerOutputAgo: 10 * 60
+            producerOutputAgo: 10 * 60,
+            scrapePhase: .active
         ) == .usedToday)
         #expect(kind(lifecycle: .working, occurredAgo: 31 * 60, producerProcessAlive: true) == .usedToday)
         #expect(kind(
@@ -456,6 +461,30 @@ struct HolySessionIndicatorPolicyTests {
             producerOutputAgo: 30
         ) == .usedToday)
         #expect(kind(lifecycle: .working, occurredAgo: 31 * 60, producerProcessAlive: false) == .usedToday)
+    }
+
+    @Test func expiredWorkingLeaseFallsBackToCurrentScrapeVerdict() {
+        #expect(kind(
+            lifecycle: .working,
+            occurredAgo: 31 * 60,
+            producerProcessAlive: true,
+            producerOutputAgo: 1,
+            scrapePhase: .working
+        ) == .working)
+        #expect(kind(
+            lifecycle: .working,
+            occurredAgo: 31 * 60,
+            producerProcessAlive: true,
+            producerOutputAgo: 1,
+            scrapePhase: .waitingInput
+        ) == .needsUser)
+        #expect(kind(
+            lifecycle: .working,
+            occurredAgo: 31 * 60,
+            producerProcessAlive: true,
+            producerOutputAgo: 1,
+            scrapePhase: .active
+        ) == .usedToday)
     }
 
     @Test func processEvidenceNeverCreatesOrExtendsOtherStates() {

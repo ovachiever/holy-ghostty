@@ -98,6 +98,7 @@ enum HolySessionAttention: String, CaseIterable {
 /// case answers one question only: active work, human attention, unread work,
 /// or age. Adding another glyph requires changing this contract and its tests.
 enum HolySessionAttentionKind: String, Codable, Equatable, Hashable, CaseIterable {
+    case conflict
     case working
     case needsUser
     case unread
@@ -360,7 +361,7 @@ struct HolySessionAttentionPresentation: Equatable {
     }
 }
 
-/// Pure evidence consumed by the six-state indicator policy. There is
+/// Pure evidence consumed by the roster indicator policy. There is
 /// intentionally no preview, title, spinner glyph, or screen-text field here.
 struct HolySessionIndicatorEvidence: Equatable {
     let lifecycle: HolyAgentLifecycleState?
@@ -373,15 +374,17 @@ struct HolySessionIndicatorEvidence: Equatable {
     /// pane that published the latest working claim still runs a non-shell
     /// foreground process. nil means unknown and degrades to lease behavior.
     var producerProcessAlive: Bool? = nil
-    /// Last output activity in the producer pane's window. Bounds lease
-    /// extension: a working agent TUI redraws continuously, so a static pane
-    /// plus a process idling at its prompt is not evidence of work.
+    /// Last output activity in the producer pane's window. Diagnostic only:
+    /// pane redraws are not hook traffic and cannot renew a working lease.
     var producerLastOutputAt: Date? = nil
     /// Latest moment anything happened here on any axis — human prompt,
     /// agent event, or the operator reading the session. Splits plain grey
     /// (quiet for you, but alive) from sleeping (dormant on every axis).
     /// nil degrades to `lastUsedAt`.
     var lastActivityAt: Date? = nil
+    /// Screen-derived phase used only after an authoritative working claim's
+    /// hook lease expires. It cannot override fresh wire truth.
+    let scrapePhase: HolySessionPhase?
     let now: Date
 }
 
@@ -390,10 +393,6 @@ enum HolySessionIndicatorPolicy {
     static let needsUserLease: TimeInterval = 30 * 60
     static let usedTodayInterval: TimeInterval = 24 * 60 * 60
     static let sleepingInterval: TimeInterval = 48 * 60 * 60
-    /// How recent producer pane output must be for a live process to extend
-    /// a working claim past its lease.
-    static let producerOutputFreshWindow: TimeInterval = 3 * 60
-
     static func kind(
         for evidence: HolySessionIndicatorEvidence,
         workingLease: TimeInterval = workingLease,
@@ -419,24 +418,27 @@ enum HolySessionIndicatorPolicy {
                     }
                 }
             case .working:
-                // Process evidence may extend or invalidate a committed
-                // working claim, never create one (mn-8cec74). A provably
-                // dead producer drops the spinner on the next poll. Extension
-                // past the lease demands BOTH a live producer process and
-                // fresh pane output — an agent TUI redraws continuously while
-                // working, so a static pane with a process idling at its
-                // prompt must expire on the lease, not spin forever.
-                if evidence.producerProcessAlive != false {
-                    if let occurredAt = evidence.lifecycleOccurredAt {
-                        let age = evidence.now.timeIntervalSince(occurredAt)
-                        if age >= 0, age < workingLease {
-                            return .working
-                        }
-                    }
-                    if evidence.producerProcessAlive == true,
-                       let outputAt = evidence.producerLastOutputAt,
-                       evidence.now.timeIntervalSince(outputAt) < producerOutputFreshWindow {
+                // A process may invalidate a claim, but only a newer hook event
+                // can renew its lease. Claude can sit at an idle prompt while
+                // its process and window remain active, so neither fact is
+                // proof of continuing work. After lease expiry, use the current
+                // scrape verdict until fresh wire truth arrives.
+                if evidence.producerProcessAlive != false,
+                   let occurredAt = evidence.lifecycleOccurredAt {
+                    let age = evidence.now.timeIntervalSince(occurredAt)
+                    if age >= 0, age < workingLease {
                         return .working
+                    }
+
+                    if age >= workingLease {
+                        switch evidence.scrapePhase {
+                        case .working:
+                            return .working
+                        case .waitingInput, .failed:
+                            return .needsUser
+                        case .active, .completed, nil:
+                            break
+                        }
                     }
                 }
             case .finished, .idle, .ended:

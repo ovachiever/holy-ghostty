@@ -141,7 +141,7 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(observation.observedAt == observedAt)
     }
 
-    @Test func conflictingValidPaneProducersFailClosed() throws {
+    @Test func newerValidPaneProducerSupersedesStaleValue() throws {
         let first = try envelope(
             lifecycle: .working,
             timestamp: 1_752_500_123_456,
@@ -158,9 +158,88 @@ struct HolyTmuxAgentStateMonitorTests {
         ].joined(separator: "\n"))
         let observation = try #require(observations.values.first)
 
+        #expect(observation.integrity == .valid)
+        #expect(observation.envelope?.eventToken == "event-2")
+        #expect(observation.rawWireValue == second)
+    }
+
+    @Test func equalFormatAndTimestampDisagreementStillFailsClosed() throws {
+        let first = try envelope(
+            lifecycle: .working,
+            timestamp: 1_752_500_123_456,
+            token: "event-1"
+        ).wireValue
+        let second = try envelope(
+            lifecycle: .needsUser,
+            timestamp: 1_752_500_123_456,
+            token: "event-2"
+        ).wireValue
+        let observations = try parse([
+            row(session: "alpha", pane: "%1", wire: first),
+            row(session: "alpha", pane: "%2", wire: second),
+        ].joined(separator: "\n"))
+        let observation = try #require(observations.values.first)
+
         #expect(observation.integrity == .conflicting)
         #expect(observation.envelope == nil)
         #expect(observation.rawWireValue == nil)
+    }
+
+    @Test func conflictingRegisterSelfHealsWhenOneProducerAdvances() throws {
+        let first = try envelope(
+            lifecycle: .working,
+            timestamp: 1_752_500_123_456,
+            token: "event-1"
+        ).wireValue
+        let tied = try envelope(
+            lifecycle: .needsUser,
+            timestamp: 1_752_500_123_456,
+            token: "event-2"
+        ).wireValue
+        let healed = try envelope(
+            lifecycle: .idle,
+            timestamp: 1_752_500_123_457,
+            token: "event-3"
+        ).wireValue
+
+        let conflict = try parse([
+            row(session: "alpha", pane: "%1", wire: first),
+            row(session: "alpha", pane: "%2", wire: tied),
+        ].joined(separator: "\n")).values.first
+        let nextPoll = try parse([
+            row(session: "alpha", pane: "%1", wire: first),
+            row(session: "alpha", pane: "%2", wire: healed),
+        ].joined(separator: "\n")).values.first
+
+        #expect(conflict?.integrity == .conflicting)
+        #expect(nextPoll?.integrity == .valid)
+        #expect(nextPoll?.envelope?.eventToken == "event-3")
+    }
+
+    @Test func identifiedWireSupersedesLegacyBlankSessionShape() throws {
+        // The legacy pane is deliberately one millisecond newer. Identified
+        // hook state has stronger format authority than migration residue.
+        let legacy = try envelope(
+            lifecycle: .working,
+            timestamp: 1_752_500_123_457,
+            token: "legacy"
+        ).wireValue
+        let identified = try envelope(
+            lifecycle: .idle,
+            timestamp: 1_752_500_123_456,
+            token: "identified",
+            sessionID: "0b15c3a3-1d98-4498-96fd-a6dc20d4a521"
+        ).wireValue
+        let observations = try parse([
+            row(session: "alpha", pane: "%1", wire: legacy),
+            row(session: "alpha", pane: "%2", wire: identified),
+        ].joined(separator: "\n"))
+        let observation = try #require(observations.values.first)
+
+        #expect(observation.integrity == .valid)
+        #expect(observation.envelope?.eventToken == "identified")
+        #expect(observation.envelope?.sessionID == "0b15c3a3-1d98-4498-96fd-a6dc20d4a521")
+        #expect(observation.rawWireValue == identified)
     }
 
     @Test func laterEndedStateDoesNotEraseDurableFinishedEnvelope() throws {
@@ -186,6 +265,28 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(observation.envelope?.lifecycle == .ended)
         #expect(observation.lastFinishedEnvelope?.lifecycle == .finished)
         #expect(observation.lastFinishedEnvelope?.eventToken == "finish-1")
+    }
+
+    @Test func newestFinishedRegisterSupersedesStalePaneValue() throws {
+        let stale = try envelope(
+            lifecycle: .finished,
+            timestamp: 1_752_500_123_456,
+            token: "finish-old"
+        ).wireValue
+        let newest = try envelope(
+            lifecycle: .finished,
+            timestamp: 1_752_500_123_457,
+            token: "finish-new"
+        ).wireValue
+        let observations = try parse([
+            row(session: "alpha", pane: "%1", wire: nil, lastFinishedWire: stale),
+            row(session: "alpha", pane: "%2", wire: nil, lastFinishedWire: newest),
+        ].joined(separator: "\n"))
+        let observation = try #require(observations.values.first)
+
+        #expect(observation.integrity == .valid)
+        #expect(observation.lastFinishedEnvelope?.eventToken == "finish-new")
+        #expect(observation.rawLastFinishedWireValue == newest)
     }
 
     @Test func malformedLatestCannotEraseIndependentValidFinish() throws {
@@ -523,13 +624,15 @@ struct HolyTmuxAgentStateMonitorTests {
     private func envelope(
         lifecycle: HolyAgentLifecycleState,
         timestamp: Int64,
-        token: String
+        token: String,
+        sessionID: String? = nil
     ) throws -> HolyAgentStateEnvelope {
         try HolyAgentStateEnvelope(
             source: "future-harness.v1",
             lifecycle: lifecycle,
             occurredAtMilliseconds: timestamp,
             eventToken: token,
+            sessionID: sessionID,
             reasonCode: "test"
         )
     }

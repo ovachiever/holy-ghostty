@@ -1245,7 +1245,7 @@ struct HolyWorkspaceRootView: View {
         state: HolySessionAttentionPresentation
     ) -> String {
         switch state.kind {
-        case .needsUser, .unread:
+        case .conflict, .needsUser, .unread:
             return "\(state.title) \(elapsedText(since: state.becameAvailableAt ?? session.activityAt))"
         case .working, .usedToday, .inactive, .sleeping:
             return state.title

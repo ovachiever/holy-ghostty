@@ -194,6 +194,25 @@ struct HolySessionLiveStatusTests {
         #expect(!HolySession.isLiveAgentStatusLineForTesting("⏵⏵ auto mode on · 1 shell · ← for agents"))
     }
 
+    // Exact Claude Code footer captured 2026-09-03. The agent count is
+    // presence chrome: background agents can outlive the foreground turn, so
+    // a ready composer beside this line is idle, not working or approval.
+    @Test func agentCountFooterIsIdlePresence() {
+        let footer = "⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent"
+        let lines = [
+            "✻ Churned for 7m 12s",
+            "❯",
+            "Model · Fable 5 · xhigh",
+            footer,
+        ]
+
+        #expect(!HolySession.isLiveAgentStatusLineForTesting(footer))
+        #expect(!HolySession.isAgentBusyStatusLineForTesting(footer))
+        #expect(!HolySession.isLiveAgentSwarmLineForTesting(footer))
+        #expect(HolySession.agentWorkingEvidenceForTesting(lines: lines) == nil)
+        #expect(HolySession.agentWaitingEvidenceForTesting(lines: lines) == nil)
+    }
+
     // Next-step hints must derive from an actual approval signal, never be
     // harvested from arbitrary transcript prose — streamed text containing
     // "confirm" otherwise becomes "Review the prompt and confirm approval"

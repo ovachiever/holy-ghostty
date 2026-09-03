@@ -31,6 +31,11 @@ private struct HolyConvergeRosterSnapshot {
     let localProcessExited: Bool
 }
 
+private struct HolyAgentStateConflictEvidence: Equatable {
+    let firstObservedAt: Date
+    let paneIDs: [String]
+}
+
 @MainActor
 final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var sessions: [HolySession] = []
@@ -211,6 +216,9 @@ final class HolyWorkspaceStore: ObservableObject {
     /// Absent means unknown, which the indicator policy treats as lease-only.
     private var producerProcessAliveBySessionID: [UUID: Bool] = [:]
     private var producerLastOutputAtBySessionID: [UUID: Date] = [:]
+    /// Equal-authority lifecycle values are uncertainty, not work. Preserve
+    /// the first observed time so the static conflict glyph carries an age.
+    private var agentStateConflictBySessionID: [UUID: HolyAgentStateConflictEvidence] = [:]
     /// Armed /loop wakeup fire times per session (mn-f4d77b), from the
     /// @holy_watcher_v1 register. Feeds the static watcher eye only; never
     /// touches the indicator policy.
@@ -2628,18 +2636,25 @@ final class HolyWorkspaceStore: ObservableObject {
             metadata?.lastSeenAt,
             metadata?.lastAuthoritativeEventOccurredAt,
         ].compactMap(\.self).max() ?? lastUsedAt
-        let kind = HolySessionIndicatorPolicy.kind(for: .init(
-            lifecycle: envelope?.lifecycle,
-            lifecycleOccurredAt: eventOccurredAt,
-            processExited: session.surfaceView.processProvablyExited,
-            lastAgentFinishedAt: finishedAt,
-            lastSeenAt: metadata?.lastSeenAt,
-            lastUsedAt: lastUsedAt,
-            producerProcessAlive: producerProcessAliveBySessionID[session.id],
-            producerLastOutputAt: producerLastOutputAtBySessionID[session.id],
-            lastActivityAt: lastActivityAt,
-            now: attentionClock
-        ))
+        let stateConflict = agentStateConflictBySessionID[session.id]
+        let kind: HolySessionAttentionKind
+        if stateConflict != nil {
+            kind = .conflict
+        } else {
+            kind = HolySessionIndicatorPolicy.kind(for: .init(
+                lifecycle: envelope?.lifecycle,
+                lifecycleOccurredAt: eventOccurredAt,
+                processExited: session.surfaceView.processProvablyExited,
+                lastAgentFinishedAt: finishedAt,
+                lastSeenAt: metadata?.lastSeenAt,
+                lastUsedAt: lastUsedAt,
+                producerProcessAlive: producerProcessAliveBySessionID[session.id],
+                producerLastOutputAt: producerLastOutputAtBySessionID[session.id],
+                lastActivityAt: lastActivityAt,
+                scrapePhase: session.phase,
+                now: attentionClock
+            ))
+        }
 
         // mn-81331d instrumentation: a working envelope that does not render
         // a working orb is the exact contradiction Erik reported, with every
@@ -2654,6 +2669,19 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         switch kind {
+        case .conflict:
+            let paneCount = stateConflict?.paneIDs.count ?? 0
+            let detail = paneCount == 1
+                ? "Lifecycle register is ambiguous in one session pane"
+                : "Lifecycle producers disagree across \(paneCount) session panes"
+            return .init(
+                kind: .conflict,
+                symbolName: "exclamationmark.triangle.fill",
+                title: "Agent state conflict",
+                detail: detail,
+                isProminent: true,
+                becameAvailableAt: stateConflict?.firstObservedAt
+            )
         case .working:
             return .init(
                 kind: .working,
@@ -2934,12 +2962,6 @@ final class HolyWorkspaceStore: ObservableObject {
 
         var attentionEvidenceChanged = false
         for observation in snapshot.observations.values {
-            // Each register fails closed independently. Aggregate integrity is
-            // diagnostic; consume only whichever uniquely valid envelope the
-            // parser exposed.
-            guard observation.envelope != nil
-                    || observation.lastFinishedEnvelope != nil else { continue }
-
             let matchingSessions = sessions.filter { session in
                 sessionMatches(
                     session,
@@ -2953,9 +2975,22 @@ final class HolyWorkspaceStore: ObservableObject {
                 continue
             }
 
-            // Producer-process evidence extends or invalidates working claims
-            // in the indicator policy; repaint on the poll that observed a
-            // transition so a killed agent stops spinning within a second.
+            let previousConflict = agentStateConflictBySessionID[session.id]
+            if observation.integrity == .conflicting {
+                agentStateConflictBySessionID[session.id] = .init(
+                    firstObservedAt: previousConflict?.firstObservedAt ?? observation.observedAt,
+                    paneIDs: observation.paneIDs
+                )
+            } else {
+                agentStateConflictBySessionID.removeValue(forKey: session.id)
+            }
+            if previousConflict != agentStateConflictBySessionID[session.id] {
+                attentionEvidenceChanged = true
+            }
+
+            // Producer-process evidence may invalidate a working claim, but it
+            // cannot renew the hook lease. Repaint on a process transition so
+            // a killed agent stops spinning within a second.
             let previousAlive = producerProcessAliveBySessionID[session.id]
             if let alive = observation.producerHasLiveProcess {
                 producerProcessAliveBySessionID[session.id] = alive
@@ -2965,8 +3000,8 @@ final class HolyWorkspaceStore: ObservableObject {
             if previousAlive != observation.producerHasLiveProcess {
                 attentionEvidenceChanged = true
             }
-            // Output recency changes every poll while a TUI redraws; it only
-            // matters at lease expiry, so it never triggers a repaint itself.
+            // Output recency is retained for the stalled-agent diagnostic lane.
+            // It is not hook traffic and never renews or repaints a lease.
             if let outputAt = observation.producerLastOutputAt {
                 producerLastOutputAtBySessionID[session.id] = outputAt
             } else {
@@ -2997,6 +3032,21 @@ final class HolyWorkspaceStore: ObservableObject {
             }
             if let envelope = observation.envelope {
                 if session.applyAgentStateEnvelope(envelope, observedAt: observation.observedAt) {
+                    attentionEvidenceChanged = true
+                }
+            }
+
+            // Cross the lease boundary on the first poll after a lost finish
+            // even when process and pane-output facts remain unchanged. This
+            // makes the stale wire yield to the scrape phase within one poll,
+            // rather than waiting for the minute-level presentation clock.
+            if let envelope = session.agentStateEnvelope,
+               envelope.lifecycle == .working {
+                let leaseExpiresAt = envelope.occurredAt.addingTimeInterval(
+                    HolySessionIndicatorPolicy.workingLease
+                )
+                if observation.observedAt >= leaseExpiresAt,
+                   attentionClock < leaseExpiresAt {
                     attentionEvidenceChanged = true
                 }
             }

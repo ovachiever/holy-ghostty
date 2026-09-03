@@ -98,9 +98,8 @@ struct HolyTmuxAgentStateObservation: Equatable, Sendable {
     /// there is no unambiguous producer pane or the command is unreadable —
     /// unknown must degrade to lease behavior, never invalidate a claim.
     let producerHasLiveProcess: Bool?
-    /// Last output activity in the producer pane's window. A working agent
-    /// TUI redraws continuously; one idle at its prompt goes static. Bounds
-    /// lease extension so a process merely existing cannot pin a spinner.
+    /// Last output activity in the producer pane's window. Diagnostic evidence
+    /// for stalled-agent handling only; pane redraws cannot renew a hook lease.
     let producerLastOutputAt: Date?
     /// When the session's armed /loop wakeup will fire (mn-f4d77b). Read from
     /// the independent @holy_watcher_v1 register; nil when no pane publishes
@@ -343,6 +342,13 @@ extension HolyTmuxAgentStateMonitor {
         let scrubLocalTmuxEnvironment: Bool
     }
 
+    private struct RegisterResolution {
+        let envelope: HolyAgentStateEnvelope?
+        let rawWireValue: String?
+        let isConflicting: Bool
+        let isInvalid: Bool
+    }
+
     static func commandPlan(
         for endpoint: HolyTmuxAgentStateEndpoint
     ) throws -> CommandPlan {
@@ -497,20 +503,32 @@ extension HolyTmuxAgentStateMonitor {
                 continue
             }
 
-            // The wire's second field is the source runtime ("v1|claude|…").
-            // Cheap peek without a full parse: the producer-evidence rule
-            // needs only the runtime, and a malformed wire yields nil, which
-            // downgrades evidence to unknown — fail-closed as everywhere.
-            func envelopeSource(fromRawWireValue raw: String?) -> String? {
-                guard let raw else { return nil }
-                let fields = raw.split(separator: "|", omittingEmptySubsequences: false)
-                guard fields.count > 1 else { return nil }
-                return String(fields[1])
-            }
+            // A long-running tmux session can retain a pane value from before
+            // harness identity rode the wire beside a newer identified value.
+            // That is migration residue, not an eternal conflict. Resolve each
+            // independent register by wire authority first and producer time
+            // second. Equal-authority, equal-time disagreement still fails
+            // closed and becomes an explicit workspace conflict.
+            let current = resolveRegister(nonEmptyValues)
+            let finished = resolveRegister(
+                nonEmptyFinishedValues,
+                requiring: .finished
+            )
+            let currentEnvelope = current.envelope
+            let finishedEnvelope = finished.envelope
 
-            // Process evidence is meaningful only when exactly one pane owns
-            // the latest-state register; ambiguity fails closed to unknown.
-            let producerPanes = paneValues.filter { $0.rawWireValue != nil }
+            // Process evidence belongs to the elected current producer, not to
+            // every stale pane that carries a superseded register value.
+            // Duplicate winning producers remain ambiguous and fail closed.
+            let producerPanes = currentEnvelope.map { envelope in
+                paneValues.filter { pane in
+                    guard let raw = pane.rawWireValue,
+                          let candidate = try? HolyAgentStateEnvelope(wireValue: raw) else {
+                        return false
+                    }
+                    return candidate == envelope
+                }
+            } ?? []
             let producerHasLiveProcess: Bool?
             let producerLastOutputAt: Date?
             if producerPanes.count == 1, let producer = producerPanes.first {
@@ -518,18 +536,12 @@ extension HolyTmuxAgentStateMonitor {
                     producerHasLiveProcess = false
                 } else if let command = producer.currentCommand {
                     if shellCommandNames.contains(command.lowercased()) {
-                        // A visible shell means DEAD only for runtimes that
-                        // never put one in the foreground. Claude runs its
-                        // tool calls AS bash/zsh children, so a hard-working
-                        // Claude session samples as "shell" mid-tool and was
-                        // being declared dead — the exact mn-81331d
-                        // contradiction (working envelope, producerAlive=
-                        // false, output 0s old). Unknown neither extends nor
-                        // invalidates; the envelope lease carries the claim.
-                        producerHasLiveProcess =
-                            envelopeSource(fromRawWireValue: producer.rawWireValue) == "claude"
-                                ? nil
-                                : false
+                        // Claude runs tool calls as shell children, so sampling
+                        // zsh/bash is not proof that Claude exited. Unknown can
+                        // invalidate nothing; the hook lease carries the claim.
+                        producerHasLiveProcess = currentEnvelope?.source == HolyAgentStateSource.claude
+                            ? nil
+                            : false
                     } else {
                         producerHasLiveProcess = true
                     }
@@ -542,52 +554,13 @@ extension HolyTmuxAgentStateMonitor {
                 producerLastOutputAt = nil
             }
 
-            var validByCanonicalWire: [String: HolyAgentStateEnvelope] = [:]
-            var invalidValues: Set<String> = []
-            for rawWireValue in nonEmptyValues {
-                do {
-                    let envelope = try HolyAgentStateEnvelope(wireValue: rawWireValue)
-                    validByCanonicalWire[envelope.wireValue] = envelope
-                } catch {
-                    invalidValues.insert(rawWireValue)
-                }
-            }
-
-            var validFinishedByCanonicalWire: [String: HolyAgentStateEnvelope] = [:]
-            var invalidFinishedValues: Set<String> = []
-            for rawWireValue in nonEmptyFinishedValues {
-                do {
-                    let envelope = try HolyAgentStateEnvelope(wireValue: rawWireValue)
-                    guard envelope.lifecycle == .finished else {
-                        invalidFinishedValues.insert(rawWireValue)
-                        continue
-                    }
-                    validFinishedByCanonicalWire[envelope.wireValue] = envelope
-                } catch {
-                    invalidFinishedValues.insert(rawWireValue)
-                }
-            }
-
-            // The latest lifecycle and independent last-finished register have
-            // separate integrity domains. A malformed future latest value must
-            // not erase a uniquely valid offline finish, and vice versa.
-            let currentConflicting = validByCanonicalWire.count > 1
-                || (!validByCanonicalWire.isEmpty && !invalidValues.isEmpty)
-            let finishedConflicting = validFinishedByCanonicalWire.count > 1
-                || (!validFinishedByCanonicalWire.isEmpty && !invalidFinishedValues.isEmpty)
-            let currentInvalid = !invalidValues.isEmpty && validByCanonicalWire.isEmpty
-            let finishedInvalid = !invalidFinishedValues.isEmpty
-                && validFinishedByCanonicalWire.isEmpty
-            let currentEnvelope = currentConflicting || currentInvalid
-                ? nil
-                : validByCanonicalWire.values.first
-            let finishedEnvelope = finishedConflicting || finishedInvalid
-                ? nil
-                : validFinishedByCanonicalWire.values.first
+            // Latest lifecycle and last-finished are separate integrity
+            // domains. One malformed register cannot erase a valid envelope
+            // from the other domain.
             let integrity: HolyTmuxAgentStateObservationIntegrity
-            if currentConflicting || finishedConflicting {
+            if current.isConflicting || finished.isConflicting {
                 integrity = .conflicting
-            } else if currentInvalid || finishedInvalid {
+            } else if current.isInvalid || finished.isInvalid {
                 integrity = .invalid
             } else if currentEnvelope != nil || finishedEnvelope != nil {
                 integrity = .valid
@@ -602,14 +575,8 @@ extension HolyTmuxAgentStateMonitor {
                 integrity: integrity,
                 envelope: currentEnvelope,
                 lastFinishedEnvelope: finishedEnvelope,
-                rawWireValue: currentConflicting
-                    ? nil
-                    : currentEnvelope?.wireValue
-                        ?? (invalidValues.count == 1 ? invalidValues.first : nil),
-                rawLastFinishedWireValue: finishedConflicting
-                    ? nil
-                    : finishedEnvelope?.wireValue
-                        ?? (invalidFinishedValues.count == 1 ? invalidFinishedValues.first : nil),
+                rawWireValue: current.rawWireValue,
+                rawLastFinishedWireValue: finished.rawWireValue,
                 producerHasLiveProcess: producerHasLiveProcess,
                 producerLastOutputAt: producerLastOutputAt,
                 watcherFireAt: watcherFireAt(fromRawValues: paneValues.compactMap(\.rawWatcherValue))
@@ -617,6 +584,78 @@ extension HolyTmuxAgentStateMonitor {
         }
 
         return observations
+    }
+
+    /// Elects one authoritative pane register without letting stale migration
+    /// residue become a permanent conflict. Identified envelopes outrank the
+    /// legacy blank-session shape; within one shape, the newest producer
+    /// timestamp wins. Only disagreement at the winning rank is ambiguous.
+    private static func resolveRegister(
+        _ rawValues: [String],
+        requiring lifecycle: HolyAgentLifecycleState? = nil
+    ) -> RegisterResolution {
+        var validByCanonicalWire: [String: HolyAgentStateEnvelope] = [:]
+        var invalidValues: Set<String> = []
+
+        for rawValue in rawValues {
+            do {
+                let envelope = try HolyAgentStateEnvelope(wireValue: rawValue)
+                guard lifecycle == nil || envelope.lifecycle == lifecycle else {
+                    invalidValues.insert(rawValue)
+                    continue
+                }
+                validByCanonicalWire[envelope.wireValue] = envelope
+            } catch {
+                invalidValues.insert(rawValue)
+            }
+        }
+
+        guard !validByCanonicalWire.isEmpty else {
+            return .init(
+                envelope: nil,
+                rawWireValue: invalidValues.count == 1 ? invalidValues.first : nil,
+                isConflicting: false,
+                isInvalid: !invalidValues.isEmpty
+            )
+        }
+
+        // Unknown or malformed values remain a real conflict beside valid
+        // state. They might be a future format with facts this build cannot
+        // interpret. Only parseable stale values may be superseded.
+        guard invalidValues.isEmpty else {
+            return .init(
+                envelope: nil,
+                rawWireValue: nil,
+                isConflicting: true,
+                isInvalid: false
+            )
+        }
+
+        let values = Array(validByCanonicalWire.values)
+        let identifiedRank = values.contains(where: { $0.sessionID != nil })
+        let formatCandidates = values.filter { ($0.sessionID != nil) == identifiedRank }
+        let newestTimestamp = formatCandidates
+            .map(\.occurredAtMilliseconds)
+            .max()
+        let finalists = formatCandidates.filter {
+            $0.occurredAtMilliseconds == newestTimestamp
+        }
+
+        guard finalists.count == 1, let winner = finalists.first else {
+            return .init(
+                envelope: nil,
+                rawWireValue: nil,
+                isConflicting: true,
+                isInvalid: false
+            )
+        }
+
+        return .init(
+            envelope: winner,
+            rawWireValue: winner.wireValue,
+            isConflicting: false,
+            isInvalid: false
+        )
     }
 
     /// Foreground commands that prove the producer process exited: when an

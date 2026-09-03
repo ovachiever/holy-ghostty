@@ -178,6 +178,18 @@ struct HolyAgentStateEnvelopeTests {
         #expect(HolyAgentStateEnvelope.monotonicTimestamp(nowMilliseconds: 200, after: later) == 200)
     }
 
+    @Test func identifiedWireShapeSupersedesNewerLegacyTimestamp() throws {
+        let legacy = try envelope(timestamp: 101, token: "legacy")
+        let identified = try envelope(
+            timestamp: 100,
+            token: "identified",
+            sessionID: "0b15c3a3-1d98-4498-96fd-a6dc20d4a521"
+        )
+
+        #expect(identified.isNewer(than: legacy))
+        #expect(!legacy.isNewer(than: identified))
+    }
+
     @Test func transportUsesReservedOSC777TitleAndTmuxOption() throws {
         let envelope = try envelope(timestamp: 1_752_500_123_456, token: "event-1")
         let sequence = HolyAgentStateTransport.osc777Sequence(for: envelope)
@@ -207,13 +219,15 @@ struct HolyAgentStateEnvelopeTests {
 
     private func envelope(
         timestamp: Int64,
-        token: String
+        token: String,
+        sessionID: String? = nil
     ) throws -> HolyAgentStateEnvelope {
         try HolyAgentStateEnvelope(
             source: HolyAgentStateSource.codex,
             lifecycle: .finished,
             occurredAtMilliseconds: timestamp,
             eventToken: token,
+            sessionID: sessionID,
             reasonCode: "turn-finished"
         )
     }

@@ -200,10 +200,17 @@ struct HolyAgentStateEnvelope: Equatable, Sendable {
         hasSameEventToken(as: other) && self == other
     }
 
-    /// Total order for consumer-side stale-event rejection. Generated hooks
-    /// make pane timestamps monotonic; the token is a deterministic tie-break
+    /// Total order for consumer-side stale-event rejection. An identified
+    /// envelope outranks the legacy blank-session shape even if migration
+    /// residue carries a later wall-clock value. Within one shape, generated
+    /// hooks make timestamps monotonic; the token is a deterministic tie-break
     /// for independently delivered OSC and tmux copies of the same moment.
     func isNewer(than other: Self) -> Bool {
+        let isIdentified = sessionID != nil
+        let otherIsIdentified = other.sessionID != nil
+        if isIdentified != otherIsIdentified {
+            return isIdentified
+        }
         if occurredAtMilliseconds != other.occurredAtMilliseconds {
             return occurredAtMilliseconds > other.occurredAtMilliseconds
         }
