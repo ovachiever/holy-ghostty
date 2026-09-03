@@ -399,3 +399,31 @@ private final class HolySSHTransportTestFixture: @unchecked Sendable {
     exit 0
     """#
 }
+
+struct HolySSHControlPathLengthTests {
+    // OpenSSH binds the configured ControlPath plus "." and 16 random
+    // characters against sun_path (104 bytes with NUL). The MacBook mirror
+    // proved the Caches-based default (114-120 bytes) kills every master on
+    // every Mac; this pin keeps the default short and the guard honest.
+    @Test func defaultRenderedControlPathStaysWellUnderTheSocketCap() throws {
+        let manager = HolySSHTransportManager()
+        let path = try manager.controlPath(
+            destination: "erik@eriks-mac-studio-1",
+            purpose: .control
+        )
+        #expect(path.utf8.count <= 80)
+        #expect(path.utf8.count <= HolySSHTransportManager.controlPathByteLimit)
+    }
+
+    @Test func overLimitControlDirectoryIsRefusedWithTheTypedError() throws {
+        let longDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(String(repeating: "x", count: 90), isDirectory: true)
+        let manager = HolySSHTransportManager(controlDirectoryURL: longDirectory)
+        #expect(throws: HolySSHTransportError.self) {
+            _ = try manager.controlPath(
+                destination: "erik@eriks-mac-studio-1",
+                purpose: .control
+            )
+        }
+    }
+}

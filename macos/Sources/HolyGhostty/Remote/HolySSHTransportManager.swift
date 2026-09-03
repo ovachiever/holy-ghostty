@@ -3,9 +3,12 @@ import Darwin
 import Foundation
 
 enum HolySSHTransportLane: String, Sendable, Equatable {
-    case interactive0 = "interactive-0"
-    case interactive1 = "interactive-1"
-    case control
+    // Raw values ride inside the ControlPath socket filename, which counts
+    // against the 104-byte sun_path cap (see controlPathByteLimit) — keep
+    // them at two characters or fewer.
+    case interactive0 = "i0"
+    case interactive1 = "i1"
+    case control = "c"
 }
 
 enum HolySSHTransportPurpose: Sendable, Equatable {
@@ -16,6 +19,7 @@ enum HolySSHTransportPurpose: Sendable, Equatable {
 enum HolySSHTransportError: Error, Sendable, Equatable, LocalizedError {
     case invalidDestination
     case transportOptionOverride
+    case controlPathTooLong(path: String, limit: Int)
 
     var errorDescription: String? {
         switch self {
@@ -23,6 +27,10 @@ enum HolySSHTransportError: Error, Sendable, Equatable, LocalizedError {
             return "The SSH destination is invalid."
         case .transportOptionOverride:
             return "A caller attempted to override Holy's SSH transport ownership."
+        case let .controlPathTooLong(path, limit):
+            return "The SSH control socket path is \(path.utf8.count) bytes; "
+                + "OpenSSH's mux listener needs it at or under \(limit) "
+                + "(sun_path minus the temporary-bind suffix): \(path)"
         }
     }
 }
@@ -98,7 +106,7 @@ final class HolySSHTransportManager: @unchecked Sendable {
         prepareControlDirectory()
 
         let lane = lane(for: purpose)
-        let controlPath = controlPath(destination: destination, lane: lane)
+        let controlPath = try controlPath(destination: destination, lane: lane)
         let admissionPlan: HolySSHAdmissionShellPlan = switch purpose {
         case .interactive:
             .surface(
@@ -135,7 +143,7 @@ final class HolySSHTransportManager: @unchecked Sendable {
         purpose: HolySSHTransportPurpose
     ) throws -> String {
         let destination = try validatedDestination(rawDestination)
-        return controlPath(destination: destination, lane: lane(for: purpose))
+        return try controlPath(destination: destination, lane: lane(for: purpose))
     }
 
     private func validatedDestination(_ rawDestination: String) throws -> String {
@@ -174,15 +182,29 @@ final class HolySSHTransportManager: @unchecked Sendable {
         }
     }
 
-    private func controlPath(destination: String, lane: HolySSHTransportLane) -> String {
+    /// OpenSSH's mux listener binds the configured path plus "." and 16
+    /// random characters, then checks the result against sun_path (104
+    /// bytes, NUL included). 104 - 17 - 1 leaves 86 bytes for the path we
+    /// configure; exceeding it kills every master with unix_listener errors
+    /// before the connection exists.
+    static let controlPathByteLimit = 86
+
+    private func controlPath(destination: String, lane: HolySSHTransportLane) throws -> String {
         let hostKey = HolySSHAdmissionController.hostKey(for: destination)
         let digest = SHA256.hash(data: Data(hostKey.utf8))
-            .prefix(12)
+            .prefix(4)
             .map { String(format: "%02x", $0) }
             .joined()
-        return controlDirectoryURL
+        let path = controlDirectoryURL
             .appendingPathComponent("h\(digest)-\(lane.rawValue).sock", isDirectory: false)
             .path
+        guard path.utf8.count <= Self.controlPathByteLimit else {
+            throw HolySSHTransportError.controlPathTooLong(
+                path: path,
+                limit: Self.controlPathByteLimit
+            )
+        }
+        return path
     }
 
     private func wrapperScript(
@@ -436,10 +458,13 @@ final class HolySSHTransportManager: @unchecked Sendable {
     }
 
     private static func defaultControlDirectoryURL() -> URL {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return base
-            .appendingPathComponent("org.holyghostty.app", isDirectory: true)
-            .appendingPathComponent("ssh-control", isDirectory: true)
+        // ~/.holy/ssh, not Caches: the Caches prefix alone left the rendered
+        // socket path 114-120 bytes — past the 86-byte cap for every macOS
+        // user — so no master could ever bind. The home dot-directory keeps
+        // the whole path around 36 bytes with room for long usernames, and
+        // prepareControlDirectory() enforces 0700 on it.
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".holy", isDirectory: true)
+            .appendingPathComponent("ssh", isDirectory: true)
     }
 }
