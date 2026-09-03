@@ -275,10 +275,21 @@ private final class HolySSHTransportTestFixture: @unchecked Sendable {
     init(initialDirectoryMode: Int = 0o700) throws {
         rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("holy-ssh-transport-tests-\(UUID().uuidString)", isDirectory: true)
-        controlDirectoryURL = rootURL.appendingPathComponent("control", isDirectory: true)
+        // The control directory must be SHORT, like production's ~/.holy/ssh:
+        // the manager enforces controlPathByteLimit (sun_path budget), and a
+        // temporaryDirectory-based path blows it before the socket name is
+        // even appended. /tmp is /private/tmp; 0700 below keeps it private.
+        controlDirectoryURL = URL(
+            fileURLWithPath: "/tmp/hst-\(UUID().uuidString.prefix(8))",
+            isDirectory: true
+        )
         sshExecutableURL = rootURL.appendingPathComponent("fake-ssh", isDirectory: false)
         connectionLogURL = rootURL.appendingPathComponent("connection-starts.log", isDirectory: false)
 
+        try FileManager.default.createDirectory(
+            at: rootURL,
+            withIntermediateDirectories: true
+        )
         try FileManager.default.createDirectory(
             at: controlDirectoryURL,
             withIntermediateDirectories: true,
@@ -350,6 +361,7 @@ private final class HolySSHTransportTestFixture: @unchecked Sendable {
 
     func destroy() {
         try? FileManager.default.removeItem(at: rootURL)
+        try? FileManager.default.removeItem(at: controlDirectoryURL)
     }
 
     private static let fakeSSHScript = #"""
