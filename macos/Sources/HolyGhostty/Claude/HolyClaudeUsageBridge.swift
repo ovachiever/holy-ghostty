@@ -328,6 +328,7 @@ enum HolyClaudeUsageBridge {
     def load_policy(root):
         defaults = {
             "warn_percent": __WARN_PERCENT__,
+            "restrain_percent": __RESTRAIN_PERCENT__,
             "critical_percent": __CRITICAL_PERCENT__,
             "lead_minutes": __LEAD_MINUTES__,
             "poll_seconds": __POLL_SECONDS__,
@@ -342,8 +343,10 @@ enum HolyClaudeUsageBridge {
             value = stored.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
                 policy[key] = float(value)
-        if policy["critical_percent"] < policy["warn_percent"]:
-            policy["critical_percent"] = policy["warn_percent"]
+        if policy["restrain_percent"] < policy["warn_percent"]:
+            policy["restrain_percent"] = policy["warn_percent"]
+        if policy["critical_percent"] < policy["restrain_percent"]:
+            policy["critical_percent"] = policy["restrain_percent"]
         return policy
 
 
@@ -800,12 +803,13 @@ enum HolyClaudeUsageBridge {
         if percent >= policy["critical_percent"]:
             return "critical"
         eta = bucket.get("eta_full_at")
-        if isinstance(eta, (int, float)):
-            remaining = eta - now
-            if remaining <= lead:
-                return "critical"
-            if remaining <= lead * 2 and percent >= policy["warn_percent"] / 2.0:
-                return "warn"
+        remaining = (eta - now) if isinstance(eta, (int, float)) else None
+        if remaining is not None and remaining <= lead:
+            return "critical"
+        if percent >= policy["restrain_percent"]:
+            return "restrain"
+        if remaining is not None and remaining <= lead * 2 and percent >= policy["warn_percent"] / 2.0:
+            return "warn"
         if percent >= policy["warn_percent"]:
             return "warn"
         severity = (bucket.get("severity") or "").lower()
@@ -851,7 +855,7 @@ enum HolyClaudeUsageBridge {
                 level = bucket_level(bucket, policy, now)
                 if level in ("critical", "capped"):
                     chips.append("#[fg=white,bg=red,bold] %s #[default]" % text)
-                elif level == "warn":
+                elif level in ("warn", "restrain"):
                     chips.append("#[fg=black,bg=yellow,bold] %s #[default]" % text)
                 else:
                     chips.append(text)
@@ -1077,6 +1081,7 @@ enum HolyClaudeUsageBridge {
         sys.exit(main())
     """#
     .replacingOccurrences(of: "__WARN_PERCENT__", with: String(Int(HolyClaudeUsagePolicy.default.warnPercent)))
+    .replacingOccurrences(of: "__RESTRAIN_PERCENT__", with: String(Int(HolyClaudeUsagePolicy.default.restrainPercent)))
     .replacingOccurrences(of: "__CRITICAL_PERCENT__", with: String(Int(HolyClaudeUsagePolicy.default.criticalPercent)))
     .replacingOccurrences(of: "__LEAD_MINUTES__", with: String(Int(HolyClaudeUsagePolicy.default.leadMinutes)))
     .replacingOccurrences(of: "__POLL_SECONDS__", with: String(Int(HolyClaudeUsagePolicy.default.pollSeconds)))
@@ -1105,12 +1110,13 @@ enum HolyClaudeUsageBridge {
     WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60
     DEFAULT_POLICY = {
         "warn_percent": __WARN_PERCENT__,
+        "restrain_percent": __RESTRAIN_PERCENT__,
         "critical_percent": __CRITICAL_PERCENT__,
         "lead_minutes": __LEAD_MINUTES__,
         "poll_seconds": __POLL_SECONDS__,
     }
     SPAWN_TOOLS = {"Agent", "Task", "Workflow"}
-    LEVELS = ["normal", "warn", "critical", "capped"]
+    LEVELS = ["normal", "warn", "restrain", "critical", "capped"]
 
 
     def usage_dir():
@@ -1137,8 +1143,10 @@ enum HolyClaudeUsageBridge {
             value = stored.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
                 policy[key] = float(value)
-        if policy["critical_percent"] < policy["warn_percent"]:
-            policy["critical_percent"] = policy["warn_percent"]
+        if policy["restrain_percent"] < policy["warn_percent"]:
+            policy["restrain_percent"] = policy["warn_percent"]
+        if policy["critical_percent"] < policy["restrain_percent"]:
+            policy["critical_percent"] = policy["restrain_percent"]
         return policy
 
 
@@ -1168,12 +1176,13 @@ enum HolyClaudeUsageBridge {
         if percent >= policy["critical_percent"]:
             return "critical", "%s at %s" % (label, fmt_percent(percent))
         eta = bucket.get("eta_full_at")
-        if isinstance(eta, (int, float)):
-            remaining = eta - now
-            if remaining <= lead:
-                return "critical", "%s at %s, cap in ~%s at current pace" % (label, fmt_percent(percent), fmt_minutes(remaining))
-            if remaining <= lead * 2 and percent >= policy["warn_percent"] / 2.0:
-                return "warn", "%s at %s, cap in ~%s at current pace" % (label, fmt_percent(percent), fmt_minutes(remaining))
+        remaining = (eta - now) if isinstance(eta, (int, float)) else None
+        if remaining is not None and remaining <= lead:
+            return "critical", "%s at %s, cap in ~%s at current pace" % (label, fmt_percent(percent), fmt_minutes(remaining))
+        if percent >= policy["restrain_percent"]:
+            return "restrain", "%s at %s" % (label, fmt_percent(percent))
+        if remaining is not None and remaining <= lead * 2 and percent >= policy["warn_percent"] / 2.0:
+            return "warn", "%s at %s, cap in ~%s at current pace" % (label, fmt_percent(percent), fmt_minutes(remaining))
         if percent >= policy["warn_percent"]:
             return "warn", "%s at %s" % (label, fmt_percent(percent))
         severity = (bucket.get("severity") or "").lower()
@@ -1333,21 +1342,31 @@ enum HolyClaudeUsageBridge {
         elif level == "capped":
             head = "HOLY USAGE GUARD — Claude usage cap REACHED: %s." % reason
         elif level == "critical":
-            head = "HOLY USAGE GUARD — Claude usage cap IMMINENT: %s." % reason
+            head = "HOLY USAGE GUARD — wrap up NOW, Claude usage cap imminent: %s." % reason
+        elif level == "restrain":
+            head = "HOLY USAGE GUARD — no new subagents, Claude usage high: %s." % reason
         else:
-            head = "HOLY USAGE GUARD — Claude usage cap approaching: %s." % reason
+            head = "HOLY USAGE NOTICE — Claude usage: %s." % reason
         if level in ("critical", "capped") or wrap_up:
             body = (
-                " Account %s: %s. STOP starting new work. Immediately: (1) finish or abort the current step at a safe point;"
+                " Account %s: %s. Wrap up NOW. Immediately: (1) finish or abort the current step at a safe point;"
                 " (2) commit or write all state to disk; (3) reply with a short note that begins 'PAUSED (usage cap):'"
                 " listing what is done, what is in flight, and the exact next step to resume;"
                 " (4) end your turn and do nothing further until the user says to continue."
-                " New subagent spawns are denied while this stands. The user will switch accounts and tell you to resume."
+                " New subagent spawns are denied while this stands. The user will log in under a different"
+                " Fable account with lower usage and tell you to resume."
+            ) % (account, summary)
+        elif level == "restrain":
+            body = (
+                " Account %s: %s. Keep the work in hand moving, but start no new subagents, workflows, or long"
+                " tasks: spawns are denied while this stands. Prefer small steps that leave state committed."
+                " Mention the limit to the user in your next reply; whether to switch accounts is their call."
             ) % (account, summary)
         else:
             body = (
-                " Account %s: %s. Do not start new subagents or long tasks. Bring current work to a checkpoint now"
-                " (commit, write state) so nothing is lost if the cap lands; keep steps small and finish cleanly."
+                " Account %s: %s. This is information, not an instruction: keep working exactly as you were."
+                " Mention the limit to the user in your next reply so they can plan an account switch;"
+                " do not slow down, skip work, or pause on your own."
             ) % (account, summary)
         return head + body
 
@@ -1359,7 +1378,7 @@ enum HolyClaudeUsageBridge {
 
 
     def should_announce(root, session_id, level, policy, now):
-        """warn: once on entry plus a reminder every half lead window.
+        """warn/restrain: once on entry plus a reminder every half lead window.
         critical/capped: every call, because the instruction is to stop."""
         if level in ("critical", "capped"):
             return True
@@ -1437,12 +1456,18 @@ enum HolyClaudeUsageBridge {
 
         text = message(level, reason, buckets, account_email, now, wrap_up)
         output = {"hookEventName": event or "PreToolUse"}
-        if event == "PreToolUse" and level in ("critical", "capped") and tool_name in SPAWN_TOOLS:
+        if event == "PreToolUse" and level in ("restrain", "critical", "capped") and tool_name in SPAWN_TOOLS:
             output["permissionDecision"] = "deny"
-            output["permissionDecisionReason"] = (
-                "Holy usage guard: %s. Subagent spawns are denied so they do not die mid-work. "
-                "Wrap up and pause with a 'PAUSED (usage cap):' note." % reason
-            )
+            if level == "restrain":
+                output["permissionDecisionReason"] = (
+                    "Holy usage guard: %s. No new subagents from here; keep the work in hand moving"
+                    " in this session and tell the user about the limit." % reason
+                )
+            else:
+                output["permissionDecisionReason"] = (
+                    "Holy usage guard: %s. Subagent spawns are denied so they do not die mid-work. "
+                    "Wrap up and pause with a 'PAUSED (usage cap):' note." % reason
+                )
             output["additionalContext"] = text
         elif should_announce(root, session_id, level, policy, now):
             output["additionalContext"] = text
@@ -1460,6 +1485,7 @@ enum HolyClaudeUsageBridge {
             sys.exit(0)
     """#
     .replacingOccurrences(of: "__WARN_PERCENT__", with: String(Int(HolyClaudeUsagePolicy.default.warnPercent)))
+    .replacingOccurrences(of: "__RESTRAIN_PERCENT__", with: String(Int(HolyClaudeUsagePolicy.default.restrainPercent)))
     .replacingOccurrences(of: "__CRITICAL_PERCENT__", with: String(Int(HolyClaudeUsagePolicy.default.criticalPercent)))
     .replacingOccurrences(of: "__LEAD_MINUTES__", with: String(Int(HolyClaudeUsagePolicy.default.leadMinutes)))
     .replacingOccurrences(of: "__POLL_SECONDS__", with: String(Int(HolyClaudeUsagePolicy.default.pollSeconds)))

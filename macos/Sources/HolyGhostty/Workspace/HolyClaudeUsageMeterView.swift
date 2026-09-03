@@ -228,6 +228,7 @@ enum HolyClaudeUsagePalette {
         switch level {
         case .normal: HolyGhosttyTheme.success
         case .warn: HolyGhosttyTheme.warning
+        case .restrain: HolyGhosttyTheme.warning
         case .critical: HolyGhosttyTheme.danger
         case .capped: HolyGhosttyTheme.danger
         }

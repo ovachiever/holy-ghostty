@@ -14,6 +14,7 @@ struct HolyClaudeUsageGuardTests {
     @Test func percentThresholdsDecideLevels() {
         #expect(level(percent: 10) == .normal)
         #expect(level(percent: policy.warnPercent) == .warn)
+        #expect(level(percent: policy.restrainPercent) == .restrain)
         #expect(level(percent: policy.criticalPercent) == .critical)
         #expect(level(percent: 100) == .capped)
     }
@@ -50,8 +51,9 @@ struct HolyClaudeUsageGuardTests {
         defaults.set(-3, forKey: HolyClaudeUsagePolicy.DefaultsKey.leadMinutes)
         let policy = HolyClaudeUsagePolicy.fromUserDefaults(defaults)
         #expect(policy.warnPercent == HolyClaudeUsagePolicy.default.warnPercent)
-        // critical below warn is clamped up to warn rather than inverting the order.
-        #expect(policy.criticalPercent == HolyClaudeUsagePolicy.default.warnPercent)
+        // critical below restrain is clamped up to restrain rather than inverting the order.
+        #expect(policy.restrainPercent == HolyClaudeUsagePolicy.default.restrainPercent)
+        #expect(policy.criticalPercent == HolyClaudeUsagePolicy.default.restrainPercent)
         #expect(policy.leadMinutes == HolyClaudeUsagePolicy.default.leadMinutes)
     }
 
@@ -161,8 +163,8 @@ struct HolyClaudeUsageGuardTests {
 
         let first = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s1"))
         let context = try #require(first["additionalContext"] as? String)
-        #expect(context.contains("HOLY USAGE GUARD"))
-        #expect(context.contains("approaching"))
+        #expect(context.contains("HOLY USAGE NOTICE"))
+        #expect(context.contains("keep working exactly as you were"))
         #expect(context.contains("Session (5h) 76%"))
         #expect(first["permissionDecision"] == nil)
 
@@ -196,13 +198,37 @@ struct HolyClaudeUsageGuardTests {
         let bash1 = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s2"))
         let bash2 = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s2"))
         #expect(bash1["permissionDecision"] == nil)
-        #expect((bash1["additionalContext"] as? String)?.contains("IMMINENT") == true)
+        #expect((bash1["additionalContext"] as? String)?.contains("wrap up NOW") == true)
         #expect(bash2["additionalContext"] != nil)
 
         // A user prompt is never blocked, only informed.
         let prompt = try #require(try fixture.runGuard(event: "UserPromptSubmit", tool: nil, sessionID: "s2"))
         #expect(prompt["permissionDecision"] == nil)
         #expect(prompt["additionalContext"] != nil)
+    }
+
+    @Test func guardRestrainsSpawnsButKeepsWorkMovingAtRestrain() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.installGuard(policy: policy)
+        try fixture.write(latestJSON(percent: policy.restrainPercent + 1), to: fixture.paths.latestURL)
+
+        // New subagents are refused, with a reason that says to keep going here.
+        let spawn = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Agent", sessionID: "s3"))
+        #expect(spawn["permissionDecision"] as? String == "deny")
+        #expect((spawn["permissionDecisionReason"] as? String)?.contains("No new subagents from here") == true)
+        let context = try #require(spawn["additionalContext"] as? String)
+        #expect(context.contains("no new subagents"))
+        #expect(context.contains("Keep the work in hand moving"))
+        #expect(!context.contains("PAUSED (usage cap):"))
+
+        // Ordinary work is not blocked, and the notice follows the warn cadence:
+        // a denial does not count as an announcement, so the next call announces
+        // once, then stays quiet until the reminder interval.
+        let bash1 = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s3"))
+        #expect(bash1["permissionDecision"] == nil)
+        #expect((bash1["additionalContext"] as? String)?.contains("no new subagents") == true)
+        #expect(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "s3") == nil)
     }
 
     @Test func guardPrefersTheSessionsOwnReading() throws {
@@ -217,7 +243,7 @@ struct HolyClaudeUsageGuardTests {
             to: fixture.paths.sessionsDirectoryURL.appendingPathComponent("abc-123.json")
         )
         let own = try #require(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "abc-123"))
-        #expect((own["additionalContext"] as? String)?.contains("IMMINENT") == true)
+        #expect((own["additionalContext"] as? String)?.contains("wrap up NOW") == true)
         #expect(try fixture.runGuard(event: "PreToolUse", tool: "Bash", sessionID: "other") == nil)
     }
 
@@ -278,6 +304,8 @@ struct HolyClaudeUsageGuardTests {
             (10, nil, nil),
             (policy.warnPercent - 0.5, nil, nil),
             (policy.warnPercent, nil, nil),
+            (policy.restrainPercent - 0.5, nil, nil),
+            (policy.restrainPercent, nil, nil),
             (policy.criticalPercent - 0.5, nil, nil),
             (policy.criticalPercent, nil, nil),
             (100, nil, nil),
@@ -301,7 +329,13 @@ struct HolyClaudeUsageGuardTests {
                 pythonLevel = .normal
             } else if output?["permissionDecision"] as? String == "deny" {
                 let text = output?["additionalContext"] as? String ?? ""
-                pythonLevel = text.contains("REACHED") ? .capped : .critical
+                if text.contains("REACHED") {
+                    pythonLevel = .capped
+                } else if text.contains("wrap up NOW") {
+                    pythonLevel = .critical
+                } else {
+                    pythonLevel = .restrain
+                }
             } else {
                 pythonLevel = .warn
             }
@@ -323,7 +357,8 @@ struct HolyClaudeUsageGuardTests {
             {"key": "weekly_scoped:Fable", "percent": \(policy.criticalPercent + 1)},
             {"key": "weekly_scoped:Fa#(whoami)%H;'`ble", "percent": 10.0},
         ]
-        policy = {"warn_percent": \(policy.warnPercent), "critical_percent": \(policy.criticalPercent),
+        policy = {"warn_percent": \(policy.warnPercent), "restrain_percent": \(policy.restrainPercent),
+                  "critical_percent": \(policy.criticalPercent),
                   "lead_minutes": \(policy.leadMinutes), "poll_seconds": \(policy.pollSeconds)}
         print(module["compose_segment"](buckets, policy, now))
         print(module["compose_segment"]([], policy, now))
@@ -385,7 +420,8 @@ struct HolyClaudeUsageGuardTests {
         }}
         buckets = module["normalize_codex"](raw)
         print(json.dumps(buckets))
-        policy = {"warn_percent": \(policy.warnPercent), "critical_percent": \(policy.criticalPercent),
+        policy = {"warn_percent": \(policy.warnPercent), "restrain_percent": \(policy.restrainPercent),
+                  "critical_percent": \(policy.criticalPercent),
                   "lead_minutes": \(policy.leadMinutes), "poll_seconds": \(policy.pollSeconds)}
         claude = [{"key": "session", "label": "Session (5h)", "percent": 30.0}]
         print(module["compose_segment"](claude + buckets, policy, now, codex_resets=1))

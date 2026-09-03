@@ -130,6 +130,8 @@ extension HolyWorkspaceStore {
             return
         case .warn:
             title = "\(vendor) usage approaching cap"
+        case .restrain:
+            title = "\(vendor) usage high — no new subagents"
         case .critical:
             title = isCodex
                 ? "Codex usage cap imminent"

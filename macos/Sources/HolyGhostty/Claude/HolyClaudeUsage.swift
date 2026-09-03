@@ -2,11 +2,14 @@ import Foundation
 
 /// How close a Claude.ai subscription window is to the cap that would kill
 /// running work. Ordered so a snapshot's worst bucket decides the whole level.
+/// `warn` only informs the user; `restrain` stops new spawns while the work in
+/// hand continues; `critical` and `capped` wrap up now.
 enum HolyClaudeUsageLevel: Int, Comparable, Codable, Sendable {
     case normal = 0
     case warn = 1
-    case critical = 2
-    case capped = 3
+    case restrain = 2
+    case critical = 3
+    case capped = 4
 
     static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
 
@@ -14,7 +17,8 @@ enum HolyClaudeUsageLevel: Int, Comparable, Codable, Sendable {
         switch self {
         case .normal: "Normal"
         case .warn: "Approaching cap"
-        case .critical: "Cap imminent"
+        case .restrain: "No new spawns"
+        case .critical: "Wrap up now"
         case .capped: "Capped"
         }
     }
@@ -105,13 +109,19 @@ struct HolyClaudeUsageSessionReading: Equatable, Identifiable, Sendable {
 /// Erik wants before it is his. Each default carries its reasoning so a
 /// future change is a decision, not a guess.
 struct HolyClaudeUsagePolicy: Equatable, Codable, Sendable {
-    /// Percent of any window at which sessions are told to stop starting new
-    /// work and reach a checkpoint. A quarter of a window is the margin that
-    /// lets a subagent-heavy swarm at >150k context finish its current step.
+    /// Percent of any window at which sessions tell the user about the limit
+    /// and otherwise keep working as they were: switching accounts is the
+    /// user's call, not the agent's. A quarter of a window is early enough to
+    /// plan that switch without changing pace.
     var warnPercent: Double
-    /// Percent at which sessions must pause with a written note and new
-    /// subagent spawns are denied. One tenth of a window is the margin
-    /// between "commit and write the note" and "the API refuses the call".
+    /// Percent at which new subagents, workflows, and long tasks stop while the
+    /// work in hand continues; spawns are denied from here. One tenth of a
+    /// window is the margin that lets a subagent-heavy swarm at >150k context
+    /// finish its current step.
+    var restrainPercent: Double
+    /// Percent at which sessions must wrap up now and pause with a written
+    /// note. One twentieth of a window is the margin between "commit and write
+    /// the note" and "the API refuses the call".
     var criticalPercent: Double
     /// Minutes of projected time-to-cap (from the recent burn rate) that count
     /// as imminent regardless of percent. Long enough for a human to notice a
@@ -124,13 +134,15 @@ struct HolyClaudeUsagePolicy: Equatable, Codable, Sendable {
 
     static let `default` = HolyClaudeUsagePolicy(
         warnPercent: 75,
-        criticalPercent: 90,
+        restrainPercent: 90,
+        criticalPercent: 95,
         leadMinutes: 20,
         pollSeconds: 60
     )
 
     enum DefaultsKey {
         static let warnPercent = "holy.claudeUsage.warnPercent"
+        static let restrainPercent = "holy.claudeUsage.restrainPercent"
         static let criticalPercent = "holy.claudeUsage.criticalPercent"
         static let leadMinutes = "holy.claudeUsage.leadMinutes"
         static let pollSeconds = "holy.claudeUsage.pollSeconds"
@@ -146,11 +158,15 @@ struct HolyClaudeUsagePolicy: Equatable, Codable, Sendable {
             if valid(candidate) { value = candidate }
         }
         override(DefaultsKey.warnPercent, into: &policy.warnPercent) { $0 > 0 && $0 < 100 }
+        override(DefaultsKey.restrainPercent, into: &policy.restrainPercent) { $0 > 0 && $0 < 100 }
         override(DefaultsKey.criticalPercent, into: &policy.criticalPercent) { $0 > 0 && $0 <= 100 }
         override(DefaultsKey.leadMinutes, into: &policy.leadMinutes) { $0 > 0 }
         override(DefaultsKey.pollSeconds, into: &policy.pollSeconds) { $0 > 0 }
-        if policy.criticalPercent < policy.warnPercent {
-            policy.criticalPercent = policy.warnPercent
+        if policy.restrainPercent < policy.warnPercent {
+            policy.restrainPercent = policy.warnPercent
+        }
+        if policy.criticalPercent < policy.restrainPercent {
+            policy.criticalPercent = policy.restrainPercent
         }
         return policy
     }
@@ -164,6 +180,7 @@ struct HolyClaudeUsagePolicy: Equatable, Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case warnPercent = "warn_percent"
+        case restrainPercent = "restrain_percent"
         case criticalPercent = "critical_percent"
         case leadMinutes = "lead_minutes"
         case pollSeconds = "poll_seconds"
@@ -194,14 +211,15 @@ enum HolyClaudeUsageEvaluator {
         if percent >= policy.criticalPercent {
             return (.critical, "\(bucket.label) at \(formatPercent(percent))")
         }
-        if let eta = bucket.etaFullAt {
-            let remaining = eta.timeIntervalSince(now)
-            if remaining <= lead {
-                return (.critical, "\(bucket.label) at \(formatPercent(percent)), cap in ~\(formatMinutes(remaining)) at current pace")
-            }
-            if remaining <= lead * 2, percent >= policy.warnPercent / 2 {
-                return (.warn, "\(bucket.label) at \(formatPercent(percent)), cap in ~\(formatMinutes(remaining)) at current pace")
-            }
+        let remaining = bucket.etaFullAt?.timeIntervalSince(now)
+        if let remaining, remaining <= lead {
+            return (.critical, "\(bucket.label) at \(formatPercent(percent)), cap in ~\(formatMinutes(remaining)) at current pace")
+        }
+        if percent >= policy.restrainPercent {
+            return (.restrain, "\(bucket.label) at \(formatPercent(percent))")
+        }
+        if let remaining, remaining <= lead * 2, percent >= policy.warnPercent / 2 {
+            return (.warn, "\(bucket.label) at \(formatPercent(percent)), cap in ~\(formatMinutes(remaining)) at current pace")
         }
         if percent >= policy.warnPercent {
             return (.warn, "\(bucket.label) at \(formatPercent(percent))")
