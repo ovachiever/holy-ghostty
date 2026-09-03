@@ -7,7 +7,7 @@ base_commit: 9eec11749be7aa5504eb4e3135dc978a8300544d
 scope: '[P1][STATE] Eternal spinner: conflicting wire integrity is sticky, a lost Stop leaves working forever, and ''← 1 agent'' footer reads as activity'
 inputs:
 - Erik live report 2026-09-03 10:48 + session_events and tmux pane-option receipts, this session
-binding: sha256:326c576413fe6f78bcaf2cbe46a0b0a0ee92cbbd17f74c760207a19c37c16138
+binding: sha256:c2fe16fd79ee4645cd64b445f377bcc0b945ec7b49d7fbac9faf43aabf9fdabd
 ---
 
 # Handoff: [P1][STATE] Eternal spinner: conflicting wire integrity is sticky, a lost Stop leaves working forever, and '← 1 agent' footer reads as activity
@@ -38,3 +38,22 @@ Live repro 2026-09-03 10:48, session 'Aldebaran Group | erik and tiff' (A8C1BDBA
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-d204ae`.
 4. Commit with `Manna: mn-d204ae` and run `agent-do manna done mn-d204ae` only after the work is verified.
+
+## Current continuation
+
+- Implementation is integrated on `main` at `bde9a651f`. It gives identified
+  wire envelopes authority over legacy blank-session values, elects the newest
+  timestamp within one wire shape, makes true ties an aged static conflict,
+  expires unrenewed working claims into the current scrape phase, and treats
+  Claude's `← N agents` footer as presence.
+- Compile-only validation passed on both the isolated implementation tip and
+  the integrated `main` tip with the four affected test suites selected:
+  `HolyAgentStateEnvelopeTests`, `HolyTmuxAgentStateMonitorTests`,
+  `HolySessionIndicatorPolicyTests`, and `HolySessionLiveStatusTests`.
+- No app, test host, provider session, installer, or screenshot was launched.
+  The focused test code compiled but did not execute under the zero-launch
+  validation protocol.
+- Remaining acceptance is one coordinated installed-app poll against session
+  `A8C1BDBA`: confirm the idle prompt settles to the blue idle state and that a
+  surviving equal-authority conflict renders the static aged warning glyph.
+  Keep `mn-d204ae` `in_progress` until that live receipt exists.
