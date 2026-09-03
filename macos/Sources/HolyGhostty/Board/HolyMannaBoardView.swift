@@ -286,7 +286,7 @@ struct HolyMannaBoardView: View {
                 state: overrides.width("state", fitted: fitted.state),
                 priority: overrides.width("#", fitted: fitted.priority)
             )
-            let dimFallback = state.all.contains { !Present.isFallbackText($0) }
+            let dimFallback = state.allVisibleItems.contains { store.hasPresentationDigest(for: $0) }
             boardColumnHeader(columns, showsAge: showsAge)
             ForEach(sections) { section in
                 sheetHead(section.prompt, count: String(section.items.count))
@@ -416,8 +416,8 @@ struct HolyMannaBoardView: View {
                 .foregroundStyle(Palette.muted)
                 .lineLimit(1)
                 .frame(width: columns.id, alignment: .leading)
-            Text(Present.rowText(item))
-                .foregroundStyle(dimFallback && Present.isFallbackText(item) ? Palette.muted : Palette.text)
+            Text(store.presentationDigest(for: item) ?? item.title)
+                .foregroundStyle(dimFallback && !store.hasPresentationDigest(for: item) ? Palette.muted : Palette.text)
                 .lineSpacing(Metrics.bodySize * (Metrics.digestLineHeight - 1))
                 .padding(.vertical, Metrics.s1)
                 .fixedSize(horizontal: false, vertical: true)
@@ -871,7 +871,7 @@ struct HolyMannaBoardView: View {
             .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
 
-        if let digest = item.digest, !digest.isEmpty {
+        if let digest = store.presentationDigest(for: item) {
             Text(digest)
                 .foregroundStyle(Palette.text)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1620,7 +1620,6 @@ struct HolyMannaBoardView: View {
         keyMonitor = nil
     }
 }
-
 
 /// Left-to-right, wrapping: the inspector's bracketed verbs never break
 /// inside a bracket when the column is narrow.

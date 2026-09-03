@@ -313,9 +313,10 @@ struct HolyMannaBoardItem: Decodable, Equatable, Identifiable, Sendable {
     let handoffDigest: String?
     let handoffExists: Bool?
     let source: String?
-    /// A one-line digest attached by the serve daemon; the CLI's own state
-    /// carries none today, and the title stands in (dimmed) when absent.
+    /// Hash-current presentation fields attached by canonical `manna state`.
+    /// Both remain optional because state derivation is attach-only.
     let digest: String?
+    let summary: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -343,6 +344,7 @@ struct HolyMannaBoardItem: Decodable, Equatable, Identifiable, Sendable {
         case handoffExists = "handoff_exists"
         case source
         case digest
+        case summary
     }
 }
 

@@ -48,7 +48,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
 
     private(set) var context = HolyMannaBoardContext(boardRoot: nil, remoteHost: nil)
     private let client: HolyMannaBoardClient
-    private let digestService: any HolyMannaBoardDigesting
+    private let prewarmer: any HolyMannaBoardPrewarming
     private let usageAssessmentProvider: () -> HolyClaudeUsageAssessment
     /// Every board read that lands is kept, keyed by host and root, so a
     /// board seen once shows instantly and refreshes behind its own rows.
@@ -57,20 +57,24 @@ final class HolyMannaBoardModeStore: ObservableObject {
     private var stateReadsInFlight: Set<String> = []
     private var estateRefreshedAt: Date?
     private var estateReadInFlight = false
-    private var digestTask: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
-    private var digestCache: [String: HolyMannaDigestResult] = [:]
+    private var digestCache: [String: HolyMannaPresentationResult] = [:]
+    private var digestFailures: [String: String] = [:]
 
     init(
         client: HolyMannaBoardClient = .init(),
         digestService: any HolyMannaBoardDigesting = HolyMannaBoardDigestService.shared,
+        prewarmer: (any HolyMannaBoardPrewarming)? = nil,
         usageAssessmentProvider: @escaping () -> HolyClaudeUsageAssessment = {
             .init(level: .normal, decidingBucket: nil, reason: nil)
         }
     ) {
         self.client = client
-        self.digestService = digestService
+        self.prewarmer = prewarmer ?? HolyMannaBoardPrewarmer(
+            client: client,
+            digestService: digestService
+        )
         self.usageAssessmentProvider = usageAssessmentProvider
     }
 
@@ -184,7 +188,6 @@ final class HolyMannaBoardModeStore: ObservableObject {
     func dismiss() {
         isPresented = false
         pendingMutation = nil
-        digestTask?.cancel()
         liveTask?.cancel()
         liveTask = nil
     }
@@ -217,7 +220,6 @@ final class HolyMannaBoardModeStore: ObservableObject {
         selectedPeerID = id
         if id != nil {
             selectedItemID = nil
-            digestTask?.cancel()
             isDigestLoading = false
         }
     }
@@ -301,6 +303,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
             return
         }
         isRefreshing = true
+        let client = self.client
 
         Task { [weak self] in
             let result = await Self.capture { [client] in try await client.state(for: context) }
@@ -320,6 +323,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
         estateReadInFlight = true
         isEstateRefreshing = true
         let context = context
+        let client = self.client
 
         Task { [weak self] in
             let result = await Self.capture { [client] in try await client.estate(for: context) }
@@ -461,6 +465,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
         case let .success(payload):
             stateCache[key] = payload
             stateRefreshedAt[key] = .now
+            scheduleFocusedWarm(payload, context: refreshed)
             guard isCurrent else { return }
             state = payload
             boardFailure = nil
@@ -473,6 +478,9 @@ final class HolyMannaBoardModeStore: ObservableObject {
             }
             if isPresented {
                 loadSelectedDigest()
+            }
+            if estate == nil {
+                requestEstateRefresh()
             }
         case let .failure(error):
             guard isCurrent else { return }
@@ -498,6 +506,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
             estate = payload
             estateFailure = nil
             estateRefreshedAt = .now
+            scheduleEstateWarm(payload)
             if surface == .estate {
                 lastRefreshedAt = estateRefreshedAt
             }
@@ -516,7 +525,6 @@ final class HolyMannaBoardModeStore: ObservableObject {
     }
 
     private func loadSelectedDigest() {
-        digestTask?.cancel()
         guard let item = selectedItem else {
             digestText = nil
             digestModel = nil
@@ -525,49 +533,152 @@ final class HolyMannaBoardModeStore: ObservableObject {
             return
         }
 
-        let hash = HolyMannaBoardDigestService.contentHash(for: item)
-        if let cached = digestCache[hash] {
-            applyDigest(cached)
+        if let presentation = presentation(for: item),
+           let summary = presentation.summary?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !summary.isEmpty {
+            applyDigest(presentation)
             return
         }
 
         digestText = nil
         digestModel = nil
+        digestFailure = digestFailures[Self.failureKey(context: context, itemID: item.id)]
+        isDigestLoading = digestFailure == nil
+    }
+
+    private func applyDigest(_ presentation: HolyMannaPresentationResult) {
+        digestText = presentation.summary
+        digestModel = presentation.model
+        digestWasCached = presentation.wasCached
         digestFailure = nil
-        isDigestLoading = true
+        isDigestLoading = false
+    }
+
+    func presentationDigest(for item: HolyMannaBoardItem) -> String? {
+        Self.nonblank(presentation(for: item)?.digest)
+    }
+
+    func hasPresentationDigest(for item: HolyMannaBoardItem) -> Bool {
+        presentationDigest(for: item) != nil
+    }
+
+    private func presentation(for item: HolyMannaBoardItem) -> HolyMannaPresentationResult? {
+        let contentHash = HolyMannaBoardDigestService.contentHash(for: item)
+        let cached = digestCache[Self.presentationKey(
+            context: context,
+            itemID: item.id,
+            contentHash: contentHash
+        )]
+        let digest = Self.nonblank(item.digest)
+            ?? cached?.digest
+        let summary = Self.nonblank(item.summary)
+            ?? cached?.summary
+        guard digest != nil || summary != nil else { return nil }
+        return .init(
+            itemID: item.id,
+            digest: digest,
+            summary: summary,
+            contentHash: contentHash,
+            model: (item.digest != nil || item.summary != nil) ? "manna-state-cache" : cached?.model ?? "cache",
+            wasCached: cached?.wasCached ?? true
+        )
+    }
+
+    private func scheduleFocusedWarm(
+        _ payload: HolyMannaStatePayload,
+        context: HolyMannaBoardContext
+    ) {
         let usage = usageAssessmentProvider()
-        let allowGeneration = usage.level < .critical
-        let context = context
-        digestTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                let digest = try await self.digestService.digest(
-                    for: item,
-                    boardRoot: context.boardRoot,
-                    allowGeneration: allowGeneration,
-                    usageGuardReason: usage.reason
+        let estate = estate
+        let prewarmer = prewarmer
+        let sink = warmSink()
+        Task {
+            await prewarmer.enqueueFocused(
+                payload,
+                context: context,
+                allowGeneration: usage.level < .restrain,
+                usageGuardReason: usage.reason,
+                sink: sink
+            )
+            if let estate {
+                await prewarmer.enqueueEstate(
+                    estate,
+                    baseContext: context,
+                    focusedRoot: context.boardRoot,
+                    allowGeneration: usage.level < .restrain,
+                    usageGuardReason: usage.reason,
+                    sink: sink
                 )
-                guard !Task.isCancelled,
-                      self.selectedItemID == item.id,
-                      self.context == context else { return }
-                self.digestCache[hash] = digest
-                self.applyDigest(digest)
-            } catch {
-                guard !Task.isCancelled,
-                      self.selectedItemID == item.id,
-                      self.context == context else { return }
-                self.digestFailure = error.localizedDescription
-                self.isDigestLoading = false
             }
         }
     }
 
-    private func applyDigest(_ digest: HolyMannaDigestResult) {
-        digestText = digest.text
-        digestModel = digest.model
-        digestWasCached = digest.wasCached
-        digestFailure = nil
-        isDigestLoading = false
+    private func scheduleEstateWarm(_ payload: HolyMannaEstatePayload) {
+        let usage = usageAssessmentProvider()
+        let prewarmer = prewarmer
+        let context = context
+        let sink = warmSink()
+        Task {
+            await prewarmer.enqueueEstate(
+                payload,
+                baseContext: context,
+                focusedRoot: context.boardRoot,
+                allowGeneration: usage.level < .restrain,
+                usageGuardReason: usage.reason,
+                sink: sink
+            )
+        }
+    }
+
+    private func warmSink() -> HolyMannaWarmSink {
+        { [weak self] event in
+            self?.applyWarmEvent(event)
+        }
+    }
+
+    private func applyWarmEvent(_ event: HolyMannaWarmEvent) {
+        switch event {
+        case let .resolved(context, results):
+            for result in results {
+                digestCache[Self.presentationKey(
+                    context: context,
+                    itemID: result.itemID,
+                    contentHash: result.contentHash
+                )] = result
+                digestFailures[Self.failureKey(context: context, itemID: result.itemID)] = nil
+            }
+        case let .failed(context, itemIDs, message):
+            for itemID in itemIDs {
+                digestFailures[Self.failureKey(context: context, itemID: itemID)] = message
+            }
+        }
+        if case let .resolved(eventContext, _) = event,
+           eventContext == context {
+            loadSelectedDigest()
+        } else if case let .failed(eventContext, itemIDs, _) = event,
+                  eventContext == context,
+                  let selectedItemID,
+                  itemIDs.contains(selectedItemID) {
+            loadSelectedDigest()
+        }
+    }
+
+    private static func presentationKey(
+        context: HolyMannaBoardContext,
+        itemID: String,
+        contentHash: String
+    ) -> String {
+        "\(cacheKey(context)):\(itemID):\(contentHash)"
+    }
+
+    private static func failureKey(context: HolyMannaBoardContext, itemID: String) -> String {
+        "\(cacheKey(context)):\(itemID)"
+    }
+
+    private static func nonblank(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func capture<Value: Sendable>(

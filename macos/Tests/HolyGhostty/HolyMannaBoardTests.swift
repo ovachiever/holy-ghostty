@@ -163,7 +163,188 @@ struct HolyMannaBoardTests {
         #expect(HolyMannaBoardDigestService.contentHash(for: first) != HolyMannaBoardDigestService.contentHash(for: blockerChanged))
     }
 
-    @Test @MainActor func backgroundBoardPreloadDoesNotStartAnAIDigest() async throws {
+    @Test func presentationServicePrefersAttachmentsAndRegeneratesOnlyChangedContent() async throws {
+        let directory = try temporaryDirectory(named: "holy-board-presentations")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("holy.sqlite3")
+        let database = try HolyDatabase.open(at: databaseURL)
+        try HolyDatabaseMigrator.migrate(database)
+        let completion = HolyMannaCompletionRecorder(responses: [
+            #"{"items":[{"id":"mn-generated","digest":"Generate one shared line","summary":"Generate the missing explanation once, then keep it in the stable item slot."}]}"#,
+            #"{"items":[{"id":"mn-generated","digest":"Regenerate the changed line","summary":"Only this changed item should ask the fast role for new presentation text."}]}"#,
+        ])
+        let service = HolyMannaBoardDigestService(databaseURL: databaseURL) { role, prompt, workingDirectory in
+            await completion.complete(role: role, prompt: prompt, workingDirectory: workingDirectory)
+        }
+        let context = HolyMannaBoardContext(boardRoot: "/srv/presentation", remoteHost: nil)
+        let attached = try HolyMannaBoardFixtures.item(
+            id: "mn-attached",
+            title: "Attached",
+            description: "Already shared by canonical state.",
+            digest: "Canonical shared line",
+            summary: "Canonical shared summary"
+        )
+        let generated = try HolyMannaBoardFixtures.item(
+            id: "mn-generated",
+            title: "Generated",
+            description: "Needs both fields."
+        )
+
+        let first = try await service.presentations(
+            for: [attached, generated],
+            context: context,
+            allowGeneration: true
+        )
+        let firstCalls = await completion.calls
+        #expect(first.count == 2)
+        #expect(first[0].digest == "Canonical shared line")
+        #expect(first[0].summary == "Canonical shared summary")
+        #expect(first[0].wasCached)
+        #expect(first[1].digest == "Generate one shared line")
+        #expect(first[1].isComplete)
+        #expect(firstCalls.count == 1)
+        #expect(firstCalls[0].prompt.contains("mn-generated"))
+        #expect(!firstCalls[0].prompt.contains("mn-attached"))
+        #expect(firstCalls[0].workingDirectory == "/srv/presentation")
+
+        let second = try await service.presentations(
+            for: [attached, generated],
+            context: context,
+            allowGeneration: true
+        )
+        #expect(second.map(\.isComplete) == [true, true])
+        #expect(second.map(\.wasCached) == [true, true])
+        #expect(await completion.calls.count == 1)
+
+        let guarded = try HolyMannaBoardFixtures.item(
+            id: "mn-guarded",
+            title: "Guarded",
+            description: "Wait for usage headroom."
+        )
+        let guardedResult = try await service.presentations(
+            for: [guarded],
+            context: context,
+            allowGeneration: false
+        )
+        #expect(guardedResult.map(\.isComplete) == [false])
+        #expect(await completion.calls.count == 1)
+
+        let changed = try HolyMannaBoardFixtures.item(
+            id: "mn-generated",
+            title: "Generated",
+            description: "Only this content changed."
+        )
+        let changedResult = try await service.presentations(
+            for: [changed],
+            context: context,
+            allowGeneration: true
+        )
+        #expect(changedResult.first?.digest == "Regenerate the changed line")
+        #expect(await completion.calls.count == 2)
+        #expect(
+            try database.scalarInt64(
+                "SELECT COUNT(*) FROM board_digest_cache WHERE role = 'fast';"
+            ) == 2,
+            "content changes overwrite the stable per-item slot instead of growing the cache"
+        )
+    }
+
+    @Test @MainActor func fullDayEstateReplayWarmsFocusedFirstAndSkipsUnchangedBoards() async throws {
+        let focusPayload = try JSONDecoder().decode(
+            HolyMannaStatePayload.self,
+            from: Data(HolyMannaBoardFixtures.state(itemCount: 25, root: "/srv/focus").utf8)
+        )
+        let estate = try JSONDecoder().decode(
+            HolyMannaEstatePayload.self,
+            from: Data(HolyMannaBoardFixtures.estateJSON(otherLatestUpdate: "2026-09-03T12:00:00Z").utf8)
+        )
+        let changedEstate = try JSONDecoder().decode(
+            HolyMannaEstatePayload.self,
+            from: Data(HolyMannaBoardFixtures.estateJSON(otherLatestUpdate: "2026-09-03T13:00:00Z").utf8)
+        )
+        let digestRecorder = HolyMannaDigestRecorder()
+        let client = HolyMannaBoardClient { invocation, _ in
+            let root = invocation.currentDirectoryPath ?? "/srv/other"
+            return .init(
+                stdout: HolyMannaBoardFixtures.state(itemCount: 1, root: root),
+                stderr: "",
+                exitCode: 0
+            )
+        }
+        let delayRecorder = HolyMannaDelayRecorder()
+        let pacer = HolyArchiveWritePacer(
+            budget: .init(
+                rowsPerTransaction: 12,
+                foregroundRowsPerSecond: 1,
+                backgroundRowsPerSecond: 100,
+                checkpointEveryRows: 100,
+                maximumPauseNanoseconds: 500_000_000
+            ),
+            isForeground: { true },
+            sleep: { nanoseconds in await delayRecorder.append(nanoseconds) }
+        )
+        let warmer = HolyMannaBoardPrewarmer(
+            client: client,
+            digestService: digestRecorder,
+            pacer: pacer
+        )
+        let context = HolyMannaBoardContext(boardRoot: "/srv/focus", remoteHost: nil)
+        let sink: HolyMannaWarmSink = { _ in }
+
+        await warmer.enqueueFocused(
+            focusPayload,
+            context: context,
+            allowGeneration: true,
+            usageGuardReason: nil,
+            sink: sink
+        )
+        await warmer.enqueueEstate(
+            estate,
+            baseContext: context,
+            focusedRoot: context.boardRoot,
+            allowGeneration: true,
+            usageGuardReason: nil,
+            sink: sink
+        )
+        await warmer.waitUntilIdle()
+
+        let firstBatches = await digestRecorder.batches
+        #expect(firstBatches.map(\.count) == [12, 12, 1, 1])
+        #expect(firstBatches.prefix(3).allSatisfy { $0.root == "/srv/focus" })
+        #expect(firstBatches.last?.root == "/srv/other")
+        #expect(await delayRecorder.values.count == 4)
+        #expect(await delayRecorder.values.allSatisfy { $0 > 0 })
+
+        // 144 unchanged estate refreshes model a ten-minute workday cadence.
+        // They enqueue no board reads and therefore cannot create a writing
+        // placeholder or pay generation twice.
+        for _ in 0 ..< 144 {
+            await warmer.enqueueEstate(
+                estate,
+                baseContext: context,
+                focusedRoot: context.boardRoot,
+                allowGeneration: true,
+                usageGuardReason: nil,
+                sink: sink
+            )
+        }
+        await warmer.waitUntilIdle()
+        #expect(await digestRecorder.batches.count == 4)
+
+        await warmer.enqueueEstate(
+            changedEstate,
+            baseContext: context,
+            focusedRoot: context.boardRoot,
+            allowGeneration: true,
+            usageGuardReason: nil,
+            sink: sink
+        )
+        await warmer.waitUntilIdle()
+        #expect(await digestRecorder.batches.count == 5)
+        #expect(await digestRecorder.batches.last?.root == "/srv/other")
+    }
+
+    @Test @MainActor func backgroundBoardRefreshStartsWarmWithoutDelayingState() async throws {
         let directory = try temporaryDirectory(named: "holy-board-preload")
         defer { try? FileManager.default.removeItem(at: directory) }
         let digestRecorder = HolyMannaDigestRecorder()
@@ -192,12 +373,18 @@ struct HolyMannaBoardTests {
         for _ in 0 ..< 400 where store.state == nil {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
+        for _ in 0 ..< 400 {
+            if await digestRecorder.callCount > 0 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
         let digestCallCount = await digestRecorder.callCount
 
         #expect(store.state != nil)
         #expect(!store.isPresented)
         #expect(!store.isDigestLoading)
-        #expect(digestCallCount == 0)
+        #expect(digestCallCount == 1)
+        #expect(store.digestText == "Warm summary for Native Board")
+        #expect(store.presentationDigest(for: try #require(store.selectedItem)) == "Warm Native Board")
     }
 
     @Test func databaseMigrationCreatesBoundedDigestCacheSurface() throws {
@@ -391,22 +578,65 @@ private actor HolyMannaInvocationRecorder {
     }
 }
 
+private struct HolyMannaRecordedBatch: Sendable {
+    let root: String?
+    let count: Int
+}
+
 private actor HolyMannaDigestRecorder: HolyMannaBoardDigesting {
     private(set) var callCount = 0
+    private(set) var batches: [HolyMannaRecordedBatch] = []
 
-    func digest(
-        for item: HolyMannaBoardItem,
-        boardRoot: String?,
-        allowGeneration: Bool,
-        usageGuardReason: String?
-    ) async throws -> HolyMannaDigestResult {
+    func presentations(
+        for items: [HolyMannaBoardItem],
+        context: HolyMannaBoardContext,
+        allowGeneration: Bool
+    ) async throws -> [HolyMannaPresentationResult] {
         callCount += 1
-        return .init(
-            text: "Unexpected digest",
-            contentHash: HolyMannaBoardDigestService.contentHash(for: item),
-            model: "test",
-            wasCached: false
-        )
+        batches.append(.init(root: context.boardRoot, count: items.count))
+        return items.map { item in
+            .init(
+                itemID: item.id,
+                digest: item.digest ?? "Warm \(item.titlePlain)",
+                summary: item.summary ?? "Warm summary for \(item.titlePlain)",
+                contentHash: HolyMannaBoardDigestService.contentHash(for: item),
+                model: "test",
+                wasCached: false
+            )
+        }
+    }
+}
+
+private struct HolyMannaRecordedCompletion: Sendable {
+    let role: HolyIntelligenceRole
+    let prompt: String
+    let workingDirectory: String?
+}
+
+private actor HolyMannaCompletionRecorder {
+    private var responses: [String]
+    private(set) var calls: [HolyMannaRecordedCompletion] = []
+
+    init(responses: [String]) {
+        self.responses = responses
+    }
+
+    func complete(
+        role: HolyIntelligenceRole,
+        prompt: String,
+        workingDirectory: String?
+    ) -> HolyIntelligenceResponse {
+        calls.append(.init(role: role, prompt: prompt, workingDirectory: workingDirectory))
+        let text = responses.isEmpty ? #"{"items":[]}"# : responses.removeFirst()
+        return .init(text: text, model: "test-fast")
+    }
+}
+
+private actor HolyMannaDelayRecorder {
+    private(set) var values: [UInt64] = []
+
+    func append(_ value: UInt64) {
+        values.append(value)
     }
 }
 
@@ -504,6 +734,64 @@ private enum HolyMannaBoardFixtures {
     }
     """
 
+    static func state(itemCount: Int, root: String) -> String {
+        let original = itemJSON(description: "Build the native Board.")
+        let rows = (0 ..< itemCount).map { index in
+            itemJSON(
+                id: String(format: "mn-batch%03d", index),
+                title: "Warm item \(index)",
+                description: "Generate complete presentation \(index)."
+            )
+        }.joined(separator: ",")
+        return Self.state
+            .replacingOccurrences(of: original, with: rows)
+            .replacingOccurrences(of: "/srv/holy-ghostty", with: root)
+    }
+
+    static func estateJSON(otherLatestUpdate: String) -> String {
+        """
+        {
+          "generated_at": "2026-09-03T16:00:00Z",
+          "boards": [
+            {
+              "name": "focus",
+              "root": "/srv/focus",
+              "exists": true,
+              "total": 25,
+              "status_counts": {"active": 25},
+              "dreams": 0,
+              "decisions": 0,
+              "drift_count": 0,
+              "drift_generated_at": null,
+              "latest_update": "2026-09-03T12:00:00Z",
+              "coord": {"attention": {}, "needs_you": 0, "working": 0, "here": 0, "gone": 0},
+              "slug": "focus",
+              "url": "manna://focus"
+            },
+            {
+              "name": "other",
+              "root": "/srv/other",
+              "exists": true,
+              "total": 1,
+              "status_counts": {"ready": 1},
+              "dreams": 0,
+              "decisions": 0,
+              "drift_count": 0,
+              "drift_generated_at": null,
+              "latest_update": "\(otherLatestUpdate)",
+              "coord": {"attention": {}, "needs_you": 0, "working": 0, "here": 0, "gone": 0},
+              "slug": "other",
+              "url": "manna://other"
+            }
+          ],
+          "count": 2,
+          "registry": "/Users/erik/.agent-do/manna/serve/boards.json",
+          "totals": {"needs_you": 0, "working": 0, "here": 0},
+          "building": 0
+        }
+        """
+    }
+
     static let estate = """
     {
       "generated_at": "2026-09-01T16:00:00Z",
@@ -536,31 +824,49 @@ private enum HolyMannaBoardFixtures {
     """
 
     static func item(
+        id: String = "mn-live001",
+        title: String = "Native Board",
         description: String,
-        blockerStatus: String? = nil
+        blockerStatus: String? = nil,
+        digest: String? = nil,
+        summary: String? = nil
     ) throws -> HolyMannaBoardItem {
         try JSONDecoder().decode(
             HolyMannaBoardItem.self,
-            from: Data(itemJSON(description: description, blockerStatus: blockerStatus).utf8)
+            from: Data(itemJSON(
+                id: id,
+                title: title,
+                description: description,
+                blockerStatus: blockerStatus,
+                digest: digest,
+                summary: summary
+            ).utf8)
         )
     }
 
     private static func itemJSON(
+        id: String = "mn-live001",
+        title: String = "Native Board",
         description: String,
-        blockerStatus: String? = nil
+        blockerStatus: String? = nil,
+        digest: String? = nil,
+        summary: String? = nil
     ) -> String {
-        let encodedData = (try? JSONEncoder().encode(description)) ?? Data("\"\"".utf8)
-        let encodedDescription = String(bytes: encodedData, encoding: .utf8) ?? "\"\""
+        func encoded(_ value: String?) -> String {
+            guard let value else { return "null" }
+            let data = (try? JSONEncoder().encode(value)) ?? Data("\"\"".utf8)
+            return String(bytes: data, encoding: .utf8) ?? "\"\""
+        }
         let blockedBy = blockerStatus == nil ? "[]" : "[\"mn-blocker1\"]"
         let blockers = blockerStatus.map { status in
             "{\"id\":\"mn-blocker1\",\"status\":\"\(status)\",\"title\":\"Land prerequisite\"}"
         } ?? ""
         return """
         {
-          "id": "mn-live001",
-          "title": "Native Board",
-          "title_plain": "Native Board",
-          "description": \(encodedDescription),
+          "id": \(encoded(id)),
+          "title": \(encoded(title)),
+          "title_plain": \(encoded(title)),
+          "description": \(encoded(description)),
           "status": "in_progress",
           "effective": "active",
           "kind": "item",
@@ -588,7 +894,9 @@ private enum HolyMannaBoardFixtures {
           "prompt": ".handoff/live.md",
           "handoff_digest": "sha256:live",
           "handoff_exists": true,
-          "source": ".manna/issues.jsonl"
+          "source": ".manna/issues.jsonl",
+          "digest": \(encoded(digest)),
+          "summary": \(encoded(summary))
         }
         """
     }

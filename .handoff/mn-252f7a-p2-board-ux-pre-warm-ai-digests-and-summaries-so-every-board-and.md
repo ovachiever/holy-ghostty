@@ -7,7 +7,7 @@ base_commit: dc2bd6e0d45304bed73f217fb2ccf18bd1ab7e43
 scope: '[P2][BOARD][UX] Pre-warm AI digests and summaries so every board and inspector opens fully written'
 inputs:
 - Erik ratified 2026-09-03 (instant-everything discussion)
-binding: sha256:a64ee0417849160bb6e54c5e83dd0d4f0569139e8cba71d99bce842d79667e1c
+binding: sha256:ab463dd5b4b68eef1585fb7ef07db675b9f440ab353e5e603b1b695874993256
 ---
 
 # Handoff: [P2][BOARD][UX] Pre-warm AI digests and summaries so every board and inspector opens fully written
@@ -38,3 +38,24 @@ Today digests (DIGEST column one-liners) and inspector summary paragraphs genera
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-252f7a`.
 4. Commit with `Manna: mn-252f7a` and run `agent-do manna done mn-252f7a` only after the work is verified.
+
+## Implementation
+
+- `manna state --json` digest and summary attachments are preferred. The warmer sends only missing fields to the fast role.
+- A background actor warms the focused board before changed estate boards in batches of 12.
+- Every batch passes through `HolyArchiveWritePacer`, including a foreground-aware delay while Holy Ghostty is active.
+- One SQLite slot per host, board, and item stores both presentation fields plus the current source hash. Changed content overwrites that slot, while unchanged estate versions are not reread.
+- State refresh lands before warm work and never awaits model generation. Selection reads the warmed overlay instead of starting a second generation path.
+
+## Verification
+
+- `xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug -destination 'platform=macOS' -only-testing:GhosttyTests/HolyMannaBoardTests -only-testing:GhosttyTests/HolyMannaBoardPresentationTests test`: 30 unique tests passed, 0 failed.
+- The deterministic workday replay warms 25 focused items in `12, 12, 1` batches, then the estate, records a foreground pacer delay after every batch, performs no new work across 144 unchanged estate refreshes, and performs exactly one new pass after a changed estate version.
+- `./scripts/test-holy-ghostty-build-contract.sh`: passed.
+- Strict SwiftLint on all six touched Swift files: 0 violations.
+- Board render smoke: passed. Seven PNGs were visually inspected and copied byte-identically to `.dev/mn-252f7a/render/` and iCloud Transfer.
+- Full receipt: `.dev/mn-252f7a/receipt.json`.
+
+## Remaining acceptance
+
+The implementation and deterministic full-day replay are green. Keep this ticket `in_progress` until one ordinary full day of live Board use records zero `writing…` sightings. A sighting is a bug receipt, not an acceptable transient.

@@ -95,18 +95,21 @@ struct HolyMannaBoardRenderSmokeTests {
 }
 
 private actor RenderDigestStub: HolyMannaBoardDigesting {
-    func digest(
-        for item: HolyMannaBoardItem,
-        boardRoot: String?,
-        allowGeneration: Bool,
-        usageGuardReason: String?
-    ) async throws -> HolyMannaDigestResult {
-        .init(
-            text: "We're rebuilding the native board so it reads like the web cockpit: one ledger, an inspector, the estate table.\n\nDone means Erik's side-by-side pass finds no delta that matters.",
-            contentHash: HolyMannaBoardDigestService.contentHash(for: item),
-            model: "render-stub",
-            wasCached: true
-        )
+    func presentations(
+        for items: [HolyMannaBoardItem],
+        context: HolyMannaBoardContext,
+        allowGeneration: Bool
+    ) async throws -> [HolyMannaPresentationResult] {
+        items.map { item in
+            .init(
+                itemID: item.id,
+                digest: item.digest ?? "Render \(item.titlePlain)",
+                summary: item.summary ?? "We're rebuilding the native board so it reads like the web cockpit: one ledger, an inspector, the estate table. Done means Erik's side-by-side pass finds no delta that matters.",
+                contentHash: HolyMannaBoardDigestService.contentHash(for: item),
+                model: "render-stub",
+                wasCached: true
+            )
+        }
     }
 }
 
