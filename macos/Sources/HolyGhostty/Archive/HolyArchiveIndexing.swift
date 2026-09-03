@@ -338,16 +338,16 @@ actor HolyArchiveIndexer {
 
     private let repository: HolyArchiveRepository
     private let registry: HolyArchiveProviderRegistry
-    private let embedder: (any HolyArchiveEmbeddingProviding)?
+    private let pacer: HolyArchiveWritePacer
 
     init(
         repository: HolyArchiveRepository,
         registry: HolyArchiveProviderRegistry = .init(),
-        embedder: (any HolyArchiveEmbeddingProviding)? = HolyArchiveEmbeddingProviderFactory.makeConfigured()
+        pacer: HolyArchiveWritePacer = .init()
     ) {
         self.repository = repository
         self.registry = registry
-        self.embedder = embedder
+        self.pacer = pacer
     }
 
     func fullReindex(
@@ -444,42 +444,6 @@ actor HolyArchiveIndexer {
         )
     }
 
-    func generateMissingEmbeddings(
-        progress: (@Sendable (HolyArchiveIndexProgress) async -> Void)? = nil
-    ) async -> HolyArchiveIndexReceipt {
-        let started = Date()
-        var receipt = HolyArchiveIndexReceipt()
-        guard let embedder, embedder.isAvailable else {
-            receipt.failures.append("Semantic indexing is unavailable because the selected embedding provider has no API key.")
-            return receipt
-        }
-        do {
-            let rows = try repository.chunksWithoutEmbeddings(limit: 100_000)
-            await progress?(.init(phase: .embedding, completed: 0, total: rows.count, detail: embedder.displayName))
-            var completed = 0
-            for batch in Self.embeddingBatches(rows) {
-                do {
-                    let vectors = try await embedder.embed(batch.map(\.content), purpose: .document)
-                    guard vectors.count == batch.count else {
-                        throw HolyArchiveEmbeddingError.invalidResponse("Expected \(batch.count) vectors, received \(vectors.count).")
-                    }
-                    for (row, vector) in zip(batch, vectors) {
-                        try repository.storeEmbedding(vector, model: embedder.model, chunkID: row.id)
-                        receipt.embeddingsCreated += 1
-                    }
-                } catch {
-                    receipt.failures.append("Embedding batch at \(completed): \(error.localizedDescription)")
-                }
-                completed += batch.count
-                await progress?(.init(phase: .embedding, completed: completed, total: rows.count, detail: embedder.displayName))
-            }
-        } catch {
-            receipt.failures.append("Embedding backfill: \(error.localizedDescription)")
-        }
-        receipt.elapsedMilliseconds = Date().timeIntervalSince(started) * 1000
-        return receipt
-    }
-
     private func index(
         work: [(any HolyArchiveProviding, URL)],
         metadataOnly: Bool,
@@ -489,7 +453,22 @@ actor HolyArchiveIndexer {
     ) async -> HolyArchiveIndexReceipt {
         var receipt = initialReceipt
         var parentLinks: [(String, String)] = []
+        var rowsSinceCheckpoint = 0
+        var completedAllWork = true
+        let initialProgress = HolyArchiveIndexProgress(
+            phase: .indexing,
+            completed: 0,
+            total: work.count,
+            detail: work.isEmpty ? "No changed provider sessions" : "Preparing resumable ingest"
+        )
+        try? repository.saveIndexProgress(initialProgress)
+        await progress?(initialProgress)
         for (position, item) in work.enumerated() {
+            if Task.isCancelled {
+                completedAllWork = false
+                receipt.failures.append("Archive ingest paused after \(position) of \(work.count) sessions.")
+                break
+            }
             let (provider, path) = item
             await progress?(.init(
                 phase: .indexing,
@@ -500,6 +479,7 @@ actor HolyArchiveIndexer {
             do {
                 guard var (session, messages) = try provider.parseSession(at: path) else { continue }
                 messages = synthesizedMessages(for: session, ifEmpty: messages)
+                messages = Self.storageMessages(sessionID: session.id, messages: messages)
                 session.firstPrompt = Self.indexPreview(session.firstPrompt, prefixCount: 200)
                 session.lastPrompt = Self.indexPreview(session.lastPrompt, prefixCount: 2_000)
                 session.lastResponse = Self.indexPreview(session.lastResponse, prefixCount: 500)
@@ -508,50 +488,82 @@ actor HolyArchiveIndexer {
                 session.autoTags = HolyArchiveTagger.tags(session: session, messages: messages)
                 session.resumeCommand = provider.resumeCommand(for: session)
                 session.indexedAt = .now
-                var chunks = metadataOnly ? [] : HolyArchiveChunker.chunks(session: session, messages: messages)
-                if let embedder, embedder.isAvailable, !chunks.isEmpty {
-                    do {
-                        for batchRange in Self.embeddingBatchRanges(chunks) {
-                            let values = try await embedder.embed(
-                                batchRange.map { chunks[$0].content },
-                                purpose: .document
-                            )
-                            guard values.count == batchRange.count else {
-                                throw HolyArchiveEmbeddingError.invalidResponse("Vector count did not match chunk count.")
-                            }
-                            for (index, vector) in zip(batchRange, values) {
-                                chunks[index].embedding = vector
-                                chunks[index].embeddingModel = embedder.model
-                                receipt.embeddingsCreated += 1
-                            }
-                        }
-                    } catch {
-                        receipt.failures.append("\(session.shortID) embeddings: \(error.localizedDescription)")
-                    }
-                }
-                try repository.replace(
+                let chunks = metadataOnly ? [] : HolyArchiveChunker.chunks(session: session, messages: messages)
+                let writtenRows = try await persist(
                     session: session,
                     messages: messages,
                     chunks: chunks,
                     metadataOnly: metadataOnly
                 )
+                rowsSinceCheckpoint += writtenRows
                 if let parentID = session.parentID { parentLinks.append((session.id, parentID)) }
                 receipt.sessionsIndexed += 1
                 receipt.messagesIndexed += metadataOnly ? 0 : messages.count
                 receipt.chunksCreated += chunks.count
+                let storedProgress = HolyArchiveIndexProgress(
+                    phase: .indexing,
+                    completed: position + 1,
+                    total: work.count,
+                    detail: "\(provider.harness.displayName): \(path.lastPathComponent)"
+                )
+                try repository.saveIndexProgress(storedProgress)
+                if rowsSinceCheckpoint >= pacer.budget.checkpointEveryRows {
+                    try repository.checkpointWAL()
+                    rowsSinceCheckpoint = 0
+                }
             } catch {
                 receipt.failures.append("\(provider.harness.displayName) \(path.lastPathComponent): \(error.localizedDescription)")
             }
         }
         do {
-            try repository.applyParentLinks(parentLinks.map { (childID: $0.0, parentID: $0.1) })
+            for batch in Self.batches(parentLinks, maximumCount: pacer.budget.rowsPerTransaction) {
+                try repository.applyParentLinks(batch.map { (childID: $0.0, parentID: $0.1) })
+                await pacer.yield(afterWritingRows: batch.count)
+            }
             receipt.projectsUpdated = try repository.replaceProjectStats()
         } catch {
             receipt.failures.append("Archive finishing: \(error.localizedDescription)")
         }
         await progress?(.init(phase: .finishing, completed: work.count, total: work.count, detail: "Archive ready"))
+        if completedAllWork { try? repository.clearIndexProgress() }
+        try? repository.checkpointWAL()
         receipt.elapsedMilliseconds = Date().timeIntervalSince(started) * 1000
         return receipt
+    }
+
+    private func persist(
+        session: HolyArchiveSession,
+        messages: [HolyArchiveMessage],
+        chunks: [HolyArchiveChunk],
+        metadataOnly: Bool
+    ) async throws -> Int {
+        if metadataOnly {
+            try repository.replaceMetadata(session: session)
+            await pacer.yield(afterWritingRows: 1)
+            return 1
+        }
+
+        let token = try repository.beginReplacement(
+            sessionID: session.id,
+            expectedMessageCount: messages.count,
+            expectedChunkCount: chunks.count
+        )
+        do {
+            for batch in Self.batches(messages, maximumCount: pacer.budget.rowsPerTransaction) {
+                try repository.stage(messages: batch, for: token)
+                await pacer.yield(afterWritingRows: batch.count)
+            }
+            for batch in Self.batches(chunks, maximumCount: pacer.budget.rowsPerTransaction) {
+                try repository.stage(chunks: batch, for: token)
+                await pacer.yield(afterWritingRows: batch.count)
+            }
+            try repository.finishReplacement(session: session, token: token)
+            await pacer.yield(afterWritingRows: 1 + messages.count + chunks.count)
+            return 1 + messages.count + chunks.count
+        } catch {
+            try? repository.discardReplacement(token)
+            throw error
+        }
     }
 
     private func synthesizedMessages(
@@ -580,7 +592,27 @@ actor HolyArchiveIndexer {
         return String(value.prefix(prefixCount)) + "..."
     }
 
-    private static func embeddingBatches(_ chunks: [HolyArchiveChunk]) -> [[HolyArchiveChunk]] {
+    /// Provider message IDs are only session-scoped in real stores. Forked
+    /// Claude and Codex sessions can legitimately repeat them, while Archive's
+    /// message primary key is global. Namespace by the stable owning session
+    /// and sequence before chunk references are built.
+    private static func storageMessages(
+        sessionID: String,
+        messages: [HolyArchiveMessage]
+    ) -> [HolyArchiveMessage] {
+        messages.enumerated().map { offset, message in
+            .init(
+                id: "\(sessionID):message:\(offset):\(message.id)",
+                sessionID: sessionID,
+                role: message.role,
+                content: message.content,
+                timestamp: message.timestamp,
+                sequence: offset
+            )
+        }
+    }
+
+    fileprivate static func embeddingBatches(_ chunks: [HolyArchiveChunk]) -> [[HolyArchiveChunk]] {
         var batches: [[HolyArchiveChunk]] = []
         var current: [HolyArchiveChunk] = []
         var tokenEstimate = 0
@@ -598,22 +630,111 @@ actor HolyArchiveIndexer {
         return batches
     }
 
-    private static func embeddingBatchRanges(_ chunks: [HolyArchiveChunk]) -> [[Int]] {
-        let indexed = chunks.enumerated().map { (index: $0.offset, chunk: $0.element) }
-        var batches: [[Int]] = []
-        var current: [Int] = []
-        var tokenEstimate = 0
-        for pair in indexed {
-            let estimate = max(1, min(pair.chunk.content.count, 24_000) / 3)
-            if !current.isEmpty, current.count >= 100 || tokenEstimate + estimate > 250_000 {
-                batches.append(current)
-                current = []
-                tokenEstimate = 0
-            }
-            current.append(pair.index)
-            tokenEstimate += estimate
+    private static func batches<Element>(
+        _ values: [Element],
+        maximumCount: Int
+    ) -> [[Element]] {
+        guard maximumCount > 0 else { return [] }
+        return stride(from: 0, to: values.count, by: maximumCount).map { start in
+            Array(values[start..<min(start + maximumCount, values.count)])
         }
-        if !current.isEmpty { batches.append(current) }
-        return batches
+    }
+}
+
+/// Semantic vectors are deliberately generated outside provider ingest. This
+/// actor is the single embedding queue, rate-limits provider requests, and
+/// commits each returned batch in one bounded Archive-only transaction.
+actor HolyArchiveEmbeddingWorker {
+    private let repository: HolyArchiveRepository
+    private let embedder: (any HolyArchiveEmbeddingProviding)?
+    private let pacer: HolyArchiveWritePacer
+    private let minimumRequestIntervalNanoseconds: UInt64
+    private var lastRequestAt: ContinuousClock.Instant?
+
+    init(
+        repository: HolyArchiveRepository,
+        embedder: (any HolyArchiveEmbeddingProviding)? = HolyArchiveEmbeddingProviderFactory.makeConfigured(),
+        pacer: HolyArchiveWritePacer = .init(),
+        minimumRequestIntervalNanoseconds: UInt64 = 250_000_000
+    ) {
+        self.repository = repository
+        self.embedder = embedder
+        self.pacer = pacer
+        self.minimumRequestIntervalNanoseconds = minimumRequestIntervalNanoseconds
+    }
+
+    func generateMissingEmbeddings(
+        progress: (@Sendable (HolyArchiveIndexProgress) async -> Void)? = nil
+    ) async -> HolyArchiveIndexReceipt {
+        let started = Date()
+        var receipt = HolyArchiveIndexReceipt()
+        guard let embedder, embedder.isAvailable else {
+            receipt.failures.append("Semantic indexing is unavailable because the selected embedding provider has no API key.")
+            return receipt
+        }
+        do {
+            let rows = try repository.chunksWithoutEmbeddings(limit: 100_000)
+            await progress?(.init(
+                phase: .embedding,
+                completed: 0,
+                total: rows.count,
+                detail: "\(embedder.displayName) queue"
+            ))
+            var completed = 0
+            var rowsSinceCheckpoint = 0
+            for batch in HolyArchiveIndexer.embeddingBatches(rows) {
+                if Task.isCancelled {
+                    receipt.failures.append("Embedding queue paused after \(completed) of \(rows.count) chunks.")
+                    break
+                }
+                do {
+                    await waitForRequestBudget()
+                    let vectors = try await embedder.embed(batch.map(\.content), purpose: .document)
+                    guard vectors.count == batch.count else {
+                        throw HolyArchiveEmbeddingError.invalidResponse(
+                            "Expected \(batch.count) vectors, received \(vectors.count)."
+                        )
+                    }
+                    let writes = zip(batch, vectors).map { row, vector in
+                        HolyArchiveEmbeddingWrite(
+                            chunkID: row.id,
+                            embedding: vector,
+                            model: embedder.model
+                        )
+                    }
+                    try repository.storeEmbeddings(writes)
+                    receipt.embeddingsCreated += writes.count
+                    rowsSinceCheckpoint += writes.count
+                    await pacer.yield(afterWritingRows: writes.count)
+                    if rowsSinceCheckpoint >= pacer.budget.checkpointEveryRows {
+                        try repository.checkpointWAL()
+                        rowsSinceCheckpoint = 0
+                    }
+                } catch {
+                    receipt.failures.append("Embedding batch at \(completed): \(error.localizedDescription)")
+                }
+                completed += batch.count
+                await progress?(.init(
+                    phase: .embedding,
+                    completed: completed,
+                    total: rows.count,
+                    detail: "\(embedder.displayName) queue"
+                ))
+            }
+            try? repository.checkpointWAL()
+        } catch {
+            receipt.failures.append("Embedding backfill: \(error.localizedDescription)")
+        }
+        receipt.elapsedMilliseconds = Date().timeIntervalSince(started) * 1_000
+        return receipt
+    }
+
+    private func waitForRequestBudget() async {
+        let clock = ContinuousClock()
+        if let lastRequestAt {
+            let deadline = lastRequestAt.advanced(by: .nanoseconds(Int64(minimumRequestIntervalNanoseconds)))
+            if clock.now < deadline { try? await clock.sleep(until: deadline) }
+        }
+        lastRequestAt = clock.now
     }
 }

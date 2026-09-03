@@ -8,12 +8,198 @@ struct HolyArchiveModeTests {
         try withRepository { repository, databaseURL, _ in
             _ = repository
             let database = try HolyDatabase.open(at: databaseURL, readOnly: true)
-            #expect(try database.userVersion() == 12)
+            #expect(try database.userVersion() == HolyArchiveDatabaseSchema.currentUserVersion)
             let names = try tableNames(database)
             #expect(names.contains("archive_sessions"))
             #expect(names.contains("archive_messages_fts"))
             #expect(names.contains("archive_research_chats"))
             #expect(names.contains("archive_annotations"))
+            #expect(names.contains("archive_staged_messages"))
+            #expect(try database.scalarText("PRAGMA journal_mode;").lowercased() == "wal")
+        }
+    }
+
+    @Test func archiveAndWorkspaceUseDifferentDatabaseFilesAndWriterLocks() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("holy-archive-isolation-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspaceURL = root.appendingPathComponent("holy-ghostty.sqlite3")
+        let archiveURL = root.appendingPathComponent("holy-archive.sqlite3")
+        let workspace = try HolyDatabase.open(at: workspaceURL)
+        try HolyDatabaseMigrator.migrate(workspace)
+        _ = try HolyArchiveRepository(databaseURL: archiveURL)
+        let archiveWriter = try HolyDatabase.open(at: archiveURL)
+
+        #expect(workspaceURL.standardizedFileURL != archiveURL.standardizedFileURL)
+        try archiveWriter.execute("BEGIN IMMEDIATE TRANSACTION;")
+        defer { try? archiveWriter.execute("ROLLBACK;") }
+
+        let clock = ContinuousClock()
+        for value in 0..<20 {
+            let started = clock.now
+            try workspace.execute(
+                """
+                INSERT INTO app_state(key, value_json, updated_at) VALUES ('archive-soak', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                               updated_at = excluded.updated_at;
+                """,
+                bindings: [.text(String(value)), .text(String(value))]
+            )
+            #expect(started.duration(to: clock.now) < .milliseconds(100))
+        }
+    }
+
+    @Test func legacyDatabaseMigrationResumesByCommittedRowBatch() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("holy-archive-migration-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let legacyURL = root.appendingPathComponent("holy-ghostty.sqlite3")
+        let archiveURL = root.appendingPathComponent("holy-archive.sqlite3")
+        let legacy = try HolyDatabase.open(at: legacyURL)
+        try HolyDatabaseMigrator.migrate(legacy)
+        try insertLegacySession(id: "legacy-session", in: legacy)
+        try legacy.execute(
+            """
+            INSERT INTO archive_messages(
+                id, session_id, role, content, timestamp, sequence, has_code, tool_mentions_json
+            ) VALUES ('legacy-message', 'legacy-session', 'user', 'legacy database migration',
+                      1700000000, 0, 0, '[]');
+            """
+        )
+
+        let migrator = HolyArchiveLegacyDatabaseMigrator(
+            sourceURL: legacyURL,
+            destinationURL: archiveURL,
+            pacer: .init(budget: .unthrottled)
+        )
+        let interrupted = try await migrator.migrateIfNeeded(maximumBatches: 1)
+        #expect(!interrupted.didComplete)
+        #expect(interrupted.completedRows == 1)
+
+        let completed = try await migrator.migrateIfNeeded()
+        #expect(completed.didComplete)
+        let repository = try HolyArchiveRepository(databaseURL: archiveURL)
+        #expect(try repository.session(id: "legacy-session")?.title == "Legacy session")
+        #expect(try repository.messages(sessionID: "legacy-session").map(\.content) == [
+            "legacy database migration",
+        ])
+        #expect(try legacy.scalarInt64("SELECT COUNT(*) FROM archive_sessions;") == 1)
+        let replay = try await migrator.migrateIfNeeded()
+        #expect(replay == .init(completedRows: 0, totalRows: 0, didComplete: true))
+    }
+
+    @Test func stagedReplacementKeepsLastCompleteSessionUntilAtomicPublish() throws {
+        try withRepository { repository, databaseURL, _ in
+            let original = sampleSession(id: "resume-safe")
+            let originalMessages = sampleMessages(sessionID: original.id, content: "last complete transcript")
+            try repository.replace(session: original, messages: originalMessages, chunks: [])
+
+            let replacement = HolyArchiveMessage(
+                id: "replacement", sessionID: original.id, role: .assistant,
+                content: "new transcript", timestamp: .now, sequence: 0
+            )
+            let token = try repository.beginReplacement(
+                sessionID: original.id,
+                expectedMessageCount: 1,
+                expectedChunkCount: 0
+            )
+            try repository.stage(messages: [replacement], for: token)
+
+            #expect(try repository.messages(sessionID: original.id) == originalMessages)
+            try repository.replace(session: original, messages: [replacement], chunks: [])
+            let published = try repository.messages(sessionID: original.id)
+            #expect(published.map(\.id) == [replacement.id])
+            #expect(published.map(\.content) == [replacement.content])
+            let database = try HolyDatabase.open(at: databaseURL, readOnly: true)
+            #expect(try database.scalarInt64("SELECT COUNT(*) FROM archive_staged_messages;") == 0)
+        }
+    }
+
+    @Test func progressRoundTripsForRelaunchResume() throws {
+        try withRepository { repository, _, _ in
+            let progress = HolyArchiveIndexProgress(
+                phase: .indexing,
+                completed: 750,
+                total: 79_000,
+                detail: "Codex: rollout.jsonl"
+            )
+            try repository.saveIndexProgress(progress)
+            #expect(try repository.storedIndexProgress() == progress)
+            try repository.clearIndexProgress()
+            #expect(try repository.storedIndexProgress() == nil)
+        }
+    }
+
+    @Test func foregroundWriteBudgetAppliesStrongerBackpressure() async {
+        let budget = HolyArchiveWriteBudget(
+            rowsPerTransaction: 25,
+            foregroundRowsPerSecond: 100,
+            backgroundRowsPerSecond: 1_000,
+            checkpointEveryRows: 100,
+            maximumPauseNanoseconds: 2_000_000_000
+        )
+        #expect(budget.delayNanoseconds(afterWritingRows: 50, foreground: true) == 500_000_000)
+        #expect(budget.delayNanoseconds(afterWritingRows: 50, foreground: false) == 50_000_000)
+
+        let sleeps = ArchiveSleepRecorder()
+        let pacer = HolyArchiveWritePacer(
+            budget: budget,
+            isForeground: { true },
+            sleep: { value in await sleeps.record(value) }
+        )
+        await pacer.yield(afterWritingRows: 50)
+        #expect(await sleeps.values == [500_000_000])
+    }
+
+    @Test func embeddingWorkerIsSeparateFromIngestAndCommitsBoundedBatches() async throws {
+        try await withRepositoryAsync { repository, _, _ in
+            let session = sampleSession(id: "embedding-queue")
+            let messages = sampleMessages(sessionID: session.id)
+            let chunks = HolyArchiveChunker.chunks(session: session, messages: messages)
+            try repository.replace(session: session, messages: messages, chunks: chunks)
+            #expect(try repository.embeddingRows().isEmpty)
+
+            let worker = HolyArchiveEmbeddingWorker(
+                repository: repository,
+                embedder: FixedEmbeddingProvider(vector: [0.25, 0.75]),
+                pacer: .init(budget: .unthrottled),
+                minimumRequestIntervalNanoseconds: 0
+            )
+            let receipt = await worker.generateMissingEmbeddings()
+            #expect(receipt.failures.isEmpty)
+            #expect(receipt.embeddingsCreated == chunks.count)
+            #expect(try repository.embeddingRows().count == chunks.count)
+        }
+    }
+
+    @Test func indexerNamespacesProviderMessageIDsByOwningSession() async throws {
+        try await withRepositoryAsync { repository, _, root in
+            let firstURL = root.appendingPathComponent("first.jsonl")
+            let secondURL = root.appendingPathComponent("second.jsonl")
+            try Data("fixture\n".utf8).write(to: firstURL)
+            try Data("fixture\n".utf8).write(to: secondURL)
+            let first = sampleSession(id: "first-session", rawPath: firstURL.path)
+            let second = sampleSession(id: "second-session", rawPath: secondURL.path)
+            let provider = FixtureArchiveProvider(
+                root: root,
+                sessions: [first, second],
+                messageID: "shared-provider-message"
+            )
+            let indexer = HolyArchiveIndexer(
+                repository: repository,
+                registry: .init(providers: [provider]),
+                pacer: .init(budget: .unthrottled)
+            )
+
+            let receipt = await indexer.fullReindex()
+
+            #expect(receipt.failures.isEmpty)
+            let firstIDs = try repository.messages(sessionID: first.id).map(\.id)
+            let secondIDs = try repository.messages(sessionID: second.id).map(\.id)
+            #expect(firstIDs == ["first-session:message:0:shared-provider-message"])
+            #expect(secondIDs == ["second-session:message:0:shared-provider-message"])
         }
     }
 
@@ -244,6 +430,34 @@ struct HolyArchiveModeTests {
             let response = try await search.search("harness:codex", limit: 50)
             #expect(response.results.map(\.session.id) == ["two", "one"])
             #expect(response.results.allSatisfy { $0.score == 1 })
+        }
+    }
+
+    @Test func restoreResolverWaitsForLegacyDatabaseMigration() async throws {
+        try await withRepositoryAsync { repository, databaseURL, root in
+            let legacyURL = root.appendingPathComponent("legacy-workspace.sqlite3")
+            let legacy = try HolyDatabase.open(at: legacyURL)
+            try HolyDatabaseMigrator.migrate(legacy)
+            try insertLegacySession(id: "legacy-session", in: legacy)
+            let resolver = HolyArchiveRestoreResolver(
+                databaseURL: databaseURL,
+                legacyDatabaseURL: legacyURL,
+                registry: .init(providers: [])
+            )
+
+            let outcome = await resolver.resolve(.init(
+                workingDirectory: "/legacy",
+                harness: "codex",
+                nearUnixSeconds: 1_700_000_001
+            ))
+
+            guard case let .resolved(result) = outcome else {
+                Issue.record("Expected resolution after storage migration")
+                return
+            }
+            #expect(result.matched)
+            #expect(result.providerSessionID == "legacy-session")
+            #expect(try repository.session(id: "legacy-session") != nil)
         }
     }
 
@@ -826,6 +1040,26 @@ struct HolyArchiveModeTests {
         try #require(String(bytes: jsonData(value), encoding: .utf8))
     }
 
+    private func insertLegacySession(id: String, in database: HolyDatabase) throws {
+        try database.execute(
+            """
+            INSERT INTO archive_sessions(
+                id, harness, raw_path, project_path, project_name, title,
+                first_prompt_preview, last_prompt_preview, last_response_preview,
+                timestamp, timestamp_end, is_child, child_type, parent_id, model,
+                tool_calls_json, tokens_used, summary, content_hash, extra_json,
+                resume_command, message_count, turn_count, file_mtime, indexed_at,
+                auto_tags_json
+            ) VALUES (?, 'codex', '/legacy/session.jsonl', '/legacy', 'legacy',
+                      'Legacy session', 'Move legacy archive', 'Move legacy archive',
+                      'Moved', 1700000000, 1700000001, 0, NULL, NULL, 'gpt-5.6',
+                      '[]', 10, NULL, 'legacy-hash', '{}', 'codex resume legacy-session',
+                      1, 1, 1700000001, 1700000001, '[]');
+            """,
+            bindings: [.text(id)]
+        )
+    }
+
     private func sampleSession(
         id: String,
         child: Bool = false,
@@ -868,6 +1102,14 @@ struct HolyArchiveModeTests {
     }
 }
 
+private actor ArchiveSleepRecorder {
+    private(set) var values: [UInt64] = []
+
+    func record(_ value: UInt64) {
+        values.append(value)
+    }
+}
+
 private struct FixedEmbeddingProvider: HolyArchiveEmbeddingProviding {
     let id = "fixed"
     let displayName = "Fixed"
@@ -884,6 +1126,7 @@ private struct FixtureArchiveProvider: HolyArchiveProviding {
     let harness = HolyArchiveHarness.codex
     let root: URL
     let sessions: [HolyArchiveSession]
+    var messageID: String?
     var sessionsDirectory: URL { root }
 
     func discoverSessionFiles() throws -> [URL] {
@@ -901,7 +1144,7 @@ private struct FixtureArchiveProvider: HolyArchiveProviding {
     func parseSession(at url: URL) throws -> (HolyArchiveSession, [HolyArchiveMessage])? {
         guard let session = sessions.first(where: { $0.rawPath == url.path }) else { return nil }
         return (session, [
-            .init(id: "\(session.id)-u", sessionID: session.id, role: .user, content: session.firstPrompt, timestamp: session.createdAt, sequence: 0),
+            .init(id: messageID ?? "\(session.id)-u", sessionID: session.id, role: .user, content: session.firstPrompt, timestamp: session.createdAt, sequence: 0),
         ])
     }
 

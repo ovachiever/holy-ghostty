@@ -15,6 +15,10 @@ enum HolyDatabasePaths {
         containerDirectory.appendingPathComponent(HolyDatabaseSchema.filename, isDirectory: false)
     }
 
+    static var archiveDatabaseURL: URL {
+        containerDirectory.appendingPathComponent(HolyArchiveDatabaseSchema.filename, isDirectory: false)
+    }
+
     static var legacyWorkspaceStateURL: URL {
         containerDirectory.appendingPathComponent("workspace-state.json", isDirectory: false)
     }

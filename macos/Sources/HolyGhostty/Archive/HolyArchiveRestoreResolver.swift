@@ -11,13 +11,20 @@ struct HolyArchiveRestoreResolver: HolyRestoreBatchResolving, HolyRestoreResolvi
     static let claimInterval: TimeInterval = 120
 
     private let databaseURL: URL
+    private let legacyDatabaseURL: URL?
     private let registry: HolyArchiveProviderRegistry
 
     init(
-        databaseURL: URL = HolyDatabasePaths.databaseURL,
+        databaseURL: URL = HolyDatabasePaths.archiveDatabaseURL,
+        legacyDatabaseURL: URL? = nil,
         registry: HolyArchiveProviderRegistry = .init()
     ) {
         self.databaseURL = databaseURL
+        self.legacyDatabaseURL = legacyDatabaseURL ?? (
+            databaseURL.standardizedFileURL == HolyDatabasePaths.archiveDatabaseURL.standardizedFileURL
+                ? HolyDatabasePaths.databaseURL
+                : nil
+        )
         self.registry = registry
     }
 
@@ -34,7 +41,9 @@ struct HolyArchiveRestoreResolver: HolyRestoreBatchResolving, HolyRestoreResolvi
             do {
                 // The single-resolve contract is lookup-only. Batch restore is
                 // the sole owner of refresh so a cold boot cannot launch one
-                // archive crawl per roster row.
+                // archive crawl per roster row. The one-time database move is
+                // a storage prerequisite, not a provider refresh.
+                try await prepareStorage()
                 let repository = try HolyArchiveRepository(databaseURL: databaseURL)
                 let near = TimeInterval(query.nearUnixSeconds)
                 let candidates = try repository.resolveCandidates(
@@ -69,8 +78,9 @@ struct HolyArchiveRestoreResolver: HolyRestoreBatchResolving, HolyRestoreResolvi
     ) async -> HolyRestoreBatchResolveOutcome {
         guard !requests.isEmpty else { return .resolved([]) }
         do {
+            try await prepareStorage()
             let repository = try HolyArchiveRepository(databaseURL: databaseURL)
-            let indexer = HolyArchiveIndexer(repository: repository, registry: registry, embedder: nil)
+            let indexer = HolyArchiveIndexer(repository: repository, registry: registry)
             let validated = requests.map(Self.validate)
             await refreshStaleScopes(validated, repository: repository, indexer: indexer)
             var results: [HolyRestoreResolveBatchResult] = []
@@ -101,6 +111,17 @@ struct HolyArchiveRestoreResolver: HolyRestoreBatchResolving, HolyRestoreResolvi
             return .resolved(results)
         } catch {
             return .resolverUnavailable("Native archive resolution failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func prepareStorage() async throws {
+        guard let legacyDatabaseURL else { return }
+        let receipt = try await HolyArchiveLegacyDatabaseMigrator(
+            sourceURL: legacyDatabaseURL,
+            destinationURL: databaseURL
+        ).migrateIfNeeded()
+        guard receipt.didComplete else {
+            throw HolyArchiveRestoreStorageError.migrationIncomplete
         }
     }
 
@@ -237,5 +258,13 @@ struct HolyArchiveRestoreResolver: HolyRestoreBatchResolving, HolyRestoreResolvi
     private enum ValidatedRequest: Sendable {
         case success(HolyRestoreResolveBatchRequest, HolyArchiveHarness, runtime: String, path: String)
         case failure(HolyRestoreResolveBatchRequest, String)
+    }
+}
+
+private enum HolyArchiveRestoreStorageError: LocalizedError {
+    case migrationIncomplete
+
+    var errorDescription: String? {
+        "Archive storage migration paused before restore resolution could read a complete index."
     }
 }

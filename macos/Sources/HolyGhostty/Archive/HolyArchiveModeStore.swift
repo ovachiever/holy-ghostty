@@ -85,6 +85,8 @@ final class HolyArchiveModeStore: ObservableObject {
     let registry: HolyArchiveProviderRegistry
     private let repository: HolyArchiveRepository?
     private let indexer: HolyArchiveIndexer?
+    private let embeddingWorker: HolyArchiveEmbeddingWorker?
+    private let storageMigrator: HolyArchiveLegacyDatabaseMigrator?
     private let search: HolyArchiveHybridSearch?
     private let researchAgent: HolyArchiveResearchAgent?
     private let resumeHandler: @MainActor (HolyArchiveSession) -> Bool
@@ -95,7 +97,7 @@ final class HolyArchiveModeStore: ObservableObject {
 
     init(
         registry: HolyArchiveProviderRegistry = .init(),
-        databaseURL: URL = HolyDatabasePaths.databaseURL,
+        databaseURL: URL = HolyDatabasePaths.archiveDatabaseURL,
         resumeHandler: @escaping @MainActor (HolyArchiveSession) -> Bool
     ) {
         self.registry = registry
@@ -105,17 +107,37 @@ final class HolyArchiveModeStore: ObservableObject {
         self.reasoningEffort = UserDefaults.standard.string(forKey: "holy.archive.research.effort") ?? "xhigh"
         do {
             let repository = try HolyArchiveRepository(databaseURL: databaseURL)
+            let pacer = HolyArchiveWritePacer(isForeground: {
+                await MainActor.run { NSApp.isActive }
+            })
             let search = HolyArchiveHybridSearch(repository: repository)
             let tools = HolyArchiveResearchTools(
                 repository: repository, search: search, registry: registry
             )
             self.repository = repository
-            self.indexer = HolyArchiveIndexer(repository: repository, registry: registry)
+            self.indexer = HolyArchiveIndexer(
+                repository: repository,
+                registry: registry,
+                pacer: pacer
+            )
+            self.embeddingWorker = HolyArchiveEmbeddingWorker(
+                repository: repository,
+                pacer: pacer
+            )
+            let isDefaultArchive = databaseURL.standardizedFileURL
+                == HolyDatabasePaths.archiveDatabaseURL.standardizedFileURL
+            self.storageMigrator = HolyArchiveLegacyDatabaseMigrator(
+                sourceURL: isDefaultArchive ? HolyDatabasePaths.databaseURL : nil,
+                destinationURL: databaseURL,
+                pacer: pacer
+            )
             self.search = search
             self.researchAgent = HolyArchiveResearchAgent(repository: repository, tools: tools)
         } catch {
             repository = nil
             indexer = nil
+            embeddingWorker = nil
+            storageMigrator = nil
             search = nil
             researchAgent = nil
             errorMessage = "Archive storage could not open: \(error.localizedDescription)"
@@ -190,14 +212,14 @@ final class HolyArchiveModeStore: ObservableObject {
         isLoading = true
         statusMessage = "Loading indexed sessions..."
         refreshSessions()
-        // Nothing to discover means nothing to index or migrate.
-        // Auto-ingest is opt-in until archive writes stop contending with the
-        // UI's database writer (see the P0 contention item): the initial
-        // 79k-session ingest into the shared file starves session persistence
-        // behind SQLite's single WAL writer and freezes the app.
-        if !registry.availableProviders.isEmpty,
-           UserDefaults.standard.bool(forKey: "holy.archive.autoIndex") {
+        let storedProgress = try? repository?.storedIndexProgress()
+        if let storedProgress { indexProgress = storedProgress }
+        let explicitAutoIndex = UserDefaults.standard.object(forKey: "holy.archive.autoIndex") as? Bool
+        let shouldIndex = explicitAutoIndex ?? true
+        if !registry.availableProviders.isEmpty, shouldIndex || storedProgress != nil {
             incrementalIndex()
+        } else {
+            migrateLegacyStorageOnly()
         }
         refreshRecentChats()
     }
@@ -251,6 +273,11 @@ final class HolyArchiveModeStore: ObservableObject {
         isIndexing = true
         statusMessage = "Checking for new sessions..."
         Task {
+            guard await migrateLegacyStorageIfNeeded() else {
+                indexProgress = nil
+                isIndexing = false
+                return
+            }
             var receipt = await indexer.incrementalUpdate(maxAgeHours: HolyArchiveIndexer.startupWindowHours) { progress in
                 await MainActor.run { self.indexProgress = progress }
             }
@@ -280,6 +307,11 @@ final class HolyArchiveModeStore: ObservableObject {
         isIndexing = true
         statusMessage = "Rebuilding the native archive..."
         Task {
+            guard await migrateLegacyStorageIfNeeded() else {
+                indexProgress = nil
+                isIndexing = false
+                return
+            }
             var receipt = await indexer.fullReindex { progress in
                 await MainActor.run { self.indexProgress = progress }
             }
@@ -304,10 +336,15 @@ final class HolyArchiveModeStore: ObservableObject {
     }
 
     func generateMissingEmbeddings() {
-        guard let indexer, !isIndexing else { return }
+        guard let embeddingWorker, !isIndexing else { return }
         isIndexing = true
         Task {
-            let receipt = await indexer.generateMissingEmbeddings { progress in
+            guard await migrateLegacyStorageIfNeeded() else {
+                indexProgress = nil
+                isIndexing = false
+                return
+            }
+            let receipt = await embeddingWorker.generateMissingEmbeddings { progress in
                 await MainActor.run { self.indexProgress = progress }
             }
             lastIndexReceipt = receipt
@@ -316,6 +353,34 @@ final class HolyArchiveModeStore: ObservableObject {
             statusMessage = "Generated \(receipt.embeddingsCreated) embeddings."
             errorMessage = receipt.failures.first
             await search?.invalidateCache()
+        }
+    }
+
+    private func migrateLegacyStorageOnly() {
+        guard !isIndexing else { return }
+        isIndexing = true
+        Task {
+            _ = await migrateLegacyStorageIfNeeded()
+            indexProgress = nil
+            isIndexing = false
+            refreshSessions()
+        }
+    }
+
+    private func migrateLegacyStorageIfNeeded() async -> Bool {
+        guard let storageMigrator else { return true }
+        do {
+            let receipt = try await storageMigrator.migrateIfNeeded { progress in
+                await MainActor.run { self.indexProgress = progress }
+            }
+            if receipt.totalRows > 0 {
+                statusMessage = "Moved \(receipt.completedRows) legacy Archive rows into \(HolyArchiveDatabaseSchema.filename)."
+                refreshSessions()
+            }
+            return receipt.didComplete
+        } catch {
+            fail("Archive database migration failed", error)
+            return false
         }
     }
 

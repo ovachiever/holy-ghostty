@@ -208,9 +208,10 @@ struct HolyArchiveProject: Identifiable, Hashable, Sendable {
     var id: String { path }
 }
 
-struct HolyArchiveIndexProgress: Equatable, Sendable {
-    enum Phase: String, Sendable {
+struct HolyArchiveIndexProgress: Codable, Equatable, Sendable {
+    enum Phase: String, Codable, Sendable {
         case discovering
+        case migrating
         case indexing
         case embedding
         case finishing

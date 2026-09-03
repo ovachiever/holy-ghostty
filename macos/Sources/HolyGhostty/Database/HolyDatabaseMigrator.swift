@@ -81,7 +81,7 @@ enum HolyDatabaseMigrator {
         .init(
             version: 12,
             label: "Native session archive, search, and researcher",
-            statements: schemaV12
+            statements: archiveSchemaStatements
         ),
     ]
 
@@ -536,11 +536,11 @@ enum HolyDatabaseMigrator {
         """,
     ]
 
-    /// Archive owns its index inside Holy's database. The `archive_` prefix
-    /// keeps provider conversations distinct from live workspace rows while
-    /// still letting archive resume and crash restore join them through the
-    /// stable harness session id.
-    private static let schemaV12: [String] = [
+    /// Version 12 originally placed Archive in the workspace database. Keep
+    /// these statements available as the legacy source schema so an existing
+    /// installation can be copied into the independent Archive database.
+    /// New Archive writes are owned by `HolyArchiveDatabaseMigrator`.
+    static let archiveSchemaStatements: [String] = [
         """
         CREATE TABLE IF NOT EXISTS archive_index_meta (
             key TEXT PRIMARY KEY,
