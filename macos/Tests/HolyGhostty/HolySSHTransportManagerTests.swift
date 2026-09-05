@@ -100,7 +100,12 @@ struct HolySSHTransportManagerTests {
         let lifecycleScript = try #require(lifecycle.arguments.last)
         let lifecycleDiscoveryScript = try #require(lifecycleDiscovery.arguments.last)
 
-        #expect(surfaceScript.contains("for holy_slot_index in 0 1 2 3 4 5 6 7 8; do"))
+        // Surface slots derive from the production budget (which pairs with
+        // the estate's MaxSessions raise), never from a pinned literal.
+        let perLane = HolySSHAdmissionLimits.production.normalized.surfaceChannelsPerHost
+            / HolySSHTransportManager.interactiveLaneCount
+        let expectedSurfaceSlots = (0 ..< perLane).map(String.init).joined(separator: " ")
+        #expect(surfaceScript.contains("for holy_slot_index in \(expectedSurfaceSlots); do"))
         #expect(discoveryScript.contains("for holy_slot_index in 0 1 2 3 4 5; do"))
         #expect(lifecycleScript.contains("for holy_slot_index in 6 7 0 1 2 3 4 5; do"))
         #expect(lifecycleDiscoveryScript.contains("for holy_slot_index in 6 7 0 1 2 3 4 5; do"))

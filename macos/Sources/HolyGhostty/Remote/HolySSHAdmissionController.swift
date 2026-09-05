@@ -4,11 +4,18 @@ import Foundation
 /// multiplex these channels over a much smaller number of TCP connections,
 /// but multiplexing does not make channel capacity infinite.
 struct HolySSHAdmissionLimits: Sendable, Equatable {
-    /// OpenSSH defaults MaxSessions to 10 per multiplexed connection. Two
-    /// interactive masters therefore admit nine surfaces each and retain one
-    /// slot of headroom per lane. Hosts with a larger local override remain
-    /// safe; Holy does not assume that every destination shares that override.
-    var surfaceChannelsPerHost = 18
+    /// Paired with the estate's server config, not OpenSSH's defaults: the
+    /// managed hosts run MaxSessions 110 (raised alongside the transport
+    /// manager so multiplexed masters can carry real fleets — a 28-40 surface
+    /// host starved forever under the old default-sized budget of 18). Two
+    /// interactive masters admit fifty surfaces each, staying under the
+    /// server's per-connection cap with headroom for the control lane. A
+    /// host still running stock MaxSessions 10 refuses channels at its own
+    /// wall and the failure diagnosis names it; Holy's budget must not be
+    /// the artificial ceiling. Overridable per install via the
+    /// holy.ssh.surfaceChannelsPerHost default.
+    var surfaceChannelsPerHost = UserDefaults.standard
+        .object(forKey: "holy.ssh.surfaceChannelsPerHost") as? Int ?? 100
 
     /// The reserved control master is shared by discovery, metadata, and
     /// lifecycle commands. Lifecycle keeps the final slots so a saturated
