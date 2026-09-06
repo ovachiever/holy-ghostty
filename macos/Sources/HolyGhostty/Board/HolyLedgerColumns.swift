@@ -79,6 +79,7 @@ struct HolyLedgerFixedColumn: Equatable, Sendable {
 
 struct HolyLedgerResolvedColumns: Equatable, Sendable {
     let availableWidth: CGFloat
+    let minimumFlexibleWidth: CGFloat
     let flexibleWidth: CGFloat
     let chromeWidth: CGFloat
     let discardedStoredWidths: Bool
@@ -86,12 +87,14 @@ struct HolyLedgerResolvedColumns: Equatable, Sendable {
 
     init(
         availableWidth: CGFloat,
+        minimumFlexibleWidth: CGFloat,
         flexibleWidth: CGFloat,
         chromeWidth: CGFloat,
         discardedStoredWidths: Bool,
         widths: [String: CGFloat]
     ) {
         self.availableWidth = availableWidth
+        self.minimumFlexibleWidth = minimumFlexibleWidth
         self.flexibleWidth = flexibleWidth
         self.chromeWidth = chromeWidth
         self.discardedStoredWidths = discardedStoredWidths
@@ -102,10 +105,10 @@ struct HolyLedgerResolvedColumns: Equatable, Sendable {
         widths[column] ?? fallback
     }
 
-    func widths(for columns: [String]) -> [String: CGFloat] {
-        columns.reduce(into: [:]) { result, column in
-            result[column] = widths[column]
-        }
+    func widths(includingFlexibleColumn flexibleColumn: String) -> [String: CGFloat] {
+        var result = widths
+        result[flexibleColumn] = flexibleWidth
+        return result
     }
 
     var occupiedWidth: CGFloat {
@@ -137,13 +140,27 @@ enum HolyLedgerResponsiveLayout {
         minimumWidth: CGFloat = HolyMannaBoardMetrics.inspectorMinimumWidth,
         maximumWidth: CGFloat = HolyMannaBoardMetrics.inspectorMaximumWidth
     ) -> CGFloat {
-        let persisted = min(maximumWidth, max(minimumWidth, persistedWidth))
+        let bounds = inspectorWidthBounds(
+            windowWidth: windowWidth,
+            narrowWidth: narrowWidth,
+            minimumWidth: minimumWidth,
+            maximumWidth: maximumWidth
+        )
+        return min(bounds.upperBound, max(bounds.lowerBound, persistedWidth))
+    }
+
+    static func inspectorWidthBounds(
+        windowWidth: CGFloat,
+        narrowWidth: CGFloat = HolyMannaBoardMetrics.inspectorNarrowWidth,
+        minimumWidth: CGFloat = HolyMannaBoardMetrics.inspectorMinimumWidth,
+        maximumWidth: CGFloat = HolyMannaBoardMetrics.inspectorMaximumWidth
+    ) -> ClosedRange<CGFloat> {
         let proportionalCap = max(0, windowWidth * inspectorFraction)
         let breakpointCap = windowWidth <= HolyMannaBoardMetrics.narrowBreakpoint
             ? narrowWidth
             : maximumWidth
         let cap = min(maximumWidth, min(proportionalCap, breakpointCap))
-        return max(minimumWidth, min(persisted, cap))
+        return minimumWidth ... max(minimumWidth, cap)
     }
 
     static func compactInspectorWidth(windowWidth: CGFloat, pagePadding: CGFloat) -> CGFloat {
@@ -156,12 +173,36 @@ enum HolyLedgerResponsiveLayout {
         stripeWidth: CGFloat,
         minimumFlexibleWidth: CGFloat,
         fixedColumns: [HolyLedgerFixedColumn],
-        overrides: HolyLedgerColumnOverrides
+        overrides: HolyLedgerColumnOverrides,
+        transientWidths: [String: CGFloat]? = nil,
+        transientFlexibleWidth: CGFloat? = nil
     ) -> HolyLedgerResolvedColumns {
         let available = max(0, availableWidth)
         let chrome = stripeWidth + CGFloat(fixedColumns.count + 1) * gap
         let requestedFlexible = min(minimumFlexibleWidth, max(0, available - chrome))
         let fixedBudget = max(0, available - chrome - requestedFlexible)
+
+        if let transientWidths {
+            let widths = fixedColumns.reduce(into: [String: CGFloat]()) { result, column in
+                let transient = transientWidths[column.id]
+                result[column.id] = transient?.isFinite == true
+                    ? max(0, transient ?? 0)
+                    : max(column.minimumWidth, column.fittedWidth)
+            }
+            let fixedTotal = widths.values.reduce(0, +)
+            let transientFlexible = transientFlexibleWidth?.isFinite == true
+                ? max(0, transientFlexibleWidth ?? 0)
+                : max(0, available - chrome - fixedTotal)
+            return .init(
+                availableWidth: available,
+                minimumFlexibleWidth: requestedFlexible,
+                flexibleWidth: transientFlexible,
+                chromeWidth: chrome,
+                discardedStoredWidths: false,
+                widths: widths
+            )
+        }
+
         var widths = fixedColumns.reduce(into: [String: CGFloat]()) { result, column in
             let preferred = overrides.width(
                 column.id,
@@ -203,6 +244,7 @@ enum HolyLedgerResponsiveLayout {
         let flexible = max(0, available - chrome - fixedTotal)
         return .init(
             availableWidth: available,
+            minimumFlexibleWidth: requestedFlexible,
             flexibleWidth: flexible,
             chromeWidth: chrome,
             discardedStoredWidths: storedWidthsStarveFlex,
@@ -211,31 +253,15 @@ enum HolyLedgerResponsiveLayout {
     }
 }
 
-/// The fixed columns touching one physical divider. The flexible column is
-/// implicit: left-side grips resize the fixed column before it, the first
-/// right-side grip resizes the fixed column after it with reversed delta, and
-/// later right-side grips transfer the same width between neighboring fixed
-/// columns. In every case the divider follows the pointer.
-enum HolyLedgerColumnBoundary: Equatable, Sendable {
-    case fixedBeforeFlexible(String)
-    case fixedAfterFlexible(String)
-    case fixedPair(leading: String, trailing: String)
+/// A physical divider is always the same transaction: its left neighbor gains
+/// exactly the width its right neighbor yields. Flexible text columns are
+/// explicit participants, never invisible compensation routed from elsewhere.
+struct HolyLedgerColumnBoundary: Equatable, Sendable {
+    let leading: String
+    let trailing: String
+    let gripOnLeadingEdge: Bool
 
-    var columns: [String] {
-        switch self {
-        case let .fixedBeforeFlexible(column), let .fixedAfterFlexible(column):
-            [column]
-        case let .fixedPair(leading, trailing):
-            [leading, trailing]
-        }
-    }
-
-    var gripOnLeadingEdge: Bool {
-        switch self {
-        case .fixedBeforeFlexible: false
-        case .fixedAfterFlexible, .fixedPair: true
-        }
-    }
+    var columns: [String] { [leading, trailing] }
 
     func resizedWidths(
         from startingWidths: [String: CGFloat],
@@ -243,24 +269,166 @@ enum HolyLedgerColumnBoundary: Equatable, Sendable {
         translation: CGFloat
     ) -> [String: CGFloat] {
         let delta = translation.rounded()
-        switch self {
-        case let .fixedBeforeFlexible(column):
-            let start = startingWidths[column] ?? 0
-            return [column: max(minimumWidths[column] ?? 0, start + delta)]
-        case let .fixedAfterFlexible(column):
-            let start = startingWidths[column] ?? 0
-            return [column: max(minimumWidths[column] ?? 0, start - delta)]
-        case let .fixedPair(leading, trailing):
-            let leadingStart = startingWidths[leading] ?? 0
-            let trailingStart = startingWidths[trailing] ?? 0
-            let lowerDelta = (minimumWidths[leading] ?? 0) - leadingStart
-            let upperDelta = trailingStart - (minimumWidths[trailing] ?? 0)
-            let clampedDelta = min(upperDelta, max(lowerDelta, delta))
-            return [
-                leading: leadingStart + clampedDelta,
-                trailing: trailingStart - clampedDelta,
-            ]
+        let leadingStart = startingWidths[leading] ?? 0
+        let trailingStart = startingWidths[trailing] ?? 0
+        // A responsive layout may already be below its semantic floor. Treat
+        // the captured width as the floor in that degraded state so grabbing a
+        // divider never jumps the table before the pointer moves.
+        let leadingMinimum = min(leadingStart, max(0, minimumWidths[leading] ?? 0))
+        let trailingMinimum = min(trailingStart, max(0, minimumWidths[trailing] ?? 0))
+        let lowerDelta = leadingMinimum - leadingStart
+        let upperDelta = trailingStart - trailingMinimum
+        let clampedDelta = min(upperDelta, max(lowerDelta, delta))
+        return [
+            leading: leadingStart + clampedDelta,
+            trailing: trailingStart - clampedDelta,
+        ]
+    }
+}
+
+struct HolyLedgerColumnFrame: Equatable, Sendable {
+    let minX: CGFloat
+    let width: CGFloat
+}
+
+struct HolyLedgerColumnDragSnapshot: Equatable, Sendable {
+    let widths: [String: CGFloat]
+    let frames: [String: HolyLedgerColumnFrame]
+    let availableWidth: CGFloat
+}
+
+/// One physical divider drag. All geometry and bounds are captured at gesture
+/// start. Intermediate pointer events only update an in-memory pixel snapshot;
+/// the caller receives one normalized persistence value when the gesture ends.
+struct HolyLedgerColumnDragSession: Equatable, Sendable {
+    static let writeEpsilon: CGFloat = 0.5
+
+    private let boundary: HolyLedgerColumnBoundary
+    private let startingWidths: [String: CGFloat]
+    private let minimumWidths: [String: CGFloat]
+    private let columnOrder: [String]
+    private let columnGap: CGFloat
+    private let startingPointerX: CGFloat
+    private let availableWidth: CGFloat
+    private(set) var currentWidths: [String: CGFloat]
+    private(set) var hasFinished = false
+
+    init(
+        boundary: HolyLedgerColumnBoundary,
+        startingWidths: [String: CGFloat],
+        minimumWidths: [String: CGFloat],
+        columnOrder: [String],
+        columnGap: CGFloat,
+        startingPointerX: CGFloat,
+        availableWidth: CGFloat
+    ) {
+        let leadingIndex = columnOrder.firstIndex(of: boundary.leading)
+        let trailingIndex = columnOrder.firstIndex(of: boundary.trailing)
+        precondition(
+            leadingIndex != nil && trailingIndex == leadingIndex.map { $0 + 1 },
+            "A ledger grip must join adjacent columns"
+        )
+        self.boundary = boundary
+        self.startingWidths = startingWidths
+        self.minimumWidths = minimumWidths
+        self.columnOrder = columnOrder
+        self.columnGap = columnGap
+        self.startingPointerX = startingPointerX
+        self.availableWidth = availableWidth
+        currentWidths = startingWidths
+    }
+
+    mutating func update(pointerX: CGFloat) -> HolyLedgerColumnDragSnapshot? {
+        guard !hasFinished else { return nil }
+        let resized = boundary.resizedWidths(
+            from: startingWidths,
+            minimumWidths: minimumWidths,
+            translation: pointerX - startingPointerX
+        )
+        var next = startingWidths
+        for (column, width) in resized {
+            next[column] = width
         }
+        guard Self.differs(next, from: currentWidths) else { return nil }
+        currentWidths = next
+        return snapshot
+    }
+
+    mutating func finish(pointerX: CGFloat) -> HolyLedgerColumnDragSnapshot? {
+        guard !hasFinished else { return nil }
+        _ = update(pointerX: pointerX)
+        hasFinished = true
+        return Self.differs(currentWidths, from: startingWidths) ? snapshot : nil
+    }
+
+    private var snapshot: HolyLedgerColumnDragSnapshot {
+        .init(
+            widths: currentWidths,
+            frames: Self.frames(columnOrder: columnOrder, widths: currentWidths, gap: columnGap),
+            availableWidth: availableWidth
+        )
+    }
+
+    static func frames(
+        columnOrder: [String],
+        widths: [String: CGFloat],
+        gap: CGFloat
+    ) -> [String: HolyLedgerColumnFrame] {
+        var minX: CGFloat = 0
+        return columnOrder.reduce(into: [:]) { frames, column in
+            let width = widths[column] ?? 0
+            frames[column] = .init(minX: minX, width: width)
+            minX += width + gap
+        }
+    }
+
+    private static func differs(
+        _ left: [String: CGFloat],
+        from right: [String: CGFloat]
+    ) -> Bool {
+        Set(left.keys).union(right.keys).contains { column in
+            abs((left[column] ?? 0) - (right[column] ?? 0)) >= writeEpsilon
+        }
+    }
+}
+
+/// Inspector resizing follows the same transaction law as a column boundary:
+/// a static range and origin for the whole gesture, previews in memory, and
+/// exactly one persisted width on end.
+struct HolyLedgerInspectorDragSession: Equatable, Sendable {
+    static let writeEpsilon: CGFloat = 0.5
+
+    private let startingWidth: CGFloat
+    private let bounds: ClosedRange<CGFloat>
+    private let startingPointerX: CGFloat
+    private(set) var currentWidth: CGFloat
+    private(set) var hasFinished = false
+
+    init(
+        startingWidth: CGFloat,
+        bounds: ClosedRange<CGFloat>,
+        startingPointerX: CGFloat
+    ) {
+        self.startingWidth = startingWidth
+        self.bounds = bounds
+        self.startingPointerX = startingPointerX
+        currentWidth = min(bounds.upperBound, max(bounds.lowerBound, startingWidth))
+    }
+
+    mutating func update(pointerX: CGFloat) -> CGFloat? {
+        guard !hasFinished else { return nil }
+        let proposed = (startingWidth - (pointerX - startingPointerX)).rounded()
+        let next = min(bounds.upperBound, max(bounds.lowerBound, proposed))
+        guard abs(next - currentWidth) >= Self.writeEpsilon else { return nil }
+        currentWidth = next
+        return next
+    }
+
+    mutating func finish(pointerX: CGFloat) -> CGFloat? {
+        guard !hasFinished else { return nil }
+        _ = update(pointerX: pointerX)
+        hasFinished = true
+        return abs(currentWidth - startingWidth) >= Self.writeEpsilon ? currentWidth : nil
     }
 }
 
@@ -268,24 +436,38 @@ enum HolyLedgerColumnBoundary: Equatable, Sendable {
 /// this same map, so adding or reordering a fixed column cannot silently bring
 /// back the reversed-control bug.
 enum HolyLedgerColumnBoundaries {
+    static func boardOrder(showsTrack: Bool) -> [String] {
+        showsTrack
+            ? ["id", "digest", "track", "state", "#"]
+            : ["id", "digest", "state", "#"]
+    }
+
     static func board(column: String, showsTrack: Bool) -> HolyLedgerColumnBoundary {
         switch column {
-        case "id": return .fixedBeforeFlexible("id")
-        case "track": return .fixedAfterFlexible("track")
+        case "id": return .init(leading: "id", trailing: "digest", gripOnLeadingEdge: false)
+        case "track": return .init(leading: "digest", trailing: "track", gripOnLeadingEdge: true)
         case "state":
-            if showsTrack {
-                return .fixedPair(leading: "track", trailing: "state")
-            }
-            return .fixedAfterFlexible("state")
-        case "#": return .fixedPair(leading: "state", trailing: "#")
+            let leading = showsTrack ? "track" : "digest"
+            return .init(leading: leading, trailing: "state", gripOnLeadingEdge: true)
+        case "#": return .init(leading: "state", trailing: "#", gripOnLeadingEdge: true)
         default: preconditionFailure("Unknown Board column: \(column)")
         }
     }
 
-    static func archive(column: String) -> HolyLedgerColumnBoundary {
+    static func archiveOrder(showsProject: Bool) -> [String] {
+        showsProject
+            ? ["date", "harness", "project", "summary", "sub"]
+            : ["date", "harness", "summary", "sub"]
+    }
+
+    static func archive(column: String, showsProject: Bool) -> HolyLedgerColumnBoundary {
         switch column {
-        case "date", "harness", "project": return .fixedBeforeFlexible(column)
-        case "sub": return .fixedAfterFlexible("sub")
+        case "date": return .init(leading: "date", trailing: "harness", gripOnLeadingEdge: false)
+        case "harness":
+            let trailing = showsProject ? "project" : "summary"
+            return .init(leading: "harness", trailing: trailing, gripOnLeadingEdge: false)
+        case "project": return .init(leading: "project", trailing: "summary", gripOnLeadingEdge: false)
+        case "sub": return .init(leading: "summary", trailing: "sub", gripOnLeadingEdge: true)
         default: preconditionFailure("Unknown Archive column: \(column)")
         }
     }
@@ -302,10 +484,15 @@ struct HolyLedgerColumnGrip: View {
     let boundary: HolyLedgerColumnBoundary
     let currentWidths: [String: CGFloat]
     let minimumWidths: [String: CGFloat]
-    let onResize: ([String: CGFloat]) -> Void
+    let columnOrder: [String]
+    let columnGap: CGFloat
+    let availableWidth: CGFloat
+    let onPreview: (HolyLedgerColumnDragSnapshot) -> Void
+    let onCommit: (HolyLedgerColumnDragSnapshot) -> Void
+    let onEnd: () -> Void
     let onReset: ([String]) -> Void
 
-    @State private var dragStartWidths: [String: CGFloat]?
+    @State private var dragSession: HolyLedgerColumnDragSession?
     @State private var hovered = false
 
     var body: some View {
@@ -314,23 +501,41 @@ struct HolyLedgerColumnGrip: View {
             .frame(width: Self.width)
             .overlay(alignment: .center) {
                 Rectangle()
-                    .fill(hovered || dragStartWidths != nil ? HolyMannaBoardPalette.lineStrong : HolyMannaBoardPalette.line)
-                    .frame(width: hovered || dragStartWidths != nil ? 2 : 1, height: 18)
+                    .fill(hovered || dragSession != nil ? HolyMannaBoardPalette.lineStrong : HolyMannaBoardPalette.line)
+                    .frame(width: hovered || dragSession != nil ? 2 : 1, height: 18)
             }
             .contentShape(Rectangle())
             .onHover { hovered = $0 }
             .gesture(
-                DragGesture(minimumDistance: 1)
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { value in
-                        let start = dragStartWidths ?? currentWidths
-                        dragStartWidths = start
-                        onResize(boundary.resizedWidths(
-                            from: start,
+                        var session = dragSession ?? HolyLedgerColumnDragSession(
+                            boundary: boundary,
+                            startingWidths: currentWidths,
                             minimumWidths: minimumWidths,
-                            translation: value.translation.width
-                        ))
+                            columnOrder: columnOrder,
+                            columnGap: columnGap,
+                            startingPointerX: value.startLocation.x,
+                            availableWidth: availableWidth
+                        )
+                        if let preview = session.update(pointerX: value.location.x) {
+                            dragSession = session
+                            onPreview(preview)
+                        } else if dragSession == nil {
+                            dragSession = session
+                        }
                     }
-                    .onEnded { _ in dragStartWidths = nil }
+                    .onEnded { value in
+                        guard var session = dragSession else {
+                            onEnd()
+                            return
+                        }
+                        if let commit = session.finish(pointerX: value.location.x) {
+                            onCommit(commit)
+                        }
+                        dragSession = nil
+                        onEnd()
+                    }
             )
             .onTapGesture(count: 2) { onReset(boundary.columns) }
             .help("drag · double-click to refit")

@@ -7,7 +7,7 @@ base_commit: 5466c2fada020da9fef58752e955d6caf68d7332
 scope: '[P1][BOARD][ARCHIVE][UX] Ledger layouts must fit any window: clamp, flex, and fold like the web cockpit'
 inputs:
 - Erik report 2026-09-05 20:58 (MacBook screenshot in his Downloads; TCC blocked remote read — attach via iCloud Screen Shots for pixel triage if needed)
-binding: sha256:db95d86fd9bf5104ff52212894ee6127908b933e7120a4a148fc2640e9a29c67
+binding: sha256:79f0bb46ea1d6999fdef5d8b8b3dfded9217e012d38ecdfb9a59e400e9562cad
 ---
 
 # Handoff: [P1][BOARD][ARCHIVE][UX] Ledger layouts must fit any window: clamp, flex, and fold like the web cockpit
@@ -72,3 +72,22 @@ Erik 2026-09-05, MacBook: board columns clip off the right edge — persisted gr
   index refresh remains blocked by a macOS TCC `Operation not permitted` error
   on the vault root; the note contents were verified directly.
 - ZPC received 7 error-resolution lessons and 0 decisions for this build.
+
+## Live-pass correction, 2026-09-06
+
+- Erik's first live visual pass correctly rejected the drag feel: moving the
+  STATE boundary displaced TRACK through DIGEST, and both column and inspector
+  dividers shook because layout preferences were rewritten and responsively
+  normalized during every drag frame.
+- `mn-ac0b36` supersedes the earlier grip implementation. Every grip now trades
+  width between exactly its two physical neighbors from one captured pixel
+  snapshot. No non-neighbor moves, and no fitting, normalization, or preference
+  write occurs until release. DIGEST and SUMMARY flex only during ordinary
+  window layout.
+- Inspector dividers now use the same captured global pointer origin and static
+  bounds, preview only in memory, and persist at most once on release.
+- A fresh isolated Debug arm64 build passed. Ten drag-contract tests, both
+  offscreen ledger render suites, the related Board and Archive suites, strict
+  SwiftLint, the Holy build-contract script, and `git diff --check` all passed.
+- This item intentionally remains `in_progress`. The code-level defect is fixed,
+  but Erik's fresh live visual pass remains the final acceptance gate.

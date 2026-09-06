@@ -22,7 +22,8 @@ struct HolyArchiveModeView: View {
     @FocusState private var searchFocused: Bool
     @FocusState private var researchFocused: Bool
     @FocusState private var findFocused: Bool
-    @State private var inspectorDragStartWidth: CGFloat?
+    @State private var columnDragPreview: HolyLedgerColumnDragSnapshot?
+    @State private var inspectorDragSession: HolyLedgerInspectorDragSession?
     @State private var resizerHovered = false
     @State private var compactInspectorPresented = false
     @State private var hoveredRowID: String?
@@ -49,7 +50,7 @@ struct HolyArchiveModeView: View {
                         sheetColumn(windowWidth: width)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         if showsInlineInspector {
-                            resizer(currentWidth: inspectorWidth)
+                            resizer(currentWidth: inspectorWidth, windowWidth: width)
                             inspector
                                 .frame(width: inspectorWidth)
                                 .frame(maxHeight: .infinity)
@@ -97,7 +98,10 @@ struct HolyArchiveModeView: View {
     }
 
     private func inspectorWidth(_ width: CGFloat) -> CGFloat {
-        HolyLedgerResponsiveLayout.inspectorWidth(
+        if let inspectorDragSession {
+            return inspectorDragSession.currentWidth
+        }
+        return HolyLedgerResponsiveLayout.inspectorWidth(
             windowWidth: width,
             persistedWidth: CGFloat(storedInspectorWidth)
         )
@@ -370,7 +374,7 @@ struct HolyArchiveModeView: View {
             ),
         ].compactMap { $0 }
         let columns = HolyLedgerResponsiveLayout.columns(
-            availableWidth: availableWidth,
+            availableWidth: columnDragPreview?.availableWidth ?? availableWidth,
             gap: Metrics.columnGap,
             stripeWidth: Metrics.stripeColumnWidth,
             minimumFlexibleWidth: Metrics.columnWidth(
@@ -378,40 +382,47 @@ struct HolyArchiveModeView: View {
                 headerCharacters: "summary".count
             ),
             fixedColumns: fixedColumns,
-            overrides: overrides
+            overrides: overrides,
+            transientWidths: columnDragPreview?.widths,
+            transientFlexibleWidth: columnDragPreview?.widths["summary"]
         )
+        let columnOrder = HolyLedgerColumnBoundaries.archiveOrder(showsProject: showsProject)
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Metrics.columnGap) {
                 Color.clear.frame(width: Metrics.stripeColumnWidth)
                 resizableHeader(
                     "date",
                     columns: columns,
-                    boundary: HolyLedgerColumnBoundaries.archive(column: "date")
+                    boundary: HolyLedgerColumnBoundaries.archive(column: "date", showsProject: showsProject),
+                    columnOrder: columnOrder
                 )
                 resizableHeader(
                     "harness",
                     columns: columns,
-                    boundary: HolyLedgerColumnBoundaries.archive(column: "harness")
+                    boundary: HolyLedgerColumnBoundaries.archive(column: "harness", showsProject: showsProject),
+                    columnOrder: columnOrder
                 )
                 if showsProject {
                     resizableHeader(
                         "project",
                         columns: columns,
-                        boundary: HolyLedgerColumnBoundaries.archive(column: "project")
+                        boundary: HolyLedgerColumnBoundaries.archive(column: "project", showsProject: showsProject),
+                        columnOrder: columnOrder
                     )
                 }
                 columnLabel("summary").frame(width: columns.flexibleWidth, alignment: .leading)
                 resizableHeader(
                     "sub",
                     columns: columns,
-                    boundary: HolyLedgerColumnBoundaries.archive(column: "sub"),
+                    boundary: HolyLedgerColumnBoundaries.archive(column: "sub", showsProject: showsProject),
+                    columnOrder: columnOrder,
                     alignment: .trailing
                 )
             }
             .frame(height: Metrics.columnHeaderHeight)
             .overlay(alignment: .bottom) { rule }
             .task(id: columns.discardedStoredWidths ? columnOverridesJSON : "") {
-                if columns.discardedStoredWidths {
+                if columnDragPreview == nil, columns.discardedStoredWidths {
                     columnOverridesJSON = ""
                 }
             }
@@ -973,27 +984,43 @@ struct HolyArchiveModeView: View {
 
     // MARK: - Resizer and strip
 
-    private func resizer(currentWidth: CGFloat) -> some View {
+    private func resizer(currentWidth: CGFloat, windowWidth: CGFloat) -> some View {
         Rectangle()
-            .fill(resizerHovered || inspectorDragStartWidth != nil ? Palette.lineStrong : Color.clear)
+            .fill(resizerHovered || inspectorDragSession != nil ? Palette.lineStrong : Color.clear)
             .frame(width: Metrics.resizerWidth)
             .overlay(alignment: .leading) { Rectangle().fill(Palette.line).frame(width: 1) }
             .contentShape(Rectangle())
             .onHover { resizerHovered = $0 }
             .gesture(
-                DragGesture(minimumDistance: 1)
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { value in
-                        let start = inspectorDragStartWidth ?? currentWidth
-                        inspectorDragStartWidth = start
-                        let proposed = start - value.translation.width
-                        storedInspectorWidth = Double(
-                            min(Metrics.inspectorMaximumWidth, max(Metrics.inspectorMinimumWidth, proposed.rounded()))
+                        var session = inspectorDragSession ?? HolyLedgerInspectorDragSession(
+                            startingWidth: currentWidth,
+                            bounds: HolyLedgerResponsiveLayout.inspectorWidthBounds(windowWidth: windowWidth),
+                            startingPointerX: value.startLocation.x
                         )
+                        if session.update(pointerX: value.location.x) != nil {
+                            inspectorDragSession = session
+                        } else if inspectorDragSession == nil {
+                            inspectorDragSession = session
+                        }
                     }
-                    .onEnded { _ in inspectorDragStartWidth = nil }
+                    .onEnded { value in
+                        guard var session = inspectorDragSession else { return }
+                        if let committed = session.finish(pointerX: value.location.x),
+                           abs(CGFloat(storedInspectorWidth) - committed)
+                            >= HolyLedgerInspectorDragSession.writeEpsilon {
+                            storedInspectorWidth = Double(committed)
+                        }
+                        inspectorDragSession = nil
+                    }
             )
             .onTapGesture(count: 2) {
-                storedInspectorWidth = Double(HolyArchiveMetrics.inspectorDefaultWidth)
+                inspectorDragSession = nil
+                let defaultWidth = Double(HolyArchiveMetrics.inspectorDefaultWidth)
+                if storedInspectorWidth != defaultWidth {
+                    storedInspectorWidth = defaultWidth
+                }
             }
             .help("drag · double-click to reset")
     }
@@ -1087,39 +1114,60 @@ struct HolyArchiveModeView: View {
             .lineLimit(1)
     }
 
-    /// A fixed column header whose grip sits on the physical boundary it owns.
+    /// A column header whose grip trades width only between its two neighbors.
     private func resizableHeader(
         _ column: String,
         columns: HolyLedgerResolvedColumns,
         boundary: HolyLedgerColumnBoundary,
+        columnOrder: [String],
         alignment: Alignment = .leading
     ) -> some View {
-        columnLabel(column)
+        let flexibleColumn = "summary"
+        return columnLabel(column)
             .frame(width: columns.width(column), alignment: alignment)
             .overlay(alignment: boundary.gripOnLeadingEdge ? .leading : .trailing) {
                 HolyLedgerColumnGrip(
                     boundary: boundary,
-                    currentWidths: columns.widths(for: boundary.columns),
+                    currentWidths: columns.widths(includingFlexibleColumn: flexibleColumn),
                     minimumWidths: boundary.columns.reduce(into: [:]) { result, boundaryColumn in
-                        result[boundaryColumn] = HolyMannaBoardMetrics.columnWidth(
-                            contentCharacters: HolyLedgerColumnGrip.minimumCharacters,
-                            headerCharacters: boundaryColumn.count
-                        )
+                        if boundaryColumn == flexibleColumn {
+                            result[boundaryColumn] = columns.minimumFlexibleWidth
+                        } else {
+                            result[boundaryColumn] = HolyMannaBoardMetrics.columnWidth(
+                                contentCharacters: HolyLedgerColumnGrip.minimumCharacters,
+                                headerCharacters: boundaryColumn.count
+                            )
+                        }
                     },
-                    onResize: { newWidths in
+                    columnOrder: columnOrder,
+                    columnGap: Metrics.columnGap,
+                    availableWidth: columns.availableWidth,
+                    onPreview: { preview in
+                        if columnDragPreview != preview {
+                            columnDragPreview = preview
+                        }
+                    },
+                    onCommit: { commit in
                         var overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
-                        for (resizedColumn, newWidth) in newWidths {
+                        for resizedColumn in boundary.columns where resizedColumn != flexibleColumn {
+                            guard let newWidth = commit.widths[resizedColumn] else { continue }
                             overrides.set(
                                 resizedColumn,
                                 width: newWidth,
-                                availableWidth: columns.availableWidth
+                                availableWidth: commit.availableWidth
                             )
                         }
-                        columnOverridesJSON = overrides.json
+                        let persisted = overrides.json
+                        if columnOverridesJSON != persisted {
+                            columnOverridesJSON = persisted
+                        }
+                        columnDragPreview = nil
                     },
+                    onEnd: { columnDragPreview = nil },
                     onReset: { resetColumns in
+                        columnDragPreview = nil
                         var overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
-                        for resetColumn in resetColumns {
+                        for resetColumn in resetColumns where resetColumn != flexibleColumn {
                             overrides.reset(resetColumn)
                         }
                         columnOverridesJSON = overrides.json

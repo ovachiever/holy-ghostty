@@ -188,60 +188,175 @@ struct HolyLedgerColumnOverridesTests {
         #expect(abs(columns.occupiedWidth - columns.availableWidth) < 0.001)
     }
 
-    @Test func everyBoardGripMovesTheBoundaryUnderThePointer() {
-        let minimums: [String: CGFloat] = ["id": 50, "track": 40, "state": 40, "#": 30]
+    @Test func everyGripNamesExactlyTheTwoColumnsTouchingItsDivider() {
+        #expect(HolyLedgerColumnBoundaries.board(column: "id", showsTrack: true).columns == ["id", "digest"])
+        #expect(HolyLedgerColumnBoundaries.board(column: "track", showsTrack: true).columns == ["digest", "track"])
+        #expect(HolyLedgerColumnBoundaries.board(column: "state", showsTrack: true).columns == ["track", "state"])
+        #expect(HolyLedgerColumnBoundaries.board(column: "state", showsTrack: false).columns == ["digest", "state"])
+        #expect(HolyLedgerColumnBoundaries.board(column: "#", showsTrack: true).columns == ["state", "#"])
 
-        let id = HolyLedgerColumnBoundaries.board(column: "id", showsTrack: true)
-        #expect(!id.gripOnLeadingEdge)
-        #expect(id.columns == ["id"])
-        #expect(id.resizedWidths(
-            from: ["id": 80], minimumWidths: minimums, translation: 12
-        ) == ["id": 92])
-
-        let track = HolyLedgerColumnBoundaries.board(column: "track", showsTrack: true)
-        #expect(track.gripOnLeadingEdge)
-        #expect(track.resizedWidths(
-            from: ["track": 120], minimumWidths: minimums, translation: 12
-        ) == ["track": 108])
-
-        let state = HolyLedgerColumnBoundaries.board(column: "state", showsTrack: true)
-        #expect(state.columns == ["track", "state"])
-        #expect(state.resizedWidths(
-            from: ["track": 120, "state": 100], minimumWidths: minimums, translation: 12
-        ) == ["track": 132, "state": 88])
-
-        let priority = HolyLedgerColumnBoundaries.board(column: "#", showsTrack: true)
-        #expect(priority.columns == ["state", "#"])
-        #expect(priority.resizedWidths(
-            from: ["state": 100, "#": 50], minimumWidths: minimums, translation: 12
-        ) == ["state": 112, "#": 38])
-
-        let narrowState = HolyLedgerColumnBoundaries.board(column: "state", showsTrack: false)
-        #expect(narrowState == .fixedAfterFlexible("state"))
-        #expect(narrowState.resizedWidths(
-            from: ["state": 100], minimumWidths: minimums, translation: 12
-        ) == ["state": 88])
+        #expect(HolyLedgerColumnBoundaries.archive(column: "date", showsProject: true).columns == ["date", "harness"])
+        #expect(HolyLedgerColumnBoundaries.archive(column: "harness", showsProject: true).columns == ["harness", "project"])
+        #expect(HolyLedgerColumnBoundaries.archive(column: "harness", showsProject: false).columns == ["harness", "summary"])
+        #expect(HolyLedgerColumnBoundaries.archive(column: "project", showsProject: true).columns == ["project", "summary"])
+        #expect(HolyLedgerColumnBoundaries.archive(column: "sub", showsProject: true).columns == ["summary", "sub"])
     }
 
-    @Test func everyArchiveGripMovesTheBoundaryUnderThePointer() {
-        let minimums: [String: CGFloat] = ["date": 40, "harness": 40, "project": 40, "sub": 30]
-        for column in ["date", "harness", "project"] {
-            let boundary = HolyLedgerColumnBoundaries.archive(column: column)
-            #expect(!boundary.gripOnLeadingEdge)
-            #expect(boundary.resizedWidths(
-                from: [column: 80], minimumWidths: minimums, translation: 12
-            ) == [column: 92])
+    @Test func everyIntermediateDragFrameLeavesEveryNonNeighborByteIdentical() {
+        for scenario in dragScenarios {
+            let startingFrames = HolyLedgerColumnDragSession.frames(
+                columnOrder: scenario.order,
+                widths: scenario.widths,
+                gap: scenario.gap
+            )
+            for boundary in scenario.boundaries {
+                var session = HolyLedgerColumnDragSession(
+                    boundary: boundary,
+                    startingWidths: scenario.widths,
+                    minimumWidths: scenario.minimums,
+                    columnOrder: scenario.order,
+                    columnGap: scenario.gap,
+                    startingPointerX: 400,
+                    availableWidth: scenario.availableWidth
+                )
+                for pointerX in [404, 411, 419, 407, 395, 384] {
+                    let preview = session.update(pointerX: CGFloat(pointerX))
+                    #expect(preview != nil)
+                    guard let preview else { continue }
+                    let rendered = transientLayout(for: scenario, preview: preview)
+                    let renderedWidths = rendered.widths(
+                        includingFlexibleColumn: scenario.flexibleColumn
+                    )
+                    let renderedFrames = HolyLedgerColumnDragSession.frames(
+                        columnOrder: scenario.order,
+                        widths: renderedWidths,
+                        gap: scenario.gap
+                    )
+
+                    #expect(!rendered.discardedStoredWidths)
+                    for column in scenario.order {
+                        #expect(
+                            Double(renderedWidths[column] ?? -1).bitPattern
+                                == Double(preview.widths[column] ?? -2).bitPattern
+                        )
+                    }
+
+                    for column in scenario.order where !boundary.columns.contains(column) {
+                        let before = startingFrames[column]
+                        let after = renderedFrames[column]
+                        #expect(Double(before?.minX ?? -1).bitPattern == Double(after?.minX ?? -2).bitPattern)
+                        #expect(Double(before?.width ?? -1).bitPattern == Double(after?.width ?? -2).bitPattern)
+                    }
+
+                    let leading = preview.widths[boundary.leading] ?? 0
+                    let trailing = preview.widths[boundary.trailing] ?? 0
+                    let startingTotal = (scenario.widths[boundary.leading] ?? 0)
+                        + (scenario.widths[boundary.trailing] ?? 0)
+                    #expect(leading + trailing == startingTotal)
+                }
+            }
         }
-
-        let sub = HolyLedgerColumnBoundaries.archive(column: "sub")
-        #expect(sub.gripOnLeadingEdge)
-        #expect(sub.resizedWidths(
-            from: ["sub": 60], minimumWidths: minimums, translation: 12
-        ) == ["sub": 48])
     }
 
-    @Test func fixedPairTransfersWidthAndStopsAtEitherContentFloor() {
-        let boundary = HolyLedgerColumnBoundary.fixedPair(leading: "track", trailing: "state")
+    @Test func everyDividerTracksMonotonicGlobalPointerMovement() {
+        for scenario in dragScenarios {
+            for boundary in scenario.boundaries {
+                var session = HolyLedgerColumnDragSession(
+                    boundary: boundary,
+                    startingWidths: scenario.widths,
+                    minimumWidths: scenario.minimums,
+                    columnOrder: scenario.order,
+                    columnGap: scenario.gap,
+                    startingPointerX: 900,
+                    availableWidth: scenario.availableWidth
+                )
+                var priorPointerX: CGFloat = 900
+                var priorLeading = scenario.widths[boundary.leading] ?? 0
+                var priorTrailing = scenario.widths[boundary.trailing] ?? 0
+                for pointerX in [903, 909, 918, 912, 902, 895] {
+                    let preview = session.update(pointerX: CGFloat(pointerX))
+                    #expect(preview != nil)
+                    guard let preview else { continue }
+                    let leading = preview.widths[boundary.leading] ?? 0
+                    let trailing = preview.widths[boundary.trailing] ?? 0
+                    if CGFloat(pointerX) > priorPointerX {
+                        #expect(leading > priorLeading)
+                        #expect(trailing < priorTrailing)
+                    } else {
+                        #expect(leading < priorLeading)
+                        #expect(trailing > priorTrailing)
+                    }
+                    priorPointerX = CGFloat(pointerX)
+                    priorLeading = leading
+                    priorTrailing = trailing
+                }
+            }
+        }
+    }
+
+    @Test func dragLifecycleEmitsOnlyOneReleaseCommit() {
+        let scenario = dragScenarios[0]
+        let boundary = scenario.boundaries[1]
+        var session = HolyLedgerColumnDragSession(
+            boundary: boundary,
+            startingWidths: scenario.widths,
+            minimumWidths: scenario.minimums,
+            columnOrder: scenario.order,
+            columnGap: scenario.gap,
+            startingPointerX: 200,
+            availableWidth: scenario.availableWidth
+        )
+
+        #expect(session.update(pointerX: 206) != nil)
+        #expect(session.update(pointerX: 214) != nil)
+        #expect(session.update(pointerX: 221) != nil)
+        #expect(session.finish(pointerX: 224) != nil)
+        #expect(session.finish(pointerX: 230) == nil)
+        #expect(session.update(pointerX: 240) == nil)
+
+        var noMovement = HolyLedgerColumnDragSession(
+            boundary: boundary,
+            startingWidths: scenario.widths,
+            minimumWidths: scenario.minimums,
+            columnOrder: scenario.order,
+            columnGap: scenario.gap,
+            startingPointerX: 200,
+            availableWidth: scenario.availableWidth
+        )
+        #expect(noMovement.finish(pointerX: 200) == nil)
+    }
+
+    @Test func inspectorDragUsesOneGlobalOriginAndOneReleaseCommit() {
+        var session = HolyLedgerInspectorDragSession(
+            startingWidth: 420,
+            bounds: 260 ... 600,
+            startingPointerX: 700
+        )
+
+        #expect(session.update(pointerX: 700.25) == nil)
+        #expect(session.update(pointerX: 704) == 416)
+        #expect(session.update(pointerX: 711) == 409)
+        #expect(session.update(pointerX: 719) == 401)
+        #expect(session.update(pointerX: 713) == 407)
+        #expect(session.update(pointerX: 695) == 425)
+        #expect(session.finish(pointerX: 690) == 430)
+        #expect(session.finish(pointerX: 680) == nil)
+        #expect(session.update(pointerX: 670) == nil)
+
+        var noMovement = HolyLedgerInspectorDragSession(
+            startingWidth: 420,
+            bounds: 260 ... 600,
+            startingPointerX: 700
+        )
+        #expect(noMovement.finish(pointerX: 700.25) == nil)
+    }
+
+    @Test func adjacentPairStopsAtEitherContentFloor() {
+        let boundary = HolyLedgerColumnBoundary(
+            leading: "track",
+            trailing: "state",
+            gripOnLeadingEdge: true
+        )
         let starting: [String: CGFloat] = ["track": 120, "state": 80]
         let minimums: [String: CGFloat] = ["track": 40, "state": 40]
 
@@ -251,6 +366,95 @@ struct HolyLedgerColumnOverridesTests {
         #expect(boundary.resizedWidths(
             from: starting, minimumWidths: minimums, translation: -100
         ) == ["track": 40, "state": 160])
+    }
+
+    private struct DragScenario {
+        let order: [String]
+        let boundaries: [HolyLedgerColumnBoundary]
+        let widths: [String: CGFloat]
+        let minimums: [String: CGFloat]
+        let flexibleColumn: String
+        let gap: CGFloat
+
+        var availableWidth: CGFloat {
+            widths.values.reduce(0, +) + 10 + CGFloat(order.count) * gap
+        }
+    }
+
+    private var dragScenarios: [DragScenario] {
+        let boardWideOrder = HolyLedgerColumnBoundaries.boardOrder(showsTrack: true)
+        let boardNarrowOrder = HolyLedgerColumnBoundaries.boardOrder(showsTrack: false)
+        let archiveWideOrder = HolyLedgerColumnBoundaries.archiveOrder(showsProject: true)
+        let archiveNarrowOrder = HolyLedgerColumnBoundaries.archiveOrder(showsProject: false)
+        return [
+            .init(
+                order: boardWideOrder,
+                boundaries: ["id", "track", "state", "#"].map {
+                    HolyLedgerColumnBoundaries.board(column: $0, showsTrack: true)
+                },
+                widths: ["id": 80.25, "digest": 260.5, "track": 120.75, "state": 100.125, "#": 60.875],
+                minimums: ["id": 50, "digest": 160, "track": 40, "state": 40, "#": 30],
+                flexibleColumn: "digest",
+                gap: 12
+            ),
+            .init(
+                order: boardNarrowOrder,
+                boundaries: ["id", "state", "#"].map {
+                    HolyLedgerColumnBoundaries.board(column: $0, showsTrack: false)
+                },
+                widths: ["id": 80, "digest": 260, "state": 100, "#": 60],
+                minimums: ["id": 50, "digest": 160, "state": 40, "#": 30],
+                flexibleColumn: "digest",
+                gap: 12
+            ),
+            .init(
+                order: archiveWideOrder,
+                boundaries: ["date", "harness", "project", "sub"].map {
+                    HolyLedgerColumnBoundaries.archive(column: $0, showsProject: true)
+                },
+                widths: ["date": 90, "harness": 110, "project": 180, "summary": 280, "sub": 60],
+                minimums: ["date": 40, "harness": 40, "project": 60, "summary": 160, "sub": 30],
+                flexibleColumn: "summary",
+                gap: 12
+            ),
+            .init(
+                order: archiveNarrowOrder,
+                boundaries: ["date", "harness", "sub"].map {
+                    HolyLedgerColumnBoundaries.archive(column: $0, showsProject: false)
+                },
+                widths: ["date": 90, "harness": 110, "summary": 280, "sub": 60],
+                minimums: ["date": 40, "harness": 40, "summary": 160, "sub": 30],
+                flexibleColumn: "summary",
+                gap: 12
+            ),
+        ]
+    }
+
+    private func transientLayout(
+        for scenario: DragScenario,
+        preview: HolyLedgerColumnDragSnapshot
+    ) -> HolyLedgerResolvedColumns {
+        var poisoned = HolyLedgerColumnOverrides(json: "")
+        if let firstFixed = scenario.order.first(where: { $0 != scenario.flexibleColumn }) {
+            poisoned.set(firstFixed, width: scenario.availableWidth, availableWidth: scenario.availableWidth)
+        }
+        return HolyLedgerResponsiveLayout.columns(
+            availableWidth: preview.availableWidth,
+            gap: scenario.gap,
+            stripeWidth: 10,
+            minimumFlexibleWidth: scenario.minimums[scenario.flexibleColumn] ?? 0,
+            fixedColumns: scenario.order.compactMap { column in
+                guard column != scenario.flexibleColumn else { return nil }
+                return HolyLedgerFixedColumn(
+                    id: column,
+                    fittedWidth: scenario.widths[column] ?? 0,
+                    minimumWidth: scenario.minimums[column] ?? 0
+                )
+            },
+            overrides: poisoned,
+            transientWidths: preview.widths,
+            transientFlexibleWidth: preview.widths[scenario.flexibleColumn]
+        )
     }
 }
 
