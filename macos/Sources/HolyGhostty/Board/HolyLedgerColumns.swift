@@ -212,13 +212,14 @@ enum HolyLedgerResponsiveLayout {
             result[column.id] = max(column.minimumWidth, preferred)
         }
 
-        let usesStoredWidths = fixedColumns.contains { overrides.hasOverride($0.id) }
-        let storedWidthsStarveFlex = usesStoredWidths && widths.values.reduce(0, +) > fixedBudget
-        if storedWidthsStarveFlex {
-            widths = fixedColumns.reduce(into: [:]) { result, column in
-                result[column.id] = max(column.minimumWidth, column.fittedWidth)
-            }
-        }
+        // Stored widths are never discarded wholesale: nuking them to
+        // content-fit made every release near the budget edge snap the whole
+        // table (33 years of table UX say a divider you dropped stays where
+        // you dropped it). Overflow is handled by the proportional shrink
+        // below — columns keep their relative placement and yield only what
+        // the window genuinely cannot hold.
+        let storedWidthsStarveFlex = fixedColumns.contains { overrides.hasOverride($0.id) }
+            && widths.values.reduce(0, +) > fixedBudget
 
         var deficit = max(0, widths.values.reduce(0, +) - fixedBudget)
         let shrinkRoom = fixedColumns.reduce(0) { total, column in
