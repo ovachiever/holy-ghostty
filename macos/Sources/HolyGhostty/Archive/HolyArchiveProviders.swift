@@ -28,6 +28,58 @@ struct HolyArchiveProviderRegistry: Sendable {
     }
 }
 
+/// A project label is derived only from provider evidence about where the
+/// session ran. Harness stores are archives, not projects, and `/` carries no
+/// useful identity. Keeping the path and label in one value prevents search,
+/// grouping, and presentation from disagreeing about the same session.
+struct HolyArchiveProjectIdentity: Equatable, Sendable {
+    static let missingName = "(no project)"
+
+    let path: String?
+    let name: String
+
+    init(candidatePath: String?, homeDirectory: URL) {
+        guard let raw = candidatePath?.holyArchiveNilIfBlank,
+              raw.hasPrefix("/")
+        else {
+            path = nil
+            name = Self.missingName
+            return
+        }
+
+        let resolved = URL(fileURLWithPath: raw).standardizedFileURL.path
+        guard resolved != "/", !Self.isHarnessStorage(resolved, homeDirectory: homeDirectory) else {
+            path = nil
+            name = Self.missingName
+            return
+        }
+
+        path = resolved
+        name = URL(fileURLWithPath: resolved).lastPathComponent.holyArchiveNilIfBlank
+            ?? Self.missingName
+    }
+
+    private static func isHarnessStorage(_ path: String, homeDirectory: URL) -> Bool {
+        let home = homeDirectory.standardizedFileURL.path
+        guard path.hasPrefix(home + "/") else { return false }
+
+        let relative = String(path.dropFirst(home.count + 1))
+        let components = relative.split(separator: "/").map(String.init)
+        guard let first = components.first else { return true }
+        if first == ".codex" || first == ".claude" || first.hasPrefix(".claude-")
+            || first == ".factory" {
+            return true
+        }
+        if components.starts(with: [".cache", "opensession"])
+            || components.starts(with: [".local", "share", "opencode"])
+            || components.starts(with: ["Library", "Application Support", "Cursor"])
+            || components.starts(with: ["Documents", "Codex"]) {
+            return true
+        }
+        return false
+    }
+}
+
 // MARK: - Claude Code
 
 struct HolyClaudeArchiveProvider: HolyArchiveProviding {
@@ -116,7 +168,7 @@ struct HolyClaudeArchiveProvider: HolyArchiveProviding {
 
         guard !messages.isEmpty else { return nil }
         let projectDirectory = url.deletingLastPathComponent().lastPathComponent
-        let projectPath = cwd?.holyArchiveNilIfBlank ?? Self.decodeProjectPath(projectDirectory)
+        let project = HolyArchiveProjectIdentity(candidatePath: cwd, homeDirectory: homeDirectory)
         let firstPrompt = HolyArchiveText.firstRealPrompt(in: messages)
         var childType: String?
         var isChild = sidechain
@@ -138,8 +190,8 @@ struct HolyClaudeArchiveProvider: HolyArchiveProviding {
             id: sessionID,
             harness: harness,
             rawPath: url.path,
-            projectPath: projectPath,
-            projectName: URL(fileURLWithPath: projectPath).lastPathComponent.holyArchiveNilIfBlank ?? "Claude Code",
+            projectPath: project.path,
+            projectName: project.name,
             title: firstPrompt.holyArchiveFirstLine.map { HolyArchiveText.preview($0, limit: 80) } ?? "Claude Code Session",
             firstPrompt: firstPrompt,
             lastPrompt: lastPrompt,
@@ -183,10 +235,6 @@ struct HolyClaudeArchiveProvider: HolyArchiveProviding {
 
     static func encodeProjectPath(_ path: String) -> String {
         path.replacingOccurrences(of: #"[^a-zA-Z0-9]"#, with: "-", options: .regularExpression)
-    }
-
-    static func decodeProjectPath(_ value: String) -> String {
-        value.replacingOccurrences(of: "-", with: "/")
     }
 
     private func allSessionDirectories() throws -> [URL] {
@@ -285,6 +333,7 @@ struct HolyCodexArchiveProvider: HolyArchiveProviding {
         var fallbackMessages: [HolyArchiveMessage] = []
         var tools = Set<String>()
         var model: String?
+        var turnCWD: String?
         var timestamps: [Date] = []
 
         for row in rows {
@@ -299,7 +348,9 @@ struct HolyCodexArchiveProvider: HolyArchiveProviding {
                     sessionMeta = payload
                 }
             case "turn_context":
-                model = model ?? row.dictionary("payload")?.string("model")
+                let payload = row.dictionary("payload")
+                model = model ?? payload?.string("model")
+                turnCWD = turnCWD ?? payload?.string("cwd")?.holyArchiveNilIfBlank
             case "event_msg":
                 guard let payload = row.dictionary("payload"),
                       let role = Self.eventRole(payload.string("type")),
@@ -350,8 +401,10 @@ struct HolyCodexArchiveProvider: HolyArchiveProviding {
             )
         }
         guard !messages.isEmpty || !sessionMeta.isEmpty else { return nil }
-        let projectPath = sessionMeta.string("cwd")?.holyArchiveNilIfBlank
-            ?? homeDirectory.path
+        let project = HolyArchiveProjectIdentity(
+            candidatePath: sessionMeta.string("cwd")?.holyArchiveNilIfBlank ?? turnCWD,
+            homeDirectory: homeDirectory
+        )
         let firstPrompt = HolyArchiveText.firstRealPrompt(in: messages)
         let lastPrompt = HolyArchiveText.lastRealPrompt(in: messages)
         let lastResponse = HolyArchiveText.lastRealResponse(in: messages)
@@ -366,8 +419,8 @@ struct HolyCodexArchiveProvider: HolyArchiveProviding {
             id: sessionID,
             harness: harness,
             rawPath: url.path,
-            projectPath: projectPath,
-            projectName: URL(fileURLWithPath: projectPath).lastPathComponent.holyArchiveNilIfBlank ?? "Codex",
+            projectPath: project.path,
+            projectName: project.name,
             title: threadName?.holyArchiveNilIfBlank
                 ?? firstPrompt.holyArchiveFirstLine.map { HolyArchiveText.preview($0, limit: 80) }
                 ?? "Codex Session",
@@ -536,8 +589,7 @@ struct HolyDroidArchiveProvider: HolyArchiveProviding {
         }
 
         guard !messages.isEmpty else { return nil }
-        let projectPath = cwd?.holyArchiveNilIfBlank
-            ?? HolyClaudeArchiveProvider.decodeProjectPath(url.deletingLastPathComponent().lastPathComponent)
+        let project = HolyArchiveProjectIdentity(candidatePath: cwd, homeDirectory: homeDirectory)
         let firstPrompt = HolyArchiveText.firstRealPrompt(in: messages)
         if !isChild, let automated = HolyArchiveText.automatedSessionType(firstPrompt) {
             isChild = true
@@ -549,8 +601,8 @@ struct HolyDroidArchiveProvider: HolyArchiveProviding {
             id: sessionID,
             harness: harness,
             rawPath: url.path,
-            projectPath: projectPath,
-            projectName: URL(fileURLWithPath: projectPath).lastPathComponent.holyArchiveNilIfBlank ?? "Droid",
+            projectPath: project.path,
+            projectName: project.name,
             title: title,
             firstPrompt: firstPrompt,
             lastPrompt: lastPrompt,
@@ -662,13 +714,16 @@ struct HolyCursorArchiveProvider: HolyArchiveProviding {
                 ))
             }
             let automated = HolyArchiveText.automatedSessionType(firstPrompt)
-            let path = projectPath ?? homeDirectory.path
+            let project = HolyArchiveProjectIdentity(
+                candidatePath: projectPath,
+                homeDirectory: homeDirectory
+            )
             let session = HolyArchiveSession(
                 id: id,
                 harness: harness,
                 rawPath: url.path,
-                projectPath: path,
-                projectName: URL(fileURLWithPath: path).lastPathComponent.holyArchiveNilIfBlank ?? "Cursor",
+                projectPath: project.path,
+                projectName: project.name,
                 title: HolyArchiveText.preview(firstPrompt.holyArchiveFirstLine ?? "Cursor Session", limit: 80),
                 firstPrompt: firstPrompt,
                 lastPrompt: firstPrompt,
@@ -987,7 +1042,10 @@ struct HolyOpenCodeArchiveProvider: HolyArchiveProviding {
             isChild = true
             childType = automated
         }
-        let path = projectPath?.holyArchiveNilIfBlank ?? homeDirectory.path
+        let project = HolyArchiveProjectIdentity(
+            candidatePath: projectPath,
+            homeDirectory: homeDirectory
+        )
         let resolvedTitle = title?.holyArchiveNilIfBlank
             ?? firstPrompt.split(separator: "\n").prefix(5)
                 .map(String.init)
@@ -998,8 +1056,8 @@ struct HolyOpenCodeArchiveProvider: HolyArchiveProviding {
             id: id,
             harness: harness,
             rawPath: url.path,
-            projectPath: path,
-            projectName: URL(fileURLWithPath: path).lastPathComponent.holyArchiveNilIfBlank ?? "OpenCode",
+            projectPath: project.path,
+            projectName: project.name,
             title: resolvedTitle,
             firstPrompt: firstPrompt,
             lastPrompt: lastPrompt,

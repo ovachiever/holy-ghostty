@@ -795,7 +795,7 @@ struct HolyArchiveModeTests {
                 [
                     "type": "session_meta", "timestamp": "2026-09-02T12:00:01Z",
                     "payload": [
-                        "id": "codex-session", "cwd": "/repo/codex",
+                        "id": "codex-session",
                         "source": [
                             "subagent": [
                                 "thread_spawn": [
@@ -811,7 +811,7 @@ struct HolyArchiveModeTests {
                     "payload": ["id": "codex-session", "cwd": "/must-not-win"],
                 ],
                 [
-                    "type": "turn_context", "payload": ["model": "gpt-5.6"],
+                    "type": "turn_context", "payload": ["model": "gpt-5.6", "cwd": "/repo/codex"],
                 ],
                 [
                     "type": "event_msg", "timestamp": "2026-09-02T12:01:00Z",
@@ -836,11 +836,135 @@ struct HolyArchiveModeTests {
             let parsed = try #require(try provider.parseSession(at: sessionURL))
             #expect(parsed.0.id == "codex-session")
             #expect(parsed.0.projectPath == "/repo/codex")
+            #expect(parsed.0.projectName == "codex")
             #expect(parsed.0.title == "Canonical title")
             #expect(parsed.0.parentID == "parent-thread")
             #expect(parsed.0.childType == "reviewer")
             #expect(parsed.0.extra["agent_nickname"] == "Ada")
             #expect(parsed.0.toolCalls == ["exec_command"])
+        }
+    }
+
+    @Test func providersNeverPromoteArchiveStorageToProjectIdentity() throws {
+        try withRepository { _, _, root in
+            let codexDirectory = root.appendingPathComponent(
+                "Documents/Codex/2026-09-05/you-re-looking-at-a-screenshot",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(at: codexDirectory, withIntermediateDirectories: true)
+            let codexURL = codexDirectory.appendingPathComponent("codex-missing-cwd.jsonl")
+            try writeJSONLines([
+                [
+                    "type": "session_meta",
+                    "payload": ["id": "codex-missing-cwd"],
+                ],
+                [
+                    "type": "event_msg",
+                    "payload": ["type": "user_message", "text": "Inspect the screenshot"],
+                ],
+            ], to: codexURL)
+
+            let claudeDirectory = root.appendingPathComponent(
+                ".claude/projects/-Users-erik-Documents-Codex-you-re-looking-at-a-screenshot",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(at: claudeDirectory, withIntermediateDirectories: true)
+            let claudeURL = claudeDirectory.appendingPathComponent("claude-missing-cwd.jsonl")
+            try writeJSONLines([
+                [
+                    "type": "user", "uuid": "claude-user",
+                    "message": ["role": "user", "content": "Inspect the screenshot"],
+                ],
+            ], to: claudeURL)
+
+            let droidDirectory = root.appendingPathComponent(
+                ".cache/opensession/0.0.6",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(at: droidDirectory, withIntermediateDirectories: true)
+            let droidURL = droidDirectory.appendingPathComponent("droid-missing-cwd.jsonl")
+            try writeJSONLines([
+                ["type": "session_start", "title": "Inspect the archive"],
+                [
+                    "type": "message", "uuid": "droid-user",
+                    "message": ["role": "user", "content": "Inspect the archive"],
+                ],
+            ], to: droidURL)
+
+            let codex = try #require(try HolyCodexArchiveProvider(homeDirectory: root)
+                .parseSession(at: codexURL)).0
+            let claude = try #require(try HolyClaudeArchiveProvider(homeDirectory: root)
+                .parseSession(at: claudeURL)).0
+            let droid = try #require(try HolyDroidArchiveProvider(homeDirectory: root)
+                .parseSession(at: droidURL)).0
+
+            for session in [codex, claude, droid] {
+                #expect(session.projectPath == nil)
+                #expect(session.projectName == "(no project)")
+            }
+        }
+    }
+
+    @Test func projectIdentityKeepsRealUmbrellaDirectoriesButRejectsRootAndCaches() {
+        let home = URL(fileURLWithPath: "/Users/erik", isDirectory: true)
+        let umbrella = HolyArchiveProjectIdentity(
+            candidatePath: "/Users/erik/Custom_Coding",
+            homeDirectory: home
+        )
+        #expect(umbrella.path == "/Users/erik/Custom_Coding")
+        #expect(umbrella.name == "Custom_Coding")
+        #expect(HolyArchiveProjectIdentity(
+            candidatePath: "/Users/erik",
+            homeDirectory: home
+        ).name == "erik")
+        #expect(HolyArchiveProjectIdentity(candidatePath: "/", homeDirectory: home).path == nil)
+        #expect(HolyArchiveProjectIdentity(
+            candidatePath: "/Users/erik/.cache/opensession/0.0.6",
+            homeDirectory: home
+        ).path == nil)
+        #expect(HolyArchiveProjectIdentity(
+            candidatePath: "/Users/erik/.codex/sessions/slug",
+            homeDirectory: home
+        ).path == nil)
+        #expect(HolyArchiveProjectIdentity(
+            candidatePath: "/Users/erik/Documents/Codex/2026-09-05/you-re-looking-at-a-screenshot",
+            homeDirectory: home
+        ).path == nil)
+    }
+
+    @Test func fullReindexRecomputesExistingProjectIdentity() async throws {
+        try await withRepositoryAsync { repository, _, root in
+            let directory = root.appendingPathComponent(
+                ".codex/sessions/2026/09/05",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let sessionURL = directory.appendingPathComponent("recomputed.jsonl")
+            try writeJSONLines([
+                ["type": "session_meta", "payload": ["id": "recomputed"]],
+                [
+                    "type": "event_msg",
+                    "payload": ["type": "user_message", "text": "Recompute this row"],
+                ],
+            ], to: sessionURL)
+            try repository.replace(
+                session: sampleSession(id: "recomputed", rawPath: sessionURL.path),
+                messages: [],
+                chunks: []
+            )
+            #expect(try repository.session(id: "recomputed")?.projectName == "holy-ghostty")
+
+            let indexer = HolyArchiveIndexer(
+                repository: repository,
+                registry: .init(providers: [HolyCodexArchiveProvider(homeDirectory: root)]),
+                pacer: .init(budget: .unthrottled)
+            )
+            let receipt = await indexer.fullReindex()
+
+            #expect(receipt.failures.isEmpty)
+            #expect(receipt.sessionsIndexed == 1)
+            #expect(try repository.session(id: "recomputed")?.projectPath == nil)
+            #expect(try repository.session(id: "recomputed")?.projectName == "(no project)")
         }
     }
 

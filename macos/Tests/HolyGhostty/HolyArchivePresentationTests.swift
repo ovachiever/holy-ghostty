@@ -162,7 +162,7 @@ struct HolyLedgerColumnOverridesTests {
         #expect(HolyLedgerResponsiveLayout.inspectorWidth(windowWidth: 1_728, persistedWidth: 600) == 600)
     }
 
-    @Test func fixedColumnsYieldToTheFlexibleFloorWithoutOverflow() {
+    @Test func poisonedStoredWidthsAreDiscardedBeforeTheContentFitShrinks() {
         var overrides = HolyLedgerColumnOverrides(json: "")
         overrides.set("track", width: 500, availableWidth: 1_200)
         let columns = HolyLedgerResponsiveLayout.columns(
@@ -171,20 +171,86 @@ struct HolyLedgerColumnOverridesTests {
             stripeWidth: 10,
             minimumFlexibleWidth: 180,
             fixedColumns: [
-                .init(id: "id", fittedWidth: 70, minimumWidth: 70, shrinkPriority: 1),
-                .init(id: "track", fittedWidth: 200, minimumWidth: 50, shrinkPriority: 0),
-                .init(id: "state", fittedWidth: 120, minimumWidth: 120, shrinkPriority: 1),
-                .init(id: "#", fittedWidth: 30, minimumWidth: 30, shrinkPriority: 1),
+                .init(id: "id", fittedWidth: 70, minimumWidth: 70),
+                .init(id: "track", fittedWidth: 200, minimumWidth: 50),
+                .init(id: "state", fittedWidth: 120, minimumWidth: 120),
+                .init(id: "#", fittedWidth: 30, minimumWidth: 30),
             ],
             overrides: overrides
         )
 
+        #expect(columns.discardedStoredWidths)
         #expect(columns.flexibleWidth == 180)
         #expect(columns.width("id") == 70)
         #expect(columns.width("state") == 120)
         #expect(columns.width("#") == 30)
         #expect(columns.width("track") == 130)
         #expect(abs(columns.occupiedWidth - columns.availableWidth) < 0.001)
+    }
+
+    @Test func everyBoardGripMovesTheBoundaryUnderThePointer() {
+        let minimums: [String: CGFloat] = ["id": 50, "track": 40, "state": 40, "#": 30]
+
+        let id = HolyLedgerColumnBoundaries.board(column: "id", showsTrack: true)
+        #expect(!id.gripOnLeadingEdge)
+        #expect(id.columns == ["id"])
+        #expect(id.resizedWidths(
+            from: ["id": 80], minimumWidths: minimums, translation: 12
+        ) == ["id": 92])
+
+        let track = HolyLedgerColumnBoundaries.board(column: "track", showsTrack: true)
+        #expect(track.gripOnLeadingEdge)
+        #expect(track.resizedWidths(
+            from: ["track": 120], minimumWidths: minimums, translation: 12
+        ) == ["track": 108])
+
+        let state = HolyLedgerColumnBoundaries.board(column: "state", showsTrack: true)
+        #expect(state.columns == ["track", "state"])
+        #expect(state.resizedWidths(
+            from: ["track": 120, "state": 100], minimumWidths: minimums, translation: 12
+        ) == ["track": 132, "state": 88])
+
+        let priority = HolyLedgerColumnBoundaries.board(column: "#", showsTrack: true)
+        #expect(priority.columns == ["state", "#"])
+        #expect(priority.resizedWidths(
+            from: ["state": 100, "#": 50], minimumWidths: minimums, translation: 12
+        ) == ["state": 112, "#": 38])
+
+        let narrowState = HolyLedgerColumnBoundaries.board(column: "state", showsTrack: false)
+        #expect(narrowState == .fixedAfterFlexible("state"))
+        #expect(narrowState.resizedWidths(
+            from: ["state": 100], minimumWidths: minimums, translation: 12
+        ) == ["state": 88])
+    }
+
+    @Test func everyArchiveGripMovesTheBoundaryUnderThePointer() {
+        let minimums: [String: CGFloat] = ["date": 40, "harness": 40, "project": 40, "sub": 30]
+        for column in ["date", "harness", "project"] {
+            let boundary = HolyLedgerColumnBoundaries.archive(column: column)
+            #expect(!boundary.gripOnLeadingEdge)
+            #expect(boundary.resizedWidths(
+                from: [column: 80], minimumWidths: minimums, translation: 12
+            ) == [column: 92])
+        }
+
+        let sub = HolyLedgerColumnBoundaries.archive(column: "sub")
+        #expect(sub.gripOnLeadingEdge)
+        #expect(sub.resizedWidths(
+            from: ["sub": 60], minimumWidths: minimums, translation: 12
+        ) == ["sub": 48])
+    }
+
+    @Test func fixedPairTransfersWidthAndStopsAtEitherContentFloor() {
+        let boundary = HolyLedgerColumnBoundary.fixedPair(leading: "track", trailing: "state")
+        let starting: [String: CGFloat] = ["track": 120, "state": 80]
+        let minimums: [String: CGFloat] = ["track": 40, "state": 40]
+
+        #expect(boundary.resizedWidths(
+            from: starting, minimumWidths: minimums, translation: 100
+        ) == ["track": 160, "state": 40])
+        #expect(boundary.resizedWidths(
+            from: starting, minimumWidths: minimums, translation: -100
+        ) == ["track": 40, "state": 160])
     }
 }
 

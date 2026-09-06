@@ -348,14 +348,12 @@ struct HolyArchiveModeView: View {
             HolyLedgerFixedColumn(
                 id: "date",
                 fittedWidth: fitted.date,
-                minimumWidth: fitted.date,
-                shrinkPriority: 1
+                minimumWidth: fitted.date
             ),
             HolyLedgerFixedColumn(
                 id: "harness",
                 fittedWidth: fitted.harness,
-                minimumWidth: fitted.harness,
-                shrinkPriority: 1
+                minimumWidth: fitted.harness
             ),
             showsProject ? HolyLedgerFixedColumn(
                 id: "project",
@@ -363,14 +361,12 @@ struct HolyArchiveModeView: View {
                 minimumWidth: Metrics.columnWidth(
                     contentCharacters: HolyLedgerColumnGrip.minimumCharacters,
                     headerCharacters: "project".count
-                ),
-                shrinkPriority: 0
+                )
             ) : nil,
             HolyLedgerFixedColumn(
                 id: "sub",
                 fittedWidth: fitted.children,
-                minimumWidth: fitted.children,
-                shrinkPriority: 1
+                minimumWidth: fitted.children
             ),
         ].compactMap { $0 }
         let columns = HolyLedgerResponsiveLayout.columns(
@@ -387,29 +383,38 @@ struct HolyArchiveModeView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Metrics.columnGap) {
                 Color.clear.frame(width: Metrics.stripeColumnWidth)
-                resizableHeader("date", width: columns.width("date"), availableWidth: columns.availableWidth)
+                resizableHeader(
+                    "date",
+                    columns: columns,
+                    boundary: HolyLedgerColumnBoundaries.archive(column: "date")
+                )
                 resizableHeader(
                     "harness",
-                    width: columns.width("harness"),
-                    availableWidth: columns.availableWidth
+                    columns: columns,
+                    boundary: HolyLedgerColumnBoundaries.archive(column: "harness")
                 )
                 if showsProject {
                     resizableHeader(
                         "project",
-                        width: columns.width("project"),
-                        availableWidth: columns.availableWidth
+                        columns: columns,
+                        boundary: HolyLedgerColumnBoundaries.archive(column: "project")
                     )
                 }
                 columnLabel("summary").frame(width: columns.flexibleWidth, alignment: .leading)
                 resizableHeader(
                     "sub",
-                    width: columns.width("sub"),
-                    availableWidth: columns.availableWidth,
+                    columns: columns,
+                    boundary: HolyLedgerColumnBoundaries.archive(column: "sub"),
                     alignment: .trailing
                 )
             }
             .frame(height: Metrics.columnHeaderHeight)
             .overlay(alignment: .bottom) { rule }
+            .task(id: columns.discardedStoredWidths ? columnOverridesJSON : "") {
+                if columns.discardedStoredWidths {
+                    columnOverridesJSON = ""
+                }
+            }
             sheetHead(head.prompt, count: head.count) {
                 if store.isSearching { spinner }
             }
@@ -1082,35 +1087,48 @@ struct HolyArchiveModeView: View {
             .lineLimit(1)
     }
 
-    /// A fixed column's header with its drag grip at the right edge.
+    /// A fixed column header whose grip sits on the physical boundary it owns.
     private func resizableHeader(
         _ column: String,
-        width: CGFloat,
-        availableWidth: CGFloat,
+        columns: HolyLedgerResolvedColumns,
+        boundary: HolyLedgerColumnBoundary,
         alignment: Alignment = .leading
     ) -> some View {
         columnLabel(column)
-            .frame(width: width, alignment: alignment)
-            .overlay(alignment: .trailing) {
+            .frame(width: columns.width(column), alignment: alignment)
+            .overlay(alignment: boundary.gripOnLeadingEdge ? .leading : .trailing) {
                 HolyLedgerColumnGrip(
-                    column: column,
-                    currentWidth: width,
-                    minimumWidth: HolyMannaBoardMetrics.columnWidth(
-                        contentCharacters: HolyLedgerColumnGrip.minimumCharacters,
-                        headerCharacters: column.count
-                    ),
-                    onResize: { newWidth in
+                    boundary: boundary,
+                    currentWidths: columns.widths(for: boundary.columns),
+                    minimumWidths: boundary.columns.reduce(into: [:]) { result, boundaryColumn in
+                        result[boundaryColumn] = HolyMannaBoardMetrics.columnWidth(
+                            contentCharacters: HolyLedgerColumnGrip.minimumCharacters,
+                            headerCharacters: boundaryColumn.count
+                        )
+                    },
+                    onResize: { newWidths in
                         var overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
-                        overrides.set(column, width: newWidth, availableWidth: availableWidth)
+                        for (resizedColumn, newWidth) in newWidths {
+                            overrides.set(
+                                resizedColumn,
+                                width: newWidth,
+                                availableWidth: columns.availableWidth
+                            )
+                        }
                         columnOverridesJSON = overrides.json
                     },
-                    onReset: {
+                    onReset: { resetColumns in
                         var overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
-                        overrides.reset(column)
+                        for resetColumn in resetColumns {
+                            overrides.reset(resetColumn)
+                        }
                         columnOverridesJSON = overrides.json
                     }
                 )
-                .offset(x: Metrics.columnGap / 2 + HolyLedgerColumnGrip.width / 2)
+                .offset(
+                    x: (Metrics.columnGap / 2 + HolyLedgerColumnGrip.width / 2)
+                        * (boundary.gripOnLeadingEdge ? -1 : 1)
+                )
             }
     }
 
