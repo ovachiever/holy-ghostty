@@ -196,6 +196,8 @@ struct HolyAgentStateEnvelopeTests {
 
         #expect(HolyAgentStateTransport.tmuxOption == "@holy_agent_state_v1")
         #expect(HolyAgentStateTransport.tmuxLastFinishedOption == "@holy_agent_last_finished_v1")
+        #expect(HolyAgentStateTransport.tmuxLastUsedOption == "@holy_agent_last_used_v1")
+        #expect(HolyAgentStateTransport.tmuxSeenOption == "@holy_seen_v1")
         #expect(HolyAgentStateTransport.tmuxOwnershipOption == "@holy_agent_state_owner_v1")
         #expect(HolyAgentStateTransport.tmuxOwnershipValue == "holy")
         #expect(HolyAgentStateTransport.notificationTitle == "com.holyghostty.agent-state.v1")
@@ -214,6 +216,77 @@ struct HolyAgentStateEnvelopeTests {
                 notificationTitle: "other",
                 body: envelope.wireValue
             )
+        }
+    }
+
+    @Test func sharedSeenStateRoundTripsAnEventWatermarkAndExplicitUnreadTombstone() throws {
+        let firstSeen = try #require(HolyAgentSeenState.seen(
+            acknowledgingEventAtMilliseconds: 1_752_500_123_456,
+            at: Date(timeIntervalSince1970: 1_752_500_124),
+            after: nil
+        ))
+        #expect(firstSeen.wireValue == "v1|seen|1752500123456|1752500124000")
+        #expect(try HolyAgentSeenState(wireValue: firstSeen.wireValue) == firstSeen)
+        #expect(firstSeen.acknowledges(eventAtMilliseconds: 1_752_500_123_456))
+        #expect(!firstSeen.acknowledges(eventAtMilliseconds: 1_752_500_123_457))
+        let finished = try HolyAgentStateEnvelope(
+            source: "claude",
+            lifecycle: .finished,
+            occurredAtMilliseconds: 1_752_500_123_456,
+            eventToken: "finish-1"
+        )
+        let question = try HolyAgentStateEnvelope(
+            source: "claude",
+            lifecycle: .needsUser,
+            occurredAtMilliseconds: 1_752_500_123_456,
+            eventToken: "question-1",
+            reasonCode: "permission"
+        )
+        #expect(firstSeen.acknowledgesNotification(for: finished))
+        #expect(!firstSeen.acknowledgesNotification(for: question))
+        let failed = try HolyAgentStateEnvelope(
+            source: "claude",
+            lifecycle: .failed,
+            occurredAtMilliseconds: 1_752_500_123_456,
+            eventToken: "failed-1"
+        )
+        #expect(firstSeen.acknowledgesNotification(for: failed))
+
+        let unread = try #require(HolyAgentSeenState.unread(
+            at: Date(timeIntervalSince1970: 1_752_500_123),
+            after: firstSeen
+        ))
+        #expect(unread.wireValue == "v1|unread||1752500124001")
+        #expect(try HolyAgentSeenState(wireValue: unread.wireValue) == unread)
+        #expect(unread.seenAt == nil)
+        #expect(!unread.acknowledges(eventAtMilliseconds: 1))
+        #expect(unread.isNewer(than: firstSeen))
+
+        let tiedSeen = try HolyAgentSeenState(
+            wireValue: "v1|seen|1752500123456|1752500124001"
+        )
+        #expect(unread.isNewer(than: tiedSeen))
+        #expect(!tiedSeen.isNewer(than: unread))
+    }
+
+    @Test func sharedSeenStateFailsClosedOnMalformedOrContradictoryValues() {
+        expectSeenStateError(.unsupportedVersion("v2")) {
+            try HolyAgentSeenState(wireValue: "v2|seen|1752500123456|1752500124000")
+        }
+        expectSeenStateError(.invalidAcknowledgedTimestamp) {
+            try HolyAgentSeenState(wireValue: "v1|seen||1752500124000")
+        }
+        expectSeenStateError(.invalidAcknowledgedTimestamp) {
+            try HolyAgentSeenState(wireValue: "v1|unread|1752500123456|1752500124000")
+        }
+        expectSeenStateError(.invalidChangedTimestamp) {
+            try HolyAgentSeenState(wireValue: "v1|seen|1752500124001|1752500124000")
+        }
+        expectSeenStateError(.invalidChangedTimestamp) {
+            try HolyAgentSeenState(wireValue: "v1|unread||not-a-time")
+        }
+        expectSeenStateError(.invalidDisposition("maybe")) {
+            try HolyAgentSeenState(wireValue: "v1|maybe||1752500124000")
         }
     }
 
@@ -240,6 +313,20 @@ struct HolyAgentStateEnvelopeTests {
             _ = try operation()
             Issue.record("Expected agent-state envelope parsing to fail")
         } catch let error as HolyAgentStateEnvelopeError {
+            #expect(error == expected)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    private func expectSeenStateError<Result>(
+        _ expected: HolyAgentSeenStateError,
+        operation: () throws -> Result
+    ) {
+        do {
+            _ = try operation()
+            Issue.record("Expected shared seen-state parsing to fail")
+        } catch let error as HolyAgentSeenStateError {
             #expect(error == expected)
         } catch {
             Issue.record("Unexpected error: \(error)")

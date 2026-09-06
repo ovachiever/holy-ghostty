@@ -150,6 +150,7 @@ struct HolyTmuxSessionMetadataSyncTests {
     }
 
     @Test func deliveryCoalescesPendingFieldsWithoutRepublishingDeliveredFields() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
         var launchSpec = HolySessionLaunchSpec.interactiveTmuxShell()
         launchSpec.note = "first"
         launchSpec.noteUpdatedAtMilliseconds = 710
@@ -169,13 +170,19 @@ struct HolyTmuxSessionMetadataSyncTests {
                 includeTodayPin: true
             )
         )
+        let sharedSeen = try #require(HolyAgentSeenState.seen(
+            acknowledgingEventAtMilliseconds: 709,
+            at: start,
+            after: nil
+        ))
+        let seen = HolyTmuxSessionMetadataPayload(seenState: sharedSeen)
 
         var state = HolyTmuxSessionMetadataDeliveryState()
-        let start = Date(timeIntervalSince1970: 1_000)
         state.request(note)
         let firstValue = state.beginAttempt(now: start)
         let first = try #require(firstValue)
         state.request(pin)
+        state.request(seen)
         state.complete(first, succeeded: false, now: start)
 
         #expect(state.beginAttempt(now: start.addingTimeInterval(0.5)) == nil)
@@ -183,6 +190,7 @@ struct HolyTmuxSessionMetadataSyncTests {
         let combined = try #require(combinedValue)
         #expect(combined.payload.encodedNote == note.encodedNote)
         #expect(combined.payload.todayPin == true)
+        #expect(combined.payload.seenStateWireValue == sharedSeen.wireValue)
         state.complete(combined, succeeded: true, now: start.addingTimeInterval(1.1))
 
         launchSpec.note = "second"
@@ -199,6 +207,7 @@ struct HolyTmuxSessionMetadataSyncTests {
         let next = try #require(nextValue)
         #expect(next.payload.encodedNote == secondNote.encodedNote)
         #expect(next.payload.todayPin == nil)
+        #expect(next.payload.seenStateWireValue == nil)
     }
 
     @Test func commandFailsClosedWithoutExactStoredIdentityAndBoundsRemoteSSH() throws {
@@ -218,6 +227,18 @@ struct HolyTmuxSessionMetadataSyncTests {
         #expect(localScript.contains("'-t' \"$holy_session_id\""))
         #expect(localScript.contains("'@holy_note_v1'"))
         #expect(localScript.contains("'@holy_note_updated_at_v1' '800'"))
+
+        let sharedSeen = try #require(HolyAgentSeenState.seen(
+            acknowledgingEventAtMilliseconds: 799,
+            at: Date(timeIntervalSince1970: 1),
+            after: nil
+        ))
+        let seenPayload = HolyTmuxSessionMetadataPayload(seenState: sharedSeen)
+        let seenCommand = try #require(
+            HolyTmuxSessionMetadataUpdateCommand.command(for: launchSpec, payload: seenPayload)
+        )
+        let seenScript = try #require(seenCommand.arguments.last)
+        #expect(seenScript.contains("'@holy_seen_v1' 'v1|seen|799|1000'"))
 
         var missingName = launchSpec
         missingName.tmux?.sessionName = nil
@@ -337,6 +358,17 @@ struct HolyTmuxSessionMetadataSyncTests {
         )
         #expect(command.run())
 
+        let sharedSeen = try #require(HolyAgentSeenState.seen(
+            acknowledgingEventAtMilliseconds: 1_784_555_000_122,
+            at: Date(timeIntervalSince1970: 1_784_555_001),
+            after: nil
+        ))
+        let seenCommand = try #require(HolyTmuxSessionMetadataUpdateCommand.command(
+            for: launchSpec,
+            payload: HolyTmuxSessionMetadataPayload(seenState: sharedSeen)
+        ))
+        #expect(seenCommand.run())
+
         #expect(
             runShellOutput("tmux -L \(socketName) show-options -qv -t '\(sessionName)' @holy_note_v1")
                 == HolyTmuxSessionMetadataCodec.encodeNote(note)
@@ -352,6 +384,19 @@ struct HolyTmuxSessionMetadataSyncTests {
             runShellOutput("tmux -L \(socketName) show-options -qv -t '\(sessionName)' @holy_today_pin_updated_at_v1")
                 == "1784555000124"
         )
+        #expect(
+            runShellOutput("tmux -L \(socketName) show-options -qv -t '\(sessionName)' @holy_seen_v1")
+                == sharedSeen.wireValue
+        )
+
+        let endpoint = HolyTmuxAgentStateEndpoint(
+            hostID: UUID(),
+            hostLabel: "This Mac",
+            location: .local,
+            socketName: socketName
+        )
+        let stateObservations = try await HolyTmuxAgentStateMonitor.shared.read(endpoint: endpoint)
+        #expect(stateObservations.values.first?.seenState == sharedSeen)
 
         let sessions = try await HolyRemoteTmuxDiscoveryService.shared
             .discoverLocalSessionsThrowing(

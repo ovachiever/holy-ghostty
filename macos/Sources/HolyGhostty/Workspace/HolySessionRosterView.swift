@@ -1100,13 +1100,11 @@ private struct HolyRosterRow: View {
         return .clear
     }
 
-    // Age = time since the agent last produced output. Shown only once a
-    // session has aged past an hour, so fresh rows stay uncluttered.
+    // Age follows the host-derived attention axis. Local surface attachment
+    // and cache creation must not make a historical session look freshly used.
     private func ageLabelText(asOf now: Date) -> String? {
         let isConflict = attention.kind == .conflict
-        let anchor = isConflict
-            ? attention.becameAvailableAt ?? session.activityAt
-            : session.activityAt
+        guard let anchor = attention.becameAvailableAt else { return nil }
         let seconds = max(0, now.timeIntervalSince(anchor))
         if isConflict, seconds < 60 { return "<1m" }
         if isConflict, seconds < 3_600 { return "\(max(1, Int(seconds / 60)))m" }

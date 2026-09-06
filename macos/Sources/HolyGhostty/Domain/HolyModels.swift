@@ -108,11 +108,15 @@ enum HolySessionAttentionKind: String, Codable, Equatable, Hashable, CaseIterabl
 }
 
 struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
-    static let currentSeenTrackingVersion = 2
+    static let currentSeenTrackingVersion = 3
     static let currentNotificationTrackingVersion = 1
 
     let sessionID: UUID
     var lastSeenAt: Date?
+    /// Canonical tmux-backed acknowledgement. `lastSeenAt` remains the cached
+    /// human-activity clock; this value says which producer event was actually
+    /// visible and therefore may clear unread or a failed-turn demand.
+    var sharedSeenState: HolyAgentSeenState?
     var seenEvidenceSignature: String?
     var lastAttentionEvidenceSignature: String?
     var lastAttentionBecameAvailableAt: Date?
@@ -129,9 +133,10 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
     /// opaque and contains no prompt or response text.
     var lastAuthoritativeEventID: String?
     var lastAuthoritativeFinishedEventID: String?
-    /// Producer and receipt clocks stay separate. Operational leases use the
-    /// producer occurrence (clamped against future clock skew); diagnostics
-    /// can still explain when Holy actually observed the event.
+    var lastAuthoritativeUsedEventID: String?
+    /// Producer and receipt clocks stay separate. The producer occurrence is
+    /// preserved exactly so every viewer rebuilds identical recency; callers
+    /// clamp it against their observation clock only for operational leases.
     var lastAuthoritativeEventOccurredAt: Date?
     var lastAuthoritativeEventObservedAt: Date?
     /// Human recency: advanced only by a committed `user-prompt` envelope,
@@ -155,6 +160,7 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
     init(
         sessionID: UUID,
         lastSeenAt: Date? = nil,
+        sharedSeenState: HolyAgentSeenState? = nil,
         seenEvidenceSignature: String? = nil,
         lastAttentionEvidenceSignature: String? = nil,
         lastAttentionBecameAvailableAt: Date? = nil,
@@ -166,6 +172,7 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
         seenTrackingVersion: Int? = nil,
         lastAuthoritativeEventID: String? = nil,
         lastAuthoritativeFinishedEventID: String? = nil,
+        lastAuthoritativeUsedEventID: String? = nil,
         lastAuthoritativeEventOccurredAt: Date? = nil,
         lastAuthoritativeEventObservedAt: Date? = nil,
         lastUsedAt: Date? = nil,
@@ -177,6 +184,7 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
     ) {
         self.sessionID = sessionID
         self.lastSeenAt = lastSeenAt
+        self.sharedSeenState = sharedSeenState
         self.seenEvidenceSignature = seenEvidenceSignature
         self.lastAttentionEvidenceSignature = lastAttentionEvidenceSignature
         self.lastAttentionBecameAvailableAt = lastAttentionBecameAvailableAt
@@ -188,6 +196,7 @@ struct HolySessionAttentionMetadata: Codable, Equatable, Identifiable {
         self.seenTrackingVersion = seenTrackingVersion
         self.lastAuthoritativeEventID = lastAuthoritativeEventID
         self.lastAuthoritativeFinishedEventID = lastAuthoritativeFinishedEventID
+        self.lastAuthoritativeUsedEventID = lastAuthoritativeUsedEventID
         self.lastAuthoritativeEventOccurredAt = lastAuthoritativeEventOccurredAt
         self.lastAuthoritativeEventObservedAt = lastAuthoritativeEventObservedAt
         self.lastUsedAt = lastUsedAt
@@ -208,16 +217,15 @@ extension HolySessionAttentionMetadata {
     @discardableResult
     mutating func migrateSeenTracking(at date: Date) -> Bool {
         guard seenTrackingVersion != Self.currentSeenTrackingVersion else { return false }
-        let firstAdoption = seenTrackingVersion == nil
         seenTrackingVersion = Self.currentSeenTrackingVersion
-        if firstAdoption {
-            // First hook-aware adoption only: baseline seen so historical
-            // replies cannot badge-storm the whole roster.
-            lastSeenAt = date
-        }
-        // v2: used-today is earned by user prompts alone. Clear pre-v2
-        // stamps that conflated agent events and boot baselines with use.
+        // v3 removes the machine-local first-adoption baseline. A fresh cache
+        // and an upgraded cache must render the same host truth. Pre-v3 seen
+        // and prompt recency existed only on this viewing machine, so neither
+        // may survive as authority while the tmux registers are absent.
+        lastSeenAt = nil
         lastUsedAt = nil
+        sharedSeenState = nil
+        lastAuthoritativeUsedEventID = nil
         updatedAt = date
         return true
     }
@@ -237,11 +245,12 @@ extension HolySessionAttentionMetadata {
         observedAt: Date
     ) -> Bool {
         guard lastAuthoritativeEventID != envelope.eventIdentity else { return false }
-        let occurredAt = min(envelope.occurredAt, observedAt)
+        let occurredAt = envelope.occurredAt
         lastAuthoritativeEventID = envelope.eventIdentity
         lastAuthoritativeEventOccurredAt = occurredAt
         lastAuthoritativeEventObservedAt = observedAt
         if envelope.reasonCode == Self.humanUseReasonCode {
+            lastAuthoritativeUsedEventID = envelope.eventIdentity
             lastUsedAt = max(lastUsedAt ?? .distantPast, occurredAt)
         }
         lastAttentionWasActiveWork = envelope.lifecycle == .working
@@ -271,7 +280,7 @@ extension HolySessionAttentionMetadata {
         guard envelope.lifecycle == .finished else {
             return false
         }
-        let occurredAt = min(envelope.occurredAt, observedAt)
+        let occurredAt = envelope.occurredAt
         if let lastAgentFinishedAt {
             if occurredAt < lastAgentFinishedAt {
                 return false
@@ -292,14 +301,68 @@ extension HolySessionAttentionMetadata {
         return true
     }
 
-    /// Seeing a session acknowledges its unread reply; it does not count as
-    /// using it. Blue advances only through `humanUseReasonCode` envelopes.
+    /// Incorporates the independent durable user-prompt register without
+    /// letting later tool or completion events manufacture or erase blue.
     @discardableResult
-    mutating func markSeen(at date: Date) -> Bool {
-        guard lastSeenAt.map({ $0 < date }) ?? true else { return false }
-        lastSeenAt = date
-        updatedAt = date
+    mutating func recordUsed(
+        envelope: HolyAgentStateEnvelope,
+        observedAt: Date
+    ) -> Bool {
+        guard envelope.reasonCode == Self.humanUseReasonCode else { return false }
+        let occurredAt = envelope.occurredAt
+        if let lastUsedAt {
+            if occurredAt < lastUsedAt { return false }
+            if occurredAt == lastUsedAt,
+               envelope.eventIdentity <= (lastAuthoritativeUsedEventID ?? "") {
+                return false
+            }
+        } else if lastAuthoritativeUsedEventID == envelope.eventIdentity {
+            return false
+        }
+
+        lastAuthoritativeUsedEventID = envelope.eventIdentity
+        lastUsedAt = occurredAt
+        updatedAt = observedAt
         return true
+    }
+
+    /// Replaces the local cache with the owning tmux session's atomic seen
+    /// value. Applying `unread` clears both the event acknowledgement and the
+    /// read-activity clock; a missing or malformed register never calls here.
+    @discardableResult
+    mutating func applySharedSeenState(
+        _ state: HolyAgentSeenState,
+        observedAt: Date
+    ) -> Bool {
+        if let sharedSeenState {
+            guard state.isNewer(than: sharedSeenState) else { return false }
+        }
+        sharedSeenState = state
+        lastSeenAt = state.seenAt
+        seenTrackingVersion = Self.currentSeenTrackingVersion
+        updatedAt = observedAt
+        return true
+    }
+
+    var latestAuthoritativeEventAtMilliseconds: Int64? {
+        [
+            lastAuthoritativeEventOccurredAt,
+            lastAgentFinishedAt,
+            lastUsedAt,
+        ]
+        .compactMap { date -> Int64? in
+            guard let date else { return nil }
+            let milliseconds = date.timeIntervalSince1970 * 1_000
+            guard milliseconds.isFinite,
+                  milliseconds >= 1,
+                  milliseconds < 0x1p63 else { return nil }
+            return Int64(milliseconds.rounded(.down))
+        }
+        .max()
+    }
+
+    var acknowledgedAuthoritativeEventAt: Date? {
+        sharedSeenState?.acknowledgedEventAt ?? lastSeenAt
     }
 
     /// Operator-initiated "Mark Unread": clears the seen timestamp so the
@@ -310,13 +373,14 @@ extension HolySessionAttentionMetadata {
     mutating func markUnread(at date: Date) -> Bool {
         guard lastAgentFinishedAt != nil, lastSeenAt != nil else { return false }
         lastSeenAt = nil
+        sharedSeenState = nil
         updatedAt = date
         return true
     }
 
     var hasUnreadAgentReply: Bool {
         guard let lastAgentFinishedAt else { return false }
-        return lastAgentFinishedAt > (lastSeenAt ?? .distantPast)
+        return lastAgentFinishedAt > (acknowledgedAuthoritativeEventAt ?? .distantPast)
     }
 
     /// Advances notification acknowledgement without ever moving backward.
@@ -369,6 +433,10 @@ struct HolySessionIndicatorEvidence: Equatable {
     let processExited: Bool
     let lastAgentFinishedAt: Date?
     let lastSeenAt: Date?
+    /// Producer watermark carried by the shared tmux acknowledgement. When
+    /// present it decides event acknowledgement; `lastSeenAt` remains the
+    /// shared read-activity clock cached for the inactive/sleeping axis.
+    var lastSeenAuthoritativeEventAt: Date?
     let lastUsedAt: Date
     /// Durable-register process evidence from the tmux monitor: whether the
     /// pane that published the latest working claim still runs a non-shell
@@ -410,8 +478,11 @@ enum HolySessionIndicatorPolicy {
                     // turn is different: it asks for nothing but eyes, so
                     // seeing the session after the failure acknowledges it
                     // and the row falls back to the ordinary axes.
+                    let acknowledgedAt = evidence.lastSeenAuthoritativeEventAt
+                        ?? evidence.lastSeenAt
+                        ?? .distantPast
                     let acknowledged = lifecycle == .failed
-                        && (evidence.lastSeenAt ?? .distantPast) >= occurredAt
+                        && acknowledgedAt >= occurredAt
                     let age = evidence.now.timeIntervalSince(occurredAt)
                     if !acknowledged, age >= 0, age < needsUserLease {
                         return .needsUser
@@ -447,7 +518,11 @@ enum HolySessionIndicatorPolicy {
         }
 
         if let finishedAt = evidence.lastAgentFinishedAt,
-           finishedAt > (evidence.lastSeenAt ?? .distantPast) {
+           finishedAt > (
+               evidence.lastSeenAuthoritativeEventAt
+                   ?? evidence.lastSeenAt
+                   ?? .distantPast
+           ) {
             return .unread
         }
 

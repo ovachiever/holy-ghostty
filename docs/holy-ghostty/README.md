@@ -128,7 +128,7 @@ question:
 |---|---|
 | Spinner | The agent is working right now. The spinner stops within a second of the agent process dying, and survives long tool-less stretches only while the agent is visibly producing output |
 | Question mark | The agent needs you: a committed question, permission request, or failure |
-| Glowing green dot | An unread agent reply. It clears only when you genuinely focus the session; selecting a row in a background window does not count |
+| Glowing green dot | An unread agent reply. It clears everywhere only when you genuinely focus the session on an attached Holy; selecting a row in a background window does not count |
 | Blue dot | You prompted this session within the last 24 hours. Blue is earned by you alone — agent activity, restores, and app launches never fake it |
 | Grey dot | No prompt from you in 24 hours, but something happened here (a reply landed, or you read one) within 48 |
 | Sleeping Z | Nothing at all for 48 hours or more |
@@ -144,7 +144,7 @@ Two quiet companions sit beside the orb:
   overlapping changed files.
 
 `Mark Unread` in a row's `...` action menu restores the green dot for a reply
-you want to revisit.
+you want to revisit on every attached Holy.
 
 ### Enabling the indicators
 
@@ -161,6 +161,14 @@ Agent notifications (replied, needs you, failed) ride the same event
 identities with a persisted watermark, so restarts and duplicate deliveries
 never re-alert, and a finish committed while Holy is closed alerts exactly
 once on the next launch.
+
+Finished events, real user prompts, and seen acknowledgements live as bounded
+options on the tmux server that owns the session. The local database only
+caches them. Clearing local sessions, re-attaching from another Mac, or
+starting from a new local cache reconstructs the same dots and ages without
+turning attachment time into fake recency. Mark Unread is a shared tombstone;
+questions and permissions still remain until the agent publishes a resolving
+event.
 
 ## Claude Usage Guard
 

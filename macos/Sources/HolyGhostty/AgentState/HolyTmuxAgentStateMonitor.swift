@@ -88,10 +88,17 @@ struct HolyTmuxAgentStateObservation: Equatable, Sendable {
     /// Independent completion register. A later `ended` or `idle` latest-state
     /// write cannot erase an unread completion while Holy is detached.
     let lastFinishedEnvelope: HolyAgentStateEnvelope?
+    /// Independent committed-user-prompt register. Later tool, finish, and
+    /// ended events cannot erase the only evidence allowed to earn blue.
+    let lastUsedEnvelope: HolyAgentStateEnvelope?
+    /// Session-scoped human acknowledgement written by any attached Holy.
+    /// nil is fail-closed: a missing or malformed value never clears unread.
+    let seenState: HolyAgentSeenState?
     /// Preserved only when there is a single unambiguous producer value.
     /// Conflicts intentionally expose neither candidate as authoritative.
     let rawWireValue: String?
     let rawLastFinishedWireValue: String?
+    let rawLastUsedWireValue: String?
     /// Whether the single pane that published the latest-state register still
     /// runs a non-shell foreground process. When an agent dies, tmux shows
     /// the pane's shell again, which proves the producer is gone. nil when
@@ -162,7 +169,7 @@ actor HolyTmuxAgentStateMonitor {
 
     private static let fieldSeparator = "\u{1F}"
     private static let listPanesFormat =
-        "#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}\u{1F}#{window_activity}\u{1F}#{@holy_watcher_v1}"
+        "#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{@holy_agent_last_used_v1}\u{1F}#{@holy_seen_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}\u{1F}#{window_activity}\u{1F}#{@holy_watcher_v1}"
     private static let maximumOutputBytes = 4 * 1_024 * 1_024
     private static let maximumLineBytes = 2 * 1_024
     private static let maximumPaneRows = 4_096
@@ -432,6 +439,8 @@ extension HolyTmuxAgentStateMonitor {
             let paneID: String
             let rawWireValue: String?
             let rawLastFinishedWireValue: String?
+            let rawLastUsedWireValue: String?
+            let rawSeenValue: String?
             let isDead: Bool
             let currentCommand: String?
             let windowActivityAt: Date?
@@ -451,7 +460,7 @@ extension HolyTmuxAgentStateMonitor {
                 separator: Character(fieldSeparator),
                 omittingEmptySubsequences: false
             )
-            guard fields.count == 8,
+            guard fields.count == 10,
                   !fields[0].isEmpty,
                   !fields[1].isEmpty else {
                 throw HolyTmuxAgentStateMonitorFailure(
@@ -468,10 +477,12 @@ extension HolyTmuxAgentStateMonitor {
                 paneID: paneID,
                 rawWireValue: rawWireValue,
                 rawLastFinishedWireValue: rawLastFinishedWireValue,
-                isDead: fields[4] == "1",
-                currentCommand: fields[5].isEmpty ? nil : String(fields[5]),
-                windowActivityAt: Int64(fields[6]).map { Date(timeIntervalSince1970: TimeInterval($0)) },
-                rawWatcherValue: fields[7].isEmpty ? nil : String(fields[7])
+                rawLastUsedWireValue: fields[4].isEmpty ? nil : String(fields[4]),
+                rawSeenValue: fields[5].isEmpty ? nil : String(fields[5]),
+                isDead: fields[6] == "1",
+                currentCommand: fields[7].isEmpty ? nil : String(fields[7]),
+                windowActivityAt: Int64(fields[8]).map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                rawWatcherValue: fields[9].isEmpty ? nil : String(fields[9])
             ))
         }
 
@@ -485,6 +496,12 @@ extension HolyTmuxAgentStateMonitor {
             let paneIDs = Array(Set(paneValues.map(\.paneID))).sorted()
             let nonEmptyValues = paneValues.compactMap(\.rawWireValue)
             let nonEmptyFinishedValues = paneValues.compactMap(\.rawLastFinishedWireValue)
+            let nonEmptyUsedValues = paneValues.compactMap(\.rawLastUsedWireValue)
+            let used = resolveRegister(
+                nonEmptyUsedValues,
+                requiringReasonCode: HolySessionAttentionMetadata.humanUseReasonCode
+            )
+            let seenState = seenState(fromRawValues: paneValues.map(\.rawSeenValue))
 
             guard !nonEmptyValues.isEmpty || !nonEmptyFinishedValues.isEmpty else {
                 observations[key] = HolyTmuxAgentStateObservation(
@@ -494,8 +511,11 @@ extension HolyTmuxAgentStateMonitor {
                     integrity: .noState,
                     envelope: nil,
                     lastFinishedEnvelope: nil,
+                    lastUsedEnvelope: used.envelope,
+                    seenState: seenState,
                     rawWireValue: nil,
                     rawLastFinishedWireValue: nil,
+                    rawLastUsedWireValue: used.rawWireValue,
                     producerHasLiveProcess: nil,
                     producerLastOutputAt: nil,
                     watcherFireAt: watcherFireAt(fromRawValues: paneValues.compactMap(\.rawWatcherValue))
@@ -575,8 +595,11 @@ extension HolyTmuxAgentStateMonitor {
                 integrity: integrity,
                 envelope: currentEnvelope,
                 lastFinishedEnvelope: finishedEnvelope,
+                lastUsedEnvelope: used.envelope,
+                seenState: seenState,
                 rawWireValue: current.rawWireValue,
                 rawLastFinishedWireValue: finished.rawWireValue,
+                rawLastUsedWireValue: used.rawWireValue,
                 producerHasLiveProcess: producerHasLiveProcess,
                 producerLastOutputAt: producerLastOutputAt,
                 watcherFireAt: watcherFireAt(fromRawValues: paneValues.compactMap(\.rawWatcherValue))
@@ -592,7 +615,8 @@ extension HolyTmuxAgentStateMonitor {
     /// timestamp wins. Only disagreement at the winning rank is ambiguous.
     private static func resolveRegister(
         _ rawValues: [String],
-        requiring lifecycle: HolyAgentLifecycleState? = nil
+        requiring lifecycle: HolyAgentLifecycleState? = nil,
+        requiringReasonCode reasonCode: String? = nil
     ) -> RegisterResolution {
         var validByCanonicalWire: [String: HolyAgentStateEnvelope] = [:]
         var invalidValues: Set<String> = []
@@ -600,7 +624,8 @@ extension HolyTmuxAgentStateMonitor {
         for rawValue in rawValues {
             do {
                 let envelope = try HolyAgentStateEnvelope(wireValue: rawValue)
-                guard lifecycle == nil || envelope.lifecycle == lifecycle else {
+                guard lifecycle == nil || envelope.lifecycle == lifecycle,
+                      reasonCode == nil || envelope.reasonCode == reasonCode else {
                     invalidValues.insert(rawValue)
                     continue
                 }
@@ -679,6 +704,17 @@ extension HolyTmuxAgentStateMonitor {
             return nil
         }
         return Date(timeIntervalSince1970: TimeInterval(fireAtMilliseconds) / 1_000)
+    }
+
+    /// A session option is inherited by each pane, so duplicates are expected.
+    /// Any disagreement or malformed value is uncertainty and cannot clear an
+    /// unread event from a local cache.
+    private static func seenState(fromRawValues rawSeenValues: [String?]) -> HolyAgentSeenState? {
+        guard !rawSeenValues.isEmpty,
+              rawSeenValues.allSatisfy({ $0 != nil }) else { return nil }
+        let rawValues = Set(rawSeenValues.compactMap(\.self))
+        guard rawValues.count == 1, let raw = rawValues.first else { return nil }
+        return try? HolyAgentSeenState(wireValue: raw)
     }
 
     private static func tmuxCommandArguments(socketName: String?) -> [String] {

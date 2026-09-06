@@ -756,9 +756,13 @@ struct HolyAgentStateBridgeTests {
         #expect(try Data(contentsOf: ttyURL) == firstCapture)
 
         #expect(try runHelper(helperURL, lifecycle: "working", reason: "user-prompt", environment: environment) == 0)
+        let lastUsedURL = stateURL.appendingPathComponent("holy_agent_last_used_v1")
+        let lastUsed = try String(contentsOf: lastUsedURL, encoding: .utf8)
+        #expect(try HolyAgentStateEnvelope(wireValue: lastUsed).reasonCode == "user-prompt")
         #expect(try String(contentsOf: lastFinishURL, encoding: .utf8) == firstFinish)
         #expect(try runHelper(helperURL, lifecycle: "ended", reason: "session-ended", environment: environment) == 0)
         #expect(try String(contentsOf: lastFinishURL, encoding: .utf8) == firstFinish)
+        #expect(try String(contentsOf: lastUsedURL, encoding: .utf8) == lastUsed)
 
         let latestURL = stateURL.appendingPathComponent("holy_agent_state_v1")
         let latest = try HolyAgentStateEnvelope(
@@ -824,6 +828,33 @@ struct HolyAgentStateBridgeTests {
         ) == 0)
         #expect(try String(contentsOf: latestURL, encoding: .utf8) == committedLatest)
         #expect(try String(contentsOf: finishURL, encoding: .utf8) == committedLatest)
+        #expect(!(try Data(contentsOf: ttyURL)).isEmpty)
+
+        // The same repair law applies to the independent human-use register:
+        // retry the committed latest event rather than minting a fake second
+        // prompt timestamp when only the side register failed.
+        try Data().write(to: ttyURL)
+        environment["HOLY_FAKE_TMUX_FAIL_OPTION"] = "@holy_agent_last_used_v1"
+        #expect(try runHelper(
+            helperURL,
+            lifecycle: "working",
+            reason: "user-prompt",
+            environment: environment
+        ) == 1)
+        let committedUse = try String(contentsOf: latestURL, encoding: .utf8)
+        let useURL = stateURL.appendingPathComponent("holy_agent_last_used_v1")
+        #expect(!FileManager.default.fileExists(atPath: useURL.path))
+        #expect(try Data(contentsOf: ttyURL).isEmpty)
+
+        environment.removeValue(forKey: "HOLY_FAKE_TMUX_FAIL_OPTION")
+        #expect(try runHelper(
+            helperURL,
+            lifecycle: "working",
+            reason: "user-prompt",
+            environment: environment
+        ) == 0)
+        #expect(try String(contentsOf: latestURL, encoding: .utf8) == committedUse)
+        #expect(try String(contentsOf: useURL, encoding: .utf8) == committedUse)
         #expect(!(try Data(contentsOf: ttyURL)).isEmpty)
     }
 

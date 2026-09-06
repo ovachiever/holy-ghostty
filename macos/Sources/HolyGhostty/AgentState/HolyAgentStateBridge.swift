@@ -26,7 +26,7 @@ enum HolyAgentStateBridge {
     /// Generation ownership is deliberately separate from the v1 wire
     /// protocol. Bumping it lets the installer replace an older Holy-owned
     /// helper/plugin without treating a modified current generation as ours.
-    static let generationVersion = 4
+    static let generationVersion = 5
     static let openCodePluginFileName = "holy-agent-state.ts"
     static let codexNotifyAdapterFileName = "holy-codex-turn-complete.py"
     static let helperOwnershipMarkerPrefix =
@@ -403,7 +403,9 @@ enum HolyAgentStateBridge {
     ///
     /// It publishes the latest envelope durably in a pane-scoped tmux option
     /// and immediately through Holy's reserved OSC 777 notification. Finished
-    /// envelopes are also copied to an independent last-finished register.
+    /// envelopes and committed user prompts are also copied to independent
+    /// registers so neither unread nor human recency can be erased by a later
+    /// lifecycle transition.
     static let helperScript = #"""
     #!/bin/sh
     \#(helperOwnershipMarker)
@@ -481,15 +483,27 @@ enum HolyAgentStateBridge {
         # Repeated delivery of the same still-current lifecycle fact is not a
         # new event. A real next turn first transitions through working, while
         # Codex also supplies a different turn identity in the session field.
-        if [ "$lifecycle" != "finished" ]; then
+        durable_copy_required=0
+        durable_copy_needs_repair=0
+        if [ "$lifecycle" = "finished" ]; then
+          durable_copy_required=1
+          previous_finish=$(tmux show-options -pqv -t "$TMUX_PANE" @holy_agent_last_finished_v1 2>/dev/null || true)
+          if [ "$previous_finish" != "$previous" ]; then
+            durable_copy_needs_repair=1
+          fi
+        fi
+        if [ "$reason" = "user-prompt" ]; then
+          durable_copy_required=1
+          previous_use=$(tmux show-options -pqv -t "$TMUX_PANE" @holy_agent_last_used_v1 2>/dev/null || true)
+          if [ "$previous_use" != "$previous" ]; then
+            durable_copy_needs_repair=1
+          fi
+        fi
+        if [ "$durable_copy_required" -eq 0 ] || [ "$durable_copy_needs_repair" -eq 0 ]; then
           exit 0
         fi
-        previous_finish=$(tmux show-options -pqv -t "$TMUX_PANE" @holy_agent_last_finished_v1 2>/dev/null || true)
-        if [ "$previous_finish" = "$previous" ]; then
-          exit 0
-        fi
-        # The latest register committed but the independent finish register did
-        # not. Repair the same event identity instead of minting a second reply.
+        # The latest register committed but one of its independent registers
+        # did not. Repair the same event identity instead of minting a second.
         reuse_previous=1
       fi
       previous_ms=$(printf '%s' "$previous" | cut -d '|' -f 4)
@@ -512,14 +526,23 @@ enum HolyAgentStateBridge {
 
     latest_persisted=0
     finish_persisted=1
+    use_persisted=1
     if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
       if tmux set-option -pq -t "$TMUX_PANE" @holy_agent_state_v1 "$wire" 2>/dev/null; then
         latest_persisted=1
       fi
       if [ "$lifecycle" = "finished" ]; then
         finish_persisted=0
-        if tmux set-option -pq -t "$TMUX_PANE" @holy_agent_last_finished_v1 "$wire" 2>/dev/null; then
+        if [ "$latest_persisted" -eq 1 ] \
+          && tmux set-option -pq -t "$TMUX_PANE" @holy_agent_last_finished_v1 "$wire" 2>/dev/null; then
           finish_persisted=1
+        fi
+      fi
+      if [ "$reason" = "user-prompt" ]; then
+        use_persisted=0
+        if [ "$latest_persisted" -eq 1 ] \
+          && tmux set-option -pq -t "$TMUX_PANE" @holy_agent_last_used_v1 "$wire" 2>/dev/null; then
+          use_persisted=1
         fi
       fi
     fi
@@ -527,7 +550,9 @@ enum HolyAgentStateBridge {
     # OSC is only an acceleration path for an event that is already durable.
     # Its failure cannot erase a committed event, and its success cannot make
     # an unpersisted event look committed.
-    if [ "$latest_persisted" -eq 1 ] && [ "$finish_persisted" -eq 1 ]; then
+    if [ "$latest_persisted" -eq 1 ] \
+      && [ "$finish_persisted" -eq 1 ] \
+      && [ "$use_persisted" -eq 1 ]; then
       tty_path=${HOLY_AGENT_STATE_TTY:-/dev/tty}
       # `-w /dev/tty` is true even for a process with no controlling
       # terminal (a daemon-hosted background session), where the open
@@ -541,6 +566,7 @@ enum HolyAgentStateBridge {
 
     [ "$latest_persisted" -eq 1 ] || exit 1
     [ "$finish_persisted" -eq 1 ] || exit 1
+    [ "$use_persisted" -eq 1 ] || exit 1
     exit 0
     """# + "\n"
 

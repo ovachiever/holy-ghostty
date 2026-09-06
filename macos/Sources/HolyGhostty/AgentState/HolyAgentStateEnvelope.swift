@@ -3,8 +3,8 @@ import Foundation
 /// The small lifecycle vocabulary that agent harnesses may publish to Holy.
 ///
 /// This deliberately describes lifecycle facts, not rendered roster states.
-/// Unread and recency are derived locally from these facts plus Holy's own
-/// seen timestamps.
+/// Unread and recency are derived from these facts plus the owning tmux
+/// session's shared prompt and seen registers. SQLite only caches that truth.
 enum HolyAgentLifecycleState: String, Codable, CaseIterable, Sendable {
     case working
     case needsUser = "needs-user"
@@ -299,6 +299,206 @@ struct HolyAgentStateEnvelope: Equatable, Sendable {
     }
 }
 
+enum HolyAgentSeenStateError: Error, Equatable, LocalizedError {
+    case wireValueTooLong
+    case invalidFieldCount
+    case unsupportedVersion(String)
+    case invalidDisposition(String)
+    case invalidAcknowledgedTimestamp
+    case invalidChangedTimestamp
+
+    var errorDescription: String? {
+        switch self {
+        case .wireValueTooLong:
+            "Seen-state metadata exceeds its size limit"
+        case .invalidFieldCount:
+            "Seen-state metadata has the wrong number of fields"
+        case let .unsupportedVersion(version):
+            "Unsupported seen-state metadata version: \(version)"
+        case let .invalidDisposition(disposition):
+            "Seen-state metadata has an invalid disposition: \(disposition)"
+        case .invalidAcknowledgedTimestamp:
+            "Seen-state metadata has an invalid acknowledged-event timestamp"
+        case .invalidChangedTimestamp:
+            "Seen-state metadata has an invalid change timestamp"
+        }
+    }
+}
+
+/// Session-scoped acknowledgement stored on the tmux server that owns the
+/// conversation. A single atomic value carries both the producer watermark
+/// that was actually visible and the time it was seen. `unread` is an explicit
+/// tombstone, so the roster action synchronizes instead of being mistaken for
+/// a missing legacy option.
+///
+///     v1|seen|acknowledged-event-epoch-ms|seen-epoch-ms
+///     v1|unread||change-epoch-ms
+struct HolyAgentSeenState: Codable, Equatable, Sendable {
+    enum Disposition: String, Codable, Sendable {
+        case seen
+        case unread
+    }
+
+    static let currentVersion = 1
+    static let maximumWireLength = 96
+
+    let disposition: Disposition
+    let acknowledgedEventAtMilliseconds: Int64?
+    let changedAtMilliseconds: Int64
+
+    var acknowledgedEventAt: Date? {
+        acknowledgedEventAtMilliseconds.map {
+            Date(timeIntervalSince1970: TimeInterval($0) / 1_000)
+        }
+    }
+
+    var seenAt: Date? {
+        guard disposition == .seen else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(changedAtMilliseconds) / 1_000)
+    }
+
+    var wireValue: String {
+        [
+            "v\(Self.currentVersion)",
+            disposition.rawValue,
+            acknowledgedEventAtMilliseconds.map(String.init) ?? "",
+            String(changedAtMilliseconds),
+        ].joined(separator: "|")
+    }
+
+    init(wireValue: String) throws {
+        guard wireValue.utf8.count <= Self.maximumWireLength else {
+            throw HolyAgentSeenStateError.wireValueTooLong
+        }
+        let fields = wireValue.split(separator: "|", omittingEmptySubsequences: false)
+        guard fields.count == 4 else {
+            throw HolyAgentSeenStateError.invalidFieldCount
+        }
+        let version = String(fields[0])
+        guard version == "v\(Self.currentVersion)" else {
+            throw HolyAgentSeenStateError.unsupportedVersion(version)
+        }
+        let dispositionField = String(fields[1])
+        guard let disposition = Disposition(rawValue: dispositionField) else {
+            throw HolyAgentSeenStateError.invalidDisposition(dispositionField)
+        }
+        guard let changedAtMilliseconds = Self.positiveMilliseconds(String(fields[3])) else {
+            throw HolyAgentSeenStateError.invalidChangedTimestamp
+        }
+
+        let acknowledgedEventAtMilliseconds: Int64?
+        switch disposition {
+        case .seen:
+            guard let acknowledged = Self.positiveMilliseconds(String(fields[2])) else {
+                throw HolyAgentSeenStateError.invalidAcknowledgedTimestamp
+            }
+            guard acknowledged <= changedAtMilliseconds else {
+                throw HolyAgentSeenStateError.invalidChangedTimestamp
+            }
+            acknowledgedEventAtMilliseconds = acknowledged
+        case .unread:
+            guard fields[2].isEmpty else {
+                throw HolyAgentSeenStateError.invalidAcknowledgedTimestamp
+            }
+            acknowledgedEventAtMilliseconds = nil
+        }
+
+        self.disposition = disposition
+        self.acknowledgedEventAtMilliseconds = acknowledgedEventAtMilliseconds
+        self.changedAtMilliseconds = changedAtMilliseconds
+    }
+
+    static func seen(
+        acknowledgingEventAtMilliseconds eventAtMilliseconds: Int64,
+        at date: Date,
+        after previous: Self?
+    ) -> Self? {
+        guard eventAtMilliseconds > 0,
+              let wallClockMilliseconds = milliseconds(for: date) else {
+            return nil
+        }
+        return Self(
+            disposition: .seen,
+            acknowledgedEventAtMilliseconds: eventAtMilliseconds,
+            changedAtMilliseconds: monotonicChangeTimestamp(
+                nowMilliseconds: max(eventAtMilliseconds, wallClockMilliseconds),
+                after: previous
+            )
+        )
+    }
+
+    static func unread(at date: Date, after previous: Self?) -> Self? {
+        guard let wallClockMilliseconds = milliseconds(for: date) else { return nil }
+        return Self(
+            disposition: .unread,
+            acknowledgedEventAtMilliseconds: nil,
+            changedAtMilliseconds: monotonicChangeTimestamp(
+                nowMilliseconds: wallClockMilliseconds,
+                after: previous
+            )
+        )
+    }
+
+    func acknowledges(eventAtMilliseconds: Int64) -> Bool {
+        disposition == .seen
+            && (acknowledgedEventAtMilliseconds ?? 0) >= eventAtMilliseconds
+    }
+
+    func acknowledgesNotification(for envelope: HolyAgentStateEnvelope) -> Bool {
+        switch envelope.lifecycle {
+        case .finished, .failed:
+            acknowledges(eventAtMilliseconds: envelope.occurredAtMilliseconds)
+        case .working, .needsUser, .idle, .ended:
+            false
+        }
+    }
+
+    /// Shared-state ordering follows the note/pin contract: a later monotonic
+    /// change stamp wins. A canonical-wire tie break makes simultaneous writes
+    /// converge instead of leaving two viewing caches in disagreement.
+    func isNewer(than other: Self) -> Bool {
+        if changedAtMilliseconds != other.changedAtMilliseconds {
+            return changedAtMilliseconds > other.changedAtMilliseconds
+        }
+        return wireValue > other.wireValue
+    }
+
+    private init(
+        disposition: Disposition,
+        acknowledgedEventAtMilliseconds: Int64?,
+        changedAtMilliseconds: Int64
+    ) {
+        self.disposition = disposition
+        self.acknowledgedEventAtMilliseconds = acknowledgedEventAtMilliseconds
+        self.changedAtMilliseconds = changedAtMilliseconds
+    }
+
+    private static func monotonicChangeTimestamp(
+        nowMilliseconds: Int64,
+        after previous: Self?
+    ) -> Int64 {
+        guard let previous else { return max(1, nowMilliseconds) }
+        guard previous.changedAtMilliseconds < Int64.max else { return Int64.max }
+        return max(max(1, nowMilliseconds), previous.changedAtMilliseconds + 1)
+    }
+
+    private static func milliseconds(for date: Date) -> Int64? {
+        let value = date.timeIntervalSince1970 * 1_000
+        guard value.isFinite, value >= 1, value < 0x1p63 else { return nil }
+        return Int64(value.rounded(.down))
+    }
+
+    private static func positiveMilliseconds(_ value: String) -> Int64? {
+        guard !value.isEmpty,
+              value.utf8.allSatisfy({ (48 ... 57).contains($0) }),
+              let milliseconds = Int64(value),
+              milliseconds > 0 else {
+            return nil
+        }
+        return milliseconds
+    }
+}
+
 /// One join law for the harness conversation identity carried by hooks.
 ///
 /// Hooks and transcripts expose the full UUID. Manna publishes the first 16
@@ -374,6 +574,12 @@ enum HolyAgentStateTransport {
     /// A finish is durable independently of the latest lifecycle. Later
     /// working/idle/ended events must not erase evidence used to derive unread.
     static let tmuxLastFinishedOption = "@holy_agent_last_finished_v1"
+    /// A user-prompt envelope is copied independently so a later lifecycle
+    /// event cannot erase the only evidence allowed to earn the blue dot.
+    static let tmuxLastUsedOption = "@holy_agent_last_used_v1"
+    /// Human acknowledgement is session-scoped and therefore shared by every
+    /// Holy instance attached to the owning tmux server.
+    static let tmuxSeenOption = "@holy_seen_v1"
     /// Explicit opt-in for adopted panes that did not originate from Holy's
     /// launch builder and therefore have no legacy `@holy_runtime` metadata.
     static let tmuxOwnershipOption = "@holy_agent_state_owner_v1"

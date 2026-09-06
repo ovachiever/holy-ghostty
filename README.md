@@ -115,16 +115,17 @@ The authoritative layer is the roster's vocabulary. Claude Code, Codex, and
 OpenCode publish lifecycle facts (working, needs-user, finished, failed, idle,
 ended) through Holy-installed hooks into a metadata-only wire envelope; the
 envelope never contains prompts, responses, or terminal text. Holy derives
-exactly six mutually exclusive states from those facts plus its own persisted
-seen and recency timestamps:
+exactly six mutually exclusive states from those facts plus seen and prompt
+recency stored on the owning tmux session. Every attached Mac reads the same
+host truth; the local database is a rebuildable cache:
 
 - Spinner: the agent is working, backed by a committed lifecycle event within
   its lease, extended past the lease only while the agent process is alive and
   visibly producing output, and dropped within a second of the process dying.
 - Question mark: the agent needs you (a committed question, permission
   request, or failure).
-- Green dot: an unread agent reply, cleared only by genuinely focusing the
-  session.
+- Green dot: an unread agent reply, cleared everywhere only by genuinely
+  focusing the session on any attached Holy.
 - Blue dot: you prompted this session within 24 hours. Blue is earned by the
   operator alone; agent activity never fakes it.
 - Grey dot: no prompt from you in 24 hours, but the session saw activity on
@@ -141,6 +142,13 @@ exact-owned handlers, leaves unrelated configuration intact, and fails closed
 on anything it does not own. Codex hook trust remains a manual `/hooks`
 approval, and a foreign Codex notifier that chains Holy's adapter is accepted
 as a delegation rather than blocked.
+
+Finished events, real user prompts, and seen acknowledgements survive local
+Clear plus Attach All because their bounded metadata lives on the tmux server
+that owns the session. Re-attaching from another Mac reconstructs the same
+dots and ages without treating the new local row as recent activity. Mark
+Unread writes an explicit shared tombstone; questions and permissions still
+remain until the agent publishes a resolving event.
 
 The heuristic layer supplements this with phase labels (`Ready`, `Working`,
 `Needs Input`, `Complete`, `Issue`) inferred from Ghostty surface state,

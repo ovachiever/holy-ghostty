@@ -231,19 +231,34 @@ publish the same bounded metadata-only envelope
 (`v1|source|lifecycle|epoch-ms|event-token|session-id|reason-code`) through a
 shared helper into the pane-scoped tmux option `@holy_agent_state_v1`, with
 finishes copied to the independent `@holy_agent_last_finished_v1` register and
-an OSC 777 fast path for immediate delivery. Claude publishes `finished` from
-its Stop hook (a blocked stop self-corrects via newest-wins ordering), with
-idle_prompt as confirmation. A second five-field register,
+committed user prompts copied to `@holy_agent_last_used_v1`. This preserves the
+two event axes after later lifecycle writes and after any viewing machine loses
+its cache. The latest option commits before either side register; a partial
+side-register failure retries the same event identity. An OSC 777 fast path
+provides immediate delivery. Claude publishes `finished` from its Stop hook (a
+blocked stop self-corrects via newest-wins ordering), with idle_prompt as
+confirmation. A separate five-field register,
 `@holy_watcher_v1`, is maintained by an inline ScheduleWakeup-matched hook
 program that reads only `delaySeconds` and `stop` from the tool input and
 records when an armed `/loop` wakeup will fire.
 
+Acknowledgement. Seen state is an atomic session option on the owning server:
+`@holy_seen_v1 = v1|seen|acknowledged-event-ms|changed-at-ms`. The watermark is
+the newest producer timestamp actually visible when a real focused surface is
+acknowledged, so cross-machine clock skew cannot make an unseen event look read.
+`v1|unread||changed-at-ms` is the explicit Mark Unread tombstone. The delivery
+uses the exact-session-ID bounded-retry path already shared by notes and Today
+pins. Newer change stamps win and older server values self-heal from the cache,
+with a canonical tie break for simultaneous writes. A missing, malformed, or
+conflicting seen value never clears unread.
+
 Transport. `HolyTmuxAgentStateMonitor` is an actor polling each distinct
 tmux endpoint with one grouped `list-panes` read per second locally (0.75 s
-remote start cadence, bounded command timeouts). Each poll carries both
-registers plus process evidence: `pane_dead`, `pane_current_command`, and
-`window_activity`. Parsing fails closed per register: malformed, conflicting,
-or ambiguously owned values yield nothing rather than a guess.
+remote start cadence, bounded command timeouts). Each poll carries the latest,
+last-finished, last-used, seen, and watcher registers plus process evidence:
+`pane_dead`, `pane_current_command`, and `window_activity`. Parsing fails closed
+per register: malformed, conflicting, or ambiguously owned values yield nothing
+rather than a guess.
 
 Policy. `HolySessionIndicatorPolicy` derives exactly six mutually exclusive
 states. Working and needs-user claims carry 30-minute leases. Process
@@ -252,21 +267,30 @@ non-shell producer with pane output fresher than three minutes extends past
 the lease, and a provably dead producer invalidates within a poll. The
 used-today axis (`lastUsedAt`) advances only on committed `user-prompt`
 envelopes; the inactive/sleeping split anchors to the latest activity on any
-axis. Seen tracking is versioned; the current version clears pre-existing
-recency stamps once so blue is earned from real prompts.
+axis. The durable last-used register rebuilds prompt recency when local rows are
+cleared. The shared event watermark, not a viewer timestamp, decides whether a
+finish or failed turn was acknowledged. Question and permission events keep
+their demand-until-resolved law. Seen tracking is versioned; the current
+version clears the former machine-local seen and prompt-recency stamps. Only
+the host registers may repopulate those axes.
 
 Presentation. `HolyWorkspaceStore` recomputes attention presentations against
 a published attention clock that ticks each minute and additionally advances
 on envelope arrival and process-evidence transitions, so the roster repaints
 within about a second of a real change. The watcher eye renders from the
 watcher register as a static glyph beside the age label and never feeds
-policy.
+policy. Attention age labels use producer and shared-acknowledgement timestamps,
+never local row-creation or re-attachment time. The SQLite attention row is a
+rebuildable cache: a new machine or Clear plus Attach All reconstructs the same
+dots and recency presentation from the owning tmux session.
 
 Notifications. Actionable events (finished, needs-user, failed) schedule
 macOS notifications through a deterministic request identity and a persisted
 monotonic watermark, so duplicates, restarts, and older recovery registers
 never re-alert. Focused visibility acknowledges an event before a banner can
-fire for the session the operator is already watching.
+fire for the session the operator is already watching. A shared seen watermark
+also suppresses or retracts a finish or failure alert on another viewer;
+questions and permissions remain unresolved until the producer says otherwise.
 
 Installation. `HolyAgentStateBridgeInstaller` is consent-gated behind the
 `Enable Authoritative Agent Indicators` menu action, snapshot-and-rollback

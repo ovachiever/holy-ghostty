@@ -107,14 +107,14 @@ struct HolySessionIndicatorPolicyTests {
         #expect(kind(lastUsedAgo: 48 * 60 * 60) == .sleeping)
     }
 
-    @Test func metadataMigrationBaselinesOnceAndNextReplyBecomesUnread() throws {
+    @Test func freshCacheMigrationDoesNotPretendHostHistoryWasSeen() throws {
         var metadata = HolySessionAttentionMetadata(sessionID: UUID())
         let baseline = now.addingTimeInterval(-10)
         let didBaseline = metadata.migrateSeenTracking(at: baseline)
         let didBaselineAgain = metadata.migrateSeenTracking(at: now)
         #expect(didBaseline)
         #expect(!didBaselineAgain)
-        #expect(metadata.lastSeenAt == baseline)
+        #expect(metadata.lastSeenAt == nil)
 
         let envelope = try HolyAgentStateEnvelope(
             source: HolyAgentStateSource.claude,
@@ -127,9 +127,165 @@ struct HolySessionIndicatorPolicyTests {
         #expect(didRecord)
         #expect(!didRecordAgain)
         #expect(metadata.hasUnreadAgentReply)
-        let didMarkSeen = metadata.markSeen(at: now.addingTimeInterval(1))
-        #expect(didMarkSeen)
+        let sharedSeen = try #require(HolyAgentSeenState.seen(
+            acknowledgingEventAtMilliseconds: envelope.occurredAtMilliseconds,
+            at: now.addingTimeInterval(1),
+            after: nil
+        ))
+        let didApplySeen = metadata.applySharedSeenState(sharedSeen, observedAt: now)
+        #expect(didApplySeen)
         #expect(!metadata.hasUnreadAgentReply)
+    }
+
+    @Test func sharedSeenWatermarkAcknowledgesTheObservedEventWithoutTrustingViewerClock() throws {
+        let finished = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.codex,
+            lifecycle: .finished,
+            occurredAtMilliseconds: 1_750_000_000_000,
+            eventToken: "finish-1"
+        )
+        var metadata = HolySessionAttentionMetadata(sessionID: UUID())
+        _ = metadata.migrateSeenTracking(at: now.addingTimeInterval(-60))
+        let didRecordFinished = metadata.recordFinished(envelope: finished, observedAt: now)
+        #expect(didRecordFinished)
+
+        // The viewer clock is behind the producer, but the acknowledgement
+        // names the producer watermark it actually displayed.
+        let sharedSeen = try #require(HolyAgentSeenState.seen(
+            acknowledgingEventAtMilliseconds: finished.occurredAtMilliseconds,
+            at: finished.occurredAt.addingTimeInterval(-30),
+            after: nil
+        ))
+        let didApplySharedSeen = metadata.applySharedSeenState(sharedSeen, observedAt: now)
+        #expect(didApplySharedSeen)
+        #expect(!metadata.hasUnreadAgentReply)
+        #expect(kind(
+            lastFinishedAt: finished.occurredAt,
+            lastSeenAt: metadata.lastSeenAt,
+            lastSeenAuthoritativeEventAt: metadata.acknowledgedAuthoritativeEventAt
+        ) == .usedToday)
+
+        let olderUnread = try HolyAgentSeenState(wireValue: "v1|unread||1749999999999")
+        let didApplyOlder = metadata.applySharedSeenState(olderUnread, observedAt: now)
+        #expect(!didApplyOlder)
+        #expect(metadata.sharedSeenState == sharedSeen)
+    }
+
+    @Test func durableHumanUseRegisterRebuildsBlueAfterLaterLifecycleEvents() throws {
+        let prompt = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.claude,
+            lifecycle: .working,
+            occurredAt: now.addingTimeInterval(-60),
+            eventToken: "prompt-1",
+            reasonCode: HolySessionAttentionMetadata.humanUseReasonCode
+        )
+        let ended = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.claude,
+            lifecycle: .ended,
+            occurredAt: now.addingTimeInterval(-30),
+            eventToken: "ended-1"
+        )
+        var rebuilt = HolySessionAttentionMetadata(sessionID: UUID())
+        _ = rebuilt.migrateSeenTracking(at: now)
+
+        let didRecordEnded = rebuilt.record(envelope: ended, observedAt: now)
+        #expect(didRecordEnded)
+        #expect(rebuilt.lastUsedAt == nil)
+        let didRecordUse = rebuilt.recordUsed(envelope: prompt, observedAt: now)
+        #expect(didRecordUse)
+        #expect(rebuilt.lastUsedAt == prompt.occurredAt)
+        let didRecordUseAgain = rebuilt.recordUsed(envelope: prompt, observedAt: now)
+        #expect(!didRecordUseAgain)
+    }
+
+    @Test func hostEventTimesRebuildIdenticallyAcrossViewerClockSkew() throws {
+        let hostNow = Date(timeIntervalSince1970: 1_750_000_120)
+        let prompt = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.claude,
+            lifecycle: .working,
+            occurredAt: hostNow,
+            eventToken: "prompt-skew",
+            reasonCode: HolySessionAttentionMetadata.humanUseReasonCode
+        )
+        let finished = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.claude,
+            lifecycle: .finished,
+            occurredAt: hostNow.addingTimeInterval(5),
+            eventToken: "finish-skew"
+        )
+        var slowViewer = HolySessionAttentionMetadata(sessionID: UUID())
+        var fastViewer = HolySessionAttentionMetadata(sessionID: UUID())
+
+        let slowObservedAt = hostNow.addingTimeInterval(-60)
+        let fastObservedAt = hostNow.addingTimeInterval(60)
+        _ = slowViewer.record(envelope: finished, observedAt: slowObservedAt)
+        _ = slowViewer.recordFinished(envelope: finished, observedAt: slowObservedAt)
+        _ = slowViewer.recordUsed(envelope: prompt, observedAt: slowObservedAt)
+        _ = fastViewer.record(envelope: finished, observedAt: fastObservedAt)
+        _ = fastViewer.recordFinished(envelope: finished, observedAt: fastObservedAt)
+        _ = fastViewer.recordUsed(envelope: prompt, observedAt: fastObservedAt)
+
+        #expect(slowViewer.lastAuthoritativeEventOccurredAt == finished.occurredAt)
+        #expect(slowViewer.lastAuthoritativeEventOccurredAt == fastViewer.lastAuthoritativeEventOccurredAt)
+        #expect(slowViewer.lastAgentFinishedAt == fastViewer.lastAgentFinishedAt)
+        #expect(slowViewer.lastUsedAt == fastViewer.lastUsedAt)
+    }
+
+    @Test func clearAndReattachRebuildsSameSeenAndRecencyFromHostRegisters() throws {
+        let prompt = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.claude,
+            lifecycle: .working,
+            occurredAt: now.addingTimeInterval(-2 * 60 * 60),
+            eventToken: "prompt-before-clear",
+            reasonCode: HolySessionAttentionMetadata.humanUseReasonCode
+        )
+        let finished = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.claude,
+            lifecycle: .finished,
+            occurredAt: now.addingTimeInterval(-60 * 60),
+            eventToken: "finish-before-clear"
+        )
+        let ended = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.claude,
+            lifecycle: .ended,
+            occurredAt: now.addingTimeInterval(-20 * 60),
+            eventToken: "ended-before-clear"
+        )
+        let sharedSeen = try #require(HolyAgentSeenState.seen(
+            acknowledgingEventAtMilliseconds: finished.occurredAtMilliseconds,
+            at: now.addingTimeInterval(-30 * 60),
+            after: nil
+        ))
+
+        func rebuild(observedAt: Date) -> HolySessionAttentionMetadata {
+            var metadata = HolySessionAttentionMetadata(sessionID: UUID())
+            _ = metadata.migrateSeenTracking(at: observedAt)
+            _ = metadata.record(envelope: ended, observedAt: observedAt)
+            _ = metadata.recordFinished(envelope: finished, observedAt: observedAt)
+            _ = metadata.recordUsed(envelope: prompt, observedAt: observedAt)
+            _ = metadata.applySharedSeenState(sharedSeen, observedAt: observedAt)
+            return metadata
+        }
+
+        var studio = rebuild(observedAt: now.addingTimeInterval(-10 * 60))
+        var clearedMacBook = rebuild(observedAt: now)
+        #expect(studio.lastUsedAt == clearedMacBook.lastUsedAt)
+        #expect(studio.lastAgentFinishedAt == clearedMacBook.lastAgentFinishedAt)
+        #expect(studio.lastAuthoritativeEventOccurredAt == clearedMacBook.lastAuthoritativeEventOccurredAt)
+        #expect(studio.acknowledgedAuthoritativeEventAt == clearedMacBook.acknowledgedAuthoritativeEventAt)
+        #expect(!studio.hasUnreadAgentReply)
+        #expect(!clearedMacBook.hasUnreadAgentReply)
+
+        let unseenFinish = try HolyAgentStateEnvelope(
+            source: HolyAgentStateSource.claude,
+            lifecycle: .finished,
+            occurredAt: now.addingTimeInterval(-60),
+            eventToken: "finish-after-seen"
+        )
+        _ = studio.recordFinished(envelope: unseenFinish, observedAt: now)
+        _ = clearedMacBook.recordFinished(envelope: unseenFinish, observedAt: now)
+        #expect(studio.hasUnreadAgentReply)
+        #expect(clearedMacBook.hasUnreadAgentReply)
     }
 
     @Test func notificationGateAdoptsHistoryAndReplaysOfflineEventsExactlyOnce() throws {
@@ -328,6 +484,7 @@ struct HolySessionIndicatorPolicyTests {
         processExited: Bool = false,
         lastFinishedAt: Date? = nil,
         lastSeenAt: Date? = nil,
+        lastSeenAuthoritativeEventAt: Date? = nil,
         lastUsedAgo: TimeInterval = 0,
         producerProcessAlive: Bool? = nil,
         producerOutputAgo: TimeInterval? = nil,
@@ -340,6 +497,7 @@ struct HolySessionIndicatorPolicyTests {
             processExited: processExited,
             lastAgentFinishedAt: lastFinishedAt,
             lastSeenAt: lastSeenAt,
+            lastSeenAuthoritativeEventAt: lastSeenAuthoritativeEventAt,
             lastUsedAt: now.addingTimeInterval(-lastUsedAgo),
             producerProcessAlive: producerProcessAlive,
             producerLastOutputAt: producerOutputAgo.map { now.addingTimeInterval(-$0) },
@@ -396,7 +554,12 @@ struct HolySessionIndicatorPolicyTests {
         _ = metadata.recordFinished(envelope: finished, observedAt: now)
         #expect(metadata.lastUsedAt == nil)
 
-        _ = metadata.markSeen(at: now.addingTimeInterval(-40))
+        let sharedSeen = try #require(HolyAgentSeenState.seen(
+            acknowledgingEventAtMilliseconds: finished.occurredAtMilliseconds,
+            at: now.addingTimeInterval(-40),
+            after: nil
+        ))
+        _ = metadata.applySharedSeenState(sharedSeen, observedAt: now)
         #expect(metadata.lastUsedAt == nil)
 
         let prompt = try HolyAgentStateEnvelope(
@@ -410,7 +573,7 @@ struct HolySessionIndicatorPolicyTests {
         #expect(metadata.lastUsedAt == prompt.occurredAt)
     }
 
-    @Test func migrationClearsPreV2UseStampsButKeepsSeenAndRunsOnce() {
+    @Test func v3MigrationClearsMachineLocalSeenAndUseExactlyOnce() {
         let seenAt = now.addingTimeInterval(-7_200)
         var metadata = HolySessionAttentionMetadata(
             sessionID: UUID(),
@@ -424,7 +587,7 @@ struct HolySessionIndicatorPolicyTests {
         #expect(didMigrate)
         #expect(!didMigrateAgain)
         #expect(metadata.lastUsedAt == nil)
-        #expect(metadata.lastSeenAt == seenAt)
+        #expect(metadata.lastSeenAt == nil)
     }
 
     // Process evidence may invalidate a working claim, never create or renew

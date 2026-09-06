@@ -17,7 +17,7 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(command == [
             "unset TMUX TMUX_PANE TMUX_TMPDIR; exec 'tmux' '-L' 'holy state'",
             "'list-panes' '-a' '-F'",
-            "'#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}\u{1F}#{window_activity}\u{1F}#{@holy_watcher_v1}'",
+            "'#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{@holy_agent_last_used_v1}\u{1F}#{@holy_seen_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}\u{1F}#{window_activity}\u{1F}#{@holy_watcher_v1}'",
         ].joined(separator: " "))
         #expect(command.components(separatedBy: "list-panes").count == 2)
         #expect(!command.contains("show-options"))
@@ -110,6 +110,8 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(command.contains("holy"))
         #expect(command.contains("prod"))
         #expect(command.contains("#{@holy_agent_state_v1}"))
+        #expect(command.contains("#{@holy_agent_last_used_v1}"))
+        #expect(command.contains("#{@holy_seen_v1}"))
         #expect(command.contains("#{@holy_agent_last_finished_v1}"))
         #expect(!command.contains("show-options"))
         #expect(!command.contains("display-message"))
@@ -265,6 +267,61 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(observation.envelope?.lifecycle == .ended)
         #expect(observation.lastFinishedEnvelope?.lifecycle == .finished)
         #expect(observation.lastFinishedEnvelope?.eventToken == "finish-1")
+    }
+
+    @Test func laterLifecycleDoesNotEraseDurableHumanUseOrSharedSeenState() throws {
+        let prompt = try HolyAgentStateEnvelope(
+            source: "future-harness.v1",
+            lifecycle: .working,
+            occurredAtMilliseconds: 1_752_500_123_456,
+            eventToken: "prompt-1",
+            reasonCode: HolySessionAttentionMetadata.humanUseReasonCode
+        ).wireValue
+        let ended = try envelope(
+            lifecycle: .ended,
+            timestamp: 1_752_500_123_458,
+            token: "ended-1"
+        ).wireValue
+        let seen = try #require(HolyAgentSeenState.seen(
+            acknowledgingEventAtMilliseconds: 1_752_500_123_457,
+            at: Date(timeIntervalSince1970: 1_752_500_124),
+            after: nil
+        ))
+
+        let observations = try parse(row(
+            session: "alpha",
+            pane: "%1",
+            wire: ended,
+            lastUsedWire: prompt,
+            seen: seen.wireValue
+        ))
+        let observation = try #require(observations.values.first)
+
+        #expect(observation.lastUsedEnvelope?.eventToken == "prompt-1")
+        #expect(observation.rawLastUsedWireValue == prompt)
+        #expect(observation.seenState == seen)
+    }
+
+    @Test func malformedOrConflictingSharedSeenStateFailsClosed() throws {
+        let malformed = try parse(row(
+            session: "alpha",
+            pane: "%1",
+            wire: nil,
+            seen: "v2|seen|1752500123456|1752500124000"
+        ))
+        #expect(malformed.values.first?.seenState == nil)
+
+        let conflicting = try parse([
+            row(session: "alpha", pane: "%1", wire: nil, seen: "v1|seen|1752500123456|1752500124000"),
+            row(session: "alpha", pane: "%2", wire: nil, seen: "v1|unread||1752500124001"),
+        ].joined(separator: "\n"))
+        #expect(conflicting.values.first?.seenState == nil)
+
+        let mixedScope = try parse([
+            row(session: "alpha", pane: "%1", wire: nil, seen: "v1|seen|1752500123456|1752500124000"),
+            row(session: "alpha", pane: "%2", wire: nil),
+        ].joined(separator: "\n"))
+        #expect(mixedScope.values.first?.seenState == nil)
     }
 
     @Test func newestFinishedRegisterSupersedesStalePaneValue() throws {
@@ -604,6 +661,8 @@ struct HolyTmuxAgentStateMonitorTests {
         pane: String,
         wire: String?,
         lastFinishedWire: String? = nil,
+        lastUsedWire: String? = nil,
+        seen: String? = nil,
         dead: Bool = false,
         command: String? = nil,
         activityAt: Int64? = nil,
@@ -614,6 +673,8 @@ struct HolyTmuxAgentStateMonitorTests {
             pane,
             wire ?? "",
             lastFinishedWire ?? "",
+            lastUsedWire ?? "",
+            seen ?? "",
             dead ? "1" : "0",
             command ?? "",
             activityAt.map(String.init) ?? "",

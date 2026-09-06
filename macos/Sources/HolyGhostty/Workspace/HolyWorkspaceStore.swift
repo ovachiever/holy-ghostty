@@ -2415,9 +2415,17 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func markSessionUnread(_ sessionID: UUID, at date: Date = .init()) {
-        guard var metadata = attentionMetadataBySessionID[sessionID],
-              metadata.markUnread(at: date) else { return }
+        guard let session = session(withID: sessionID),
+              var metadata = attentionMetadataBySessionID[sessionID] else { return }
+        let previousSharedState = metadata.sharedSeenState
+        guard metadata.markUnread(at: date),
+              let unreadState = HolyAgentSeenState.unread(
+                  at: date,
+                  after: previousSharedState
+              ) else { return }
+        _ = metadata.applySharedSeenState(unreadState, observedAt: date)
         attentionMetadataBySessionID[sessionID] = metadata
+        session.publishTmuxSeenState(unreadState)
         // A pending selected-seen mark would immediately re-read the session.
         cancelSelectedSessionSeenMark()
         persist()
@@ -2526,7 +2534,7 @@ final class HolyWorkspaceStore: ObservableObject {
 
     private func reconcileAttentionMetadata(
         markSelectedSeen: Bool,
-        seedMissingAsSeen: Bool = false,
+        migratePersistedRows: Bool = false,
         at date: Date = .init()
     ) {
         let activeIDs = Set(sessions.map(\.id))
@@ -2534,12 +2542,11 @@ final class HolyWorkspaceStore: ObservableObject {
         var changed = next.count != attentionMetadataBySessionID.count
 
         for session in sessions {
-            let shouldMarkSeen = (markSelectedSeen && session.id == selectedSessionID)
-                || (seedMissingAsSeen && next[session.id] == nil)
+            let shouldMarkSeen = markSelectedSeen && session.id == selectedSessionID
             if updateAttentionMetadata(
                 for: session,
                 markSeen: shouldMarkSeen,
-                migrateSeenTracking: seedMissingAsSeen,
+                migrateSeenTracking: migratePersistedRows,
                 existing: &next,
                 at: date
             ) {
@@ -2564,9 +2571,9 @@ final class HolyWorkspaceStore: ObservableObject {
         var metadata = existing[session.id] ?? HolySessionAttentionMetadata(sessionID: session.id)
         var changed = false
 
-        // Migrate rows to the current seen-tracking version during restore,
-        // and baseline a newly created session before its first event, so
-        // historical replies cannot all become unread during rollout.
+        // Migrate restored rows and stamp newly created rows with the current
+        // cache schema before consuming host registers. Migration deliberately
+        // creates no seen baseline: absent shared evidence cannot clear unread.
         if metadata.seenTrackingVersion != HolySessionAttentionMetadata.currentSeenTrackingVersion,
            migrateSeenTracking || !hadExistingMetadata {
             changed = metadata.migrateSeenTracking(at: date) || changed
@@ -2581,7 +2588,24 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         if markSeen {
-            changed = metadata.markSeen(at: date) || changed
+            // Acknowledgement names the newest producer event actually on
+            // screen. This is stronger than comparing viewer clocks and lets
+            // every machine consume the same tmux-hosted watermark.
+            if let eventAtMilliseconds = metadata.latestAuthoritativeEventAtMilliseconds,
+               metadata.sharedSeenState?.acknowledges(
+                   eventAtMilliseconds: eventAtMilliseconds
+               ) != true,
+               let sharedSeenState = HolyAgentSeenState.seen(
+                   acknowledgingEventAtMilliseconds: eventAtMilliseconds,
+                   at: date,
+                   after: metadata.sharedSeenState
+               ) {
+                changed = metadata.applySharedSeenState(
+                    sharedSeenState,
+                    observedAt: date
+                ) || changed
+                session.publishTmuxSeenState(sharedSeenState)
+            }
         }
 
         if changed {
@@ -2628,14 +2652,20 @@ final class HolyWorkspaceStore: ObservableObject {
             .compactMap(\.self)
             .joined(separator: " · ")
             .nilIfEmpty
-        let eventOccurredAt = envelope.map { min($0.occurredAt, observedAt ?? .now) }
-        let lastUsedAt = metadata?.lastUsedAt ?? session.record.createdAt
+        let eventOccurredAt = envelope?.occurredAt
+        let lifecycleOccurredAt = envelope.map { min($0.occurredAt, observedAt ?? .now) }
+        // Unknown human use earns no blue. Freshly re-attaching a historical
+        // tmux session must not turn the local row-creation time into a prompt.
+        let lastUsedAt = metadata?.lastUsedAt ?? .distantPast
         let lastActivityAt = [
             lastUsedAt,
             finishedAt,
             metadata?.lastSeenAt,
             metadata?.lastAuthoritativeEventOccurredAt,
-        ].compactMap(\.self).max() ?? lastUsedAt
+        ]
+        .filter { $0 != .distantPast }
+        .compactMap(\.self)
+        .max()
         let stateConflict = agentStateConflictBySessionID[session.id]
         let kind: HolySessionAttentionKind
         if stateConflict != nil {
@@ -2643,10 +2673,11 @@ final class HolyWorkspaceStore: ObservableObject {
         } else {
             kind = HolySessionIndicatorPolicy.kind(for: .init(
                 lifecycle: envelope?.lifecycle,
-                lifecycleOccurredAt: eventOccurredAt,
+                lifecycleOccurredAt: lifecycleOccurredAt,
                 processExited: session.surfaceView.processProvablyExited,
                 lastAgentFinishedAt: finishedAt,
                 lastSeenAt: metadata?.lastSeenAt,
+                lastSeenAuthoritativeEventAt: metadata?.acknowledgedAuthoritativeEventAt,
                 lastUsedAt: lastUsedAt,
                 producerProcessAlive: producerProcessAliveBySessionID[session.id],
                 producerLastOutputAt: producerLastOutputAtBySessionID[session.id],
@@ -2662,7 +2693,7 @@ final class HolyWorkspaceStore: ObservableObject {
         // once per session per launch so the guilty one names itself.
         if envelope?.lifecycle == .working, kind != .working,
            attentionContradictionLoggedSessionIDs.insert(session.id).inserted {
-            let envelopeAge = eventOccurredAt.map { attentionClock.timeIntervalSince($0) } ?? -1
+            let envelopeAge = lifecycleOccurredAt.map { attentionClock.timeIntervalSince($0) } ?? -1
             Self.attentionDebugLogger.error(
                 "attention contradiction \(session.id, privacy: .public) [\(session.title, privacy: .public)]: kind=\(String(describing: kind), privacy: .public) envelopeAge=\(Int(envelopeAge))s processExited=\(session.surfaceView.processProvablyExited) producerAlive=\(String(describing: self.producerProcessAliveBySessionID[session.id]), privacy: .public) producerOutAge=\(String(describing: self.producerLastOutputAtBySessionID[session.id].map { Int(self.attentionClock.timeIntervalSince($0)) }), privacy: .public)"
             )
@@ -2689,7 +2720,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 title: "Working",
                 detail: currentDetail,
                 isProminent: true,
-                becameAvailableAt: observedAt
+                becameAvailableAt: eventOccurredAt
             )
         case .needsUser:
             // The question bubble is reserved for an agent that literally has
@@ -2702,7 +2733,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 title: agentFailed ? "Needs you — agent failed" : "Needs you",
                 detail: currentDetail,
                 isProminent: true,
-                becameAvailableAt: observedAt
+                becameAvailableAt: eventOccurredAt
             )
         case .unread:
             return .init(
@@ -2729,7 +2760,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 title: "No prompt from you in 24+ hours",
                 detail: "Recent activity is keeping it awake",
                 isProminent: false,
-                becameAvailableAt: lastUsedAt
+                becameAvailableAt: lastActivityAt
             )
         case .sleeping:
             return .init(
@@ -2738,7 +2769,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 title: "No activity at all for 48+ hours",
                 detail: nil,
                 isProminent: false,
-                becameAvailableAt: lastUsedAt
+                becameAvailableAt: lastActivityAt
             )
         }
     }
@@ -2759,7 +2790,7 @@ final class HolyWorkspaceStore: ObservableObject {
         focusedPaneSlot = state.selectedSessionID.flatMap { paneLayout.slot(for: $0) }
         suppressAutomaticSelectionPersistence = false
         refreshSessionPresentationState()
-        bindSessions(seedMissingAsSeen: true)
+        bindSessions(migratePersistedAttention: true)
         reconcileExternalTasks()
         scheduleSelectedSessionSeenMark()
         updatePowerAssertion()
@@ -3030,10 +3061,26 @@ final class HolyWorkspaceStore: ObservableObject {
                     emitTimelineEvent: observation.envelope?.isDuplicate(of: finishedEnvelope) != true
                 )
             }
+            if let usedEnvelope = observation.lastUsedEnvelope,
+               recordDurableUsedEnvelope(
+                   usedEnvelope,
+                   for: session,
+                   observedAt: observation.observedAt
+               ) {
+                attentionEvidenceChanged = true
+            }
             if let envelope = observation.envelope {
                 if session.applyAgentStateEnvelope(envelope, observedAt: observation.observedAt) {
                     attentionEvidenceChanged = true
                 }
+            }
+            if let seenState = observation.seenState,
+               applySharedSeenState(
+                   seenState,
+                   for: session,
+                   observedAt: observation.observedAt
+               ) {
+                attentionEvidenceChanged = true
             }
 
             // Cross the lease boundary on the first poll after a lost finish
@@ -3111,6 +3158,55 @@ final class HolyWorkspaceStore: ObservableObject {
             events = []
         }
         persist(pendingEvents: events)
+    }
+
+    @discardableResult
+    private func recordDurableUsedEnvelope(
+        _ envelope: HolyAgentStateEnvelope,
+        for session: HolySession,
+        observedAt: Date
+    ) -> Bool {
+        var metadata = attentionMetadataBySessionID[session.id]
+            ?? HolySessionAttentionMetadata(sessionID: session.id)
+        if metadata.seenTrackingVersion != HolySessionAttentionMetadata.currentSeenTrackingVersion {
+            _ = metadata.migrateSeenTracking(at: workspaceStartedAt)
+        }
+        _ = metadata.baselineNotificationTracking(at: workspaceStartedAt)
+        guard metadata.recordUsed(envelope: envelope, observedAt: observedAt) else {
+            return false
+        }
+        attentionMetadataBySessionID[session.id] = metadata
+        persist()
+        return true
+    }
+
+    @discardableResult
+    private func applySharedSeenState(
+        _ seenState: HolyAgentSeenState,
+        for session: HolySession,
+        observedAt: Date
+    ) -> Bool {
+        var metadata = attentionMetadataBySessionID[session.id]
+            ?? HolySessionAttentionMetadata(sessionID: session.id)
+        if metadata.seenTrackingVersion != HolySessionAttentionMetadata.currentSeenTrackingVersion {
+            _ = metadata.migrateSeenTracking(at: workspaceStartedAt)
+        }
+        _ = metadata.baselineNotificationTracking(at: workspaceStartedAt)
+        if let cachedState = metadata.sharedSeenState,
+           cachedState != seenState,
+           cachedState.isNewer(than: seenState) {
+            // A delayed write or poll exposed an older server value. Reuse the
+            // note/pin self-heal rail so all viewers converge on the newer
+            // atomic state instead of letting transport order reverse intent.
+            session.publishTmuxSeenState(cachedState)
+            return false
+        }
+        guard metadata.applySharedSeenState(seenState, observedAt: observedAt) else {
+            return false
+        }
+        attentionMetadataBySessionID[session.id] = metadata
+        persist()
+        return true
     }
 
     private func sessionMatches(
@@ -3997,7 +4093,7 @@ final class HolyWorkspaceStore: ObservableObject {
         }
     }
 
-    private func bindSessions(seedMissingAsSeen: Bool = false) {
+    private func bindSessions(migratePersistedAttention: Bool = false) {
         sessionObservationCancellables.removeAll()
 
         for session in sessions {
@@ -4012,7 +4108,10 @@ final class HolyWorkspaceStore: ObservableObject {
         }
 
         recomputeCoordination()
-        reconcileAttentionMetadata(markSelectedSeen: false, seedMissingAsSeen: seedMissingAsSeen)
+        reconcileAttentionMetadata(
+            markSelectedSeen: false,
+            migratePersistedRows: migratePersistedAttention
+        )
         refreshAgentStateMonitorIfNeeded()
         sessionSupervisor.sessionBindingsDidChange(for: currentSessionStoreState)
     }
@@ -4046,6 +4145,37 @@ final class HolyWorkspaceStore: ObservableObject {
 
         let eventID = envelope.eventIdentity
         let sessionID = session.id
+
+        // Cross-host seen truth suppresses or retracts finish/failure alerts on
+        // this viewer too. Questions and permissions remain demanding because
+        // a read acknowledgement does not resolve their producer lifecycle.
+        if metadata.sharedSeenState?.acknowledgesNotification(for: envelope) == true {
+            let committedAtMilliseconds = HolyAgentNotificationPolicy.committedAtMilliseconds(
+                envelope: envelope,
+                observedAt: explicitObservedAt ?? session.agentStateObservedAt ?? .now
+            )
+            let didAcknowledge = metadata.acknowledgeAuthoritativeNotification(
+                eventID: eventID,
+                occurredAtMilliseconds: committedAtMilliseconds,
+                at: .now
+            )
+            attentionMetadataBySessionID[sessionID] = metadata
+            notificationIssuesBySessionID.removeValue(forKey: sessionID)
+            pendingAgentNotificationEventIDs.removeValue(forKey: sessionID)
+            clearAgentNotificationRetryState(for: sessionID)
+            let identifier = HolyAgentNotificationPolicy.requestIdentifier(
+                sessionID: sessionID,
+                eventID: eventID
+            )
+            let center = UNUserNotificationCenter.current()
+            center.removePendingNotificationRequests(withIdentifiers: [identifier])
+            center.removeDeliveredNotifications(withIdentifiers: [identifier])
+            if didAcknowledge {
+                persist()
+            }
+            return
+        }
+
         guard pendingAgentNotificationEventIDs[sessionID] == nil else { return }
 
         if agentNotificationRetryEventIDs[sessionID] != eventID {

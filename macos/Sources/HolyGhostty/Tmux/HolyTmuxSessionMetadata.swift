@@ -177,6 +177,7 @@ struct HolyTmuxSessionMetadataPayload: Equatable, Sendable {
     let noteUpdatedAtMilliseconds: Int64?
     let todayPin: Bool?
     let todayPinUpdatedAtMilliseconds: Int64?
+    let seenStateWireValue: String?
 
     init?(
         launchSpec: HolySessionLaunchSpec,
@@ -210,23 +211,35 @@ struct HolyTmuxSessionMetadataPayload: Equatable, Sendable {
         self.noteUpdatedAtMilliseconds = noteUpdatedAtMilliseconds
         self.todayPin = todayPin
         self.todayPinUpdatedAtMilliseconds = todayPinUpdatedAtMilliseconds
+        seenStateWireValue = nil
+    }
+
+    init(seenState: HolyAgentSeenState) {
+        encodedNote = nil
+        noteUpdatedAtMilliseconds = nil
+        todayPin = nil
+        todayPinUpdatedAtMilliseconds = nil
+        seenStateWireValue = seenState.wireValue
     }
 
     private init(
         encodedNote: String?,
         noteUpdatedAtMilliseconds: Int64?,
         todayPin: Bool?,
-        todayPinUpdatedAtMilliseconds: Int64?
+        todayPinUpdatedAtMilliseconds: Int64?,
+        seenStateWireValue: String?
     ) {
         self.encodedNote = encodedNote
         self.noteUpdatedAtMilliseconds = noteUpdatedAtMilliseconds
         self.todayPin = todayPin
         self.todayPinUpdatedAtMilliseconds = todayPinUpdatedAtMilliseconds
+        self.seenStateWireValue = seenStateWireValue
     }
 
     func merging(_ newer: Self) -> Self {
         let hasNewerNote = newer.noteUpdatedAtMilliseconds != nil
         let hasNewerTodayPin = newer.todayPinUpdatedAtMilliseconds != nil
+        let hasNewerSeenState = newer.seenStateWireValue != nil
         return .init(
             encodedNote: hasNewerNote ? newer.encodedNote : encodedNote,
             noteUpdatedAtMilliseconds: hasNewerNote
@@ -235,7 +248,10 @@ struct HolyTmuxSessionMetadataPayload: Equatable, Sendable {
             todayPin: hasNewerTodayPin ? newer.todayPin : todayPin,
             todayPinUpdatedAtMilliseconds: hasNewerTodayPin
                 ? newer.todayPinUpdatedAtMilliseconds
-                : todayPinUpdatedAtMilliseconds
+                : todayPinUpdatedAtMilliseconds,
+            seenStateWireValue: hasNewerSeenState
+                ? newer.seenStateWireValue
+                : seenStateWireValue
         )
     }
 }
@@ -286,6 +302,12 @@ struct HolyTmuxSessionMetadataUpdateCommand: Sendable, Equatable {
             commands.append(
                 "\(tmuxCommandPrefix) 'set-option' '-q' '-t' \"$holy_session_id\" "
                     + "'@holy_today_pin_updated_at_v1' '\(updatedAt)'"
+            )
+        }
+        if let seenStateWireValue = payload.seenStateWireValue {
+            commands.append(
+                "\(tmuxCommandPrefix) 'set-option' '-q' '-t' \"$holy_session_id\" "
+                    + "'@holy_seen_v1' \(posixQuote(seenStateWireValue))"
             )
         }
         guard !commands.isEmpty else { return nil }

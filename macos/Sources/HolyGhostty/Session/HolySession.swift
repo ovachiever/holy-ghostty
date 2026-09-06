@@ -1046,6 +1046,23 @@ final class HolySession: ObservableObject, Identifiable {
         startTmuxSessionMetadataSyncIfNeeded()
     }
 
+    /// Publishes human acknowledgement through the same exact-identity,
+    /// bounded-retry rail used by notes and Today pins. The workspace owns the
+    /// focus gate; this method only delivers its already validated state to the
+    /// tmux server that owns this session.
+    func publishTmuxSeenState(_ seenState: HolyAgentSeenState) {
+        let payload = HolyTmuxSessionMetadataPayload(seenState: seenState)
+        guard HolyTmuxSessionMetadataUpdateCommand.command(
+            for: record.launchSpec,
+            payload: payload
+        ) != nil else {
+            return
+        }
+
+        tmuxSessionMetadataDelivery.request(payload)
+        startTmuxSessionMetadataSyncIfNeeded()
+    }
+
     private func startTmuxSessionMetadataSyncIfNeeded() {
         guard tmuxSessionMetadataSyncTask == nil else { return }
         guard let attempt = tmuxSessionMetadataDelivery.beginAttempt() else {

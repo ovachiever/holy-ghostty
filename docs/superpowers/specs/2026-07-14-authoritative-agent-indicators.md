@@ -1,10 +1,12 @@
 # Authoritative Agent Indicators — Protocol and Reliability Contract
 
-**Status:** Canonical implementation contract. Updated 2026-07-21.
+**Status:** Canonical implementation contract. Updated 2026-09-05.
 
 The product invariant is simple: a harness publishes lifecycle facts; Holy
-derives one of six user-visible states from those facts plus its own persisted
-seen and recency timestamps. Terminal text never decides an operational state.
+derives one of six user-visible states from those facts plus host-persisted
+seen and prompt-recency registers on the owning tmux session. Every attached
+Holy reads the same truth; its local database is only a rebuildable cache.
+Terminal text never decides an operational state.
 
 ## The six states
 
@@ -12,7 +14,7 @@ seen and recency timestamps. Terminal text never decides an operational state.
 |---|---|---|
 | Spinner | Working | A current structured `working` lifecycle event inside its 30-minute lease. Process evidence may extend or invalidate the claim, never create one: a live non-shell producer process with pane output fresher than three minutes extends past the lease (a working agent TUI redraws continuously), while a provably dead producer — dead pane or a bare shell foreground — invalidates the claim on the next one-second poll |
 | Question mark | Needs you | A current structured `needs-user` or `failed` event inside its 30-minute lease and a live surface process |
-| Green dot | Unread | A structured finished timestamp newer than the last real user focus. Rendered with a glow so the live green separates from the aging family at 9 px |
+| Green dot | Unread | A structured finished timestamp newer than the shared event acknowledgement written by the last real user focus. Rendered with a glow so the live green separates from the aging family at 9 px |
 | Blue dot | Used today | No higher-priority state and a committed `user-prompt` envelope less than 24 hours ago. Blue is earned by the operator alone: agent events, finish registers, seen-marks, restores, focus sweeps, and boot baselines never advance this axis, which makes it immune to fake-stamp bugs by construction |
 | Grey dot | Inactive | No higher-priority state, no operator prompt in 24 hours, and activity on some axis — prompt, agent event, or the operator reading the session — within 48 hours |
 | Sleeping Z | Sleeping | No higher-priority state and every axis quiet for at least 48 hours. A session whose agent replied an hour ago is never "sleeping" merely because the operator has not prompted it |
@@ -57,13 +59,38 @@ v1|source|lifecycle|epoch-ms|event-token|session-id|reason-code
 The producer writes the latest envelope to the pane-scoped tmux option
 `@holy_agent_state_v1`. A `finished` event is also copied to
 `@holy_agent_last_finished_v1`, so a later `idle` or `ended` event cannot erase
-an unread completion while Holy is detached. The same envelope is sent through
-Holy's reserved OSC 777 title for immediate delivery. A grouped `list-panes`
-reader is the durable recovery path; each poll also carries `pane_dead`,
-`pane_current_command`, and `window_activity`, the process evidence that
-extends or invalidates working claims. Evidence is trusted only when exactly
-one pane owns the latest-state register; ambiguity fails closed to lease-only
-behavior.
+an unread completion while Holy is detached. A committed `user-prompt` event
+is likewise copied to `@holy_agent_last_used_v1`, so blue recency survives all
+later lifecycle events and local-cache loss. The latest register must commit
+before either independent register is attempted; a side-register failure is
+repaired with the already committed event identity rather than a new timestamp.
+
+Human acknowledgement belongs to the session, not the viewing machine. Any
+Holy instance that visibly focuses the terminal writes one atomic,
+session-scoped option on the owning tmux server:
+
+```text
+@holy_seen_v1 = v1|seen|acknowledged-event-epoch-ms|changed-at-epoch-ms
+@holy_seen_v1 = v1|unread||changed-at-epoch-ms
+```
+
+The `seen` watermark names the newest producer event actually displayed. It
+does not compare the viewer's wall clock to the producer clock. `unread` is an
+explicit tombstone used by the roster action, distinct from a missing legacy
+option. Question and permission states remain actionable until the producer
+publishes a resolving lifecycle event; seeing them does not dismiss them.
+Newer `changed-at` values win, with a canonical-wire tie break for simultaneous
+writes; an older server value is republished through the existing note/pin
+self-heal rail. Malformed or conflicting values fail closed and never clear
+unread state.
+
+The latest event, durable finish, durable prompt, and shared seen option are
+read together by the existing grouped `list-panes` recovery path. The same
+poll also carries `pane_dead`, `pane_current_command`, and `window_activity`,
+the process evidence that extends or invalidates working claims. Evidence is
+trusted only when the relevant register has one unambiguous value. The latest
+envelope is also sent through Holy's reserved OSC 777 title for immediate
+delivery.
 
 The shared helper accepts only controlled arguments:
 
@@ -112,12 +139,22 @@ harness exposes:
 3. OS notification requests use a deterministic event identity and a persisted
    monotonic watermark so duplicate delivery and older recovery registers do
    not schedule another alert. The roster's unread state remains the durable
-   in-app notification even if macOS notification permission is disabled.
+   in-app notification even if macOS notification permission is disabled. A
+   shared seen watermark suppresses or retracts finish and failure alerts on
+   other viewers; it never resolves a question or permission request.
 4. A session is marked seen only when Holy is active, its real window is key
-   and visible, and that terminal surface actually has focus. Selecting a row
-   in a background window does not clear unread.
+   and visible, and that terminal surface actually has focus. That focus writes
+   `@holy_seen_v1` on the owning tmux session, so every attached Holy observes
+   the same acknowledgement. Selecting a row in a background window does not
+   clear unread.
 5. The transport target is observation within two seconds after a harness emits
    a committed event. Harness-side latency is measured separately.
+
+Local attention rows cache these registers for presentation and offline
+continuity only. Clearing local sessions, deleting the cache, installing Holy
+on a new machine, or re-attaching an existing tmux session must rebuild unread,
+used-today, inactive, sleeping, and their age labels from the host registers.
+Local row creation and attachment timestamps never manufacture recency.
 
 No terminal can truthfully manufacture an event that its upstream runtime does
 not expose. Claude's `Stop` hook publishes `finished` at turn end. A parallel
@@ -186,6 +223,13 @@ rewrites every host's dotfiles.
   poll; a live producer with fresh output keeps a tool-less turn spinning past
   the lease; a live process idling at a static prompt expires on the lease.
 - Reading an old session's fresh reply lands on plain grey, never sleeping-Z.
+- Mark sessions seen on one machine, clear every local session on another, and
+  re-attach from the same hosts: both machines render identical unread and
+  recency states from `@holy_agent_last_finished_v1`,
+  `@holy_agent_last_used_v1`, and `@holy_seen_v1` without a local baseline.
+- A brand-new local cache still shows a host finish as unread when no shared
+  acknowledgement covers it, and still restores blue from the durable prompt
+  register after later lifecycle events.
 - The watcher register parses one distinct valid claim per session and fails
   closed on malformed or conflicting values; the eye never feeds policy.
 - A delegated Codex notifier (foreign command referencing Holy's adapter file
