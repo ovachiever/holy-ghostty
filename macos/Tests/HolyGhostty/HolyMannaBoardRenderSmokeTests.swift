@@ -23,6 +23,26 @@ struct HolyMannaBoardRenderSmokeTests {
             ?? FileManager.default.temporaryDirectory.appendingPathComponent("holy-board-render").path)
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
+        let defaults = UserDefaults.standard
+        let inspectorKey = "holy.board.inspectorWidth.v1"
+        let columnsKey = "holy.board.columns.v1"
+        let previousInspectorWidth = defaults.object(forKey: inspectorKey)
+        let previousColumns = defaults.object(forKey: columnsKey)
+        defer {
+            if let previousInspectorWidth {
+                defaults.set(previousInspectorWidth, forKey: inspectorKey)
+            } else {
+                defaults.removeObject(forKey: inspectorKey)
+            }
+            if let previousColumns {
+                defaults.set(previousColumns, forKey: columnsKey)
+            } else {
+                defaults.removeObject(forKey: columnsKey)
+            }
+        }
+        defaults.set(600, forKey: inspectorKey)
+        defaults.set("", forKey: columnsKey)
+
         let client = HolyMannaBoardClient { invocation, _ in
             .init(
                 stdout: invocation.displayCommand.contains("estate") ? estateJSON : stateJSON,
@@ -71,8 +91,18 @@ struct HolyMannaBoardRenderSmokeTests {
             window.contentView = nil
         }
 
-        try await render("board-live")
-        try await render("board-live-wide", width: 2560, height: 1400)
+        for width: CGFloat in [900, 1_000, 1_280, 1_512, 1_728] {
+            try await render("board-width-\(Int(width))", width: width)
+        }
+        var dragged = HolyLedgerColumnOverrides(json: "")
+        dragged.set("id", width: 420, availableWidth: 1_400)
+        dragged.set("track", width: 560, availableWidth: 1_400)
+        dragged.set("state", width: 420, availableWidth: 1_400)
+        dragged.set("#", width: 280, availableWidth: 1_400)
+        defaults.set(dragged.json, forKey: columnsKey)
+        try await render("board-grip-dragged-then-narrowed", width: 1_120)
+        defaults.set("", forKey: columnsKey)
+        try await render("board-compact-fold", width: 840)
         store.selectFilter(.done)
         try await render("board-done")
         store.selectFilter(.live)
@@ -86,11 +116,11 @@ struct HolyMannaBoardRenderSmokeTests {
         store.selectSheet(.debug)
         try await render("debug")
         store.showEstate()
-        try await render("estate")
+        try await render("estate-width-1000", width: 1_000)
         store.dismiss()
 
         print("HOLY_BOARD_RENDER wrote:\n" + written.joined(separator: "\n"))
-        #expect(written.count == 7)
+        #expect(written.count == 12)
     }
 }
 

@@ -17,6 +17,26 @@ struct HolyArchiveRenderSmokeTests {
             ?? root.appendingPathComponent("png").path)
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
+        let defaults = UserDefaults.standard
+        let inspectorKey = "holy.archive.inspectorWidth.v1"
+        let columnsKey = "holy.archive.columns.v1"
+        let previousInspectorWidth = defaults.object(forKey: inspectorKey)
+        let previousColumns = defaults.object(forKey: columnsKey)
+        defer {
+            if let previousInspectorWidth {
+                defaults.set(previousInspectorWidth, forKey: inspectorKey)
+            } else {
+                defaults.removeObject(forKey: inspectorKey)
+            }
+            if let previousColumns {
+                defaults.set(previousColumns, forKey: columnsKey)
+            } else {
+                defaults.removeObject(forKey: columnsKey)
+            }
+        }
+        defaults.set(600, forKey: inspectorKey)
+        defaults.set("", forKey: columnsKey)
+
         let databaseURL = root.appendingPathComponent("holy.sqlite3")
         let repository = try HolyArchiveRepository(databaseURL: databaseURL)
         let base: TimeInterval = 1_788_390_000
@@ -72,7 +92,18 @@ struct HolyArchiveRenderSmokeTests {
             window.contentView = nil
         }
 
-        try await render("archive-sessions")
+        for width: CGFloat in [900, 1_000, 1_280, 1_512, 1_728] {
+            try await render("archive-width-\(Int(width))", width: width)
+        }
+        var dragged = HolyLedgerColumnOverrides(json: "")
+        dragged.set("date", width: 420, availableWidth: 1_400)
+        dragged.set("harness", width: 420, availableWidth: 1_400)
+        dragged.set("project", width: 560, availableWidth: 1_400)
+        dragged.set("sub", width: 280, availableWidth: 1_400)
+        defaults.set(dragged.json, forKey: columnsKey)
+        try await render("archive-grip-dragged-then-narrowed", width: 1_120)
+        defaults.set("", forKey: columnsKey)
+        try await render("archive-compact-fold", width: 840)
         store.selectChild("child-1")
         try await render("archive-child")
         store.selectParent("bbbbbbbb-2")
@@ -91,6 +122,6 @@ struct HolyArchiveRenderSmokeTests {
         store.dismiss()
 
         print("HOLY_ARCHIVE_RENDER wrote:\n" + written.joined(separator: "\n"))
-        #expect(written.count == 4)
+        #expect(written.count == 10)
     }
 }

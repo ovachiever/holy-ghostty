@@ -7,7 +7,7 @@ base_commit: 5466c2fada020da9fef58752e955d6caf68d7332
 scope: '[P1][BOARD][ARCHIVE][UX] Ledger layouts must fit any window: clamp, flex, and fold like the web cockpit'
 inputs:
 - Erik report 2026-09-05 20:58 (MacBook screenshot in his Downloads; TCC blocked remote read — attach via iCloud Screen Shots for pixel triage if needed)
-binding: sha256:3f41cfcf1be36940b065224baf7cb48311e1656297e4c5bcf38a7a2dabaabf84
+binding: sha256:db95d86fd9bf5104ff52212894ee6127908b933e7120a4a148fc2640e9a29c67
 ---
 
 # Handoff: [P1][BOARD][ARCHIVE][UX] Ledger layouts must fit any window: clamp, flex, and fold like the web cockpit
@@ -38,3 +38,37 @@ Erik 2026-09-05, MacBook: board columns clip off the right edge — persisted gr
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-f044d0`.
 4. Commit with `Manna: mn-f044d0` and run `agent-do manna done mn-f044d0` only after the work is verified.
+
+## Implementation receipt
+
+- `HolyLedgerResponsiveLayout` is the shared Board and Archive width-budget
+  authority. It reserves the flexible text floor, shrinks the secondary column
+  first, and resolves every row to the current pane width.
+- Grip preferences now use a versioned proportional payload. Existing flat
+  pixel payloads migrate against the 1440-point reference measure.
+- Board DIGEST and Archive SUMMARY own the flexible remainder. TRACK and PROJECT
+  truncate first and hide at 1100 points or below.
+- Both inspectors cap at 35 percent of window width, narrow to 260 points at
+  1100 points or below, and fold behind `[detail]` at 860 points or below.
+- Board estate owns its horizontal scroll and no longer widens the page.
+
+## Verification receipt
+
+- Strict SwiftLint over the six changed Swift files: 0 violations.
+- Board, Archive, presentation, and render suites: 69 passed, 0 failed, 0
+  skipped. Result bundle:
+  `/Users/erik/Library/Developer/Xcode/DerivedData/Ghostty-evzhqzgwedstedhkeiqpqvomarls/Logs/Test/Test-Ghostty-2026.09.05_21-49-24--0500.xcresult`.
+- `scripts/test-holy-ghostty-build-contract.sh`: passed.
+- Offscreen visual matrix: 22 PNGs under `.dev/mn-f044d0/`, including Board
+  and Archive at 900/1000/1280/1512/1728 points, dragged-then-narrowed at 1120,
+  compact fold at 840, Board estate at 1000, and the remaining Board/Archive
+  faces. No app was ordered on screen.
+- Local visual inspection found no horizontal window overflow or clipped glyphs
+  in the required matrix. Human close gate remains Erik's requested visual pass.
+- The 23-file receipt bundle is mirrored to iCloud Transfer at
+  `Transfer/mn-f044d0/`.
+- The completion note exists at
+  `Erkverse/+/2026-09-05 mn-f044d0 Responsive Ledgers.md`. Its post-write local
+  index refresh remains blocked by a macOS TCC `Operation not permitted` error
+  on the vault root; the note contents were verified directly.
+- ZPC received 7 error-resolution lessons and 0 decisions for this build.

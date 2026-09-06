@@ -24,6 +24,7 @@ struct HolyArchiveModeView: View {
     @FocusState private var findFocused: Bool
     @State private var inspectorDragStartWidth: CGFloat?
     @State private var resizerHovered = false
+    @State private var compactInspectorPresented = false
     @State private var hoveredRowID: String?
     @State private var copiedLabel: String?
     @State private var copiedResetTask: Task<Void, Never>?
@@ -31,18 +32,42 @@ struct HolyArchiveModeView: View {
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
-            let showsInspector = width > Metrics.compactBreakpoint && !store.chatIsFullscreen
+            let showsInlineInspector = HolyLedgerResponsiveLayout.showsInlineInspector(windowWidth: width)
+                && !store.chatIsFullscreen
+            let showsCompactToggle = !HolyLedgerResponsiveLayout.showsInlineInspector(windowWidth: width)
+                && !store.chatIsFullscreen
+            let inspectorWidth = inspectorWidth(width)
             VStack(spacing: 0) {
-                topbar(width: width, inspectorWidth: inspectorWidth(width), showsInspector: showsInspector)
-                HStack(spacing: 0) {
-                    sheetColumn
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if showsInspector {
-                        resizer(currentWidth: inspectorWidth(width))
+                topbar(
+                    width: width,
+                    inspectorWidth: inspectorWidth,
+                    showsInspector: showsInlineInspector,
+                    showsCompactToggle: showsCompactToggle
+                )
+                ZStack(alignment: .trailing) {
+                    HStack(spacing: 0) {
+                        sheetColumn(windowWidth: width)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        if showsInlineInspector {
+                            resizer(currentWidth: inspectorWidth)
+                            inspector
+                                .frame(width: inspectorWidth)
+                                .frame(maxHeight: .infinity)
+                                .background(Palette.surface)
+                        }
+                    }
+                    if showsCompactToggle, compactInspectorPresented {
                         inspector
-                            .frame(width: inspectorWidth(width))
+                            .frame(width: HolyLedgerResponsiveLayout.compactInspectorWidth(
+                                windowWidth: width,
+                                pagePadding: pagePadding(width)
+                            ))
                             .frame(maxHeight: .infinity)
                             .background(Palette.surface)
+                            .overlay(alignment: .leading) {
+                                Rectangle().fill(Palette.line).frame(width: 1)
+                            }
+                            .transition(.move(edge: .trailing))
                     }
                 }
                 .padding(.horizontal, pagePadding(width))
@@ -72,8 +97,10 @@ struct HolyArchiveModeView: View {
     }
 
     private func inspectorWidth(_ width: CGFloat) -> CGFloat {
-        if width <= Metrics.narrowBreakpoint { return Metrics.inspectorNarrowWidth }
-        return min(Metrics.inspectorMaximumWidth, max(Metrics.inspectorMinimumWidth, CGFloat(storedInspectorWidth)))
+        HolyLedgerResponsiveLayout.inspectorWidth(
+            windowWidth: width,
+            persistedWidth: CGFloat(storedInspectorWidth)
+        )
     }
 
     private func mono(_ size: CGFloat = Metrics.bodySize, weight: Font.Weight = .regular) -> Font {
@@ -82,7 +109,12 @@ struct HolyArchiveModeView: View {
 
     // MARK: - Topbar
 
-    private func topbar(width: CGFloat, inspectorWidth: CGFloat, showsInspector: Bool) -> some View {
+    private func topbar(
+        width: CGFloat,
+        inspectorWidth: CGFloat,
+        showsInspector: Bool,
+        showsCompactToggle: Bool
+    ) -> some View {
         HStack(spacing: Metrics.s4) {
             HStack(spacing: 0) {
                 linkButton("‹ terminal") { onDismiss() }
@@ -98,9 +130,21 @@ struct HolyArchiveModeView: View {
             tabs.fixedSize()
             searchField
             Spacer(minLength: 0)
-            topbarRight
-                .frame(width: showsInspector ? inspectorWidth : nil, alignment: .trailing)
-                .padding(.leading, showsInspector ? Metrics.s4 : 0)
+            HStack(spacing: Metrics.s2) {
+                if showsCompactToggle {
+                    Button {
+                        compactInspectorPresented.toggle()
+                    } label: {
+                        Text(compactInspectorPresented ? "[list]" : "[detail]")
+                            .foregroundStyle(Palette.blue)
+                    }
+                    .buttonStyle(.plain)
+                    .help(compactInspectorPresented ? "close detail" : "show detail")
+                }
+                topbarRight
+            }
+            .frame(width: showsInspector ? inspectorWidth : nil, alignment: .trailing)
+            .padding(.leading, showsInspector ? Metrics.s4 : 0)
         }
         .padding(.horizontal, pagePadding(width))
         .frame(height: Metrics.topbarHeight)
@@ -205,19 +249,22 @@ struct HolyArchiveModeView: View {
     // MARK: - Sheet column
 
     @ViewBuilder
-    private var sheetColumn: some View {
+    private func sheetColumn(windowWidth: CGFloat) -> some View {
         if store.chatIsPresented {
             researchSheet
         } else {
-            sessionsSheet
+            sessionsSheet(windowWidth: windowWidth)
         }
     }
 
-    private var sessionsSheet: some View {
+    private func sessionsSheet(windowWidth: CGFloat) -> some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
                 chips
-                sessionList
+                sessionList(
+                    availableWidth: max(0, geometry.size.width - Metrics.s4),
+                    windowWidth: windowWidth
+                )
                     .frame(maxHeight: .infinity)
                 rule
                 childrenPane
@@ -285,7 +332,7 @@ struct HolyArchiveModeView: View {
     }
 
     @ViewBuilder
-    private var sessionList: some View {
+    private func sessionList(availableWidth: CGFloat, windowWidth: CGFloat) -> some View {
         let head = Present.listHead(
             query: store.query,
             filter: store.providerFilter,
@@ -294,22 +341,72 @@ struct HolyArchiveModeView: View {
             sort: store.sort,
             matchingChildren: store.matchingChildCount
         )
+        let showsProject = HolyLedgerResponsiveLayout.showsSecondaryColumn(windowWidth: windowWidth)
         let fitted = Present.columns(for: store.sessions, childCounts: store.childCountsByParentID)
         let overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
-        let columns = HolyArchiveColumnWidths(
-            date: overrides.width("date", fitted: fitted.date),
-            harness: overrides.width("harness", fitted: fitted.harness),
-            project: overrides.width("project", fitted: fitted.project),
-            children: overrides.width("sub", fitted: fitted.children)
+        let fixedColumns = [
+            HolyLedgerFixedColumn(
+                id: "date",
+                fittedWidth: fitted.date,
+                minimumWidth: fitted.date,
+                shrinkPriority: 1
+            ),
+            HolyLedgerFixedColumn(
+                id: "harness",
+                fittedWidth: fitted.harness,
+                minimumWidth: fitted.harness,
+                shrinkPriority: 1
+            ),
+            showsProject ? HolyLedgerFixedColumn(
+                id: "project",
+                fittedWidth: fitted.project,
+                minimumWidth: Metrics.columnWidth(
+                    contentCharacters: HolyLedgerColumnGrip.minimumCharacters,
+                    headerCharacters: "project".count
+                ),
+                shrinkPriority: 0
+            ) : nil,
+            HolyLedgerFixedColumn(
+                id: "sub",
+                fittedWidth: fitted.children,
+                minimumWidth: fitted.children,
+                shrinkPriority: 1
+            ),
+        ].compactMap { $0 }
+        let columns = HolyLedgerResponsiveLayout.columns(
+            availableWidth: availableWidth,
+            gap: Metrics.columnGap,
+            stripeWidth: Metrics.stripeColumnWidth,
+            minimumFlexibleWidth: Metrics.columnWidth(
+                contentCharacters: Metrics.digestFloorCharacters,
+                headerCharacters: "summary".count
+            ),
+            fixedColumns: fixedColumns,
+            overrides: overrides
         )
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Metrics.columnGap) {
                 Color.clear.frame(width: Metrics.stripeColumnWidth)
-                resizableHeader("date", width: columns.date)
-                resizableHeader("harness", width: columns.harness)
-                resizableHeader("project", width: columns.project)
-                columnLabel("summary").frame(maxWidth: .infinity, alignment: .leading)
-                resizableHeader("sub", width: columns.children, alignment: .trailing)
+                resizableHeader("date", width: columns.width("date"), availableWidth: columns.availableWidth)
+                resizableHeader(
+                    "harness",
+                    width: columns.width("harness"),
+                    availableWidth: columns.availableWidth
+                )
+                if showsProject {
+                    resizableHeader(
+                        "project",
+                        width: columns.width("project"),
+                        availableWidth: columns.availableWidth
+                    )
+                }
+                columnLabel("summary").frame(width: columns.flexibleWidth, alignment: .leading)
+                resizableHeader(
+                    "sub",
+                    width: columns.width("sub"),
+                    availableWidth: columns.availableWidth,
+                    alignment: .trailing
+                )
             }
             .frame(height: Metrics.columnHeaderHeight)
             .overlay(alignment: .bottom) { rule }
@@ -329,7 +426,12 @@ struct HolyArchiveModeView: View {
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             ForEach(Array(store.sessions.enumerated()), id: \.element.id) { index, session in
-                                sessionRow(session, index: index, columns: columns)
+                                sessionRow(
+                                    session,
+                                    index: index,
+                                    columns: columns,
+                                    showsProject: showsProject
+                                )
                                     .id(session.id)
                             }
                         }
@@ -343,7 +445,12 @@ struct HolyArchiveModeView: View {
     }
 
     /// widgets.py ParentSessionItem: date · icon · project[:12] · (n) · description.
-    private func sessionRow(_ session: HolyArchiveSession, index: Int, columns: HolyArchiveColumnWidths) -> some View {
+    private func sessionRow(
+        _ session: HolyArchiveSession,
+        index: Int,
+        columns: HolyLedgerResolvedColumns,
+        showsProject: Bool
+    ) -> some View {
         let selected = store.selectedSessionID == session.id && store.selectedChildID == nil
         let row = Present.rowText(for: session)
         let cls = Present.colorClass(for: session.harness)
@@ -353,27 +460,28 @@ struct HolyArchiveModeView: View {
             Text(Present.dateStamp(session.activityAt))
                 .foregroundStyle(Palette.faint)
                 .lineLimit(1)
-                .frame(width: columns.date, alignment: .leading)
+                .frame(width: columns.width("date"), alignment: .leading)
             Text(Present.shortLabel(for: session.harness))
                 .foregroundStyle(Palette.wordColor(forClass: cls))
                 .lineLimit(1)
-                .frame(width: columns.harness, alignment: .leading)
-            Text(Present.projectLabel(session))
-                .foregroundStyle(Palette.text)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(width: columns.project, alignment: .leading)
-                .help(session.projectPath ?? session.projectName)
+                .frame(width: columns.width("harness"), alignment: .leading)
+            if showsProject {
+                Text(Present.projectLabel(session))
+                    .foregroundStyle(Palette.text)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: columns.width("project"), alignment: .leading)
+                    .help(session.projectPath ?? session.projectName)
+            }
             Text(row.text)
                 .foregroundStyle(row.isFallback ? Palette.muted : Palette.text)
-                .lineLimit(2)
-                .lineSpacing(Metrics.bodySize * (Metrics.digestLineHeight - 1))
-                .padding(.vertical, Metrics.s1)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: columns.flexibleWidth, alignment: .leading)
             Text(Present.childCountText(children))
                 .foregroundStyle(children > 0 ? Palette.amber : Palette.faint)
                 .lineLimit(1)
-                .frame(width: columns.children, alignment: .trailing)
+                .frame(width: columns.width("sub"), alignment: .trailing)
         }
         .frame(minHeight: Metrics.rowHeight)
         .background(rowBackground(selected: selected, hovered: hoveredRowID == session.id, even: index % 2 == 1))
@@ -975,7 +1083,12 @@ struct HolyArchiveModeView: View {
     }
 
     /// A fixed column's header with its drag grip at the right edge.
-    private func resizableHeader(_ column: String, width: CGFloat, alignment: Alignment = .leading) -> some View {
+    private func resizableHeader(
+        _ column: String,
+        width: CGFloat,
+        availableWidth: CGFloat,
+        alignment: Alignment = .leading
+    ) -> some View {
         columnLabel(column)
             .frame(width: width, alignment: alignment)
             .overlay(alignment: .trailing) {
@@ -988,7 +1101,7 @@ struct HolyArchiveModeView: View {
                     ),
                     onResize: { newWidth in
                         var overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
-                        overrides.set(column, width: newWidth)
+                        overrides.set(column, width: newWidth, availableWidth: availableWidth)
                         columnOverridesJSON = overrides.json
                     },
                     onReset: {

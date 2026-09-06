@@ -28,6 +28,7 @@ struct HolyMannaBoardView: View {
     @FocusState private var grepFocused: Bool
     @State private var inspectorDragStartWidth: CGFloat?
     @State private var resizerHovered = false
+    @State private var compactInspectorPresented = false
     @State private var hoveredRowID: String?
     @State private var copiedLabel: String?
     @State private var copiedResetTask: Task<Void, Never>?
@@ -90,12 +91,14 @@ struct HolyMannaBoardView: View {
     }
 
     private func showsInspector(_ width: CGFloat) -> Bool {
-        width > Metrics.compactBreakpoint
+        HolyLedgerResponsiveLayout.showsInlineInspector(windowWidth: width)
     }
 
     private func inspectorWidth(_ width: CGFloat) -> CGFloat {
-        if width <= Metrics.narrowBreakpoint { return Metrics.inspectorNarrowWidth }
-        return min(Metrics.inspectorMaximumWidth, max(Metrics.inspectorMinimumWidth, CGFloat(storedInspectorWidth)))
+        HolyLedgerResponsiveLayout.inspectorWidth(
+            windowWidth: width,
+            persistedWidth: CGFloat(storedInspectorWidth)
+        )
     }
 
     private func mono(_ size: CGFloat = Metrics.bodySize, weight: Font.Weight = .regular) -> Font {
@@ -109,32 +112,62 @@ struct HolyMannaBoardView: View {
         let inspectorWidth = inspectorWidth(width)
         return VStack(spacing: 0) {
             boardTopbar(width: width, inspectorWidth: inspectorWidth, showsInspector: showsInspector)
-            HStack(spacing: 0) {
-                sheet
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if showsInspector {
-                    resizer(currentWidth: inspectorWidth)
+            ZStack(alignment: .trailing) {
+                HStack(spacing: 0) {
+                    sheet(windowWidth: width)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if showsInspector {
+                        resizer(currentWidth: inspectorWidth)
+                        inspector
+                            .frame(width: inspectorWidth)
+                            .frame(maxHeight: .infinity)
+                            .background(Palette.surface)
+                    }
+                }
+                if !showsInspector, compactInspectorPresented {
                     inspector
-                        .frame(width: inspectorWidth)
+                        .frame(width: HolyLedgerResponsiveLayout.compactInspectorWidth(
+                            windowWidth: width,
+                            pagePadding: pagePadding(width)
+                        ))
                         .frame(maxHeight: .infinity)
                         .background(Palette.surface)
+                        .overlay(alignment: .leading) {
+                            Rectangle().fill(Palette.line).frame(width: 1)
+                        }
+                        .transition(.move(edge: .trailing))
                 }
             }
+            .frame(width: max(0, width - 2 * pagePadding(width)))
             .padding(.horizontal, pagePadding(width))
             strip(width: width)
         }
     }
 
     private func boardTopbar(width: CGFloat, inspectorWidth: CGFloat, showsInspector: Bool) -> some View {
-        HStack(spacing: Metrics.s4) {
-            crumb
+        let compact = width < Metrics.measure
+        return HStack(spacing: Metrics.s4) {
+            crumb(compact: compact)
             tabs.fixedSize()
-            grepField
+            grepField(compact: compact)
             Spacer(minLength: 0)
-            topbarRight
-                .frame(width: showsInspector ? inspectorWidth : nil, alignment: .trailing)
-                .padding(.leading, showsInspector ? Metrics.s4 : 0)
+            HStack(spacing: Metrics.s2) {
+                if !showsInspector {
+                    Button {
+                        compactInspectorPresented.toggle()
+                    } label: {
+                        Text(compactInspectorPresented ? "[list]" : "[detail]")
+                            .foregroundStyle(Palette.blue)
+                    }
+                    .buttonStyle(.plain)
+                    .help(compactInspectorPresented ? "close detail" : "show detail")
+                }
+                topbarRight(compact: compact)
+            }
+            .frame(width: showsInspector ? inspectorWidth : nil, alignment: .trailing)
+            .padding(.leading, showsInspector ? Metrics.s4 : 0)
         }
+        .frame(width: max(0, width - 2 * pagePadding(width)))
         .padding(.horizontal, pagePadding(width))
         .frame(height: Metrics.topbarHeight)
         .padding(.top, Metrics.titlebarInset)
@@ -144,9 +177,15 @@ struct HolyMannaBoardView: View {
 
     /// `terminal › estate › board`: the outermost crumb is the way out. The
     /// page has no such link because a browser tab is its own exit.
-    private var crumb: some View {
+    private func crumb(compact: Bool) -> some View {
         HStack(spacing: 0) {
-            terminalCrumb
+            if compact {
+                linkButton("‹") { onDismiss() }
+                    .help("Return to the terminal (Escape)")
+                    .accessibilityLabel("Return to terminal")
+            } else {
+                terminalCrumb
+            }
             separator("›")
             linkButton("estate") { store.showEstate() }
             separator("›")
@@ -154,7 +193,7 @@ struct HolyMannaBoardView: View {
                 .fontWeight(.semibold)
                 .foregroundStyle(Palette.text)
                 .help(store.context.boardRoot ?? "")
-            if let host = store.context.remoteHost {
+            if !compact, let host = store.context.remoteHost {
                 Text("via \(host)")
                     .foregroundStyle(Palette.blue)
                     .padding(.leading, Metrics.s2)
@@ -207,7 +246,7 @@ struct HolyMannaBoardView: View {
         return count > 0 ? String(count) : nil
     }
 
-    private var grepField: some View {
+    private func grepField(compact: Bool) -> some View {
         TextField("grep · ⌘F", text: $store.grep)
             .textFieldStyle(.plain)
             .focused($grepFocused)
@@ -216,32 +255,36 @@ struct HolyMannaBoardView: View {
             // that when the crumb and tabs need the room, so the right
             // cluster and the inspector never leave the window.
             .frame(
-                minWidth: Metrics.grepFieldWidth / 2,
-                idealWidth: Metrics.grepFieldWidth,
+                minWidth: compact ? 120 : Metrics.grepFieldWidth / 2,
+                idealWidth: compact ? 240 : Metrics.grepFieldWidth,
                 maxWidth: Metrics.grepFieldWidth,
                 minHeight: Metrics.grepFieldHeight,
                 maxHeight: Metrics.grepFieldHeight
             )
             .background(Palette.surface)
             .overlay(Rectangle().stroke(grepFocused ? Palette.blue : Palette.line, lineWidth: 1))
-            .padding(.leading, Metrics.s6 - Metrics.s4)
+            .padding(.leading, compact ? Metrics.s2 : Metrics.s6 - Metrics.s4)
     }
 
     /// updated Ns ago | ● live | refresh — the mark is lit only while the
     /// board is being kept current and its last read landed.
-    private var topbarRight: some View {
+    private func topbarRight(compact: Bool) -> some View {
         TimelineView(.periodic(from: .now, by: clockInterval)) { timeline in
             HStack(spacing: Metrics.s1) {
-                Text(Present.updatedLabel(since: store.lastRefreshedAt, now: timeline.date))
-                separator("|")
+                if !compact {
+                    Text(Present.updatedLabel(since: store.lastRefreshedAt, now: timeline.date))
+                    separator("|")
+                }
                 Text(store.isLive ? "●" : "○")
                     .foregroundStyle(store.isLive ? Palette.green : Palette.faint)
-                Text(Present.connectionLabel(
-                    isLive: store.isLive,
-                    isRefreshing: store.surface == .estate ? store.isEstateRefreshing : store.isRefreshing,
-                    hasState: store.surface == .estate ? store.estate != nil : store.state != nil,
-                    failed: store.surface == .estate ? store.estateFailure != nil : store.boardFailure != nil
-                ))
+                if !compact {
+                    Text(Present.connectionLabel(
+                        isLive: store.isLive,
+                        isRefreshing: store.surface == .estate ? store.isEstateRefreshing : store.isRefreshing,
+                        hasState: store.surface == .estate ? store.estate != nil : store.state != nil,
+                        failed: store.surface == .estate ? store.estateFailure != nil : store.boardFailure != nil
+                    ))
+                }
                 separator("|")
                 if store.surface == .estate ? store.isEstateRefreshing : store.isRefreshing {
                     Text("reading…").foregroundStyle(Palette.faint)
@@ -256,38 +299,76 @@ struct HolyMannaBoardView: View {
 
     // MARK: - Sheet
 
-    private var sheet: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                switch store.selectedSheet {
-                case .board: boardSheet
-                case .asks: inboxSheet
-                case .coordination: coordinationSheet
-                case .debug: debugSheet
+    private func sheet(windowWidth: CGFloat) -> some View {
+        GeometryReader { geometry in
+            let availableWidth = max(0, geometry.size.width - Metrics.s4)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    switch store.selectedSheet {
+                    case .board: boardSheet(availableWidth: availableWidth, windowWidth: windowWidth)
+                    case .asks: inboxSheet
+                    case .coordination: coordinationSheet
+                    case .debug: debugSheet
+                    }
                 }
+                .padding(.trailing, Metrics.s4)
+                .padding(.bottom, Metrics.s5)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.trailing, Metrics.s4)
-            .padding(.bottom, Metrics.s5)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     @ViewBuilder
-    private var boardSheet: some View {
+    private func boardSheet(availableWidth: CGFloat, windowWidth: CGFloat) -> some View {
         chips
         if let state = store.state {
             let sections = store.boardSections
             let showsAge = store.boardFilter == .recent
+            let showsTrack = HolyLedgerResponsiveLayout.showsSecondaryColumn(windowWidth: windowWidth)
             let fitted = Present.boardColumns(for: sections.flatMap(\.items), showsAge: showsAge)
             let overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
-            let columns = HolyMannaBoardColumnWidths(
-                id: overrides.width("id", fitted: fitted.id),
-                track: overrides.width("track", fitted: fitted.track),
-                state: overrides.width("state", fitted: fitted.state),
-                priority: overrides.width("#", fitted: fitted.priority)
+            let priorityLabel = showsAge ? "age" : "#"
+            let fixedColumns = [
+                HolyLedgerFixedColumn(id: "id", fittedWidth: fitted.id, minimumWidth: fitted.id, shrinkPriority: 1),
+                showsTrack ? HolyLedgerFixedColumn(
+                    id: "track",
+                    fittedWidth: fitted.track,
+                    minimumWidth: Metrics.columnWidth(
+                        contentCharacters: HolyLedgerColumnGrip.minimumCharacters,
+                        headerCharacters: "track".count
+                    ),
+                    shrinkPriority: 0
+                ) : nil,
+                HolyLedgerFixedColumn(
+                    id: "state",
+                    fittedWidth: fitted.state,
+                    minimumWidth: fitted.state,
+                    shrinkPriority: 1
+                ),
+                HolyLedgerFixedColumn(
+                    id: "#",
+                    fittedWidth: fitted.priority,
+                    minimumWidth: fitted.priority,
+                    shrinkPriority: 1
+                ),
+            ].compactMap { $0 }
+            let columns = HolyLedgerResponsiveLayout.columns(
+                availableWidth: availableWidth,
+                gap: Metrics.columnGap,
+                stripeWidth: Metrics.stripeColumnWidth,
+                minimumFlexibleWidth: Metrics.columnWidth(
+                    contentCharacters: Metrics.digestFloorCharacters,
+                    headerCharacters: "digest".count
+                ),
+                fixedColumns: fixedColumns,
+                overrides: overrides
             )
             let dimFallback = state.allVisibleItems.contains { store.hasPresentationDigest(for: $0) }
-            boardColumnHeader(columns, showsAge: showsAge)
+            boardColumnHeader(
+                columns,
+                showsTrack: showsTrack,
+                priorityLabel: priorityLabel
+            )
             ForEach(sections) { section in
                 sheetHead(section.prompt, count: String(section.items.count))
                 if section.items.isEmpty {
@@ -295,7 +376,14 @@ struct HolyMannaBoardView: View {
                 } else {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(section.items.enumerated()), id: \.element.id) { index, item in
-                            itemRow(item, index: index, columns: columns, showsAge: showsAge, dimFallback: dimFallback)
+                            itemRow(
+                                item,
+                                index: index,
+                                columns: columns,
+                                showsTrack: showsTrack,
+                                showsAge: showsAge,
+                                dimFallback: dimFallback
+                            )
                         }
                     }
                 }
@@ -359,14 +447,26 @@ struct HolyMannaBoardView: View {
         .fixedSize()
     }
 
-    private func boardColumnHeader(_ columns: HolyMannaBoardColumnWidths, showsAge: Bool) -> some View {
+    private func boardColumnHeader(
+        _ columns: HolyLedgerResolvedColumns,
+        showsTrack: Bool,
+        priorityLabel: String
+    ) -> some View {
         HStack(spacing: Metrics.columnGap) {
             Color.clear.frame(width: Metrics.stripeColumnWidth)
-            resizableHeader("id", width: columns.id)
-            columnLabel("digest").frame(maxWidth: .infinity, alignment: .leading)
-            resizableHeader("track", width: columns.track)
-            resizableHeader("state", width: columns.state)
-            resizableHeader("#", label: showsAge ? "age" : "#", width: columns.priority, alignment: .trailing)
+            resizableHeader("id", width: columns.width("id"), availableWidth: columns.availableWidth)
+            columnLabel("digest").frame(width: columns.flexibleWidth, alignment: .leading)
+            if showsTrack {
+                resizableHeader("track", width: columns.width("track"), availableWidth: columns.availableWidth)
+            }
+            resizableHeader("state", width: columns.width("state"), availableWidth: columns.availableWidth)
+            resizableHeader(
+                "#",
+                label: priorityLabel,
+                width: columns.width("#"),
+                availableWidth: columns.availableWidth,
+                alignment: .trailing
+            )
         }
         .frame(height: Metrics.columnHeaderHeight)
         .overlay(alignment: .bottom) { rule }
@@ -374,7 +474,13 @@ struct HolyMannaBoardView: View {
 
     /// A fixed column's header with its drag grip at the right edge; the
     /// dragged width persists per column, double-click returns the fit.
-    private func resizableHeader(_ column: String, label: String? = nil, width: CGFloat, alignment: Alignment = .leading) -> some View {
+    private func resizableHeader(
+        _ column: String,
+        label: String? = nil,
+        width: CGFloat,
+        availableWidth: CGFloat,
+        alignment: Alignment = .leading
+    ) -> some View {
         columnLabel(label ?? column)
             .frame(width: width, alignment: alignment)
             .overlay(alignment: .trailing) {
@@ -387,7 +493,7 @@ struct HolyMannaBoardView: View {
                     ),
                     onResize: { newWidth in
                         var overrides = HolyLedgerColumnOverrides(json: columnOverridesJSON)
-                        overrides.set(column, width: newWidth)
+                        overrides.set(column, width: newWidth, availableWidth: availableWidth)
                         columnOverridesJSON = overrides.json
                     },
                     onReset: {
@@ -404,7 +510,8 @@ struct HolyMannaBoardView: View {
     private func itemRow(
         _ item: HolyMannaBoardItem,
         index: Int,
-        columns: HolyMannaBoardColumnWidths,
+        columns: HolyLedgerResolvedColumns,
+        showsTrack: Bool,
         showsAge: Bool,
         dimFallback: Bool
     ) -> some View {
@@ -415,26 +522,27 @@ struct HolyMannaBoardView: View {
             Text(item.id)
                 .foregroundStyle(Palette.muted)
                 .lineLimit(1)
-                .frame(width: columns.id, alignment: .leading)
+                .frame(width: columns.width("id"), alignment: .leading)
             Text(store.presentationDigest(for: item) ?? item.title)
                 .foregroundStyle(dimFallback && !store.hasPresentationDigest(for: item) ? Palette.muted : Palette.text)
-                .lineSpacing(Metrics.bodySize * (Metrics.digestLineHeight - 1))
-                .padding(.vertical, Metrics.s1)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text(Present.shortTrack(item.trackTitle))
-                .foregroundStyle(Palette.faint)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .frame(width: columns.track, alignment: .leading)
-                .help(item.trackTitle ?? "")
+                .frame(width: columns.flexibleWidth, alignment: .leading)
+            if showsTrack {
+                Text(Present.shortTrack(item.trackTitle))
+                    .foregroundStyle(Palette.faint)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: columns.width("track"), alignment: .leading)
+                    .help(item.trackTitle ?? "")
+            }
             stateText(cell)
-                .frame(width: columns.state, alignment: .leading)
+                .frame(width: columns.width("state"), alignment: .leading)
                 .help(cell.plain)
             Text(showsAge ? Present.ago(item.updatedAt) : Present.priorityText(item))
                 .foregroundStyle(Palette.faint)
                 .lineLimit(1)
-                .frame(width: columns.priority, alignment: .trailing)
+                .frame(width: columns.width("#"), alignment: .trailing)
         }
         .frame(minHeight: Metrics.rowHeight)
         .background(rowBackground(selected: selected, hovered: hoveredRowID == item.id, even: index % 2 == 1))
@@ -1225,6 +1333,7 @@ struct HolyMannaBoardView: View {
             }
             .buttonStyle(.plain)
         }
+        .frame(width: max(0, width - 2 * pagePadding(width)))
         .foregroundStyle(Palette.muted)
         .lineLimit(1)
         .padding(.horizontal, pagePadding(width))
@@ -1264,8 +1373,9 @@ struct HolyMannaBoardView: View {
                 .lineLimit(1)
                 .fixedSize()
                 Spacer(minLength: 0)
-                topbarRight
+                topbarRight(compact: width <= Metrics.narrowBreakpoint)
             }
+            .frame(width: max(0, width - 2 * pagePadding(width)))
             .padding(.horizontal, pagePadding(width))
             .frame(height: Metrics.topbarHeight)
             .padding(.top, Metrics.titlebarInset)
@@ -1284,7 +1394,13 @@ struct HolyMannaBoardView: View {
                         Text(failure).foregroundStyle(Palette.red).padding(.vertical, Metrics.s2)
                     }
                     if !boards.isEmpty {
-                        estateTable(boards)
+                        ScrollView(.horizontal) {
+                            estateTable(
+                                boards,
+                                availableWidth: max(0, width - 2 * pagePadding(width))
+                            )
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     } else if store.estate != nil {
                         emptyLine("No boards registered yet.")
                     }
@@ -1347,13 +1463,22 @@ struct HolyMannaBoardView: View {
     /// index.html's `table.boards`: full width, cells nowrap, numbers
     /// right; count columns fit their widest cell and the board name takes
     /// the rest of the measure.
-    private func estateTable(_ boards: [HolyMannaEstateBoard]) -> some View {
+    private func estateTable(_ boards: [HolyMannaEstateBoard], availableWidth: CGFloat) -> some View {
         let widths = Present.estateColumns(for: boards)
+        let fixedWidth = widths.needsYou + widths.working + widths.here
+            + widths.active + widths.ready + widths.blocked + widths.decision
+            + widths.dream + widths.done + widths.drift + widths.updated
+        let boardCharacters = boards.map { $0.slug.count + ($0.exists ? 0 : " (missing)".count) }.max() ?? 0
+        let minimumBoardWidth = Metrics.columnWidth(
+            contentCharacters: boardCharacters,
+            headerCharacters: "board".count
+        ) + 2 * Metrics.s2
+        let boardWidth = max(minimumBoardWidth, availableWidth - fixedWidth)
         return VStack(spacing: 0) {
             HStack(spacing: 0) {
                 columnLabel("board")
                     .padding(.horizontal, Metrics.s2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(width: boardWidth, alignment: .leading)
                 estateHeader("needs you", width: widths.needsYou)
                 estateHeader("working", width: widths.working)
                 estateHeader("here", width: widths.here)
@@ -1371,10 +1496,10 @@ struct HolyMannaBoardView: View {
             .padding(.vertical, Metrics.s1)
             .overlay(alignment: .bottom) { rule }
             ForEach(Array(boards.enumerated()), id: \.element.id) { index, board in
-                estateRow(board, index: index, widths: widths)
+                estateRow(board, index: index, boardWidth: boardWidth, widths: widths)
             }
         }
-        .frame(maxWidth: .infinity)
+        .frame(width: boardWidth + fixedWidth)
     }
 
     private func estateHeader(_ label: String, width: CGFloat) -> some View {
@@ -1383,7 +1508,12 @@ struct HolyMannaBoardView: View {
             .frame(width: width, alignment: .trailing)
     }
 
-    private func estateRow(_ board: HolyMannaEstateBoard, index: Int, widths: HolyMannaEstateColumnWidths) -> some View {
+    private func estateRow(
+        _ board: HolyMannaEstateBoard,
+        index: Int,
+        boardWidth: CGFloat,
+        widths: HolyMannaEstateColumnWidths
+    ) -> some View {
         let coord: HolyMannaEstateCoord? = board.exists ? board.coord : nil
         return HStack(spacing: 0) {
             HStack(spacing: Metrics.s1) {
@@ -1396,7 +1526,7 @@ struct HolyMannaBoardView: View {
             .lineLimit(1)
             .truncationMode(.tail)
             .padding(.horizontal, Metrics.s2)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(width: boardWidth, alignment: .leading)
             .help(board.root)
             estateCell(coord?.needsYou, cls: "needs-user", width: widths.needsYou)
             estateCell(coord?.working, cls: "working", width: widths.working)

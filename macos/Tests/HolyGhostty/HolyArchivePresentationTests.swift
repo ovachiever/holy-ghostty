@@ -122,20 +122,69 @@ struct HolyArchivePresentationTests {
     }
 }
 
-/// Dragged column widths persist per column and fall back to the fit.
+/// Dragged column widths survive screen changes without overrunning the pane.
 struct HolyLedgerColumnOverridesTests {
-    @Test func overridesRoundTripAndFallBackToTheFit() {
+    @Test func proportionalOverridesRoundTripAndFallBackToTheFit() {
         var overrides = HolyLedgerColumnOverrides(json: "")
-        #expect(overrides.width("project", fitted: 120) == 120)
-        overrides.set("project", width: 240)
-        #expect(overrides.width("project", fitted: 120) == 240)
+        #expect(overrides.width("project", fitted: 120, availableWidth: 800) == 120)
+        overrides.set("project", width: 240, availableWidth: 800)
+        #expect(overrides.width("project", fitted: 120, availableWidth: 800) == 240)
+        #expect(overrides.width("project", fitted: 120, availableWidth: 400) == 120)
+        #expect(overrides.json.contains(#""version":2"#))
+
         let restored = HolyLedgerColumnOverrides(json: overrides.json)
-        #expect(restored.width("project", fitted: 120) == 240)
-        #expect(restored.width("date", fitted: 90) == 90)
+        #expect(restored.width("project", fitted: 120, availableWidth: 800) == 240)
+        #expect(restored.width("date", fitted: 90, availableWidth: 800) == 90)
         var reset = restored
         reset.reset("project")
-        #expect(reset.width("project", fitted: 120) == 120)
-        #expect(HolyLedgerColumnOverrides(json: "not json").width("x", fitted: 7) == 7)
+        #expect(reset.width("project", fitted: 120, availableWidth: 800) == 120)
+        #expect(HolyLedgerColumnOverrides(json: "not json").width("x", fitted: 7, availableWidth: 100) == 7)
+    }
+
+    @Test func legacyPixelOverridesMigrateAgainstTheReferenceMeasure() {
+        let migrated = HolyLedgerColumnOverrides(json: #"{"project":720,"invalid":-4}"#)
+        #expect(migrated.width("project", fitted: 120, availableWidth: 1_000) == 500)
+        #expect(migrated.width("invalid", fitted: 90, availableWidth: 1_000) == 90)
+    }
+
+    @Test func inspectorClampsAndFoldsAtTheCockpitBreakpoints() {
+        #expect(!HolyLedgerResponsiveLayout.showsInlineInspector(windowWidth: 860))
+        #expect(HolyLedgerResponsiveLayout.showsInlineInspector(windowWidth: 900))
+        #expect(!HolyLedgerResponsiveLayout.showsSecondaryColumn(windowWidth: 1_100))
+        #expect(HolyLedgerResponsiveLayout.showsSecondaryColumn(windowWidth: 1_280))
+
+        #expect(HolyLedgerResponsiveLayout.inspectorWidth(windowWidth: 1_000, persistedWidth: 600) == 260)
+        #expect(HolyLedgerResponsiveLayout.inspectorWidth(windowWidth: 1_280, persistedWidth: 600) == 448)
+        #expect(abs(HolyLedgerResponsiveLayout.inspectorWidth(
+            windowWidth: 1_512,
+            persistedWidth: 600
+        ) - 529.2) < 0.001)
+        #expect(HolyLedgerResponsiveLayout.inspectorWidth(windowWidth: 1_728, persistedWidth: 600) == 600)
+    }
+
+    @Test func fixedColumnsYieldToTheFlexibleFloorWithoutOverflow() {
+        var overrides = HolyLedgerColumnOverrides(json: "")
+        overrides.set("track", width: 500, availableWidth: 1_200)
+        let columns = HolyLedgerResponsiveLayout.columns(
+            availableWidth: 600,
+            gap: 12,
+            stripeWidth: 10,
+            minimumFlexibleWidth: 180,
+            fixedColumns: [
+                .init(id: "id", fittedWidth: 70, minimumWidth: 70, shrinkPriority: 1),
+                .init(id: "track", fittedWidth: 200, minimumWidth: 50, shrinkPriority: 0),
+                .init(id: "state", fittedWidth: 120, minimumWidth: 120, shrinkPriority: 1),
+                .init(id: "#", fittedWidth: 30, minimumWidth: 30, shrinkPriority: 1),
+            ],
+            overrides: overrides
+        )
+
+        #expect(columns.flexibleWidth == 180)
+        #expect(columns.width("id") == 70)
+        #expect(columns.width("state") == 120)
+        #expect(columns.width("#") == 30)
+        #expect(columns.width("track") == 130)
+        #expect(abs(columns.occupiedWidth - columns.availableWidth) < 0.001)
     }
 }
 
