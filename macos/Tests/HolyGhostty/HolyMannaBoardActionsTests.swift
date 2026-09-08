@@ -3,6 +3,206 @@ import Testing
 @testable import Ghostty
 
 struct HolyMannaBoardActionsTests {
+    @Test(arguments: [HolySessionRuntime.codex, .claude])
+    func runtimeLookupIsSharedAndScopedToExecutionHost(runtime: HolySessionRuntime) async throws {
+        let calls = ActionCalls()
+        let resolver = HolyMannaWorkerExecutableResolver { runtime, host in
+            await calls.record("\(host ?? "local")/\(runtime.rawValue)")
+            try await Task.sleep(for: .milliseconds(40))
+            return "/\(host ?? "local")/bin/\(runtime.rawValue)"
+        }
+        try await withThrowingTaskGroup(of: String.self) { group in
+            for _ in 0..<16 {
+                group.addTask { try await resolver.binaryPath(runtime: runtime, remoteHost: nil) }
+            }
+            for try await path in group { #expect(path == "/local/bin/\(runtime.rawValue)") }
+        }
+        #expect(try await resolver.binaryPath(runtime: runtime, remoteHost: "builder") == "/builder/bin/\(runtime.rawValue)")
+        #expect(try await resolver.binaryPath(runtime: runtime, remoteHost: nil) == "/local/bin/\(runtime.rawValue)")
+        #expect(await calls.values.count == 2)
+    }
+
+    @Test(arguments: [HolySessionRuntime.codex, .claude]) @MainActor
+    func missingRuntimeRefusesBeforeSpawnOrClaim(runtime: HolySessionRuntime) async throws {
+        let calls = ActionCalls()
+        let probes = ActionCalls()
+        var spawns = 0
+        let resolver = HolyMannaWorkerExecutableResolver { runtime, _ in
+            await probes.record(runtime.rawValue)
+            return nil
+        }
+        let store = makeStore(calls: calls, resolver: resolver, launcher: { _ in spawns += 1; return UUID() })
+        store.workerRuntime = runtime
+        store.prepare(context: context)
+        try await requireBoardLoaded(store)
+        for _ in 0..<2 {
+            store.requestWorker(try item())
+            store.confirmWorker()
+            try await eventually { !store.isDispatching }
+            #expect(store.dispatchNotice?.contains("The \(runtime.rawValue) executable was not found on this Mac") == true)
+        }
+        #expect(spawns == 0)
+        #expect(await probes.values == [runtime.rawValue])
+        #expect(store.state?.item(id: "mn-123456")?.status == "open")
+        #expect(await calls.values.allSatisfy { $0.contains("manna state") || $0.contains("manna estate") })
+        do {
+            _ = try await resolver.binaryPath(runtime: runtime, remoteHost: nil)
+            Issue.record("Missing runtime unexpectedly resolved")
+        } catch {
+            #expect(error as? HolyMannaWorkerLaunchError == .runtimeMissing(runtime, host: nil))
+        }
+        store.dismiss()
+    }
+
+    @Test @MainActor func confirmedWorkerReceivesResolvedRuntimeAndFullMannaNote() async throws {
+        var launched: HolySessionLaunchSpec?
+        let store = makeStore(calls: ActionCalls(), launcher: { launched = $0; return UUID() })
+        store.workerRuntime = .codex
+        store.prepare(context: context)
+        try await requireBoardLoaded(store)
+        store.requestWorker(try item())
+        #expect(launched == nil)
+        store.confirmWorker()
+        try await eventually { !store.isDispatching }
+        let spec = try #require(launched)
+        #expect(spec.command?.contains("'/synthetic/codex'") == true)
+        #expect(spec.note == "mn-123456")
+        #expect(spec.noteUpdatedAtMilliseconds != nil)
+        #expect(spec.initialInput == nil)
+        #expect(spec.title == "board")
+        store.dismiss()
+    }
+
+    @Test func relativeOrMalformedRuntimePathsCannotBecomeLaunchCommands() throws {
+        let request = HolyMannaWorkerDispatch(item: try item(), context: context, profile: .init())
+        for path in ["codex", "./codex", "/bin/codex\nextra", "/bin/codex\u{0}"] {
+            #expect(throws: HolyMannaWorkerLaunchError.runtimeMissing(.codex, host: nil)) {
+                try request.launchSpec(executablePath: path)
+            }
+        }
+    }
+
+    @Test(arguments: [HolySessionRuntime.codex, .claude])
+    func probeRunsOnRequestedHostAndRejectsInvalidSSH(runtime: HolySessionRuntime) throws {
+        let local = try HolyMannaWorkerExecutableResolver.probeInvocation(runtime: runtime, remoteHost: nil)
+        #expect(local.executablePath == "/bin/zsh")
+        #expect(local.arguments.first == "-lc")
+        #expect(local.arguments.last?.contains("command -v \(runtime.rawValue)") == true)
+        let remote = try HolyMannaWorkerExecutableResolver.probeInvocation(runtime: runtime, remoteHost: "worker@example.com")
+        // Holy's SSH manager executes a local admission/control wrapper. Its
+        // local control-socket path is distinct from the remote tool lookup.
+        #expect(remote.executablePath == "/bin/zsh")
+        let wrapper = try #require(remote.arguments.last)
+        #expect(wrapper.contains("worker@example.com"))
+        #expect(wrapper.contains("ProxyCommand=/usr/bin/false"))
+        #expect(wrapper.contains("/bin/zsh -lc"))
+        #expect(wrapper.contains("$HOME"))
+        let localHome = FileManager.default.homeDirectoryForCurrentUser.path
+        #expect(!wrapper.contains(localHome + "/.nvm"))
+        #expect(!wrapper.contains(localHome + "/.local/bin"))
+        #expect(throws: (any Error).self) {
+            try HolyMannaWorkerExecutableResolver.probeInvocation(runtime: runtime, remoteHost: "-oProxyCommand=bad")
+        }
+    }
+
+    @Test(arguments: [HolySessionRuntime.codex, .claude])
+    func fallbackFindsOlderNvmRuntimeAndLaunchWorksWithBareSystemPath(runtime: HolySessionRuntime) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("holy-worker-'\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent(".nvm/versions/node/v22.16.0/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".nvm/versions/node/v24.19.0/bin"),
+                                                withIntermediateDirectories: true)
+        // A provider shim with an env shebang, like the installed npm Codex.
+        let executable = bin.appendingPathComponent(runtime.rawValue)
+        try "#!/usr/bin/env holy-worker-interpreter\n".write(to: executable, atomically: true, encoding: .utf8)
+        let interpreter = bin.appendingPathComponent("holy-worker-interpreter")
+        try "#!/bin/sh\nprintf '%s\\n' \"$@\"\n".write(to: interpreter, atomically: true, encoding: .utf8)
+        for file in [executable, interpreter] {
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        }
+        let script = HolyMannaWorkerExecutableResolver.probeScript(runtime: runtime)
+        // Disable user rc files only for this fixture, so the real machine's
+        // installations cannot hide the fallback regression.
+        let output = try await actionShell(script, shell: "/bin/zsh", flags: ["-f", "-c"],
+                                           environment: ["HOME": root.path, "PATH": "/usr/bin:/bin"])
+        #expect(output.exitCode == 0)
+        #expect(output.stdout == "HOLY_WORKER_EXECUTABLE=\(executable.path)\n")
+        let request = HolyMannaWorkerDispatch(item: try item(), context: context,
+                                            profile: .init(runtime: runtime, model: "model'$(touch forbidden)"))
+        let spec = try request.launchSpec(executablePath: executable.path)
+        let launched = try await actionShell(try #require(spec.command), environment: ["PATH": "/usr/bin:/bin"])
+        #expect(launched.exitCode == 0)
+        #expect(launched.stdout == "\(executable.path)\n--model\nmodel'$(touch forbidden)\n--\n\(request.brief)\n")
+        #expect(launched.stderr.isEmpty)
+    }
+
+    @Test func dispatchNoteSurvivesTmuxDetachDiscoveryAndReadoption() async throws {
+        let request = HolyMannaWorkerDispatch(item: try item(), context: context, profile: .init())
+        var spec = try request.launchSpec(executablePath: "/usr/bin/true")
+        let socket = "holy-worker-test-\(UUID().uuidString.lowercased())"
+        let name = try #require(spec.tmux?.sessionName)
+        spec.tmux?.socketName = socket
+        spec.workingDirectory = FileManager.default.temporaryDirectory.path
+        let command = try #require(HolyTmuxCommandBuilder.detachedCreateCommand(for: spec))
+        let created = try await HolyMannaProcessRunner.run(.init(
+            executablePath: command.executablePath, arguments: command.arguments,
+            currentDirectoryPath: nil, environment: [:], stdin: nil, displayCommand: "create isolated note test"
+        ), 10)
+        defer {
+            let cleanup = Process()
+            cleanup.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            cleanup.arguments = ["-lc", "tmux -L '\(socket)' kill-server"]
+            cleanup.standardOutput = FileHandle.nullDevice
+            cleanup.standardError = FileHandle.nullDevice
+            try? cleanup.run()
+            cleanup.waitUntilExit()
+        }
+        #expect(created.exitCode == 0, Comment(rawValue: created.stderr))
+        // No viewer is attached. Discovery must still recover the initial note
+        // from the server, before any later local note edit or sync poll.
+        let discovered = try await HolyRemoteTmuxDiscoveryService.shared.discoverLocalSessionsThrowing(
+            hostID: UUID(), hostLabel: "Test", tmuxSocketName: socket, timeout: 5, includeHiddenSessions: true
+        )
+        let live = try #require(discovered.first { $0.sessionName == name })
+        #expect(live.synchronizedMetadata.note?.value == "mn-123456")
+        #expect(live.synchronizedMetadata.note?.updatedAtMilliseconds == spec.noteUpdatedAtMilliseconds)
+        let action = HolyTmuxSessionMetadataMerge.action(
+            local: .init(value: Optional<String>.none, updatedAtMilliseconds: nil, isPresent: false),
+            remote: live.synchronizedMetadata.note
+        )
+        #expect(action == .applyRemote(value: "mn-123456", updatedAtMilliseconds: try #require(spec.noteUpdatedAtMilliseconds)))
+        let record = HolySessionRecord(launchSpec: spec)
+        let archived = HolyArchivedSession(sourceSessionID: record.id, record: record, phase: .completed,
+            preview: "", signals: [], commandTelemetry: .empty, budgetTelemetry: .empty, runtimeTelemetry: .empty,
+            gitSnapshot: nil, lastKnownWorkingDirectory: nil, lastActivityAt: .now, archivedAt: .now)
+        var reattach = spec
+        reattach.tmux?.createIfMissing = false
+        reattach.note = nil
+        let readopted = HolySessionSupervisor.readoptedRecordForTesting(archived, launchSpec: reattach, updatedAt: .now)
+        #expect(readopted.id == record.id)
+        #expect(readopted.launchSpec.note == "mn-123456")
+        #expect(readopted.launchSpec.noteUpdatedAtMilliseconds == spec.noteUpdatedAtMilliseconds)
+
+        var edited = spec
+        edited.note = "mn-123456: human follow-up"
+        edited.noteUpdatedAtMilliseconds = (try #require(spec.noteUpdatedAtMilliseconds)) + 1
+        let payload = try #require(HolyTmuxSessionMetadataPayload(launchSpec: edited))
+        let update = try #require(HolyTmuxSessionMetadataUpdateCommand.command(for: edited, payload: payload))
+        #expect(update.run())
+        // Running the original create-if-missing spec again must not replace
+        // a later user edit with the initial ticket-only note.
+        let repeated = try await HolyMannaProcessRunner.run(.init(
+            executablePath: command.executablePath, arguments: command.arguments,
+            currentDirectoryPath: nil, environment: [:], stdin: nil, displayCommand: "reopen isolated note test"
+        ), 10)
+        #expect(repeated.exitCode == 0)
+        let notes = try await actionShell("tmux -L '\(socket)' show-options -qv -t '\(name)' @holy_note_v1",
+                                          shell: "/bin/zsh", flags: ["-lc"])
+        #expect(HolyTmuxSessionMetadataCodec.decodeNote(notes.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
+                == .value(edited.note))
+    }
+
     @Test func concurrentBinaryLookupWaitsForTheSameSuccessfulProbe() async {
         await checkConcurrentLookup(result: "/synthetic/agent-do")
     }
@@ -101,13 +301,13 @@ struct HolyMannaBoardActionsTests {
         #expect(HolyMannaWorkerDispatch.refusal(for: claimed, context: context)?.contains("codex-owner") == true)
         #expect(HolyMannaWorkerDispatch.refusal(for: try item(), context: context) == nil)
         let request = HolyMannaWorkerDispatch(item: dream, context: context, profile: .init())
-        #expect(throws: (any Error).self) { try request.launchSpec() }
+        #expect(throws: (any Error).self) { try request.launchSpec(executablePath: "/synthetic/codex") }
     }
 
     @Test func workerBriefPinsProtocolAndArrivesAsOneStartupArgument() throws {
         let request = HolyMannaWorkerDispatch(item: try item(), context: context,
                                             profile: .init(runtime: .codex, model: "model'$(touch forbidden)"))
-        let spec = try request.launchSpec()
+        let spec = try request.launchSpec(executablePath: "/synthetic/codex")
         for clause in ["First run: agent-do manna claim mn-123456", "sealed handoff at .handoff/work.md",
                        "agent-do coord focus", "path claims", "focused test suites only",
                        "keep the tree buildable", "No app launches, installs, screenshots",
@@ -119,14 +319,14 @@ struct HolyMannaBoardActionsTests {
         #expect(spec.workingDirectory == context.boardRoot)
         #expect(spec.runtime == .codex)
         #expect(spec.title == "board")
-        #expect(spec.command?.hasPrefix("'codex' '--model' 'model'\\''$(touch forbidden)' '--' '") == true)
+        #expect(spec.command?.contains("'/synthetic/codex' '--model' 'model'\\''$(touch forbidden)' '--' '") == true)
         #expect(spec.command?.contains("First run: agent-do manna claim") == true)
-        #expect(spec.tmux?.sessionName != (try request.launchSpec()).tmux?.sessionName)
+        #expect(spec.tmux?.sessionName != (try request.launchSpec(executablePath: "/synthetic/codex")).tmux?.sessionName)
         let remote = HolyMannaWorkerDispatch(item: try item(),
             context: .init(boardRoot: "/srv/board", remoteHost: "builder@example.com"),
             profile: .init(runtime: .claude, model: "opus"))
-        #expect(try remote.launchSpec().transport.sshDestination == "builder@example.com")
-        #expect(try remote.launchSpec().initialInput == nil)
+        #expect(try remote.launchSpec(executablePath: "/remote/claude").transport.sshDestination == "builder@example.com")
+        #expect(try remote.launchSpec(executablePath: "/remote/claude").initialInput == nil)
     }
 
     @Test @MainActor func failedSpawnNeverClaimsAndConfirmationIsRequired() async throws {
@@ -159,7 +359,7 @@ struct HolyMannaBoardActionsTests {
         let store = HolyMannaBoardModeStore(client: client, workerLauncher: { _ in
             spawns += 1
             return UUID()
-        }, prewarmer: ActionPrewarmer())
+        }, workerExecutableResolver: fixtureWorkerResolver(), prewarmer: ActionPrewarmer())
         store.prepare(context: context)
         try await requireBoardLoaded(store)
         store.requestWorker(try item())
@@ -174,6 +374,12 @@ struct HolyMannaBoardActionsTests {
 
 private let context = HolyMannaBoardContext(boardRoot: "/synthetic/board", remoteHost: nil)
 
+private func actionShell(_ script: String, shell: String = "/bin/sh", flags: [String] = ["-c"],
+                         environment: [String: String] = [:]) async throws -> HolyMannaProcessOutput {
+    try await HolyMannaProcessRunner.run(.init(executablePath: shell, arguments: flags + [script],
+        currentDirectoryPath: nil, environment: environment, stdin: nil, displayCommand: "worker shell regression"), 10)
+}
+
 private func itemJSON(id: String = "mn-123456", title: String = "ready work", kind: String = "item",
                       status: String = "open", claimant: String? = nil) -> [String: Any] {
     var value: [String: Any] = ["id": id, "title": title, "title_plain": title, "status": status,
@@ -187,6 +393,10 @@ private func itemJSON(id: String = "mn-123456", title: String = "ready work", ki
 private func item(kind: String = "item", status: String = "open", claimant: String? = nil) throws -> HolyMannaBoardItem {
     try JSONDecoder().decode(HolyMannaBoardItem.self, from: JSONSerialization.data(
         withJSONObject: itemJSON(kind: kind, status: status, claimant: claimant)))
+}
+
+private func fixtureWorkerResolver() -> HolyMannaWorkerExecutableResolver {
+    .init { runtime, host in "/\(host ?? "synthetic")/\(runtime.rawValue)" }
 }
 
 private func stateJSON(timestamp: String = "now", title: String = "ready work", claimed: Bool = false) throws -> String {
@@ -225,12 +435,15 @@ private func fixtureClient(calls: ActionCalls, claimAfterFirstRead: Bool = false
     }
 }
 
-@MainActor private func makeStore(calls: ActionCalls,
-                                 asker: any HolyMannaBoardAsking = HolyMannaBoardAskService { _ in "answer" },
-                                 timeout: Duration = .seconds(60),
-                                 launcher: (@MainActor (HolySessionLaunchSpec) throws -> UUID)? = nil) -> HolyMannaBoardModeStore {
+@MainActor private func makeStore(
+    calls: ActionCalls,
+    asker: any HolyMannaBoardAsking = HolyMannaBoardAskService { _ in "answer" },
+    timeout: Duration = .seconds(60),
+    resolver: HolyMannaWorkerExecutableResolver = fixtureWorkerResolver(),
+    launcher: (@MainActor (HolySessionLaunchSpec) throws -> UUID)? = nil
+) -> HolyMannaBoardModeStore {
     HolyMannaBoardModeStore(client: fixtureClient(calls: calls), asker: asker, askTimeout: timeout,
-                           workerLauncher: launcher, prewarmer: ActionPrewarmer())
+                           workerLauncher: launcher, workerExecutableResolver: resolver, prewarmer: ActionPrewarmer())
 }
 
 private struct ActionPrewarmer: HolyMannaBoardPrewarming {

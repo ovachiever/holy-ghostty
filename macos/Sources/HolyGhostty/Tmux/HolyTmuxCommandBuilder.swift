@@ -138,7 +138,11 @@ enum HolyTmuxCommandBuilder {
             createArguments.append(bootstrapCommand)
 
             let hasSessionArguments = tmuxPrefix + ["has-session", "-t", sessionName]
-            let ensureSessionCommand = "\(shellCommand(hasSessionArguments)) 2>/dev/null || \(shellCommand(createArguments))"
+            let createCommands = [shellCommand(createArguments)] + initialNoteCommands(
+                for: launchSpec, tmuxPrefix: tmuxPrefix, sessionName: sessionName
+            )
+            let ensureSessionCommand = "\(shellCommand(hasSessionArguments)) 2>/dev/null || { "
+                + createCommands.joined(separator: " && ") + "; }"
 
             if metadataCommands.isEmpty {
                 lines.append(ensureSessionCommand)
@@ -397,6 +401,19 @@ enum HolyTmuxCommandBuilder {
         ]
 
         return metadata.map { key, value in
+            shellCommand(tmuxPrefix + ["set-option", "-q", "-t", sessionName, key, value])
+        }
+    }
+
+    private static func initialNoteCommands(
+        for launchSpec: HolySessionLaunchSpec, tmuxPrefix: [String], sessionName: String
+    ) -> [String] {
+        // Stamp only after creation, never on attach to an existing session:
+        // a persisted launch spec must not overwrite a newer human note.
+        guard let payload = HolyTmuxSessionMetadataPayload(launchSpec: launchSpec, includeTodayPin: false),
+              let encodedNote = payload.encodedNote,
+              let timestamp = payload.noteUpdatedAtMilliseconds else { return [] }
+        return [("@holy_note_v1", encodedNote), ("@holy_note_updated_at_v1", String(timestamp))].map { key, value in
             shellCommand(tmuxPrefix + ["set-option", "-q", "-t", sessionName, key, value])
         }
     }

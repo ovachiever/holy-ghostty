@@ -70,6 +70,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
     private let asker: any HolyMannaBoardAsking
     private let askTimeout: Duration
     private let workerLauncher: (@MainActor (HolySessionLaunchSpec) throws -> UUID)?
+    private let workerExecutableResolver: HolyMannaWorkerExecutableResolver
     private var askTask: Task<Void, Never>?
     private var askDeadline: Task<Void, Never>?
     private var askGeneration = UUID()
@@ -96,6 +97,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
         asker: any HolyMannaBoardAsking = HolyMannaBoardAskService.shared,
         askTimeout: Duration = .seconds(60),
         workerLauncher: (@MainActor (HolySessionLaunchSpec) throws -> UUID)? = nil,
+        workerExecutableResolver: HolyMannaWorkerExecutableResolver = .shared,
         digestService: any HolyMannaBoardDigesting = HolyMannaBoardDigestService.shared,
         prewarmer: (any HolyMannaBoardPrewarming)? = nil,
         usageAssessmentProvider: @escaping () -> HolyClaudeUsageAssessment = {
@@ -105,6 +107,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
         self.asker = asker
         self.askTimeout = askTimeout
         self.workerLauncher = workerLauncher
+        self.workerExecutableResolver = workerExecutableResolver
         self.deepModel = UserDefaults.standard.string(forKey: "holy.intelligence.deep.model") ?? "opus"
         let runtime = HolySessionRuntime(rawValue: UserDefaults.standard.string(forKey: "holy.board.worker.runtime") ?? "codex") ?? .codex
         self.workerRuntime = runtime
@@ -421,6 +424,10 @@ final class HolyMannaBoardModeStore: ObservableObject {
             guard let self else { return }
             defer { self.isDispatching = false }
             do {
+                let executablePath = try await self.workerExecutableResolver.binaryPath(
+                    runtime: request.profile.runtime, remoteHost: request.context.remoteHost
+                )
+                guard self.context == request.context else { return }
                 // A confirmation is permission for this exact item/handoff, not a
                 // stale claim. Read canonical state again; never mutate it here.
                 let fresh = try await self.client.state(for: request.context)
@@ -435,7 +442,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
                 guard item.prompt == request.item.prompt, item.handoffDigest == request.item.handoffDigest else {
                     throw HolyMannaAskError.unavailable("The handoff changed. Refresh and confirm the new work order.")
                 }
-                let launch = try request.launchSpec()
+                let launch = try request.launchSpec(executablePath: executablePath)
                 _ = try workerLauncher(launch)
                 self.dispatchNotice = "Worker session opened for \(item.id). Its claim is pending."
                 self.requestStateRefresh(force: true)

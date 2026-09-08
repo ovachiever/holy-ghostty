@@ -5,6 +5,133 @@ struct HolyMannaWorkerProfile: Equatable {
     var model = ""
 }
 
+enum HolyMannaWorkerLaunchError: LocalizedError, Equatable {
+    case runtimeMissing(HolySessionRuntime, host: String?)
+
+    var errorDescription: String? {
+        switch self {
+        case let .runtimeMissing(runtime, host):
+            return "The \(runtime.rawValue) executable was not found on \(host ?? "this Mac"). "
+                + "Checked the login-shell PATH and known tool directories. No worker was opened."
+        }
+    }
+}
+
+/// One completed lookup per runtime and execution host for this app lifetime.
+/// An in-flight lookup is shared too; a pending probe is never a missing tool.
+actor HolyMannaWorkerExecutableResolver {
+    typealias Probe = @Sendable (HolySessionRuntime, String?) async throws -> String?
+    static let shared = HolyMannaWorkerExecutableResolver()
+
+    private struct Key: Hashable {
+        let runtime: HolySessionRuntime
+        let remoteHost: String?
+    }
+
+    private let probe: Probe
+    private var resolutions: [Key: Task<String?, Error>] = [:]
+
+    init(probe: @escaping Probe = HolyMannaWorkerExecutableResolver.locate) {
+        self.probe = probe
+    }
+
+    func binaryPath(runtime: HolySessionRuntime, remoteHost: String?) async throws -> String {
+        guard runtime == .codex || runtime == .claude else {
+            throw HolyMannaAskError.unavailable("Choose Codex or Claude for the board worker.")
+        }
+        let key = Key(runtime: runtime, remoteHost: remoteHost)
+        let task: Task<String?, Error>
+        if let pending = resolutions[key] {
+            task = pending
+        } else {
+            task = Task { [probe] in try await probe(runtime, remoteHost) }
+            resolutions[key] = task
+        }
+        let path: String?
+        do {
+            path = try await task.value
+        } catch {
+            // A transport/probe failure is not proof that the tool is absent.
+            resolutions[key] = nil
+            throw error
+        }
+        guard let path, Self.isAbsoluteExecutablePath(path) else {
+            throw HolyMannaWorkerLaunchError.runtimeMissing(runtime, host: remoteHost)
+        }
+        return path
+    }
+
+    static func isAbsoluteExecutablePath(_ path: String) -> Bool {
+        path.hasPrefix("/") && !path.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+    }
+
+    /// The same bounded zsh login-shell probe runs on the execution host.
+    /// Reuse restore's known installer locations, including every nvm version.
+    static func probeScript(runtime: HolySessionRuntime) -> String {
+        let name = runtime.rawValue
+        let candidates = HolyRestoreExecutableSearch.wellKnownCandidates(
+            name: name, home: "$HOME", nvmVersionDirectoryNames: []
+        ) + ["$HOME/.npm-global/bin/\(name)", "$HOME/.npm/bin/\(name)"]
+        let candidateArguments = candidates.map { "\"\($0)\"" }.joined(separator: " ")
+        return """
+        holy_worker_path=$(command -v \(name) 2>/dev/null)
+        if [[ "$holy_worker_path" == /* && -f "$holy_worker_path" && -x "$holy_worker_path" ]]; then
+          printf 'HOLY_WORKER_EXECUTABLE=%s\\n' "$holy_worker_path"
+          exit 0
+        fi
+        for holy_worker_path in "$HOME"/.nvm/versions/node/v*/bin/\(name)(NnOn) \(candidateArguments); do
+          if [[ -f "$holy_worker_path" && -x "$holy_worker_path" ]]; then
+            printf 'HOLY_WORKER_EXECUTABLE=%s\\n' "$holy_worker_path"
+            exit 0
+          fi
+        done
+        exit 1
+        """
+    }
+
+    static func probeInvocation(runtime: HolySessionRuntime, remoteHost: String?) throws -> HolyMannaProcessInvocation {
+        let script = probeScript(runtime: runtime)
+        if let host = remoteHost {
+            // Keep the board's destination validation and managed SSH routing.
+            _ = try HolyMannaBoardClient.remoteInvocation(
+                arguments: [], context: .init(boardRoot: nil, remoteHost: host), needsBoardRoot: false, identity: nil
+            )
+            let transport = try HolySSHTransportManager.shared.command(
+                destination: host, purpose: .control,
+                options: ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"],
+                remoteCommand: ["/bin/zsh -lc " + "'" + script.replacingOccurrences(of: "'", with: "'\\''") + "'"]
+            )
+            return .init(executablePath: transport.executablePath, arguments: transport.arguments,
+                         currentDirectoryPath: nil, environment: [:], stdin: nil,
+                         displayCommand: "\(host): locate \(runtime.rawValue)")
+        }
+        return .init(executablePath: "/bin/zsh", arguments: ["-lc", script],
+                     currentDirectoryPath: nil, environment: [:], stdin: nil,
+                     displayCommand: "locate \(runtime.rawValue)")
+    }
+
+    private static func locate(runtime: HolySessionRuntime, remoteHost: String?) async throws -> String? {
+        let invocation = try probeInvocation(runtime: runtime, remoteHost: remoteHost)
+        let output: HolyMannaProcessOutput
+        if let host = remoteHost {
+            output = try await HolySSHAdmissionController.shared.withControlPermit(for: host, operation: .metadata) {
+                try await HolyMannaProcessRunner.run(invocation, 15)
+            }
+        } else {
+            output = try await HolyMannaProcessRunner.run(invocation, 15)
+        }
+        if output.exitCode == 1 { return nil }
+        guard output.exitCode == 0 else {
+            throw HolyMannaBoardClientError.commandFailed(
+                command: invocation.displayCommand, code: output.exitCode, detail: String(output.stderr.suffix(400))
+            )
+        }
+        let prefix = "HOLY_WORKER_EXECUTABLE="
+        return output.stdout.components(separatedBy: .newlines)
+            .last { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) }
+    }
+}
+
 struct HolyMannaWorkerDispatch: Equatable {
     let item: HolyMannaBoardItem
     let context: HolyMannaBoardContext
@@ -59,10 +186,13 @@ struct HolyMannaWorkerDispatch: Equatable {
         """
     }
 
-    func launchSpec() throws -> HolySessionLaunchSpec {
+    func launchSpec(executablePath: String) throws -> HolySessionLaunchSpec {
         if let reason = Self.refusal(for: item, context: context) { throw HolyMannaAskError.unavailable(reason) }
         guard profile.runtime == .codex || profile.runtime == .claude else {
             throw HolyMannaAskError.unavailable("Choose Codex or Claude for the board worker.")
+        }
+        guard HolyMannaWorkerExecutableResolver.isAbsoluteExecutablePath(executablePath) else {
+            throw HolyMannaWorkerLaunchError.runtimeMissing(profile.runtime, host: context.remoteHost)
         }
         if context.remoteHost != nil {
             // Reuse canonical SSH validation, including option-injection rejection.
@@ -75,18 +205,23 @@ struct HolyMannaWorkerDispatch: Equatable {
         )
         spec.runtime = profile.runtime
         spec.objective = "Claim and build \(item.id)"
+        spec.note = item.id
+        spec.noteUpdatedAtMilliseconds = HolyTmuxSessionMetadataClock.next(after: nil)
         spec.workingDirectory = context.boardRoot
         if let host = context.remoteHost {
             spec.transport = .init(kind: .ssh, hostLabel: host, sshDestination: host)
         }
         spec.tmux?.sessionName = "holy-worker-\(UUID().uuidString.lowercased())"
-        var arguments = [profile.runtime.rawValue]
+        var arguments = [executablePath]
         let model = profile.model.trimmingCharacters(in: .whitespacesAndNewlines)
         if !model.isEmpty { arguments += ["--model", model] }
         arguments += ["--", brief]
         // The prompt is one startup argument, never terminal input or an executable claim command.
-        spec.command = arguments.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-            .joined(separator: " ")
+        let quote: (String) -> String = { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        // npm's Codex entry point uses /usr/bin/env node. Its sibling node
+        // must resolve even when the pane inherited only the system PATH.
+        let binaryDirectory = URL(fileURLWithPath: executablePath).deletingLastPathComponent().path
+        spec.command = "PATH=\(quote(binaryDirectory)):\"$PATH\" " + arguments.map(quote).joined(separator: " ")
         spec.initialInput = nil
         return spec
     }
