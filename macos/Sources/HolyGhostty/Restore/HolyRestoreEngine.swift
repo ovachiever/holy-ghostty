@@ -430,8 +430,8 @@ final class HolyRestoreEngine: ObservableObject {
     }
 
     /// Rows whose archived record carries a live-captured harness session id
-    /// (Claude's `session_id`, stamped by the agent-state bridge while the pane
-    /// ran). Identity beats proximity: these rows never enter the
+    /// (stamped by the agent-state bridge while the pane ran). Identity beats
+    /// proximity for every supported provider: these rows never enter the
     /// timestamp assignment at all. Sheet order arbitrates the pathological
     /// duplicate — two archives claiming one conversation — so the first row
     /// keeps the id and the second falls back to the resolver.
@@ -439,7 +439,7 @@ final class HolyRestoreEngine: ObservableObject {
         var grants: [UUID: String] = [:]
         var claimed: Set<String> = []
         for row in rows {
-            guard row.plannedLaunchSpec.runtime == .claude,
+            guard [.claude, .codex, .opencode].contains(row.plannedLaunchSpec.runtime),
                   let id = row.archived.record.effectiveHarnessSessionID,
                   HolyRestoreCommandBuilder.isSafeProviderSessionID(id),
                   claimed.insert(id).inserted else { continue }

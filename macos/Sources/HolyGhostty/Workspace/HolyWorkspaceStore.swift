@@ -1739,8 +1739,10 @@ final class HolyWorkspaceStore: ObservableObject {
 
     nonisolated static func isCrashRestoreCandidate(_ archivedSession: HolyArchivedSession) -> Bool {
         guard archivedSession.record.launchSpec.transport.kind == .local else { return false }
-        return archivedSession.recoveryReason?
-            .hasPrefix(HolySessionSupervisor.coldBootRecoveryReasonPrefix) == true
+        guard let reason = archivedSession.recoveryReason else { return false }
+        return reason.hasPrefix(HolySessionSupervisor.coldBootRecoveryReasonPrefix)
+            || reason.hasPrefix("Recovery archived this session because its tmux session is no longer available:")
+            || reason.hasPrefix("Recovery archived this session because Holy could not inspect its tmux server for ")
     }
 
     /// Rows persisted before the boot-batch marker existed carry no batch id.
@@ -3074,6 +3076,10 @@ final class HolyWorkspaceStore: ObservableObject {
                    for: session,
                    observedAt: observation.observedAt
                ) {
+                attentionEvidenceChanged = true
+            }
+            if let identity = observation.harnessIdentityEnvelope,
+               session.captureHarnessSessionIdentity(from: identity) {
                 attentionEvidenceChanged = true
             }
             if let envelope = observation.envelope {

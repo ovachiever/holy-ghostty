@@ -36,6 +36,17 @@ struct HolyRestoreCandidateClassificationTests {
         #expect(HolyWorkspaceStore.isCrashRestoreCandidate(legacy))
     }
 
+    @Test func missingTmuxRecoveriesRemainVisibleWithoutProviderIdentity() {
+        for reason in [
+            "Recovery archived this session because its tmux session is no longer available: local tmux socket `holy` session `codex`.",
+            "Recovery archived this session because Holy could not inspect its tmux server for local tmux: unavailable",
+        ] {
+            let row = archived(recoveryReason: reason)
+            #expect(row.record.harnessSessionID == nil)
+            #expect(HolyWorkspaceStore.isCrashRestoreCandidate(row))
+        }
+    }
+
     @Test func plainArchivesAndOtherRecoveriesDoNotClassify() {
         #expect(!HolyWorkspaceStore.isCrashRestoreCandidate(
             archived(recoveryReason: nil)

@@ -83,6 +83,11 @@ enum HolyDatabaseMigrator {
             label: "Native session archive, search, and researcher",
             statements: archiveSchemaStatements
         ),
+        .init(
+            version: 13,
+            label: "Host-owned indicator journal survives tmux server loss",
+            statements: [HolyHostStateMirror.schema]
+        ),
     ]
 
     private static let schemaV1: [String] = [

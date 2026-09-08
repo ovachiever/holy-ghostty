@@ -14,14 +14,12 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(plan.executablePath == "/bin/zsh")
         #expect(plan.arguments.first == "-lc")
         #expect(plan.arguments.count == 2)
-        #expect(command == [
-            "unset TMUX TMUX_PANE TMUX_TMPDIR; exec 'tmux' '-L' 'holy state'",
-            "'list-panes' '-a' '-F'",
-            "'#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{@holy_agent_last_used_v1}\u{1F}#{@holy_seen_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}\u{1F}#{window_activity}\u{1F}#{@holy_watcher_v1}'",
-        ].joined(separator: " "))
+        #expect(command.hasPrefix("unset TMUX TMUX_PANE TMUX_TMPDIR; exec 'python3'"))
+        #expect(command.contains("[\"tmux\",\"-L\",\"holy state\"]"))
+        #expect(command.contains("'monitor'"))
         #expect(command.components(separatedBy: "list-panes").count == 2)
         #expect(!command.contains("show-options"))
-        #expect(!command.contains("display-message"))
+        #expect(command.contains("host_indicator_state"))
         #expect(plan.scrubLocalTmuxEnvironment)
         #expect(endpoint.pollInterval == 1)
         #expect(endpoint.commandTimeout < endpoint.pollInterval)
@@ -46,10 +44,13 @@ struct HolyTmuxAgentStateMonitorTests {
         let fakeTmuxURL = binURL.appendingPathComponent("tmux")
         try """
         #!/bin/sh
-        printf '<%s>\\n' "$@"
-        printf 'TMUX=%s\\n' "${TMUX-unset}"
-        printf 'TMUX_PANE=%s\\n' "${TMUX_PANE-unset}"
-        printf 'TMUX_TMPDIR=%s\\n' "${TMUX_TMPDIR-unset}"
+        {
+          printf '<%s>\\n' "$@"
+          printf 'TMUX=%s\\n' "${TMUX-unset}"
+          printf 'TMUX_PANE=%s\\n' "${TMUX_PANE-unset}"
+          printf 'TMUX_TMPDIR=%s\\n' "${TMUX_TMPDIR-unset}"
+        } >> "$ZDOTDIR/tmux-trace"
+        python3 -c 'print("\\x1f".join(["socket", "fixture", "$1", "%1", "0", "0"] + [""] * 12))'
         """.write(to: fakeTmuxURL, atomically: true, encoding: .utf8)
         try fileManager.setAttributes(
             [.posixPermissions: 0o755],
@@ -77,12 +78,15 @@ struct HolyTmuxAgentStateMonitorTests {
             #expect(exitCode == 0)
             #expect(stderr.isEmpty)
             #expect(!outputOverflowed)
-            #expect(stdout.contains("<holy state>"))
-            #expect(stdout.contains("<list-panes>"))
-            #expect(stdout.contains("#{@holy_agent_state_v1}"))
-            #expect(stdout.contains("TMUX=unset"))
-            #expect(stdout.contains("TMUX_PANE=unset"))
-            #expect(stdout.contains("TMUX_TMPDIR=unset"))
+            let trace = try String(contentsOf: fixtureURL.appendingPathComponent("tmux-trace"), encoding: .utf8)
+            #expect(stdout.hasPrefix("fixture\u{1F}%1"))
+            #expect(trace.components(separatedBy: "<list-panes>").count == 2)
+            #expect(trace.contains("<holy state>"))
+            #expect(trace.contains("<list-panes>"))
+            #expect(trace.contains("#{@holy_agent_state_v1}"))
+            #expect(trace.contains("TMUX=unset"))
+            #expect(trace.contains("TMUX_PANE=unset"))
+            #expect(trace.contains("TMUX_TMPDIR=unset"))
         case .launchFailed:
             Issue.record("Login-shell tmux fixture failed to launch")
         case .timedOut:
@@ -109,12 +113,12 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(command.components(separatedBy: "list-panes").count == 2)
         #expect(command.contains("holy"))
         #expect(command.contains("prod"))
-        #expect(command.contains("#{@holy_agent_state_v1}"))
-        #expect(command.contains("#{@holy_agent_last_used_v1}"))
-        #expect(command.contains("#{@holy_seen_v1}"))
-        #expect(command.contains("#{@holy_agent_last_finished_v1}"))
+        #expect(command.contains("@holy_agent_state_v1"))
+        #expect(command.contains("@holy_agent_last_used_v1"))
+        #expect(command.contains("@holy_seen_v1"))
+        #expect(command.contains("@holy_agent_last_finished_v1"))
         #expect(!command.contains("show-options"))
-        #expect(!command.contains("display-message"))
+        #expect(command.contains("host_indicator_state"))
         #expect(!plan.scrubLocalTmuxEnvironment)
         #expect(endpoint.pollInterval == 0.75)
         #expect(endpoint.pollInterval + endpoint.commandTimeout < 2)
@@ -621,6 +625,17 @@ struct HolyTmuxAgentStateMonitorTests {
         } catch {
             Issue.record("Unexpected error: \(error)")
         }
+    }
+
+    @Test func legacyPromptSuppliesIdentityButMalformedRegisterCannotDowngradeToIt() throws {
+        let used = "v1|codex|working|1752500123456|prompt-1|legacy-thread|user-prompt"
+        let legacy = row(session: "alpha", pane: "%1", wire: nil, lastUsedWire: used)
+        let before = try parse(legacy)
+        #expect(before.values.first?.harnessIdentityEnvelope?.sessionID == "legacy-thread")
+        let malformed = try parse(legacy + "\u{1F}invalid")
+        #expect(malformed.values.first?.harnessIdentityEnvelope == nil)
+        let valid = try parse(legacy + "\u{1F}v1|codex|idle|1752500123457|identity-1|actual-thread|identity")
+        #expect(valid.values.first?.harnessIdentityEnvelope?.sessionID == "actual-thread")
     }
 
     @Test func observationKeysKeepHostsAndSocketsDistinct() throws {

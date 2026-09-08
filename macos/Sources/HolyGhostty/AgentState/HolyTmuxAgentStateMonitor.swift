@@ -112,6 +112,7 @@ struct HolyTmuxAgentStateObservation: Equatable, Sendable {
     /// the independent @holy_watcher_v1 register; nil when no pane publishes
     /// a valid claim or when multiple panes disagree.
     let watcherFireAt: Date?
+    var harnessIdentityEnvelope: HolyAgentStateEnvelope? = nil
 }
 
 struct HolyTmuxAgentStateSnapshot: Equatable, Sendable {
@@ -168,8 +169,6 @@ actor HolyTmuxAgentStateMonitor {
     ) async -> HolyTmuxAgentStateSnapshot
 
     private static let fieldSeparator = "\u{1F}"
-    private static let listPanesFormat =
-        "#{session_name}\u{1F}#{pane_id}\u{1F}#{@holy_agent_state_v1}\u{1F}#{@holy_agent_last_finished_v1}\u{1F}#{@holy_agent_last_used_v1}\u{1F}#{@holy_seen_v1}\u{1F}#{pane_dead}\u{1F}#{pane_current_command}\u{1F}#{window_activity}\u{1F}#{@holy_watcher_v1}"
     private static let maximumOutputBytes = 4 * 1_024 * 1_024
     private static let maximumLineBytes = 2 * 1_024
     private static let maximumPaneRows = 4_096
@@ -359,18 +358,17 @@ extension HolyTmuxAgentStateMonitor {
     static func commandPlan(
         for endpoint: HolyTmuxAgentStateEndpoint
     ) throws -> CommandPlan {
-        let tmuxArguments = tmuxCommandArguments(socketName: endpoint.socketName)
-
         switch endpoint.location {
         case .local:
             // GUI applications do not inherit the user's interactive shell
             // PATH. Resolve Homebrew (and other user-installed) tmux binaries
             // through a login shell, while treating every tmux argument as
             // data rather than executable shell syntax.
-            let command = (["tmux"] + tmuxArguments)
-                .map(posixQuote)
-                .joined(separator: " ")
-            let script = "unset TMUX TMUX_PANE TMUX_TMPDIR; exec \(command)"
+            let mirror = HolyHostStateMirror.command(
+                tmuxPrefix: ["tmux"] + (endpoint.socketName.map { ["-L", $0] } ?? []),
+                databasePath: HolyDatabasePaths.databaseURL.path, monitor: true
+            )
+            let script = "unset TMUX TMUX_PANE TMUX_TMPDIR; exec \(mirror)"
 
             return CommandPlan(
                 executablePath: "/bin/zsh",
@@ -391,10 +389,11 @@ extension HolyTmuxAgentStateMonitor {
                 )
             }
 
-            let command = (["tmux"] + tmuxArguments)
-                .map(posixQuote)
-                .joined(separator: " ")
-            let script = "unset TMUX TMUX_PANE TMUX_TMPDIR; exec \(command)"
+            let mirror = HolyHostStateMirror.command(
+                tmuxPrefix: ["tmux"] + (endpoint.socketName.map { ["-L", $0] } ?? []),
+                databasePath: "", monitor: true
+            )
+            let script = "unset TMUX TMUX_PANE TMUX_TMPDIR; exec \(mirror)"
 
             let transport = try HolySSHTransportManager.shared.command(
                 destination: destination,
@@ -445,6 +444,7 @@ extension HolyTmuxAgentStateMonitor {
             let currentCommand: String?
             let windowActivityAt: Date?
             let rawWatcherValue: String?
+            let rawIdentityValue: String?
         }
 
         var grouped: [String: [PaneValue]] = [:]
@@ -460,7 +460,8 @@ extension HolyTmuxAgentStateMonitor {
                 separator: Character(fieldSeparator),
                 omittingEmptySubsequences: false
             )
-            guard fields.count == 10,
+            // Accept snapshots emitted by generation 5 during a rolling upgrade.
+            guard (10 ... 11).contains(fields.count),
                   !fields[0].isEmpty,
                   !fields[1].isEmpty else {
                 throw HolyTmuxAgentStateMonitorFailure(
@@ -482,7 +483,8 @@ extension HolyTmuxAgentStateMonitor {
                 isDead: fields[6] == "1",
                 currentCommand: fields[7].isEmpty ? nil : String(fields[7]),
                 windowActivityAt: Int64(fields[8]).map { Date(timeIntervalSince1970: TimeInterval($0)) },
-                rawWatcherValue: fields[9].isEmpty ? nil : String(fields[9])
+                rawWatcherValue: fields[9].isEmpty ? nil : String(fields[9]),
+                rawIdentityValue: fields.count == 11 && !fields[10].isEmpty ? String(fields[10]) : nil
             ))
         }
 
@@ -501,6 +503,11 @@ extension HolyTmuxAgentStateMonitor {
                 nonEmptyUsedValues,
                 requiringReasonCode: HolySessionAttentionMetadata.humanUseReasonCode
             )
+            let identityValues = paneValues.compactMap(\.rawIdentityValue)
+            let identity = resolveRegister(identityValues, requiringReasonCode: "identity")
+            // Older hosts have no identity register. Their committed prompt
+            // can supply identity, but never downgrade an explicit conflict.
+            let identityEnvelope = identityValues.isEmpty ? used.envelope : identity.envelope
             let seenState = seenState(fromRawValues: paneValues.map(\.rawSeenValue))
 
             guard !nonEmptyValues.isEmpty || !nonEmptyFinishedValues.isEmpty else {
@@ -518,7 +525,8 @@ extension HolyTmuxAgentStateMonitor {
                     rawLastUsedWireValue: used.rawWireValue,
                     producerHasLiveProcess: nil,
                     producerLastOutputAt: nil,
-                    watcherFireAt: watcherFireAt(fromRawValues: paneValues.compactMap(\.rawWatcherValue))
+                    watcherFireAt: watcherFireAt(fromRawValues: paneValues.compactMap(\.rawWatcherValue)),
+                    harnessIdentityEnvelope: identityEnvelope
                 )
                 continue
             }
@@ -602,7 +610,8 @@ extension HolyTmuxAgentStateMonitor {
                 rawLastUsedWireValue: used.rawWireValue,
                 producerHasLiveProcess: producerHasLiveProcess,
                 producerLastOutputAt: producerLastOutputAt,
-                watcherFireAt: watcherFireAt(fromRawValues: paneValues.compactMap(\.rawWatcherValue))
+                watcherFireAt: watcherFireAt(fromRawValues: paneValues.compactMap(\.rawWatcherValue)),
+                    harnessIdentityEnvelope: identityEnvelope
             )
         }
 
@@ -715,15 +724,6 @@ extension HolyTmuxAgentStateMonitor {
         let rawValues = Set(rawSeenValues.compactMap(\.self))
         guard rawValues.count == 1, let raw = rawValues.first else { return nil }
         return try? HolyAgentSeenState(wireValue: raw)
-    }
-
-    private static func tmuxCommandArguments(socketName: String?) -> [String] {
-        var arguments: [String] = []
-        if let socketName {
-            arguments += ["-L", socketName]
-        }
-        arguments += ["list-panes", "-a", "-F", listPanesFormat]
-        return arguments
     }
 
     private static func posixQuote(_ value: String) -> String {

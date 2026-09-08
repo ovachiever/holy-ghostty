@@ -7,7 +7,7 @@ base_commit: a416dae2ab0c865b7e6dd68a63eaed6e89dd4c8a
 scope: '[P0][RESTORE][CODEX] Reboot restore recovery-archives every codex session: identity-only pairing meets the open codex identity gap'
 inputs:
 - Erik post-reboot report 2026-09-08 16:37 + DB receipts this session (64/73 NULL identity; 15:18 workspace_restore events; archive 514 codex rows)
-binding: sha256:c544c722292c2474147f46f0218f062a34bdf488d1171153130c277ba3ab36bc
+binding: sha256:3cfd697f88112fea3c52778a605e1927d190f2607cac7b55e25ce06af83270c7
 ---
 
 # Handoff: [P0][RESTORE][CODEX] Reboot restore recovery-archives every codex session: identity-only pairing meets the open codex identity gap
@@ -38,3 +38,11 @@ Erik 2026-09-08, post-reboot: zero codex sessions restored; all 73 recovery-arch
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-9a9728`.
 4. Commit with `Manna: mn-9a9728` and run `agent-do manna done mn-9a9728` only after the work is verified.
+
+## Implementation receipt, 2026-09-08
+
+Independent Codex identity capture and native restore candidate handling are implemented. Two real Codex conversations completed through the generated notification adapter and native persistence with non-null harness_session_id values. Current mn-40f637 was already done; this receipt supplies fresh provider evidence for its old acceptance gap. The next real machine reboot remains unverified.
+
+Final focused suites: 238 PASSED, 0 FAILED, 0 SKIPPED. Separate fresh-Codex acceptance: 1 PASSED, 0 FAILED, 0 SKIPPED (two real conversations across Xcode executions). Full report, exact IDs, failed-run history, and test-isolation correction: `.dev/mn-reboot-recovery/report.md`. A legacy test initially wrote eight synthetic host-journal rows; its database target is now isolated, and no session records were modified by that journal writer.
+
+Status remains `in_progress` for coordinated installed-app acceptance. No install or push. Do not run Clear against a live roster outside that coordinated acceptance.

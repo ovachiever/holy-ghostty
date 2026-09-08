@@ -441,7 +441,7 @@ struct HolyAgentStateBridgeTests {
 
         #expect(process.terminationStatus == 0)
         let captured = try String(contentsOf: captureURL, encoding: .utf8)
-        #expect(captured == "codex\nfinished\nturn-finished\n019f6280-5fc7-7093-a705-8d6f4916f911:turn-42\n")
+        #expect(captured == "codex\nfinished\nturn-finished\n019f6280-5fc7-7093-a705-8d6f4916f911:turn-42\n019f6280-5fc7-7093-a705-8d6f4916f911\n")
         #expect(!captured.contains("TOP SECRET"))
         let adapter = try String(contentsOf: adapterURL, encoding: .utf8)
         #expect(HolyAgentStateBridge.isOwnedCodexNotifyAdapter(adapter, helperURL: helperURL))
@@ -508,7 +508,7 @@ struct HolyAgentStateBridgeTests {
 
         #expect(process.terminationStatus == 0)
         let captured = try String(contentsOf: captureURL, encoding: .utf8)
-        #expect(captured == "codex\nfinished\nturn-finished\nturn-42\n")
+        #expect(captured == "codex\nfinished\nturn-finished\nturn-42\n\n")
         #expect(!captured.contains("TOP SECRET"))
     }
 
@@ -1078,6 +1078,17 @@ struct HolyAgentStateBridgeTests {
         last=""
         for argument in "$@"; do last=$argument; done
         case "$1" in
+          list-panes)
+            python3 - "$last" "\(directory.path)" "\(holyRuntime)" "\(holyOwner)" <<'PYTMUX'
+        import os, pathlib, re, sys
+        fmt, root, runtime, owner = sys.argv[1:]
+        values = {"socket_path": root + "/socket", "session_name": "fixture", "session_id": "$1", "pane_id": "%1", "window_index": "0", "pane_index": "0", "@holy_runtime": runtime, "@holy_agent_state_owner_v1": owner, "@holy_host_state_db_v1": root + "/host.sqlite3"}
+        for key in ["@holy_agent_state_v1", "@holy_agent_last_finished_v1", "@holy_agent_last_used_v1", "@holy_harness_identity_v1", "@holy_seen_v1"]:
+            path = pathlib.Path(os.environ.get("HOLY_FAKE_TMUX_STATE_DIR", root)) / key[1:]
+            values[key] = path.read_text() if path.exists() else ""
+        print(re.sub(r"#\\{([^}]+)\\}", lambda match: values.get(match[1], ""), fmt))
+        PYTMUX
+            ;;
           display-message)
             case "$last" in
               '#{@holy_agent_state_owner_v1}') printf '%s\\n' '\(holyOwner)' ;;
@@ -1137,6 +1148,8 @@ struct HolyAgentStateBridgeTests {
         environment.removeValue(forKey: "TMUX")
         environment.removeValue(forKey: "TMUX_PANE")
         environment["TERM"] = "xterm-256color"
+        environment["HOLY_HOST_STATE_DATABASE"] = FileManager.default.temporaryDirectory
+            .appendingPathComponent("holy-hook-journal-" + UUID().uuidString + ".sqlite3").path
         return environment
     }
 

@@ -7,7 +7,7 @@ base_commit: a416dae2ab0c865b7e6dd68a63eaed6e89dd4c8a
 scope: '[P1][STATE][SYNC] Seen/recency state must survive reboot: durable mirror + option rehydration'
 inputs:
 - Erik post-reboot report 2026-09-08 + fresh tmux server receipts (start_time post-boot, options empty)
-binding: sha256:5cb74a457d5e8461ce1d4ca9fe3d6c0050a0ba794a8ee40d925e824e85764f12
+binding: sha256:cccb76b63f1814039f29f2ee609085e646abd396e181a76bd7626ed69146eb86
 ---
 
 # Handoff: [P1][STATE][SYNC] Seen/recency state must survive reboot: durable mirror + option rehydration
@@ -38,3 +38,11 @@ Erik 2026-09-08 post-reboot: all recency/seen icons gone. Mechanism: mn-2c82a2 m
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-18be22`.
 4. Commit with `Manna: mn-18be22` and run `agent-do manna done mn-18be22` only after the work is verified.
+
+## Implementation receipt, 2026-09-08
+
+Schema 13 journals the producer host registers, and generated hooks/acks/restore/adoption/discovery preserve and rehydrate them. Real disposable tmux servers were destroyed and recreated successfully. Installed cross-machine acceptance and an actual host reboot remain unverified.
+
+Final focused suites: 238 PASSED, 0 FAILED, 0 SKIPPED. Separate fresh-Codex acceptance: 1 PASSED, 0 FAILED, 0 SKIPPED (two real conversations across Xcode executions). Full report, exact IDs, failed-run history, and test-isolation correction: `.dev/mn-reboot-recovery/report.md`. A legacy test initially wrote eight synthetic host-journal rows; its database target is now isolated, and no session records were modified by that journal writer.
+
+Status remains `in_progress` for coordinated installed-app acceptance. No install or push. Do not run Clear against a live roster outside that coordinated acceptance.

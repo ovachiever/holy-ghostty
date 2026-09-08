@@ -26,7 +26,7 @@ enum HolyAgentStateBridge {
     /// Generation ownership is deliberately separate from the v1 wire
     /// protocol. Bumping it lets the installer replace an older Holy-owned
     /// helper/plugin without treating a modified current generation as ours.
-    static let generationVersion = 5
+    static let generationVersion = 6
     static let openCodePluginFileName = "holy-agent-state.ts"
     static let codexNotifyAdapterFileName = "holy-codex-turn-complete.py"
     static let helperOwnershipMarkerPrefix =
@@ -150,8 +150,8 @@ enum HolyAgentStateBridge {
             # Future notification types are not completion evidence.
             raise SystemExit(0)
 
-        # Codex's documented payload carries turn-id only; thread-id is
-        # accepted as optional enrichment if a future Codex adds it.
+        # Keep conversation identity separate from the per-turn completion
+        # token. Payloads without thread-id still report completion honestly.
         thread_id = payload.get("thread-id")
         turn_id = payload.get("turn-id")
         if not metadata(turn_id, 64):
@@ -165,7 +165,7 @@ enum HolyAgentStateBridge {
 
         try:
             result = subprocess.run(
-                [HELPER, "codex", "finished", "turn-finished", completion_id],
+                [HELPER, "codex", "finished", "turn-finished", completion_id, thread_id or ""],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -197,7 +197,17 @@ enum HolyAgentStateBridge {
 
         var lines = contents.split(separator: "\n", omittingEmptySubsequences: false)
         lines[1] = Substring(codexNotifyAdapterOwnershipMarker)
-        return lines.joined(separator: "\n") == current
+        let normalized = lines.joined(separator: "\n")
+        let previous = current
+            .replacingOccurrences(
+                of: "[HELPER, \"codex\", \"finished\", \"turn-finished\", completion_id, thread_id or \"\"]",
+                with: "[HELPER, \"codex\", \"finished\", \"turn-finished\", completion_id]"
+            )
+            .replacingOccurrences(
+                of: "# Keep conversation identity separate from the per-turn completion\n# token. Payloads without thread-id still report completion honestly.",
+                with: "# Codex's documented payload carries turn-id only; thread-id is\n# accepted as optional enrichment if a future Codex adds it."
+            )
+        return normalized == current || normalized == previous
     }
 
     /// Arguments only: callers retain control of the exact tmux socket/server
@@ -422,11 +432,18 @@ enum HolyAgentStateBridge {
       return 0
     }
 
-    [ "$#" -ge 2 ] && [ "$#" -le 4 ] || exit 64
+    [ "$#" -ge 2 ] && [ "$#" -le 5 ] || exit 64
     source=$1
     lifecycle=$2
     reason=${3:-}
     raw_session=${4:-}
+    identity=${5:-}
+    if [ "$source" != "codex" ] || [ "$reason" != "turn-finished" ]; then
+      identity=$raw_session
+    fi
+    if [ -n "$identity" ]; then
+      metadata_field_is_valid "$identity" 128 || identity=""
+    fi
 
     metadata_field_is_valid "$source" 48 || exit 64
     case "$lifecycle" in
@@ -468,6 +485,15 @@ enum HolyAgentStateBridge {
       ''|*[!0-9]*) exit 70 ;;
     esac
 
+    # Conversation identity is independent of latest lifecycle and turn tokens.
+    if [ -n "$identity" ]; then
+      identity_wire="v1|$source|idle|$now_ms|$now_ms-identity|$identity|identity"
+      tmux set-option -pq -t "$TMUX_PANE" @holy_harness_identity_v1 "$identity_wire" || exit 1
+    fi
+    mirror_state() {
+      python3 -c \#(HolyHostStateMirror.quote(HolyHostStateMirror.script)) snapshot "" '["tmux"]' "$TMUX_PANE"
+    }
+
     previous=""
     reuse_previous=0
     if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
@@ -500,6 +526,7 @@ enum HolyAgentStateBridge {
           fi
         fi
         if [ "$durable_copy_required" -eq 0 ] || [ "$durable_copy_needs_repair" -eq 0 ]; then
+          mirror_state || exit 1
           exit 0
         fi
         # The latest register committed but one of its independent registers
@@ -546,6 +573,8 @@ enum HolyAgentStateBridge {
         fi
       fi
     fi
+
+    mirror_state || exit 1
 
     # OSC is only an acceleration path for an event that is already durable.
     # Its failure cannot erase a committed event, and its success cannot make

@@ -1206,6 +1206,14 @@ final class HolySession: ObservableObject, Identifiable {
         return true
     }
 
+    /// Independent identity may be discovered after lifecycle has advanced.
+    @discardableResult
+    func captureHarnessSessionIdentity(from envelope: HolyAgentStateEnvelope) -> Bool {
+        guard record.captureHarnessSessionIdentity(from: envelope) else { return false }
+        markUpdated()
+        return true
+    }
+
     /// Minimum interval before this session is eligible for another derived-state poll,
     /// based on whether it is currently presented in the workspace.
     var derivedStateRefreshInterval: TimeInterval {

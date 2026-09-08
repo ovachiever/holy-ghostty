@@ -309,6 +309,12 @@ struct HolyTmuxSessionMetadataUpdateCommand: Sendable, Equatable {
                 "\(tmuxCommandPrefix) 'set-option' '-q' '-t' \"$holy_session_id\" "
                     + "'@holy_seen_v1' \(posixQuote(seenStateWireValue))"
             )
+            commands.append(HolyHostStateMirror.command(
+                tmuxPrefix: tmuxArguments,
+                target: sessionName,
+                databasePath: launchSpec.transport.isRemote ? "" : HolyDatabasePaths.databaseURL.path,
+                restore: false
+            ))
         }
         guard !commands.isEmpty else { return nil }
 

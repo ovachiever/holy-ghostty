@@ -664,6 +664,59 @@ struct HolyRestoreEngineTests {
         #expect(Set(commands).count == 2, "Two rows restored the same conversation: \(commands)")
     }
 
+    @Test func codexRebootRowsWithoutIdentityUseConfidenceOracle() async throws {
+        let lane = archived(runtime: .codex, command: "codex", createIfMissing: false)
+        #expect(lane.record.harnessSessionID == nil)
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [
+            candidate("codex-archived-thread", resumeCommand: "unsafe arbitrary archive command"),
+        ]])
+        let (engine, adapter, tmux) = makeEngine(archives: [lane], resolver: resolver)
+        engine.buildPlan()
+        await engine.runPreflight()
+        #expect(resolver.calls == [[.init(cwd: "/tmp/lane-a", harness: "codex", near: Self.lastActivity)]])
+        #expect((try #require(engine.rows.first)).state == .exactResume(providerSessionID: "codex-archived-thread"))
+        await engine.restoreSelected()
+        #expect(tmux.createdSpecs.compactMap(\.command) == ["'codex' 'resume' 'codex-archived-thread'"])
+        #expect(adapter.attachedArchiveIDs == [lane.id])
+    }
+
+    @Test func identitylessCodexAmbiguityAndMissingHistoryStayVisible() async throws {
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [
+            candidate("one"), candidate("two", end: Self.lastActivity - 10),
+        ]])
+        let (engine, _, tmux) = makeEngine(archives: [
+            archived(runtime: .codex, command: "codex", sessionName: "ambiguous"),
+            archived(runtime: .codex, workingDirectory: "/tmp/lane-b", command: "codex", sessionName: "missing"),
+        ], resolver: resolver)
+        engine.buildPlan()
+        await engine.runPreflight()
+        guard case .ambiguous = try row(engine, sessionName: "ambiguous").state else {
+            Issue.record("Identityless Codex tie must offer the picker")
+            return
+        }
+        #expect(try row(engine, sessionName: "missing").state == .missingHistory)
+        await engine.restoreAll()
+        #expect(engine.rows.count == 2)
+        // Missing history's explicit fallback is an empty shell; it must
+        // never launch a provider or spend an ambiguous conversation.
+        #expect(tmux.createdSpecs.count == 1)
+        #expect(tmux.createdSpecs.first?.runtime == .shell)
+        #expect(tmux.createdSpecs.first?.command == nil)
+    }
+
+    @Test func storedCodexIdentityWinsOverNearestArchiveConversation() async throws {
+        var lane = archived(runtime: .codex, command: "codex")
+        lane.record.harnessSessionID = "known-codex-thread"
+        let resolver = FakeBatchResolver(candidatesByCwd: ["/tmp/lane-a": [candidate("wrong-nearest")]])
+        let (engine, _, tmux) = makeEngine(archives: [lane], resolver: resolver)
+        engine.buildPlan()
+        await engine.runPreflight()
+        #expect(resolver.calls.isEmpty)
+        #expect((try #require(engine.rows.first)).state == .exactResume(providerSessionID: "known-codex-thread"))
+        await engine.restoreAll()
+        #expect(tmux.createdSpecs.compactMap(\.command) == ["'codex' 'resume' 'known-codex-thread'"])
+    }
+
     // MARK: - Identity-keyed restore (field failure 2026-08-31)
 
     @Test func aStoredHarnessSessionIDShortCircuitsTheResolver() async throws {

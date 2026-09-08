@@ -154,6 +154,15 @@ enum HolyTmuxCommandBuilder {
             }
         }
 
+        let databasePath = launchSpec.transport.isRemote ? "" : HolyDatabasePaths.databaseURL.path
+        if !databasePath.isEmpty {
+            lines.append(shellCommand(tmuxPrefix + [
+                "set-option", "-q", "-t", sessionName, "@holy_host_state_db_v1", databasePath,
+            ]))
+        }
+        lines.append(HolyHostStateMirror.command(
+            tmuxPrefix: tmuxPrefix, target: sessionName, databasePath: databasePath
+        ) + " || exit 1")
         if attach {
             lines.append("exec \(shellCommand(tmuxPrefix + ["attach", "-t", sessionName]))")
         }
@@ -172,7 +181,20 @@ enum HolyTmuxCommandBuilder {
             shellScript = "exec ${SHELL:-/bin/zsh} -l"
         }
 
-        return "sh -lc \(posixQuote(shellScript))"
+        // The new pane can execute before new-session returns to its parent.
+        // Stamp ownership and restore durable registers inside the pane before
+        // starting the provider, so its SessionStart hook cannot miss ownership.
+        let databasePath = launchSpec.transport.isRemote ? "" : HolyDatabasePaths.databaseURL.path
+        var preamble = [
+            "tmux set-option -pq -t \"$TMUX_PANE\" @holy_agent_state_owner_v1 holy || exit 1",
+        ]
+        if !databasePath.isEmpty {
+            preamble.append("tmux set-option -q -t \"$TMUX_PANE\" @holy_host_state_db_v1 \(posixQuote(databasePath)) || exit 1")
+        }
+        preamble.append(HolyHostStateMirror.command(
+            tmuxPrefix: ["tmux"], databasePath: databasePath
+        ) + " || exit 1")
+        return "sh -lc \(posixQuote((preamble + [shellScript]).joined(separator: "; ")))"
     }
 
     private static let clearClaudeOwnedModelLabelCommand = """
