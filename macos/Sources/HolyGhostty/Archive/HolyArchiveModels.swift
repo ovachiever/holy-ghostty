@@ -119,7 +119,7 @@ struct HolyArchiveSession: Codable, Identifiable, Equatable, Sendable {
         return "[\(harness.rawValue)/\(projectName) @ \(formatter.string(from: activityAt)) · \(shortID)]"
     }
 
-    var shortID: String { String(id.prefix(8)) }
+    var shortID: String { String(providerSessionID.prefix(8)) }
 }
 
 enum HolyArchiveChunkType: String, Codable, CaseIterable, Sendable {

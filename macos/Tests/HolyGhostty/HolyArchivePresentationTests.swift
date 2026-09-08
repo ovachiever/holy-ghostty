@@ -45,6 +45,16 @@ struct HolyArchivePresentationTests {
         #expect(Present.childCountText(0) == "·")
         #expect(Present.childCountText(3) == "3")
         #expect(Present.projectLabel(ArchiveFixtures.session(id: "p", projectName: "versova-supply-intelligence")) == "versova-supply-intelligence")
+        let local = ArchiveFixtures.session(id: "local")
+        #expect(Present.sourceLabel(for: local) == "This Mac · codex")
+        var remote = ArchiveFixtures.session(id: "remote")
+        remote.extra[HolyArchiveSourceMetadata.rawSessionID] = "provider-id"
+        remote.extra[HolyArchiveSourceMetadata.hostID] = UUID().uuidString
+        remote.extra[HolyArchiveSourceMetadata.hostLabel] = "Studio"
+        remote.extra[HolyArchiveSourceMetadata.sshDestination] = "studio.tailnet"
+        remote.extra[HolyArchiveSourceMetadata.stale] = "true"
+        #expect(Present.sourceLabel(for: remote) == "Studio [stale] · codex")
+        #expect(Present.sourceDetail(for: remote).contains("Studio · studio.tailnet · stale"))
     }
 
     @Test func listHeadsFollowTheParentHeaderStrings() {

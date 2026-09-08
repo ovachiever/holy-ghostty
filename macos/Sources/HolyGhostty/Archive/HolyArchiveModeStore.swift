@@ -89,27 +89,37 @@ final class HolyArchiveModeStore: ObservableObject {
     private let storageMigrator: HolyArchiveLegacyDatabaseMigrator?
     private let search: HolyArchiveHybridSearch?
     private let researchAgent: HolyArchiveResearchAgent?
+    private let federation: HolyArchiveFederation
+    private let remoteHostsProvider: @MainActor () -> [HolyRemoteHostRecord]
     private let resumeHandler: @MainActor (HolyArchiveSession) -> Bool
     private var searchResponse: HolyArchiveSearchResponse?
+    private var federatedChildCountsByParentID: [String: Int] = [:]
     private var didPrepare = false
     private var loadGeneration = 0
+    private var searchGeneration = 0
+    private var childrenLoadGeneration = 0
+    private var annotationLoadGeneration = 0
     private var lastLeftNavigationPane: HolyArchiveNavigationPane = .parents
 
     init(
         registry: HolyArchiveProviderRegistry = .init(),
         databaseURL: URL = HolyDatabasePaths.archiveDatabaseURL,
+        federation: HolyArchiveFederation? = nil,
+        remoteHostsProvider: @escaping @MainActor () -> [HolyRemoteHostRecord] = { [] },
         resumeHandler: @escaping @MainActor (HolyArchiveSession) -> Bool
     ) {
         self.registry = registry
+        self.remoteHostsProvider = remoteHostsProvider
         self.resumeHandler = resumeHandler
         self.researchModel = UserDefaults.standard.string(forKey: "holy.intelligence.deep.model")
             ?? HolyIntelligenceRole.deep.defaultModel
         self.reasoningEffort = UserDefaults.standard.string(forKey: "holy.archive.research.effort") ?? "xhigh"
+        let pacer = HolyArchiveWritePacer(isForeground: {
+            await MainActor.run { NSApp.isActive }
+        })
+        self.federation = federation ?? HolyArchiveFederation(pacer: pacer)
         do {
             let repository = try HolyArchiveRepository(databaseURL: databaseURL)
-            let pacer = HolyArchiveWritePacer(isForeground: {
-                await MainActor.run { NSApp.isActive }
-            })
             let search = HolyArchiveHybridSearch(repository: repository)
             let tools = HolyArchiveResearchTools(
                 repository: repository, search: search, registry: registry
@@ -145,7 +155,19 @@ final class HolyArchiveModeStore: ObservableObject {
     }
 
     var availableHarnesses: [HolyArchiveHarness] {
-        registry.availableProviders.map(\.harness)
+        let local = registry.availableProviders.map(\.harness)
+        guard !remoteHosts.isEmpty else { return local }
+        return HolyArchiveHarness.allCases
+    }
+
+    var canModifySelectedSession: Bool {
+        selectedSession?.isRemoteArchiveSession == false
+    }
+
+    private var remoteHosts: [HolyArchiveRemoteHost] {
+        remoteHostsProvider()
+            .map(HolyArchiveRemoteHost.init)
+            .filter { $0.sshDestination.holyArchiveNilIfBlank != nil }
     }
 
     var selectedParent: HolyArchiveSession? {
@@ -230,42 +252,104 @@ final class HolyArchiveModeStore: ObservableObject {
         let generation = loadGeneration
         let filter = providerFilter
         let activeResponse = searchResponse
+        let hosts = remoteHosts
         Task {
             do {
-                let loaded: [HolyArchiveSession]
-                let total: Int
                 if let activeResponse {
-                    loaded = Self.sorted(activeResponse.results, by: sort).map(\.session)
-                    total = loaded.count
-                } else {
-                    let query = HolyArchiveSearchQuery(
-                        text: "", harness: filter, rawHarness: nil,
-                        project: nil, after: nil, before: nil, tags: []
-                    )
-                    let all = try await Task.detached {
-                        try repository.sessions(query: query, parentsOnly: true)
+                    let loaded = Self.sorted(activeResponse.results, by: sort).map(\.session)
+                    let localIDs = loaded.filter { !$0.isRemoteArchiveSession }.map(\.id)
+                    let localCounts = try await Task.detached {
+                        try repository.childCounts(parentIDs: localIDs)
                     }.value
-                    total = all.count
-                    loaded = Array(all.prefix(Self.maximumDisplayedSessions))
+                    guard generation == loadGeneration else { return }
+                    sessions = loaded
+                    totalParentCount = loaded.count
+                    childCountsByParentID = localCounts.merging(
+                        federatedChildCountsByParentID,
+                        uniquingKeysWith: { _, remote in remote }
+                    )
+                    finishSessionLoad(loaded: loaded, clearStatus: false)
+                    return
                 }
-                let childCounts = try await Task.detached {
-                    try repository.childCounts(parentIDs: loaded.map(\.id))
+
+                let query = HolyArchiveSearchQuery(
+                    text: "", harness: filter, rawHarness: nil,
+                    project: nil, after: nil, before: nil, tags: []
+                )
+                let local = try await Task.detached {
+                    try repository.sessions(query: query, parentsOnly: true)
                 }.value
+                let cached = await federation.parents(
+                    hosts: hosts,
+                    query: query,
+                    limit: Self.maximumDisplayedSessions,
+                    policy: .cacheOnly
+                )
                 guard generation == loadGeneration else { return }
-                sessions = loaded
-                totalParentCount = total
-                childCountsByParentID = childCounts
-                isLoading = false
-                statusMessage = nil
-                if selectedSessionID.flatMap({ id in loaded.first { $0.id == id } }) == nil {
-                    selectedSessionID = loaded.first?.id
+                try await applySessionLoad(
+                    local: local,
+                    remote: cached,
+                    repository: repository,
+                    generation: generation
+                )
+
+                guard !hosts.isEmpty, generation == loadGeneration else { return }
+                let refreshed = await federation.parents(
+                    hosts: hosts,
+                    query: query,
+                    limit: Self.maximumDisplayedSessions,
+                    policy: .refresh
+                )
+                guard generation == loadGeneration else { return }
+                try await applySessionLoad(
+                    local: local,
+                    remote: refreshed,
+                    repository: repository,
+                    generation: generation
+                )
+                if !refreshed.notices.isEmpty {
+                    statusMessage = refreshed.notices.joined(separator: " ")
                 }
-                selectParent(selectedSessionID)
             } catch {
                 isLoading = false
                 fail("Loading the archive failed", error)
             }
         }
+    }
+
+    private func applySessionLoad(
+        local: [HolyArchiveSession],
+        remote: HolyArchiveFederatedSessions,
+        repository: HolyArchiveRepository,
+        generation: Int
+    ) async throws {
+        let loaded = Array(
+            (local + remote.sessions)
+                .sorted {
+                    if $0.activityAt != $1.activityAt { return $0.activityAt > $1.activityAt }
+                    return $0.id < $1.id
+                }
+                .prefix(Self.maximumDisplayedSessions)
+        )
+        let localIDs = loaded.filter { !$0.isRemoteArchiveSession }.map(\.id)
+        let localCounts = try await Task.detached {
+            try repository.childCounts(parentIDs: localIDs)
+        }.value
+        guard generation == loadGeneration else { return }
+        federatedChildCountsByParentID = remote.childCounts
+        sessions = loaded
+        totalParentCount = local.count + remote.total
+        childCountsByParentID = localCounts.merging(remote.childCounts) { _, remote in remote }
+        finishSessionLoad(loaded: loaded)
+    }
+
+    private func finishSessionLoad(loaded: [HolyArchiveSession], clearStatus: Bool = true) {
+        isLoading = false
+        if clearStatus { statusMessage = nil }
+        if selectedSessionID.flatMap({ id in loaded.first { $0.id == id } }) == nil {
+            selectedSessionID = loaded.first?.id
+        }
+        selectParent(selectedSessionID)
     }
 
     func incrementalIndex() {
@@ -395,28 +479,88 @@ final class HolyArchiveModeStore: ObservableObject {
         if let providerFilter, HolyArchiveSearchParser.parse(value).harness == nil {
             effective += " harness:\"\(providerFilter.rawValue)\""
         }
+        searchGeneration += 1
+        let generation = searchGeneration
+        let hosts = remoteHosts
         isSearching = true
         statusMessage = "Searching the archive..."
         Task {
             do {
-                let response = try await search.search(effective, limit: 50)
-                searchResponse = response
-                semanticStatus = response.semanticStatus
-                selectedSearchResult = response.results.first
-                sort = .relevance
-                isSearching = false
-                statusMessage = response.results.isEmpty
-                    ? "No sessions matched."
-                    : "Found \(response.results.count) sessions in \(Int(response.elapsedMilliseconds)) ms."
-                refreshSessions()
+                let local = try await search.search(effective, limit: 50)
+                let cached = await federation.search(
+                    hosts: hosts,
+                    query: local.query,
+                    semanticQueryVector: local.semanticQueryVector,
+                    limit: 50,
+                    policy: .cacheOnly
+                )
+                guard generation == searchGeneration else { return }
+                applySearch(local: local, remote: cached)
+
+                guard !hosts.isEmpty, generation == searchGeneration else { return }
+                let refreshed = await federation.search(
+                    hosts: hosts,
+                    query: local.query,
+                    semanticQueryVector: local.semanticQueryVector,
+                    limit: 50,
+                    policy: .refresh
+                )
+                guard generation == searchGeneration else { return }
+                applySearch(local: local, remote: refreshed)
             } catch {
+                guard generation == searchGeneration else { return }
                 isSearching = false
                 fail("Search failed", error)
             }
         }
     }
 
+    private func applySearch(
+        local: HolyArchiveSearchResponse,
+        remote: HolyArchiveFederatedSearch
+    ) {
+        let combined = Self.sorted(local.results + remote.results, by: .relevance)
+        let visible = Array(combined.prefix(50))
+        let visibleIDs = Set(visible.map(\.session.id))
+        let children = local.matchingChildrenByParentID
+            .merging(remote.matchingChildren) { local, remote in local + remote }
+            .filter { visibleIDs.contains($0.key) }
+        let response = HolyArchiveSearchResponse(
+            query: local.query,
+            results: visible,
+            matchingChildrenByParentID: children,
+            semanticStatus: local.semanticStatus,
+            semanticQueryVector: local.semanticQueryVector,
+            elapsedMilliseconds: local.elapsedMilliseconds
+        )
+        searchResponse = response
+        federatedChildCountsByParentID = remote.childCounts
+        semanticStatus = remote.results.isEmpty
+            ? local.semanticStatus
+            : [
+                local.semanticStatus,
+                local.semanticQueryVector == nil
+                    ? "Remote hosts contribute indexed keyword matches."
+                    : "Remote hosts contribute indexed keyword and semantic matches.",
+            ].compactMap { $0 }.joined(separator: " ")
+        selectedSearchResult = response.results.first
+        sort = .relevance
+        isSearching = false
+        if response.results.isEmpty {
+            statusMessage = remote.notices.isEmpty
+                ? "No sessions matched."
+                : "No sessions matched. \(remote.notices.joined(separator: " "))"
+        } else {
+            statusMessage = "Found \(response.results.count) sessions in \(Int(response.elapsedMilliseconds)) ms."
+            if !remote.notices.isEmpty {
+                statusMessage? += " \(remote.notices.joined(separator: " "))"
+            }
+        }
+        refreshSessions()
+    }
+
     func clearSearch() {
+        searchGeneration += 1
         query = ""
         searchResponse = nil
         selectedSearchResult = nil
@@ -454,6 +598,8 @@ final class HolyArchiveModeStore: ObservableObject {
         selectedChildID = nil
         transcriptIsPresented = false
         transcriptFindIsPresented = false
+        childrenLoadGeneration += 1
+        let generation = childrenLoadGeneration
         guard let id, let repository else {
             children = []
             annotations = []
@@ -462,6 +608,23 @@ final class HolyArchiveModeStore: ObservableObject {
         if let response = searchResponse {
             selectedSearchResult = response.results.first { $0.session.id == id }
             children = response.matchingChildrenByParentID[id] ?? []
+        } else if let session = selectedParent, session.isRemoteArchiveSession {
+            selectedSearchResult = nil
+            children = []
+            Task {
+                let cached = await federation.children(of: session, policy: .cacheOnly)
+                guard generation == childrenLoadGeneration, selectedSessionID == session.id else { return }
+                children = cached
+                if selectedChildID.flatMap({ childID in cached.first { $0.id == childID } }) == nil {
+                    selectedChildID = nil
+                }
+                let refreshed = await federation.children(of: session, policy: .refresh)
+                guard generation == childrenLoadGeneration, selectedSessionID == session.id else { return }
+                children = refreshed
+                if selectedChildID.flatMap({ childID in refreshed.first { $0.id == childID } }) == nil {
+                    selectedChildID = nil
+                }
+            }
         } else {
             selectedSearchResult = nil
             children = (try? repository.relatedChildren(of: id)) ?? []
@@ -479,19 +642,37 @@ final class HolyArchiveModeStore: ObservableObject {
     }
 
     func reloadAnnotations() {
-        guard let id = selectedSession?.id, let repository else {
+        annotationLoadGeneration += 1
+        let generation = annotationLoadGeneration
+        guard let session = selectedSession, let repository else {
             annotations = []
             return
         }
+        if session.isRemoteArchiveSession {
+            annotations = []
+            Task {
+                let cached = await federation.annotations(for: session, policy: .cacheOnly)
+                guard generation == annotationLoadGeneration, selectedSession?.id == session.id else { return }
+                annotations = cached
+                let refreshed = await federation.annotations(for: session, policy: .refresh)
+                guard generation == annotationLoadGeneration, selectedSession?.id == session.id else { return }
+                annotations = refreshed
+            }
+            return
+        }
         do {
-            annotations = try repository.annotations(sessionID: id)
+            annotations = try repository.annotations(sessionID: session.id)
         } catch {
             fail("Loading annotations failed", error)
         }
     }
 
     func beginAnnotation(_ mode: HolyArchiveAnnotationMode) {
-        guard selectedSession != nil else { return }
+        guard let session = selectedSession else { return }
+        guard !session.isRemoteArchiveSession else {
+            errorMessage = "Remote archives are read-only. Tags and notes stay on their owning host."
+            return
+        }
         annotationDraft = ""
         annotationMode = mode
     }
@@ -503,6 +684,11 @@ final class HolyArchiveModeStore: ObservableObject {
 
     func saveAnnotation() {
         guard let repository, let session = selectedSession, let mode = annotationMode else { return }
+        guard !session.isRemoteArchiveSession else {
+            errorMessage = "Remote archives are read-only. No annotation was written."
+            cancelAnnotation()
+            return
+        }
         do {
             _ = try repository.addAnnotation(
                 sessionID: session.id, kind: mode.kind, value: annotationDraft
@@ -516,7 +702,11 @@ final class HolyArchiveModeStore: ObservableObject {
     }
 
     func deleteAnnotation(_ annotation: HolyArchiveAnnotation) {
-        guard let repository else { return }
+        guard let repository, let session = selectedSession else { return }
+        guard !session.isRemoteArchiveSession else {
+            errorMessage = "Remote archives are read-only. No annotation was deleted."
+            return
+        }
         do {
             try repository.deleteAnnotation(id: annotation.id)
             reloadAnnotations()
@@ -531,6 +721,23 @@ final class HolyArchiveModeStore: ObservableObject {
         transcript = []
         visibleTranscriptMessageID = nil
         statusMessage = "Loading transcript..."
+        if session.isRemoteArchiveSession {
+            Task {
+                let cached = await federation.messages(for: session, policy: .cacheOnly)
+                guard transcriptIsPresented, selectedSession?.id == session.id else { return }
+                if !cached.isEmpty {
+                    transcript = cached
+                    statusMessage = nil
+                    recomputeFind()
+                }
+                let loaded = await federation.messages(for: session, policy: .refresh)
+                guard transcriptIsPresented, selectedSession?.id == session.id else { return }
+                transcript = loaded
+                statusMessage = loaded.isEmpty ? "No cached or live messages found." : nil
+                recomputeFind()
+            }
+            return
+        }
         let provider = registry.provider(for: session.harness)
         Task {
             do {
@@ -587,7 +794,12 @@ final class HolyArchiveModeStore: ObservableObject {
     }
 
     func copyResumeCommand() {
-        guard let command = selectedSession?.resumeCommand else {
+        guard let session = selectedSession else { return }
+        guard !session.isRemoteArchiveSession else {
+            errorMessage = "That resume command belongs on \(session.archiveSource.hostLabel). Use Resume to run it through Holy's managed remote roster."
+            return
+        }
+        guard let command = session.resumeCommand else {
             errorMessage = "This provider has no safe native resume command."
             return
         }
@@ -609,7 +821,7 @@ final class HolyArchiveModeStore: ObservableObject {
 
     func resumeSelected() {
         guard let session = selectedSession else { return }
-        guard session.resumeCommand != nil, session.harness.runtime != nil else {
+        guard HolyArchiveResumeLaunchSpec.make(for: session) != nil else {
             errorMessage = "\(session.harness.displayName) does not expose a safe in-process resume target."
             return
         }
@@ -623,6 +835,10 @@ final class HolyArchiveModeStore: ObservableObject {
 
     func generateTitle() {
         guard let session = selectedSession, let repository, !isGeneratingTitle else { return }
+        guard !session.isRemoteArchiveSession else {
+            errorMessage = "Remote archives are read-only. Generate the title on \(session.archiveSource.hostLabel)."
+            return
+        }
         isGeneratingTitle = true
         Task {
             do {

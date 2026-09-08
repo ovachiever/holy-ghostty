@@ -155,6 +155,7 @@ struct HolyArchiveSearchResponse: Equatable, Sendable {
     let results: [HolyArchiveSearchResult]
     let matchingChildrenByParentID: [String: [HolyArchiveSession]]
     let semanticStatus: String?
+    let semanticQueryVector: [Float]?
     let elapsedMilliseconds: Double
 }
 
@@ -194,6 +195,7 @@ actor HolyArchiveHybridSearch {
         let candidates = try repository.sessions(query: query)
         let candidateByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
         var semanticStatus: String?
+        var semanticQueryVector: [Float]?
         var rawResults: [HolyArchiveSearchResult]
 
         if query.isFiltersOnly {
@@ -210,6 +212,7 @@ actor HolyArchiveHybridSearch {
                 do {
                     let vectors = try await embedder.embed([query.text], purpose: .query)
                     if let vector = vectors.first {
+                        semanticQueryVector = vector
                         semantic = try semanticMatches(queryVector: vector, candidateIDs: Set(candidateByID.keys))
                     } else {
                         semanticStatus = "Semantic search returned no query vector. Keyword results remain available."
@@ -246,6 +249,7 @@ actor HolyArchiveHybridSearch {
             results: results,
             matchingChildrenByParentID: matchingChildren,
             semanticStatus: semanticStatus,
+            semanticQueryVector: semanticQueryVector,
             elapsedMilliseconds: elapsed
         )
     }
@@ -267,7 +271,14 @@ actor HolyArchiveHybridSearch {
         }.sorted { $0.score > $1.score }
         let elapsed = Date().timeIntervalSince(started) * 1000
         try repository.recordSearch(query: rawQuery, results: results, elapsedMilliseconds: elapsed)
-        return .init(query: query, results: Array(results.prefix(limit)), matchingChildrenByParentID: [:], semanticStatus: nil, elapsedMilliseconds: elapsed)
+        return .init(
+            query: query,
+            results: Array(results.prefix(limit)),
+            matchingChildrenByParentID: [:],
+            semanticStatus: nil,
+            semanticQueryVector: nil,
+            elapsedMilliseconds: elapsed
+        )
     }
 
     func searchSemanticOnly(_ rawQuery: String, limit: Int = 50) async throws -> HolyArchiveSearchResponse {
@@ -281,11 +292,13 @@ actor HolyArchiveHybridSearch {
             return .init(
                 query: query, results: [], matchingChildrenByParentID: [:],
                 semanticStatus: "Semantic search is off because the selected embedding provider has no API key.",
+                semanticQueryVector: nil,
                 elapsedMilliseconds: elapsed
             )
         }
         let vectors = try await embedder.embed([query.text], purpose: .query)
-        let raw = try vectors.first.map { try semanticMatches(queryVector: $0, candidateIDs: Set(byID.keys)) } ?? [:]
+        let queryVector = vectors.first
+        let raw = try queryVector.map { try semanticMatches(queryVector: $0, candidateIDs: Set(byID.keys)) } ?? [:]
         let normalized = Self.normalized(raw.mapValues(\.score))
         let results = raw.compactMap { id, match -> HolyArchiveSearchResult? in
             guard let session = byID[id] else { return nil }
@@ -296,7 +309,14 @@ actor HolyArchiveHybridSearch {
         }.sorted { $0.score > $1.score }
         let elapsed = Date().timeIntervalSince(started) * 1000
         try repository.recordSearch(query: rawQuery, results: results, elapsedMilliseconds: elapsed)
-        return .init(query: query, results: Array(results.prefix(limit)), matchingChildrenByParentID: [:], semanticStatus: nil, elapsedMilliseconds: elapsed)
+        return .init(
+            query: query,
+            results: Array(results.prefix(limit)),
+            matchingChildrenByParentID: [:],
+            semanticStatus: nil,
+            semanticQueryVector: queryVector,
+            elapsedMilliseconds: elapsed
+        )
     }
 
     private func semanticMatches(

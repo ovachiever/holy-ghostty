@@ -397,7 +397,8 @@ struct HolyArchiveModeView: View {
                     columnOrder: columnOrder
                 )
                 resizableHeader(
-                    "harness",
+                    "source",
+                    columnID: "harness",
                     columns: columns,
                     boundary: HolyLedgerColumnBoundaries.archive(column: "harness", showsProject: showsProject),
                     columnOrder: columnOrder
@@ -477,7 +478,7 @@ struct HolyArchiveModeView: View {
                 .foregroundStyle(Palette.faint)
                 .lineLimit(1)
                 .frame(width: columns.width("date"), alignment: .leading)
-            Text(Present.shortLabel(for: session.harness))
+            Text(Present.sourceLabel(for: session))
                 .foregroundStyle(Palette.wordColor(forClass: cls))
                 .lineLimit(1)
                 .frame(width: columns.width("harness"), alignment: .leading)
@@ -512,6 +513,7 @@ struct HolyArchiveModeView: View {
                 store.selectParent(session.id)
                 store.copyResumeCommand()
             }
+            .disabled(session.isRemoteArchiveSession)
             Button("resume in roster") {
                 store.selectParent(session.id)
                 store.resumeSelected()
@@ -760,6 +762,7 @@ struct HolyArchiveModeView: View {
             metaRow("harness") {
                 Text(session.harness.displayName).fontWeight(.medium).foregroundStyle(Palette.wordColor(forClass: cls))
             }
+            metaRow("host") { metaValue(Present.sourceDetail(for: session)) }
             metaRow("type") { metaValue(Present.typeLine(for: session, childCount: childCount)) }
             metaRow("title") { metaValue(Present.detailTitle(for: session)) }
             metaRow("path") { metaValue(session.projectPath ?? "Unknown") }
@@ -767,7 +770,7 @@ struct HolyArchiveModeView: View {
             metaRow("model") {
                 Text(session.model ?? "Unknown").fontWeight(.medium).foregroundStyle(Palette.amber)
             }
-            metaRow("session id") { metaValue(session.id) }
+            metaRow("session id") { metaValue(session.providerSessionID) }
             let tags = store.annotations.filter { $0.kind == .tag }
             if !tags.isEmpty {
                 metaRow("tags") {
@@ -775,7 +778,10 @@ struct HolyArchiveModeView: View {
                         ForEach(tags) { tag in
                             Text("[\(tag.value)]")
                                 .foregroundStyle(Palette.blue)
-                                .contextMenu { Button("delete tag", role: .destructive) { store.deleteAnnotation(tag) } }
+                                .contextMenu {
+                                    Button("delete tag", role: .destructive) { store.deleteAnnotation(tag) }
+                                        .disabled(session.isRemoteArchiveSession)
+                                }
                         }
                     }
                 }
@@ -789,7 +795,10 @@ struct HolyArchiveModeView: View {
                                 + Text(" \(note.value)").foregroundColor(Palette.text))
                                 .fontWeight(.medium)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .contextMenu { Button("delete note", role: .destructive) { store.deleteAnnotation(note) } }
+                                .contextMenu {
+                                    Button("delete note", role: .destructive) { store.deleteAnnotation(note) }
+                                        .disabled(session.isRemoteArchiveSession)
+                                }
                         }
                     }
                 }
@@ -824,7 +833,7 @@ struct HolyArchiveModeView: View {
         )
 
         VStack(alignment: .leading, spacing: Metrics.s2) {
-            columnLabel("resume command")
+            columnLabel(session.isRemoteArchiveSession ? "resume on \(session.archiveSource.hostLabel)" : "resume command")
             Text(session.resumeCommand ?? "no safe resume command for this provider")
                 .foregroundStyle(session.resumeCommand == nil ? Palette.faint : Palette.text)
                 .textSelection(.enabled)
@@ -832,7 +841,12 @@ struct HolyArchiveModeView: View {
                 .padding(Metrics.s2)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Palette.raised)
-            Text("enter copy · r resume · tab panes").foregroundStyle(Palette.faint)
+            Text(
+                session.isRemoteArchiveSession
+                    ? "r resume on \(session.archiveSource.hostLabel) · tab panes"
+                    : "enter copy · r resume · tab panes"
+            )
+            .foregroundStyle(Palette.faint)
         }
 
         Spacer(minLength: 0)
@@ -840,10 +854,10 @@ struct HolyArchiveModeView: View {
         VStack(alignment: .leading, spacing: Metrics.s2) {
             HolyMannaFlowLayout(spacing: Metrics.s3) {
                 Text("copy:").foregroundStyle(Palette.muted)
-                if let command = session.resumeCommand {
+                if let command = session.resumeCommand, !session.isRemoteArchiveSession {
                     copyButton("command") { (command, "resume command") }
                 }
-                copyButton("id") { (session.id, session.id) }
+                copyButton("id") { (session.providerSessionID, session.providerSessionID) }
                 if let path = session.projectPath {
                     copyButton("path") { (path, path) }
                 }
@@ -854,11 +868,14 @@ struct HolyArchiveModeView: View {
                     store.resumeSelected()
                 }
                 actButton("transcript", enabled: true) { store.showTranscript() }
-                actButton(store.isGeneratingTitle ? "naming…" : "name", enabled: !store.isGeneratingTitle) {
+                actButton(
+                    store.isGeneratingTitle ? "naming…" : "name",
+                    enabled: !store.isGeneratingTitle && !session.isRemoteArchiveSession
+                ) {
                     store.generateTitle()
                 }
-                actButton("tag", enabled: true) { store.beginAnnotation(.tag) }
-                actButton("note", enabled: true) { store.beginAnnotation(.note) }
+                actButton("tag", enabled: !session.isRemoteArchiveSession) { store.beginAnnotation(.tag) }
+                actButton("note", enabled: !session.isRemoteArchiveSession) { store.beginAnnotation(.note) }
             }
         }
         .padding(.top, Metrics.s2)
@@ -1044,7 +1061,13 @@ struct HolyArchiveModeView: View {
                 Text(semantic).foregroundStyle(Palette.faint).lineLimit(1)
             }
             Spacer(minLength: 0)
-            Text(store.transcriptIsPresented ? Present.transcriptLegend : Present.keyLegend)
+            Text(
+                store.transcriptIsPresented
+                    ? Present.transcriptLegend
+                    : (store.selectedSession?.isRemoteArchiveSession == true
+                        ? Present.remoteKeyLegend
+                        : Present.keyLegend)
+            )
                 .foregroundStyle(Palette.faint)
                 .lineLimit(1)
                 .layoutPriority(-1)
@@ -1116,14 +1139,16 @@ struct HolyArchiveModeView: View {
 
     /// A column header whose grip trades width only between its two neighbors.
     private func resizableHeader(
-        _ column: String,
+        _ label: String,
+        columnID: String? = nil,
         columns: HolyLedgerResolvedColumns,
         boundary: HolyLedgerColumnBoundary,
         columnOrder: [String],
         alignment: Alignment = .leading
     ) -> some View {
+        let column = columnID ?? label
         let flexibleColumn = "summary"
-        return columnLabel(column)
+        return columnLabel(label)
             .frame(width: columns.width(column), alignment: alignment)
             .overlay(alignment: boundary.gripOnLeadingEdge ? .leading : .trailing) {
                 HolyLedgerColumnGrip(

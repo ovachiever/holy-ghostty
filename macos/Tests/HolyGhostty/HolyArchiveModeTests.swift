@@ -414,6 +414,7 @@ struct HolyArchiveModeTests {
             let response = try await search.search("vector archive", limit: 50)
             #expect(response.results.first?.session.id == parent.id)
             #expect(response.matchingChildrenByParentID[parent.id]?.map(\.id) == [child.id])
+            #expect(response.semanticQueryVector == vector)
             #expect(response.results.first?.semanticScore ?? 0 >= 0.35)
             #expect(response.results.first?.score ?? 0 >= 0.2)
             #expect(try repository.searchHistory().first?.query == "vector archive")

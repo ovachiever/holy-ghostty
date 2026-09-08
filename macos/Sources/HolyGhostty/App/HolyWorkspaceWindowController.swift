@@ -63,21 +63,13 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         self.boardModeStore = HolyMannaBoardModeStore(
             usageAssessmentProvider: { workspaceStore.claudeUsageAssessment }
         )
-        self.archiveModeStore = HolyArchiveModeStore { session in
-            guard let runtime = session.harness.runtime,
-                  let command = HolyRestoreCommandBuilder.renderedResumeCommand(
-                    runtime: runtime,
-                    providerSessionID: session.id
-                  ) else { return false }
-            var spec = HolySessionLaunchSpec.interactiveTmuxShell(title: session.displayTitle)
-            spec.runtime = runtime
-            spec.objective = "Resume archived \(session.harness.displayName) conversation \(session.shortID)"
-            spec.workingDirectory = session.projectPath
-            spec.command = command
-            spec.initialInput = nil
-            spec.providerSessionID = session.id
-            return workspaceStore.createSession(with: spec, origin: .directLaunch) != nil
-        }
+        self.archiveModeStore = HolyArchiveModeStore(
+            remoteHostsProvider: { workspaceStore.remoteHosts },
+            resumeHandler: { session in
+                guard let spec = HolyArchiveResumeLaunchSpec.make(for: session) else { return false }
+                return workspaceStore.createSession(with: spec, origin: .directLaunch) != nil
+            }
+        )
 
         let window = HolyWorkspaceWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1580, height: 980),

@@ -70,6 +70,27 @@ enum HolyArchivePresentation {
         }
     }
 
+    static func sourceLabel(for session: HolyArchiveSession) -> String {
+        let source = session.archiveSource
+        let stale = source.isStale ? " [stale]" : ""
+        return "\(source.hostLabel)\(stale) · \(shortLabel(for: session.harness))"
+    }
+
+    static func sourceDetail(for session: HolyArchiveSession) -> String {
+        let source = session.archiveSource
+        guard source.isRemote else { return source.hostLabel }
+        var parts = [source.hostLabel]
+        if let destination = source.sshDestination { parts.append(destination) }
+        if let fetchedAt = source.fetchedAt {
+            parts.append("cached \(longDate(fetchedAt))")
+        }
+        if source.isStale { parts.append("stale") }
+        if let error = source.error?.holyArchiveNilIfBlank {
+            parts.append(HolyArchiveText.preview(error, limit: 180))
+        }
+        return parts.joined(separator: " · ")
+    }
+
     // MARK: Rows
 
     private static func formatter(_ format: String, timeZone: TimeZone) -> DateFormatter {
@@ -194,17 +215,18 @@ enum HolyArchivePresentation {
 
     /// The footer's key legend, as the TUI prints it.
     static let keyLegend = "enter copy · r resume · t transcript · / search · f filter · s sort · i reindex · ? research · ^t tag · ^n note · esc back"
+    static let remoteKeyLegend = "r resume on host · t transcript · / search · f filter · s sort · i reindex · ? research · esc back"
     static let transcriptLegend = "c copy all · / find · n next · esc back"
 
     // MARK: Columns
 
     static func columns(for sessions: [HolyArchiveSession], childCounts: [String: Int]) -> HolyArchiveColumnWidths {
         let projects = sessions.map { projectLabel($0).count }.max() ?? 0
-        let harnesses = sessions.map { shortLabel(for: $0.harness).count }.max() ?? 0
+        let sources = sessions.map { sourceLabel(for: $0).count }.max() ?? 0
         let children = sessions.map { childCountText(childCounts[$0.id] ?? 0).count }.max() ?? 0
         return .init(
             date: HolyMannaBoardMetrics.columnWidth(contentCharacters: "00-00 00:00".count, headerCharacters: "date".count),
-            harness: HolyMannaBoardMetrics.columnWidth(contentCharacters: harnesses, headerCharacters: "harness".count),
+            harness: HolyMannaBoardMetrics.columnWidth(contentCharacters: sources, headerCharacters: "source".count),
             project: HolyMannaBoardMetrics.columnWidth(contentCharacters: projects, headerCharacters: "project".count),
             children: HolyMannaBoardMetrics.columnWidth(contentCharacters: children, headerCharacters: "sub".count)
         )

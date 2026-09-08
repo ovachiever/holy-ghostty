@@ -40,10 +40,24 @@ struct HolyArchiveRenderSmokeTests {
         let databaseURL = root.appendingPathComponent("holy.sqlite3")
         let repository = try HolyArchiveRepository(databaseURL: databaseURL)
         let base: TimeInterval = 1_788_390_000
+        var remoteCodex = ArchiveFixtures.session(
+            id: "cccccccc-3",
+            harness: .codex,
+            projectName: "vms.io",
+            firstPrompt: "<local-command-stdout>Set effort level to medium</local-command-stdout>\nRedesign Rocks and fix summary authorization",
+            summary: nil,
+            activity: base - 300
+        )
+        remoteCodex.extra[HolyArchiveSourceMetadata.rawSessionID] = "cccccccc-3"
+        remoteCodex.extra[HolyArchiveSourceMetadata.hostID] = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        remoteCodex.extra[HolyArchiveSourceMetadata.hostLabel] = "Studio"
+        remoteCodex.extra[HolyArchiveSourceMetadata.sshDestination] = "studio.tailnet"
+        remoteCodex.extra[HolyArchiveSourceMetadata.fetchedAt] = String(base - 900)
+        remoteCodex.extra[HolyArchiveSourceMetadata.stale] = "true"
         let rows: [(HolyArchiveSession, [HolyArchiveMessage])] = [
             (ArchiveFixtures.session(id: "aaaaaaaa-1", harness: .claudeCode, projectName: "aldebaran-group", firstPrompt: "Generate the Tiffany Heaven on Earth business astrology brief", summary: "Generated Erik Tiffany Heaven on Earth business astrology", activity: base), ArchiveFixtures.messages(sessionID: "aaaaaaaa-1")),
             (ArchiveFixtures.session(id: "bbbbbbbb-2", harness: .claudeCode, projectName: "holy-ghostty", firstPrompt: "Rebuild the Board to match the web cockpit", summary: "Built native Board and Archive modes in Holy", activity: base - 120), ArchiveFixtures.messages(sessionID: "bbbbbbbb-2")),
-            (ArchiveFixtures.session(id: "cccccccc-3", harness: .codex, projectName: "vms.io", firstPrompt: "<local-command-stdout>Set effort level to medium</local-command-stdout>\nRedesign Rocks and fix summary authorization", summary: nil, activity: base - 300), ArchiveFixtures.messages(sessionID: "cccccccc-3")),
+            (remoteCodex, ArchiveFixtures.messages(sessionID: "cccccccc-3")),
             (ArchiveFixtures.session(id: "dddddddd-4", harness: .droid, projectName: "agent-do", firstPrompt: "Build clickable Engine Room drilldown prototypes", summary: "Built clickable Engine Room drilldown prototypes", activity: base - 900), ArchiveFixtures.messages(sessionID: "dddddddd-4")),
             (ArchiveFixtures.session(id: "eeeeeeee-5", harness: .opencode, projectName: "the-point-revision", firstPrompt: "Review this change for security vulnerabilities.  Changed files (you may Read these and any other file in the repo)", summary: nil, activity: base - 1_800), ArchiveFixtures.messages(sessionID: "eeeeeeee-5")),
             (ArchiveFixtures.session(id: "ffffffff-6", harness: .cursor, projectName: "substack-writings", firstPrompt: "Draft the AI universe meaning essay", summary: "Drafted AI universe meaning essay for Substack", activity: base - 3_600), ArchiveFixtures.messages(sessionID: "ffffffff-6")),
@@ -62,6 +76,11 @@ struct HolyArchiveRenderSmokeTests {
         let store = HolyArchiveModeStore(
             registry: .init(homeDirectory: emptyHome),
             databaseURL: databaseURL,
+            federation: HolyArchiveFederation(
+                queryClient: HolyArchiveRenderRemoteClient(),
+                cacheDirectoryURL: root.appendingPathComponent("cache", isDirectory: true),
+                pacer: .init(budget: .unthrottled)
+            ),
             resumeHandler: { _ in false }
         )
         store.present()
@@ -116,12 +135,30 @@ struct HolyArchiveRenderSmokeTests {
         store.recomputeFind()
         try await render("archive-transcript")
         store.closeTranscript()
+        store.selectParent("cccccccc-3")
+        try await render("archive-remote-stale")
+        store.selectParent("bbbbbbbb-2")
         store.chatIsPresented = true
         try await render("archive-research")
         store.chatIsPresented = false
         store.dismiss()
 
         print("HOLY_ARCHIVE_RENDER wrote:\n" + written.joined(separator: "\n"))
-        #expect(written.count == 10)
+        #expect(written.count == 11)
+    }
+}
+
+private actor HolyArchiveRenderRemoteClient: HolyArchiveRemoteQuerying {
+    func query(_ request: HolyArchiveRemoteRequest, on host: HolyArchiveRemoteHost) async throws
+        -> HolyArchiveRemotePage {
+        .init(
+            total: 0,
+            sessions: [],
+            messages: [],
+            annotations: [],
+            childCounts: [:],
+            matches: [:],
+            matchingChildren: [:]
+        )
     }
 }
