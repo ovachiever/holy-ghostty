@@ -7,7 +7,7 @@ base_commit: 78b6847ac0ff92b707d8f483d96e8996ff22294b
 scope: '[P1][BOARD][AI] The grep bar is also the ask bar: question the board, get a cited answer'
 inputs:
 - Erik request 2026-09-08 13:35; deferred from mn-330752's original scope
-binding: sha256:df6ceb4392af2761ce920c393aa98751357be34ec99abdbae2cc4b291041d734
+binding: sha256:407c3dd5f89980b741b2dda4c8c9eacbcb7cd65b2c1e1fdfe6653d022cf64e45
 ---
 
 # Handoff: [P1][BOARD][AI] The grep bar is also the ask bar: question the board, get a cited answer
@@ -38,3 +38,13 @@ Erik 2026-09-08: the native board's top bar should match the web cockpit's full 
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-57866a`.
 4. Commit with `Manna: mn-57866a` and run `agent-do manna done mn-57866a` only after the work is verified.
+
+## Implementation receipt (2026-09-08)
+
+Implemented the native ask bar with the verbatim web ASK_SYSTEM, a full row snapshot including done items, allowlisted citations, clickable `manna cited` rows, typed 60-second timeout, cancellation/generation guards, and a bounded in-memory cache keyed by normalized question, row content hash, board identity, and selected model. Typing remains grep; only Enter asks. Cmd-K is handled both by the board and workspace key paths. Answers are plain display text; unknown IDs are omitted and no mutation capability reaches the asker.
+
+The existing role router now defaults board deep work to plan-backed Claude opus. Explicit `gpt-` or `openai/` models use the existing native API client with tools disabled. The archive's separate default is preserved. No model request was executed in this lane.
+
+Validation: focused `xcodebuild build-for-testing` succeeded for HolyMannaBoardActionsTests, HolyMannaBoardTests, and HolyMannaBoardPresentationTests. The new actions suite contains 9 regression cases shared with mn-ec34cd. These are compilation receipts, not executed tests. ReleaseLocal and core verification receipts are in `.dev/mn-board-actions/report.md`.
+
+Needed next: coordinated installed-app acceptance of Cmd-K, instant grep, Enter/thinking/answer, citation navigation, cache reuse/invalidation, and explicit API-model routing. Execute the focused app-hosted tests only in that coordinated lane. Keep this item in_progress until that acceptance is recorded.

@@ -16,7 +16,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
     @Published var boardFilter: HolyMannaBoardFilter = .live
     /// A track id, `HolyMannaBoardPresentation.untrackedFilter`, or nil for every track.
     @Published var trackFilter: String?
-    @Published var grep = ""
+    @Published var grep = "" { didSet { if grep != oldValue { clearAnswer() } } }
     @Published private(set) var state: HolyMannaStatePayload?
     @Published private(set) var estate: HolyMannaEstatePayload?
     @Published private(set) var boardFailure: String?
@@ -46,6 +46,35 @@ final class HolyMannaBoardModeStore: ObservableObject {
     /// Mirrored from the view so key handling knows whether "/" is typing.
     @Published var isGrepFocused = false
 
+    @Published private(set) var answer: HolyMannaBoardAnswer?
+    @Published private(set) var askFailure: HolyMannaAskError?
+    @Published private(set) var isAsking = false
+    @Published var deepModel: String {
+        didSet {
+            UserDefaults.standard.set(deepModel, forKey: "holy.intelligence.deep.model")
+            clearAnswer()
+        }
+    }
+    @Published var workerRuntime: HolySessionRuntime {
+        didSet {
+            UserDefaults.standard.set(workerRuntime.rawValue, forKey: "holy.board.worker.runtime")
+            workerModel = UserDefaults.standard.string(forKey: "holy.board.worker.\(workerRuntime.rawValue).model") ?? ""
+        }
+    }
+    @Published var workerModel: String {
+        didSet { UserDefaults.standard.set(workerModel, forKey: "holy.board.worker.\(workerRuntime.rawValue).model") }
+    }
+    @Published var pendingDispatch: HolyMannaWorkerDispatch?
+    @Published private(set) var isDispatching = false
+    @Published private(set) var dispatchNotice: String?
+    private let asker: any HolyMannaBoardAsking
+    private let askTimeout: Duration
+    private let workerLauncher: (@MainActor (HolySessionLaunchSpec) throws -> UUID)?
+    private var askTask: Task<Void, Never>?
+    private var askDeadline: Task<Void, Never>?
+    private var askGeneration = UUID()
+    private var askingHash: String?
+
     private(set) var context = HolyMannaBoardContext(boardRoot: nil, remoteHost: nil)
     private let client: HolyMannaBoardClient
     private let prewarmer: any HolyMannaBoardPrewarming
@@ -64,12 +93,22 @@ final class HolyMannaBoardModeStore: ObservableObject {
 
     init(
         client: HolyMannaBoardClient = .init(),
+        asker: any HolyMannaBoardAsking = HolyMannaBoardAskService.shared,
+        askTimeout: Duration = .seconds(60),
+        workerLauncher: (@MainActor (HolySessionLaunchSpec) throws -> UUID)? = nil,
         digestService: any HolyMannaBoardDigesting = HolyMannaBoardDigestService.shared,
         prewarmer: (any HolyMannaBoardPrewarming)? = nil,
         usageAssessmentProvider: @escaping () -> HolyClaudeUsageAssessment = {
             .init(level: .normal, decidingBucket: nil, reason: nil)
         }
     ) {
+        self.asker = asker
+        self.askTimeout = askTimeout
+        self.workerLauncher = workerLauncher
+        self.deepModel = UserDefaults.standard.string(forKey: "holy.intelligence.deep.model") ?? "opus"
+        let runtime = HolySessionRuntime(rawValue: UserDefaults.standard.string(forKey: "holy.board.worker.runtime") ?? "codex") ?? .codex
+        self.workerRuntime = runtime
+        self.workerModel = UserDefaults.standard.string(forKey: "holy.board.worker.\(runtime.rawValue).model") ?? ""
         self.client = client
         self.prewarmer = prewarmer ?? HolyMannaBoardPrewarmer(
             client: client,
@@ -101,12 +140,25 @@ final class HolyMannaBoardModeStore: ObservableObject {
 
     var boardSections: [HolyMannaBoardSectionModel] {
         guard let state else { return [] }
-        return HolyMannaBoardPresentation.sections(
+        var sections = HolyMannaBoardPresentation.sections(
             state: state,
             filter: boardFilter,
             track: trackFilter,
-            grep: grep
+            grep: answer == nil ? grep : ""
         )
+        if let answer {
+            let cited = Set(answer.citedIDs)
+            if !cited.isEmpty {
+                sections = sections.map {
+                    .init(id: $0.id, prompt: $0.prompt, items: $0.items.filter { cited.contains($0.id) },
+                          emptyText: $0.emptyText, showsAge: $0.showsAge)
+                }
+            }
+            sections.insert(.init(id: "cited", prompt: "manna cited",
+                                  items: answer.citedIDs.compactMap { state.item(id: $0) },
+                                  emptyText: "no board items cited", showsAge: false), at: 0)
+        }
+        return sections
     }
 
     var inboxRows: [HolyMannaInboxRowModel] {
@@ -153,6 +205,9 @@ final class HolyMannaBoardModeStore: ObservableObject {
         let contextChanged = self.context != context
         self.context = context
         if contextChanged {
+            clearAnswer()
+            pendingDispatch = nil
+            dispatchNotice = nil
             // A different root is a different board: show what was last
             // read for it, at once, and never the old board's rows under
             // the new board's name.
@@ -187,6 +242,8 @@ final class HolyMannaBoardModeStore: ObservableObject {
 
     func dismiss() {
         isPresented = false
+        clearAnswer()
+        pendingDispatch = nil
         pendingMutation = nil
         liveTask?.cancel()
         liveTask = nil
@@ -242,6 +299,9 @@ final class HolyMannaBoardModeStore: ObservableObject {
         guard board.exists else { return }
         let next = context.selecting(boardRoot: board.root)
         if next != context {
+            clearAnswer()
+            pendingDispatch = nil
+            dispatchNotice = nil
             context = next
             state = stateCache[Self.cacheKey(next)]
             boardFailure = nil
@@ -270,6 +330,120 @@ final class HolyMannaBoardModeStore: ObservableObject {
         grep = ""
         isGrepFocused = false
         return true
+    }
+
+    // MARK: Read-only questions and worker dispatch
+
+    func clearAnswer() {
+        askGeneration = UUID()
+        askTask?.cancel()
+        askDeadline?.cancel()
+        askTask = nil
+        askDeadline = nil
+        answer = nil
+        askFailure = nil
+        isAsking = false
+        askingHash = nil
+    }
+
+    /// Only Enter calls this. Editing grep never invokes a model.
+    func submitQuestion() {
+        clearAnswer()
+        guard let state, boardFailure == nil, surface == .board else {
+            askFailure = .unavailable("Read a board before asking a question.")
+            return
+        }
+        let model = deepModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let request: HolyMannaBoardQuestion
+        do {
+            request = try HolyMannaBoardQuestion(question: grep, state: state, context: context,
+                                                model: model.isEmpty ? "opus" : model)
+        } catch {
+            askFailure = .unavailable(error.localizedDescription)
+            return
+        }
+        guard !request.question.isEmpty else { return }
+        selectedSheet = .board
+        isAsking = true
+        askingHash = request.contentHash
+        let generation = askGeneration
+        askDeadline = Task { [weak self, askTimeout] in
+            do { try await Task.sleep(for: askTimeout) } catch { return }
+            guard let self, self.askGeneration == generation, self.isAsking else { return }
+            self.clearAnswer()
+            self.askFailure = .timedOut
+        }
+        askTask = Task { [weak self, asker] in
+            do {
+                let result = try await asker.answer(request)
+                guard let self, self.askGeneration == generation else { return }
+                self.askDeadline?.cancel()
+                self.answer = result
+                self.isAsking = false
+                self.askingHash = nil
+            } catch {
+                guard let self, self.askGeneration == generation else { return }
+                self.askDeadline?.cancel()
+                self.isAsking = false
+                self.askingHash = nil
+                if case HolyMannaBoardClientError.timedOut = error {
+                    self.askFailure = .timedOut
+                } else if (error as NSError).code == NSURLErrorTimedOut {
+                    self.askFailure = .timedOut
+                } else {
+                    self.askFailure = error as? HolyMannaAskError ?? .unavailable(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    func workerRefusal(for item: HolyMannaBoardItem) -> String? {
+        if let reason = HolyMannaWorkerDispatch.refusal(for: item, context: context) { return reason }
+        if isDispatching { return "A worker is being opened." }
+        if workerLauncher == nil { return "Worker launching is unavailable in this window." }
+        if boardFailure != nil { return "Refresh the board before starting a worker." }
+        return nil
+    }
+
+    func requestWorker(_ item: HolyMannaBoardItem) {
+        if let reason = workerRefusal(for: item) { dispatchNotice = reason; return }
+        pendingDispatch = .init(item: item, context: context,
+                                profile: .init(runtime: workerRuntime, model: workerModel))
+        dispatchNotice = nil
+    }
+
+    func confirmWorker() {
+        guard let request = pendingDispatch, !isDispatching, let workerLauncher else { return }
+        pendingDispatch = nil
+        guard context == request.context else { return }
+        isDispatching = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isDispatching = false }
+            do {
+                // A confirmation is permission for this exact item/handoff, not a
+                // stale claim. Read canonical state again; never mutate it here.
+                let fresh = try await self.client.state(for: request.context)
+                guard self.context == request.context else { return }
+                guard fresh.root == request.context.boardRoot,
+                      let item = fresh.item(id: request.item.id) else {
+                    throw HolyMannaAskError.unavailable("The item is no longer on this board.")
+                }
+                if let reason = HolyMannaWorkerDispatch.refusal(for: item, context: request.context) {
+                    throw HolyMannaAskError.unavailable(reason)
+                }
+                guard item.prompt == request.item.prompt, item.handoffDigest == request.item.handoffDigest else {
+                    throw HolyMannaAskError.unavailable("The handoff changed. Refresh and confirm the new work order.")
+                }
+                let launch = try request.launchSpec()
+                _ = try workerLauncher(launch)
+                self.dispatchNotice = "Worker session opened for \(item.id). Its claim is pending."
+                self.requestStateRefresh(force: true)
+            } catch {
+                guard self.context == request.context else { return }
+                self.dispatchNotice = "Worker not started: \(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: Refresh
@@ -421,8 +595,6 @@ final class HolyMannaBoardModeStore: ObservableObject {
         var actions: [HolyMannaMutation] = []
         if item.kind == "dream" {
             actions += [.promote(item.id), .delete(item.id)]
-        } else if item.status == "open", item.effective == "ready" {
-            actions.append(.claim(item.id))
         } else if item.status == "in_progress", item.claimedBy == actorID {
             actions += [.done(item.id), .abandon(item.id)]
         }
@@ -467,6 +639,10 @@ final class HolyMannaBoardModeStore: ObservableObject {
             stateRefreshedAt[key] = .now
             scheduleFocusedWarm(payload, context: refreshed)
             guard isCurrent else { return }
+            if let hash = askingHash ?? answer?.contentHash,
+               hash != HolyMannaBoardQuestion.contentHash(payload) {
+                clearAnswer()
+            }
             state = payload
             boardFailure = nil
             lastRefreshedAt = stateRefreshedAt[key]

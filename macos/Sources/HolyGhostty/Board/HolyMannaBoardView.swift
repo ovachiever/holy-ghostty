@@ -73,6 +73,17 @@ struct HolyMannaBoardView: View {
         } message: {
             Text(store.pendingMutation?.confirmationDetail ?? "")
         }
+        .confirmationDialog(
+            "Claim & build", isPresented: Binding(
+                get: { store.pendingDispatch != nil },
+                set: { if !$0 { store.pendingDispatch = nil } }
+            ), titleVisibility: .visible
+        ) {
+            Button("Claim & build") { store.confirmWorker() }
+            Button("Cancel", role: .cancel) { store.pendingDispatch = nil }
+        } message: {
+            Text(store.pendingDispatch?.confirmation ?? "")
+        }
         .onAppear(perform: installKeyMonitor)
         .onDisappear(perform: removeKeyMonitor)
         .onChange(of: store.grepFocusRequest) { _ in
@@ -251,7 +262,11 @@ struct HolyMannaBoardView: View {
     }
 
     private func grepField(compact: Bool) -> some View {
-        TextField("grep · ⌘F", text: $store.grep)
+        TextField("ask AI · grep · ⌘K", text: $store.grep)
+            .onSubmit {
+                store.submitQuestion()
+                compactInspectorPresented = true
+            }
             .textFieldStyle(.plain)
             .focused($grepFocused)
             .padding(.horizontal, Metrics.s2)
@@ -597,9 +612,20 @@ struct HolyMannaBoardView: View {
                     .frame(width: columns.width("track"), alignment: .leading)
                     .help(item.trackTitle ?? "")
             }
-            stateText(cell)
-                .frame(width: columns.width("state"), alignment: .leading)
-                .help(cell.plain)
+            Group {
+                if selected || hoveredRowID == item.id {
+                    if item.status == "in_progress" {
+                        Text(item.claimant?.label ?? item.claimedBy ?? "claimed")
+                            .foregroundStyle(Palette.muted).lineLimit(1)
+                    } else {
+                        workerButton(item)
+                    }
+                } else {
+                    stateText(cell)
+                }
+            }
+            .frame(width: columns.width("state"), alignment: .leading)
+            .help(store.workerRefusal(for: item) ?? cell.plain)
             Text(showsAge ? Present.ago(item.updatedAt) : Present.priorityText(item))
                 .foregroundStyle(Palette.faint)
                 .lineLimit(1)
@@ -987,19 +1013,59 @@ struct HolyMannaBoardView: View {
 
     // MARK: - Inspector
 
-    @ViewBuilder
     private var inspector: some View {
-        if let peer = store.selectedPeer {
-            inspectorScroll { peerInspector(peer) }
-        } else if let item = store.selectedItem {
-            inspectorScroll { itemInspector(item) }
-        } else if store.selectedPeerID != nil {
-            emptyLine("that session is no longer on the board").padding(Metrics.s4)
-        } else if store.selectedItemID != nil, store.state != nil {
-            emptyLine("that item is no longer on the board").padding(Metrics.s4)
-        } else {
-            emptyLine("select a row").padding(Metrics.s4)
+        inspectorScroll {
+            answerInspector
+            if let peer = store.selectedPeer {
+                peerInspector(peer)
+            } else if let item = store.selectedItem {
+                itemInspector(item)
+            } else {
+                emptyLine("select a row")
+            }
         }
+    }
+
+    @ViewBuilder
+    private var answerInspector: some View {
+        HStack {
+            Text("deep model").foregroundStyle(Palette.muted)
+            TextField("opus (plan) or gpt-… (API)", text: $store.deepModel)
+                .textFieldStyle(.plain)
+                .help("Claude plan by default. An explicit gpt- or openai/ model uses OPENAI_API_KEY.")
+        }
+        if store.isAsking {
+            HStack { ProgressView().controlSize(.small); Text("thinking… · up to 60s") }
+        } else if let failure = store.askFailure {
+            Text(failure.localizedDescription).foregroundStyle(Palette.muted)
+        } else if let answer = store.answer {
+            Text(answer.text).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("\(answer.model) · \(answer.wasCached ? "cached" : "board answer")")
+                .foregroundStyle(Palette.muted)
+            HolyMannaFlowLayout {
+                ForEach(answer.citedIDs, id: \.self) { id in
+                    Button(id) { store.selectItem(id) }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Palette.blue)
+                }
+            }
+            Divider()
+        }
+        if let notice = store.dispatchNotice {
+            Text(notice).foregroundStyle(Palette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func workerButton(_ item: HolyMannaBoardItem) -> some View {
+        let refusal = store.workerRefusal(for: item)
+        return Button("[claim & build]") { store.requestWorker(item) }
+            .buttonStyle(.plain)
+            .foregroundStyle(refusal == nil ? Palette.blue : Palette.muted)
+            .disabled(refusal != nil)
+            .help(refusal ?? "Start a new worker after confirmation")
+            .accessibilityHint(refusal ?? "Start a new worker after confirmation")
     }
 
     /// The action row rides the bottom (margin-top: auto) when the content is
@@ -1055,6 +1121,20 @@ struct HolyMannaBoardView: View {
         }
 
         itemMeta(item)
+
+        HStack {
+            Text("worker").foregroundStyle(Palette.muted)
+            Picker("Runtime", selection: $store.workerRuntime) {
+                Text("Codex").tag(HolySessionRuntime.codex)
+                Text("Claude").tag(HolySessionRuntime.claude)
+            }.labelsHidden().frame(maxWidth: 110)
+            TextField("default model", text: $store.workerModel).textFieldStyle(.plain)
+        }
+        workerButton(item)
+        if let refusal = store.workerRefusal(for: item) {
+            Text(refusal).foregroundStyle(Palette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
 
         Spacer(minLength: 0)
 
@@ -1801,7 +1881,7 @@ struct HolyMannaBoardView: View {
             guard store.isPresented else { return event }
             let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
             let key = event.charactersIgnoringModifiers ?? ""
-            if key.lowercased() == "f", flags == .command {
+            if ["f", "k"].contains(key.lowercased()), flags == .command {
                 store.requestGrepFocus()
                 return nil
             }

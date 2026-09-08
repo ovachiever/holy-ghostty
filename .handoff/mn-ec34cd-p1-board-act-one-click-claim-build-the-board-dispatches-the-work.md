@@ -7,7 +7,7 @@ base_commit: 78b6847ac0ff92b707d8f483d96e8996ff22294b
 scope: '[P1][BOARD][ACT] One-click ''Claim & build'': the board dispatches the worker itself'
 inputs:
 - Erik request 2026-09-08 13:35 ('this is now in holy')
-binding: sha256:15546101e394b7ae0d462623bd04b02abc425421c6ba27b26db87f390846a9f5
+binding: sha256:04273b1b0dabc9a29a46f544c2fb50a2a26221b2741f2c81d3e34ea2433db3a6
 ---
 
 # Handoff: [P1][BOARD][ACT] One-click 'Claim & build': the board dispatches the worker itself
@@ -38,3 +38,13 @@ Erik 2026-09-08: replace the copy-command affordance with a single 'Claim & buil
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-ec34cd`.
 4. Commit with `Manna: mn-ec34cd` and run `agent-do manna done mn-ec34cd` only after the work is verified.
+
+## Implementation receipt (2026-09-08)
+
+Implemented row and inspector Claim & build controls, an explicit confirmation, global Codex/Claude worker selection with a separate saved model for each runtime, and dispatch through HolyWorkspaceStore.createSession. The immutable request captures the board root, remote host, runtime/model, item, and sealed handoff. Confirmation rereads canonical state and refuses a competing claim or changed handoff before opening a session.
+
+The generated brief is one shell-quoted harness startup argument. initialInput remains nil. The worker itself runs the first claim command, reads and verifies the sealed handoff, coordinates paths, runs focused validation, avoids launches/installs/screenshots/push, commits with the Manna trailer, and reports actual checks plus lessons/decisions counts. Dreams explain the promotion prerequisite; claimed items display their claimant. Holy performs no pre-spawn claim, and failed surface creation leaves the board unchanged.
+
+Validation: focused `xcodebuild build-for-testing` succeeded for HolyMannaBoardActionsTests, HolyMannaBoardTests, and HolyMannaBoardPresentationTests. The shared new actions suite has 9 regression cases, including dream/claim refusal, protocol clauses, startup argument quoting, remote transport, confirmation, failed spawn/no claim, and a competing-claim race. These tests were compiled, not executed; no worker was dispatched. ReleaseLocal and core verification receipts are in `.dev/mn-board-actions/report.md`.
+
+Needed next: coordinated synthetic-board acceptance of cancel/confirm, the selected Codex and Claude profiles, local/remote repository placement, initial prompt receipt, worker-owned claim, and failed-start behavior. Execute the focused app-hosted tests only in that coordinated lane. Keep this item in_progress until that acceptance is recorded.

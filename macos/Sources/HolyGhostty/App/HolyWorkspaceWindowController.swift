@@ -63,6 +63,13 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         )
         self.workspaceStore = workspaceStore
         self.boardModeStore = HolyMannaBoardModeStore(
+            workerLauncher: { spec in
+                guard let session = workspaceStore.createSession(with: spec, origin: .directLaunch),
+                      session.surfaceView.error == nil else {
+                    throw HolyMannaAskError.unavailable("The terminal surface could not be created.")
+                }
+                return session.id
+            },
             usageAssessmentProvider: { workspaceStore.claudeUsageAssessment }
         )
         self.archiveModeStore = HolyArchiveModeStore(
@@ -276,6 +283,11 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
             archiveModeStore.dismiss()
             boardModeStore.toggle(context: .focused(session: workspaceStore.selectedSession))
             workspaceStore.commandPaletteIsShowing = false
+            return true
+        }
+
+        if boardModeStore.isPresented, key == "k", relevantFlags == .command {
+            boardModeStore.requestGrepFocus()
             return true
         }
 
