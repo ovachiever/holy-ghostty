@@ -7,7 +7,7 @@ base_commit: 78b6847ac0ff92b707d8f483d96e8996ff22294b
 scope: '[P1][BOARD][ACT] One-click ''Claim & build'': the board dispatches the worker itself'
 inputs:
 - Erik request 2026-09-08 13:35 ('this is now in holy')
-binding: sha256:04273b1b0dabc9a29a46f544c2fb50a2a26221b2741f2c81d3e34ea2433db3a6
+binding: sha256:c6b3681a2f8a9c27141855a1692e36be7a0b58ef49e53a61ddc8508fef587890
 ---
 
 # Handoff: [P1][BOARD][ACT] One-click 'Claim & build': the board dispatches the worker itself
@@ -48,3 +48,15 @@ The generated brief is one shell-quoted harness startup argument. initialInput r
 Validation: focused `xcodebuild build-for-testing` succeeded for HolyMannaBoardActionsTests, HolyMannaBoardTests, and HolyMannaBoardPresentationTests. The shared new actions suite has 9 regression cases, including dream/claim refusal, protocol clauses, startup argument quoting, remote transport, confirmation, failed spawn/no claim, and a competing-claim race. These tests were compiled, not executed; no worker was dispatched. ReleaseLocal and core verification receipts are in `.dev/mn-board-actions/report.md`.
 
 Needed next: coordinated synthetic-board acceptance of cancel/confirm, the selected Codex and Claude profiles, local/remote repository placement, initial prompt receipt, worker-owned claim, and failed-start behavior. Execute the focused app-hosted tests only in that coordinated lane. Keep this item in_progress until that acceptance is recorded.
+
+## Executed regression repair (2026-09-08)
+
+The user authorized app-hosted test execution after the first implementation failed its default-parallel safety suite. This receipt supersedes the earlier compile-only test status.
+
+Root cause: HolyMannaBinaryResolver set didResolve before awaiting the shell lookup. Concurrent callers observed cached nil and failed with `The agent-do CLI was not found in the runtime environment Holy uses.` The test polling helper concealed that first failure behind an eventual timeout. The Claude resolver had the same pending-versus-missing error.
+
+Fix: both runtimes now use HolyBoardExecutableResolver, which retains one lookup Task and makes every caller await its completed result. No suite serialization or timeout increase was used. Tests now abort setup on a board-read error and preserve the error in the result bundle. Two new tests check concurrent successful and genuinely missing lookups with 16 callers each.
+
+Executed using default parallel testing: HolyMannaBoardActionsTests PASSED 11, FAILED 0, SKIPPED 0 (all original 9 plus 2 new). A final combined run of HolyMannaBoardActionsTests, HolyMannaBoardTests, and HolyMannaBoardPresentationTests PASSED 41, FAILED 0, SKIPPED 0. Both build-for-testing and test-without-building succeeded. Result bundles: `.dev/mn-board-actions/fixed-actions.xcresult` and `.dev/mn-board-actions/fixed-related.xcresult`. Detailed reproduction, commands, and counts: `.dev/mn-board-actions/regression-report.md`.
+
+Both items remain in_progress as requested. The safety-suite repair is complete; the remaining coordinated feature acceptance described above is still pending. No install, worker dispatch, model request, or push was performed in this repair lane. Lessons logged: 1 (new), les-8741f0. Decisions logged: 0 (new).

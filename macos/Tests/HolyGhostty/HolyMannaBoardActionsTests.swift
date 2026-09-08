@@ -3,6 +3,14 @@ import Testing
 @testable import Ghostty
 
 struct HolyMannaBoardActionsTests {
+    @Test func concurrentBinaryLookupWaitsForTheSameSuccessfulProbe() async {
+        await checkConcurrentLookup(result: "/synthetic/agent-do")
+    }
+
+    @Test func concurrentBinaryLookupDoesNotReportMissingBeforeProbeFinishes() async {
+        await checkConcurrentLookup(result: nil)
+    }
+
     @Test func honestyLawMatchesWebAndCitationsOnlyUseSuppliedRows() throws {
         #expect(HolyMannaBoardQuestion.system == "You answer questions about a software project board using only the rows you are given. Read every row before answering, including rows marked done: a done item that covers the question means the board covers it and the work is finished; say which state each cited item is in. Cite the item id (mn-xxxxxx) inline for every item you mention, and never cite an id that is not in the rows. If nothing on the board covers the question, say so plainly. Two short paragraphs at most; no headings, no bullet lists, no preamble.")
         let request = try fixtureQuestion()
@@ -37,7 +45,7 @@ struct HolyMannaBoardActionsTests {
             return "mn-abcdef is done."
         })
         store.prepare(context: context)
-        try await eventually { store.state != nil }
+        try await requireBoardLoaded(store)
         store.grep = "ready"
         #expect(!store.isAsking)
         #expect(await calls.values.allSatisfy { $0 != "model" })
@@ -60,7 +68,7 @@ struct HolyMannaBoardActionsTests {
     @Test @MainActor func timeoutIsTypedAndLateAnswerCannotOverwriteIt() async throws {
         let store = makeStore(calls: ActionCalls(), asker: SlowAnswer(), timeout: .milliseconds(5))
         store.prepare(context: context)
-        try await eventually { store.state != nil }
+        try await requireBoardLoaded(store)
         store.grep = "question"
         store.submitQuestion()
         try await eventually { store.askFailure != nil }
@@ -76,7 +84,7 @@ struct HolyMannaBoardActionsTests {
     @Test @MainActor func boardChangeCancelsAnswer() async throws {
         let store = makeStore(calls: ActionCalls(), asker: SlowAnswer())
         store.prepare(context: context)
-        try await eventually { store.state != nil }
+        try await requireBoardLoaded(store)
         store.grep = "question"
         store.submitQuestion()
         store.prepare(context: .init(boardRoot: nil, remoteHost: nil))
@@ -129,7 +137,7 @@ struct HolyMannaBoardActionsTests {
             throw HolyMannaAskError.unavailable("synthetic spawn failure")
         })
         store.prepare(context: context)
-        try await eventually { store.state != nil }
+        try await requireBoardLoaded(store)
         store.requestWorker(try item())
         #expect(store.pendingDispatch != nil)
         #expect(spawns == 0)
@@ -153,7 +161,7 @@ struct HolyMannaBoardActionsTests {
             return UUID()
         }, prewarmer: ActionPrewarmer())
         store.prepare(context: context)
-        try await eventually { store.state != nil }
+        try await requireBoardLoaded(store)
         store.requestWorker(try item())
         store.confirmWorker()
         try await eventually { store.dispatchNotice != nil }
@@ -246,5 +254,40 @@ private struct SlowAnswer: HolyMannaBoardAsking {
         if predicate() { return }
         try await Task.sleep(for: .milliseconds(5))
     }
-    Issue.record("Synthetic operation did not settle")
+    try #require(predicate(), "Synthetic operation did not settle")
+}
+
+@MainActor private func requireBoardLoaded(_ store: HolyMannaBoardModeStore) async throws {
+    try await eventually { store.state != nil || store.boardFailure != nil }
+    try #require(store.boardFailure == nil, Comment(rawValue: store.boardFailure ?? "Board read completed"))
+    _ = try #require(store.state)
+}
+
+private actor DelayedExecutableProbe {
+    private(set) var calls = 0
+    private(set) var finished = false
+
+    func resolve(_ result: String?) async -> String? {
+        calls += 1
+        // Keep the I/O boundary suspended so the other callers reenter the resolver.
+        try? await Task.sleep(for: .milliseconds(50))
+        finished = true
+        return result
+    }
+}
+
+private func checkConcurrentLookup(result: String?) async {
+    let probe = DelayedExecutableProbe()
+    let resolver = HolyBoardExecutableResolver { await probe.resolve(result) }
+    await withTaskGroup(of: Void.self) { group in
+        for _ in 0..<16 {
+            group.addTask {
+                let path = await resolver.binaryPath()
+                #expect(await probe.finished, "A pending lookup must never appear to be a missing executable")
+                #expect(path == result)
+            }
+        }
+    }
+    #expect(await resolver.binaryPath() == result)
+    #expect(await probe.calls == 1)
 }

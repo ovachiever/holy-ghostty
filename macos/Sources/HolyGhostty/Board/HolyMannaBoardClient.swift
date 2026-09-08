@@ -323,7 +323,7 @@ struct HolyMannaBoardClient: Sendable {
         if needsBoardRoot, context.boardRoot == nil {
             throw HolyMannaBoardClientError.noFocusedBoard
         }
-        guard let binaryPath = await HolyMannaBinaryResolver.shared.binaryPath() else {
+        guard let binaryPath = await HolyBoardExecutableResolver.agentDo.binaryPath() else {
             throw HolyMannaBoardClientError.localBinaryMissing
         }
         return .init(
@@ -357,43 +357,54 @@ struct HolyMannaBoardClient: Sendable {
     }
 }
 
-private actor HolyMannaBinaryResolver {
-    static let shared = HolyMannaBinaryResolver()
+/// One lookup task per executable. Actor isolation does not prevent reentry
+/// while a shell probe is suspended: every caller must await that same task,
+/// including when its eventual result is genuinely missing.
+actor HolyBoardExecutableResolver {
+    static let agentDo = HolyBoardExecutableResolver(name: "agent-do", candidates: [
+        FileManager.default.homeDirectoryForCurrentUser.path + "/.local/bin/agent-do",
+        "/opt/homebrew/bin/agent-do",
+        "/usr/local/bin/agent-do",
+    ])
+    static let claude = HolyBoardExecutableResolver(name: "claude", candidates: [
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+        FileManager.default.homeDirectoryForCurrentUser.path + "/.local/bin/claude",
+    ])
 
-    private var cached: String?
-    private var didResolve = false
+    private let probe: @Sendable () async -> String?
+    private var resolution: Task<String?, Never>?
+
+    init(probe: @escaping @Sendable () async -> String?) {
+        self.probe = probe
+    }
+
+    private init(name: String, candidates: [String]) {
+        self.probe = { await Self.locate(name: name, candidates: candidates) }
+    }
 
     func binaryPath() async -> String? {
-        if didResolve { return cached }
-        didResolve = true
+        if let resolution { return await resolution.value }
+        let task = Task { [probe] in await probe() }
+        resolution = task
+        return await task.value
+    }
 
+    private static func locate(name: String, candidates: [String]) async -> String? {
         let probe = HolyMannaProcessInvocation(
             executablePath: "/bin/zsh",
-            arguments: ["-lc", "command -v agent-do"],
+            arguments: ["-lc", "command -v " + name],
             currentDirectoryPath: nil,
             environment: [:],
             stdin: nil,
-            displayCommand: "locate agent-do"
+            displayCommand: "locate " + name
         )
         if let output = try? await HolyMannaProcessRunner.run(probe, 15),
            output.exitCode == 0 {
             let path = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-            if FileManager.default.isExecutableFile(atPath: path) {
-                cached = path
-                return path
-            }
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
         }
-
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        for candidate in [
-            "\(home)/.local/bin/agent-do",
-            "/opt/homebrew/bin/agent-do",
-            "/usr/local/bin/agent-do",
-        ] where FileManager.default.isExecutableFile(atPath: candidate) {
-            cached = candidate
-            return candidate
-        }
-        return nil
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 }
 

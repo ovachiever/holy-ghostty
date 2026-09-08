@@ -572,9 +572,6 @@ struct HolyIntelligenceResponse: Sendable {
 actor HolyIntelligenceRouter {
     static let shared = HolyIntelligenceRouter()
 
-    private var claudePath: String?
-    private var didResolveClaude = false
-
     func complete(
         role: HolyIntelligenceRole,
         prompt: String,
@@ -597,7 +594,7 @@ actor HolyIntelligenceRouter {
             ))
             return .init(text: response.text, model: model)
         }
-        guard let binary = await resolvedClaudePath() else {
+        guard let binary = await HolyBoardExecutableResolver.claude.binaryPath() else {
             throw HolyIntelligenceError.binaryMissing
         }
         try Task.checkCancellation()
@@ -642,39 +639,6 @@ actor HolyIntelligenceRouter {
     private func modelName(for role: HolyIntelligenceRole) -> String {
         let key = "holy.intelligence.\(role.rawValue).model"
         return UserDefaults.standard.string(forKey: key)?.nilIfBlank ?? (role == .deep ? "opus" : role.defaultModel)
-    }
-
-    private func resolvedClaudePath() async -> String? {
-        if didResolveClaude { return claudePath }
-        didResolveClaude = true
-
-        let probe = HolyMannaProcessInvocation(
-            executablePath: "/bin/zsh",
-            arguments: ["-lc", "command -v claude"],
-            currentDirectoryPath: nil,
-            environment: [:],
-            stdin: nil,
-            displayCommand: "locate Claude"
-        )
-        if let output = try? await HolyMannaProcessRunner.run(probe, 15),
-           output.exitCode == 0 {
-            let path = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-            if FileManager.default.isExecutableFile(atPath: path) {
-                claudePath = path
-                return path
-            }
-        }
-
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        for candidate in [
-            "/opt/homebrew/bin/claude",
-            "/usr/local/bin/claude",
-            "\(home)/.local/bin/claude",
-        ] where FileManager.default.isExecutableFile(atPath: candidate) {
-            claudePath = candidate
-            return candidate
-        }
-        return nil
     }
 }
 
