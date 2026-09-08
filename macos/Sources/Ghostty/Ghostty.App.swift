@@ -318,7 +318,7 @@ extension Ghostty {
         // MARK: Ghostty Callbacks (macOS)
 
         static func closeSurface(_ userdata: UnsafeMutableRawPointer?, processAlive: Bool) {
-            let surface = self.surfaceUserdata(from: userdata)
+            guard let surface = self.surfaceUserdata(from: userdata) else { return }
             NotificationCenter.default.post(name: Notification.ghosttyCloseSurface, object: surface, userInfo: [
                 "process_alive": processAlive,
             ])
@@ -329,7 +329,7 @@ extension Ghostty {
             location: ghostty_clipboard_e,
             state: UnsafeMutableRawPointer?
         ) -> Bool {
-            let surfaceView = self.surfaceUserdata(from: userdata)
+            guard let surfaceView = self.surfaceUserdata(from: userdata) else { return false }
             guard let surface = surfaceView.surface else { return false }
 
             // Get our pasteboard
@@ -349,7 +349,7 @@ extension Ghostty {
             state: UnsafeMutableRawPointer?,
             request: ghostty_clipboard_request_e
         ) {
-            let surface = self.surfaceUserdata(from: userdata)
+            guard let surface = self.surfaceUserdata(from: userdata) else { return }
             guard let valueStr = String(cString: string!, encoding: .utf8) else { return }
             guard let request = Ghostty.ClipboardRequest.from(request: request) else { return }
             NotificationCenter.default.post(
@@ -381,7 +381,7 @@ extension Ghostty {
             len: Int,
             confirm: Bool
         ) {
-            let surface = self.surfaceUserdata(from: userdata)
+            guard let surface = self.surfaceUserdata(from: userdata) else { return }
             guard let pasteboard = NSPasteboard.ghostty(location) else { return }
             guard let content = content, len > 0 else { return }
 
@@ -463,13 +463,22 @@ extension Ghostty {
         }
 
         /// Returns the surface view from the userdata.
-        static private func surfaceUserdata(from userdata: UnsafeMutableRawPointer?) -> SurfaceView {
-            return Unmanaged<SurfaceView>.fromOpaque(userdata!).takeUnretainedValue()
+        static func surfaceUserdata(from userdata: UnsafeMutableRawPointer?) -> SurfaceView? {
+            guard let userdata else { return nil }
+            // The embedded runtime delivers surface callbacks during main-thread
+            // API calls/ticks. Assert that contract at the C callback boundary.
+            return MainActor.assumeIsolated {
+                let view = Unmanaged<SurfaceUserdata>.fromOpaque(userdata).takeUnretainedValue().view
+                if view == nil {
+                    Ghostty.logger.error("lifecycle: ignored surface callback after view release")
+                }
+                return view
+            }
         }
 
         static private func surfaceView(from surface: ghostty_surface_t) -> SurfaceView? {
             guard let surface_ud = ghostty_surface_userdata(surface) else { return nil }
-            return Unmanaged<SurfaceView>.fromOpaque(surface_ud).takeUnretainedValue()
+            return surfaceUserdata(from: surface_ud)
         }
 
         // MARK: Actions (macOS)

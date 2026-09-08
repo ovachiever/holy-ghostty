@@ -128,6 +128,10 @@ final class HolySessionSupervisor {
 
     private let ghostty: Ghostty.App
     private let seedDefaultSession: Bool
+    typealias SaveWorkspace = (
+        HolyWorkspaceSnapshot, [HolySession], [UUID: HolySessionAttention], [HolySessionEventDraft]
+    ) -> Void
+    private let saveWorkspace: SaveWorkspace
     private let alertCoordinator = HolySessionAlertCoordinator()
     private let tmuxRecoveryValidator = HolyTmuxRecoveryValidator()
     private var scheduledPersistTask: Task<Void, Never>?
@@ -138,9 +142,14 @@ final class HolySessionSupervisor {
     private static let mutationPersistenceDebounceNanoseconds: UInt64 = 350_000_000
     private static let routineMutationPersistenceInterval: TimeInterval = 10
 
-    init(ghostty: Ghostty.App, seedDefaultSession: Bool) {
+    init(
+        ghostty: Ghostty.App,
+        seedDefaultSession: Bool,
+        saveWorkspace: @escaping SaveWorkspace = HolyWorkspaceRepository.save
+    ) {
         self.ghostty = ghostty
         self.seedDefaultSession = seedDefaultSession
+        self.saveWorkspace = saveWorkspace
     }
 
     func restoreWorkspace() -> HolyWorkspaceRestoreResult {
@@ -965,11 +974,11 @@ final class HolySessionSupervisor {
         let combinedEvents = bufferedMutationEvents + additionalEvents
         bufferedMutationEvents.removeAll()
         lastRoutineMutationPersistenceAt = .now
-        HolyWorkspaceRepository.save(
-            snapshot: state.snapshot,
-            activeSessions: state.sessions,
-            attentionBySessionID: attentionBySessionID,
-            pendingEvents: combinedEvents
+        saveWorkspace(
+            state.snapshot,
+            state.sessions,
+            attentionBySessionID,
+            combinedEvents
         )
     }
 

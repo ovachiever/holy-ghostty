@@ -523,7 +523,14 @@ class AppDelegate: NSObject,
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return derivedConfig.shouldQuitAfterLastWindowClosed
+        Self.shouldAutomaticallyQuitAfterLastWindowClosed(configured: derivedConfig.shouldQuitAfterLastWindowClosed)
+    }
+
+    @MainActor
+    static func shouldAutomaticallyQuitAfterLastWindowClosed(configured: Bool) -> Bool {
+        // A workspace owns the empty roster as well as its terminal surfaces.
+        // Surface teardown must never make it eligible for automatic quitting.
+        return HolyWorkspaceWindowController.all.isEmpty && configured
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

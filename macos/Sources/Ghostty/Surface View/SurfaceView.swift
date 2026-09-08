@@ -691,16 +691,19 @@ extension Ghostty {
 
         /// Provides a C-compatible ghostty configuration within a closure. The configuration
         /// and all its string pointers are only valid within the closure.
+        @MainActor
         func withCValue<T>(view: SurfaceView, _ body: (inout ghostty_surface_config_s) throws -> T) rethrows -> T {
             var config = ghostty_surface_config_new()
-            config.userdata = Unmanaged.passUnretained(view).toOpaque()
 #if os(macOS)
+            view.callbackUserdata.view = view
+            config.userdata = Unmanaged.passUnretained(view.callbackUserdata).toOpaque()
             config.platform_tag = GHOSTTY_PLATFORM_MACOS
             config.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(
                 nsview: Unmanaged.passUnretained(view).toOpaque()
             ))
             config.scale_factor = NSScreen.main!.backingScaleFactor
 #elseif os(iOS)
+            config.userdata = Unmanaged.passUnretained(view).toOpaque()
             config.platform_tag = GHOSTTY_PLATFORM_IOS
             config.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(
                 uiview: Unmanaged.passUnretained(view).toOpaque()

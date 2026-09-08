@@ -235,11 +235,17 @@ final class HolyWorkspaceStore: ObservableObject {
     private var suppressAutomaticSelectionPersistence = false
     private static let keepAwakeDefaultsKey = "HolyKeepAwakeWhileRemoteAttached"
 
-    init(ghostty: Ghostty.App, seedDefaultSession: Bool = true) {
-        self.sessionSupervisor = HolySessionSupervisor(
+    /// An explicitly supplied supervisor allows isolated lifecycle tests to
+    /// exercise real roster mutations without restoring or polling live hosts.
+    init(sessionSupervisor: HolySessionSupervisor) {
+        self.sessionSupervisor = sessionSupervisor
+    }
+
+    convenience init(ghostty: Ghostty.App, seedDefaultSession: Bool = true) {
+        self.init(sessionSupervisor: HolySessionSupervisor(
             ghostty: ghostty,
             seedDefaultSession: seedDefaultSession
-        )
+        ))
         restore()
         let coordinator = HolySessionRefreshCoordinator { [weak self] in
             self?.sessions ?? []
@@ -722,6 +728,7 @@ final class HolyWorkspaceStore: ObservableObject {
 
         nextState.selectedSessionID = nil
         applySessionStoreState(nextState)
+        Self.attentionDebugLogger.error("lifecycle: detachAllSessions (Clear) applied empty roster")
         pendingEvents.append(contentsOf: selectionEvents(from: previousSelectedSessionID, to: selectedSessionID))
         persist(pendingEvents: pendingEvents)
         refreshDraftLaunchGuardrail()

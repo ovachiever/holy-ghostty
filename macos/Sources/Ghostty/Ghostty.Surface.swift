@@ -1,6 +1,14 @@
 import GhosttyKit
 
 extension Ghostty {
+    /// Core callbacks can arrive after the NSView dies but before the queued
+    /// main-actor surface free. Keep the userdata alive through that free,
+    /// without keeping the view (and its surface) alive in a retain cycle.
+    @MainActor
+    final class SurfaceUserdata {
+        weak var view: SurfaceView?
+    }
+
     /// Represents a single surface within Ghostty.
     ///
     /// NOTE(mitchellh): This is a work-in-progress class as part of a general refactor
@@ -11,6 +19,7 @@ extension Ghostty {
     /// Wraps a `ghostty_surface_t`
     final class Surface: Sendable {
         private let surface: ghostty_surface_t
+        private let callbackUserdata: SurfaceUserdata
 
         /// Read the underlying C value for this surface. This is unsafe because the value will be
         /// freed when the Surface class is deinitialized.
@@ -19,8 +28,9 @@ extension Ghostty {
         }
 
         /// Initialize from the C structure.
-        init(cSurface: ghostty_surface_t) {
+        init(cSurface: ghostty_surface_t, callbackUserdata: SurfaceUserdata) {
             self.surface = cSurface
+            self.callbackUserdata = callbackUserdata
         }
 
         deinit {
@@ -30,8 +40,11 @@ extension Ghostty {
             // We can't wait for the task to succeed so this will happen sometime
             // but that's okay.
             let surface = self.surface
+            let callbackUserdata = self.callbackUserdata
             Task.detached { @MainActor in
-                ghostty_surface_free(surface)
+                withExtendedLifetime(callbackUserdata) {
+                    ghostty_surface_free(surface)
+                }
             }
         }
 

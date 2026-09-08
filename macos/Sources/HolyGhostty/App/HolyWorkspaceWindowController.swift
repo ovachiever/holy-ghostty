@@ -52,10 +52,12 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     init(
         ghostty: Ghostty.App,
         initialConfig: Ghostty.SurfaceConfiguration? = nil,
-        seedDefaultSession: Bool? = nil
+        seedDefaultSession: Bool? = nil,
+        workspaceStore suppliedWorkspaceStore: HolyWorkspaceStore? = nil,
+        archiveDatabaseURL: URL = HolyDatabasePaths.archiveDatabaseURL
     ) {
         let resolvedSeedDefaultSession = seedDefaultSession ?? (initialConfig == nil)
-        let workspaceStore = HolyWorkspaceStore(
+        let workspaceStore = suppliedWorkspaceStore ?? HolyWorkspaceStore(
             ghostty: ghostty,
             seedDefaultSession: resolvedSeedDefaultSession
         )
@@ -64,6 +66,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
             usageAssessmentProvider: { workspaceStore.claudeUsageAssessment }
         )
         self.archiveModeStore = HolyArchiveModeStore(
+            databaseURL: archiveDatabaseURL,
             remoteHostsProvider: { workspaceStore.remoteHosts },
             resumeHandler: { session in
                 guard let spec = HolyArchiveResumeLaunchSpec.make(for: session) else { return false }

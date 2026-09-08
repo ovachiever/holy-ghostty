@@ -29,6 +29,7 @@ extension Ghostty {
 
         /// Unique ID per surface
         let id: UUID
+        let callbackUserdata = SurfaceUserdata()
 
         // The current title of the surface as defined by the pty. This can be
         // changed with escape codes. This is public because the callbacks go
@@ -451,7 +452,7 @@ extension Ghostty {
                 self.error = Ghostty.Error.apiFailed
                 return
             }
-            self.surfaceModel = Ghostty.Surface(cSurface: surface)
+            self.surfaceModel = Ghostty.Surface(cSurface: surface, callbackUserdata: callbackUserdata)
 
             // Setup our tracking area so we get mouse moved events
             updateTrackingAreas()
