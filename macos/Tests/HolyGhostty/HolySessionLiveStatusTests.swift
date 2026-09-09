@@ -1,8 +1,79 @@
+import Foundation
 import Testing
 @testable import Ghostty
 
 @MainActor
 struct HolySessionLiveStatusTests {
+    @Test(arguments: ["claude", "codex", "opencode", "future-harness.v1"])
+    func capturedWireDrivesTheOrbForEveryLifecycle(source: String) throws {
+        let expected: [HolyAgentLifecycleState: HolySessionAttentionKind] = [
+            .working: .working,
+            .needsUser: .needsUser,
+            .failed: .needsUser,
+            .finished: .unread,
+            .idle: .usedToday,
+            .ended: .usedToday,
+        ]
+        for lifecycle in HolyAgentLifecycleState.allCases {
+            let observation = try HolyCapturedCodexStateFixture.observation(
+                source: source, lifecycle: lifecycle
+            )
+            #expect(try HolyCapturedCodexStateFixture.kind(observation) == expected[lifecycle])
+        }
+    }
+
+    @Test func codexWorkingWireOverridesSeenStateAndIdleScrapeOnItsFirstPoll() throws {
+        #expect(HolySession.isLiveAgentStatusLineForTesting("• Working (1m 23s • esc to interrupt)"))
+        let observation = try HolyCapturedCodexStateFixture.observation()
+        #expect(try HolyCapturedCodexStateFixture.kind(observation, scrapePhase: .active) == .working)
+    }
+
+    @Test(arguments: ["claude", "codex", "opencode", "future-harness.v1"])
+    func shellEvidenceCannotRenewAnExpiredWorkingLease(source: String) throws {
+        let observation = try HolyCapturedCodexStateFixture.observation(source: source)
+        let envelope = try #require(observation.envelope)
+        let expiredAt = envelope.occurredAt.addingTimeInterval(HolySessionIndicatorPolicy.workingLease)
+        #expect(try HolyCapturedCodexStateFixture.kind(
+            observation, at: expiredAt, scrapePhase: .active
+        ) == .usedToday)
+        #expect(try HolyCapturedCodexStateFixture.kind(
+            observation, at: expiredAt, scrapePhase: .working
+        ) == .working)
+        #expect(try HolyCapturedCodexStateFixture.kind(
+            observation, at: expiredAt, scrapePhase: .waitingInput
+        ) == .needsUser)
+        let dead = try HolyCapturedCodexStateFixture.observation(source: source, dead: true)
+        #expect(try HolyCapturedCodexStateFixture.kind(dead, scrapePhase: .working) == .usedToday)
+    }
+
+    @Test(arguments: [HolyAgentLifecycleState.finished, .failed, .needsUser])
+    func codexSeenAcknowledgesRepliesAndFailuresButLeavesQuestionsDemanding(
+        lifecycle: HolyAgentLifecycleState
+    ) throws {
+        let observation = try HolyCapturedCodexStateFixture.observation(lifecycle: lifecycle)
+        let envelope = try #require(observation.envelope)
+        let seen = try #require(HolyAgentSeenState.seen(
+            acknowledgingEventAtMilliseconds: envelope.occurredAtMilliseconds,
+            at: envelope.occurredAt.addingTimeInterval(1),
+            after: observation.seenState
+        ))
+        #expect(try HolyCapturedCodexStateFixture.kind(observation, seen: seen)
+            == (lifecycle == .needsUser ? .needsUser : .usedToday))
+    }
+
+    @Test(arguments: ["claude", "codex", "opencode", "future-harness.v1"])
+    func seenWireAgesThroughTheSameRecencyStates(source: String) throws {
+        let observation = try HolyCapturedCodexStateFixture.observation(source: source, lifecycle: .idle)
+        let lastActivityAt = try #require(observation.envelope).occurredAt
+        #expect(try HolyCapturedCodexStateFixture.kind(observation) == .usedToday)
+        #expect(try HolyCapturedCodexStateFixture.kind(
+            observation, at: lastActivityAt.addingTimeInterval(24 * 60 * 60)
+        ) == .inactive)
+        #expect(try HolyCapturedCodexStateFixture.kind(
+            observation, at: lastActivityAt.addingTimeInterval(48 * 60 * 60)
+        ) == .sleeping)
+    }
+
     // While OpenCode is generating it shows an interrupt hint ("esc interrupt")
     // in its footer. That phrasing lacks the "to" used by Claude/Codex, so it
     // must be recognized as a live working signal or active sessions show no
@@ -387,5 +458,86 @@ struct HolySessionLiveStatusTests {
         #expect(HolySession.backgroundShellCountForTesting(
             fromActiveContents: codexFooter, runtime: .opencode
         ) == 0)
+    }
+}
+
+/// Read-only capture from holy-worker-bf685295 / pane %31 on 2026-09-09.
+/// The filing receipt cut each line at 110 characters. Prompt/finish below
+/// retain its exact events; working is the later complete event captured in
+/// this lane, with pane_dead=0 and pane_current_command=bash. Other sources
+/// and lifecycle values are deliberate mutations, not additional live claims.
+enum HolyCapturedCodexStateFixture {
+    static let working = "v1|codex|working|1788976911699|1788976911699-48023|01a086b7-655d-7993-b433-4a9c7e18191f|tool-complete"
+    static let lastUsed = "v1|codex|working|1788976540068|1788976540068-69719|01a086b7-655d-7993-b433-4a9c7e18191f|user-prompt"
+    static let lastFinished = "v1|codex|finished|1788975832632|1788975832632-60460|01a086b7-655d-7993-b433-4a9c7e18191f:01a08719-4003-7a82-88c0-0f1a26f655e4|turn-finished"
+    static let seen = "v1|seen|1788976911699|1788976911888"
+    static let observedAt = Date(timeIntervalSince1970: 1_788_976_912)
+
+    static func observation(
+        source: String = "codex",
+        lifecycle: HolyAgentLifecycleState = .working,
+        command: String = "bash",
+        dead: Bool = false
+    ) throws -> HolyTmuxAgentStateObservation {
+        let captured = try HolyAgentStateEnvelope(wireValue: working)
+        let current = lifecycle == .working ? working : try HolyAgentStateEnvelope(
+            source: "codex",
+            lifecycle: lifecycle,
+            occurredAtMilliseconds: captured.occurredAtMilliseconds + 1_000,
+            eventToken: "fixture-\(lifecycle.rawValue)",
+            sessionID: captured.sessionID
+        ).wireValue
+        let row = [
+            "holy-worker-bf685295-f346-4ac5-9344-c259da0c7995", "%31",
+            current, lifecycle == .finished ? current : lastFinished,
+            lastUsed, seen, dead ? "1" : "0", command, "1788976911", "",
+        ].map { $0.replacingOccurrences(of: "|codex|", with: "|\(source)|") }
+            .joined(separator: "\u{1F}")
+        let observations = try HolyTmuxAgentStateMonitor.parse(
+            stdout: row,
+            endpoint: .init(
+                hostID: UUID(uuidString: "88A70BD5-A783-4CD3-9727-69C34450D719")!,
+                hostLabel: "This Mac", location: .local, socketName: "holy"
+            ),
+            observedAt: observedAt
+        )
+        return try #require(observations.values.first)
+    }
+
+    static func kind(
+        _ observation: HolyTmuxAgentStateObservation,
+        at now: Date = observedAt.addingTimeInterval(1),
+        scrapePhase: HolySessionPhase = .active,
+        seen: HolyAgentSeenState? = nil
+    ) throws -> HolySessionAttentionKind {
+        var metadata = HolySessionAttentionMetadata(sessionID: UUID())
+        let envelope = try #require(observation.envelope)
+        _ = metadata.recordFinished(
+            envelope: try #require(observation.lastFinishedEnvelope), observedAt: observation.observedAt
+        )
+        _ = metadata.recordUsed(
+            envelope: try #require(observation.lastUsedEnvelope), observedAt: observation.observedAt
+        )
+        _ = metadata.record(envelope: envelope, observedAt: observation.observedAt)
+        if let seen = seen ?? observation.seenState {
+            _ = metadata.applySharedSeenState(seen, observedAt: observation.observedAt)
+        }
+        return HolySessionIndicatorPolicy.kind(for: .init(
+            lifecycle: envelope.lifecycle,
+            lifecycleOccurredAt: envelope.occurredAt,
+            processExited: false,
+            lastAgentFinishedAt: metadata.lastAgentFinishedAt,
+            lastSeenAt: metadata.lastSeenAt,
+            lastSeenAuthoritativeEventAt: metadata.acknowledgedAuthoritativeEventAt,
+            lastUsedAt: try #require(metadata.lastUsedAt),
+            producerProcessAlive: observation.producerHasLiveProcess,
+            producerLastOutputAt: observation.producerLastOutputAt,
+            lastActivityAt: [
+                metadata.lastUsedAt, metadata.lastAgentFinishedAt,
+                metadata.lastSeenAt, metadata.lastAuthoritativeEventOccurredAt,
+            ].compactMap { $0 }.max(),
+            scrapePhase: scrapePhase,
+            now: now
+        ))
     }
 }

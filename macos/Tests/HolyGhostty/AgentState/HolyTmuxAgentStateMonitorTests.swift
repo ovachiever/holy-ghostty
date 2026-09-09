@@ -536,7 +536,7 @@ struct HolyTmuxAgentStateMonitorTests {
     }
 
     // Producer-process evidence: known only for a single unambiguous
-    // producer pane; a shell foreground or dead pane proves the agent exited.
+    // producer pane. A dead pane proves exit; a shell may be a tool child.
     @Test func producerProcessEvidenceReadsTheProducerPaneForeground() throws {
         let working = try envelope(
             lifecycle: .working,
@@ -548,7 +548,7 @@ struct HolyTmuxAgentStateMonitorTests {
         #expect(alive.values.first?.producerHasLiveProcess == true)
 
         let fellBackToShell = try parse(row(session: "alpha", pane: "%1", wire: working, command: "zsh"))
-        #expect(fellBackToShell.values.first?.producerHasLiveProcess == false)
+        #expect(fellBackToShell.values.first?.producerHasLiveProcess == nil)
 
         let deadPane = try parse(row(session: "alpha", pane: "%1", wire: working, dead: true, command: "claude.exe"))
         #expect(deadPane.values.first?.producerHasLiveProcess == false)
@@ -575,6 +575,33 @@ struct HolyTmuxAgentStateMonitorTests {
 
         let noState = try parse(row(session: "alpha", pane: "%1", wire: nil, command: "claude.exe"))
         #expect(noState.values.first?.producerHasLiveProcess == nil)
+    }
+
+    @Test(arguments: ["claude", "codex", "opencode", "future-harness.v1"])
+    func shellEvidenceDoesNotInvalidateAnyWireSource(source: String) throws {
+        for command in ["sh", "bash", "zsh", "fish", "BASH"] {
+            let observation = try HolyCapturedCodexStateFixture.observation(
+                source: source, command: command
+            )
+            #expect(observation.integrity == .valid)
+            #expect(observation.envelope?.source == source)
+            #expect(observation.producerHasLiveProcess == nil)
+
+            let dead = try HolyCapturedCodexStateFixture.observation(
+                source: source, command: command, dead: true
+            )
+            #expect(dead.producerHasLiveProcess == false)
+        }
+    }
+
+    @Test func capturedCodexTripletPreservesAllRegisters() throws {
+        let observation = try HolyCapturedCodexStateFixture.observation()
+        #expect(observation.paneIDs == ["%31"])
+        #expect(observation.integrity == .valid)
+        #expect(observation.envelope?.wireValue == HolyCapturedCodexStateFixture.working)
+        #expect(observation.lastUsedEnvelope?.wireValue == HolyCapturedCodexStateFixture.lastUsed)
+        #expect(observation.lastFinishedEnvelope?.wireValue == HolyCapturedCodexStateFixture.lastFinished)
+        #expect(observation.producerHasLiveProcess == nil)
     }
 
     // Watcher register (mn-f4d77b): one distinct valid claim per session, or

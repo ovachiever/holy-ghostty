@@ -100,10 +100,10 @@ struct HolyTmuxAgentStateObservation: Equatable, Sendable {
     let rawLastFinishedWireValue: String?
     let rawLastUsedWireValue: String?
     /// Whether the single pane that published the latest-state register still
-    /// runs a non-shell foreground process. When an agent dies, tmux shows
-    /// the pane's shell again, which proves the producer is gone. nil when
-    /// there is no unambiguous producer pane or the command is unreadable —
-    /// unknown must degrade to lease behavior, never invalidate a claim.
+    /// runs a non-shell foreground process. A dead pane proves exit, but a
+    /// shell can be a tool child. nil for shells, ambiguous producer panes,
+    /// or unreadable commands: unknown must degrade to lease behavior,
+    /// never invalidate a claim.
     let producerHasLiveProcess: Bool?
     /// Last output activity in the producer pane's window. Diagnostic evidence
     /// for stalled-agent handling only; pane redraws cannot renew a hook lease.
@@ -112,7 +112,7 @@ struct HolyTmuxAgentStateObservation: Equatable, Sendable {
     /// the independent @holy_watcher_v1 register; nil when no pane publishes
     /// a valid claim or when multiple panes disagree.
     let watcherFireAt: Date?
-    var harnessIdentityEnvelope: HolyAgentStateEnvelope? = nil
+    var harnessIdentityEnvelope: HolyAgentStateEnvelope?
 }
 
 struct HolyTmuxAgentStateSnapshot: Equatable, Sendable {
@@ -564,12 +564,11 @@ extension HolyTmuxAgentStateMonitor {
                     producerHasLiveProcess = false
                 } else if let command = producer.currentCommand {
                     if shellCommandNames.contains(command.lowercased()) {
-                        // Claude runs tool calls as shell children, so sampling
-                        // zsh/bash is not proof that Claude exited. Unknown can
-                        // invalidate nothing; the hook lease carries the claim.
-                        producerHasLiveProcess = currentEnvelope?.source == HolyAgentStateSource.claude
-                            ? nil
-                            : false
+                        // Harnesses run tool calls as shell children, so sampling
+                        // zsh/bash is not proof that the producer exited. This
+                        // evidence has the same authority for every wire source:
+                        // unknown cannot invalidate or renew the hook lease.
+                        producerHasLiveProcess = nil
                     } else {
                         producerHasLiveProcess = true
                     }
@@ -692,8 +691,8 @@ extension HolyTmuxAgentStateMonitor {
         )
     }
 
-    /// Foreground commands that prove the producer process exited: when an
-    /// agent dies, tmux reports the pane's shell as the current command.
+    /// A foreground shell cannot distinguish a tool child from an exited
+    /// harness. Its process evidence is unknown, regardless of wire source.
     private static let shellCommandNames: Set<String> = [
         "zsh", "bash", "fish", "sh", "dash", "tcsh", "csh", "ksh", "login",
     ]
