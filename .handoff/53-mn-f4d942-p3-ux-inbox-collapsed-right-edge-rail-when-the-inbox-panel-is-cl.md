@@ -1,12 +1,12 @@
 ---
 workflow: 2
 manna: mn-f4d942
-track: mn-70875b
+track: mn-eb7a80
 source: null
 base_commit: bda6d543abafdbfe0f663fc6605de4d83bc5fbce
 scope: '[P3][UX][INBOX] Collapsed right-edge rail when the inbox panel is closed'
 inputs: []
-binding: sha256:f4178a003549ff516841a37c4a7318c8c181e789f82ffbb10834aae6e66b5746
+binding: sha256:8b5c09f0c5a4688f451562797e4c84ce509d591d48c64c5f14f1e723e9cfbb83
 ---
 
 # Handoff: [P3][UX][INBOX] Collapsed right-edge rail when the inbox panel is closed
