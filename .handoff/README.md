@@ -99,9 +99,8 @@ Rules:
 | 65 | `mn-eb6b3e` | open | none | `.handoff/65-mn-eb6b3e-pre-existing-test-failure-holybrieftriagetests-needsmethreadslea.md` |
 | 66 | `mn-b864b4` | open | none | `.handoff/66-mn-b864b4-post-incident-gaps-clear-readopt-wipes-attention-metadata-no-re-k.md` |
 | 67 | `mn-330752` | in_progress | none | `.handoff/67-mn-330752-board-mode-native-full-screen-manna-cockpit-in-the-workspace.md` |
-| 68 | `mn-767817` | open | none | `.handoff/68-mn-767817-archive-mode-native-full-width-rebuild-of-agent-sessions.md` |
+| 68 | `mn-767817` | in_progress | none | `.handoff/68-mn-767817-archive-mode-native-full-width-rebuild-of-agent-sessions.md` |
 | 69 | `mn-7a8cae` | open | none | `.handoff/69-mn-7a8cae-attention-one-record-roster-and-board-read-coord-holy-writes-its.md` |
 | 70 | `mn-ac80c9` | open | none | `.handoff/70-mn-ac80c9-board-hygiene-reconcile-the-46-drift-findings-and-retire-superse.md` |
 | 71 | `mn-40f637` | in_progress | none | `.handoff/mn-40f637-p1-keystone-codex-harness-session-id-never-lands-for-codex-sessi.md` (held under live claim; expected `.handoff/71-mn-40f637-p1-keystone-codex-harness-session-id-never-lands-for-codex-sessi.md`) |
-| 72 | `mn-58a0aa` | in_progress | none | `.handoff/mn-58a0aa-p0-restore-cross-project-conversation-attached-vms-io-thread-res.md` (held under live claim; expected `.handoff/72-mn-58a0aa-p0-identity-foreground-conversation-swapped-in-process-fleetview.md`) |
-| 73 | `mn-456903` | open | none | `.handoff/73-mn-456903-p2-agent-state-installer-reports-blocked-on-erik-s-machine-so-la.md` |
+| 72 | `mn-456903` | open | none | `.handoff/72-mn-456903-p2-agent-state-installer-reports-blocked-on-erik-s-machine-so-la.md` |

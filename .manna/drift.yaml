@@ -1,5 +1,5 @@
-generated_at: "2026-08-31T21:10:05Z"
-session: a2391f79-b106-471d-815f-6148e6305b7f
+generated_at: "2026-09-02T22:35:32Z"
+session: 5b8c630f-2a02-4417-9183-c509e6296eab
 findings:
 - kind: landed_open
   issue_id: mn-9a6145
@@ -66,6 +66,26 @@ findings:
   detail: referenced by landed commit trailer but status is open
   evidence: 3ce096d8dd2e
   proposed_fix: review the commits; if the work landed, claim and done mn-13a213
+- kind: landed_open
+  issue_id: mn-330752
+  detail: referenced by landed commit trailer but status is in_progress
+  evidence: bc7ebb722664, 2f443748353c, b5ffc3a81634, +4 more
+  proposed_fix: review the commits; if the work landed, claim and done mn-330752
+- kind: landed_open
+  issue_id: mn-40f637
+  detail: referenced by landed commit trailer but status is in_progress
+  evidence: 9158f8a409b0
+  proposed_fix: review the commits; if the work landed, claim and done mn-40f637
+- kind: landed_open
+  issue_id: mn-fe97c2
+  detail: referenced by landed commit trailer but status is in_progress
+  evidence: cc933d53947d, 7952aea4a2fa, dea86a58c4d4
+  proposed_fix: review the commits; if the work landed, claim and done mn-fe97c2
+- kind: landed_open
+  issue_id: mn-b775ac
+  detail: referenced by landed commit trailer but status is open
+  evidence: e0dfd8a22cf0
+  proposed_fix: review the commits; if the work landed, claim and done mn-b775ac
 - kind: stale_dream
   issue_id: mn-cb681f
   detail: open dream older than 14 days
@@ -97,6 +117,34 @@ findings:
   detail: referenced id does not exist on this board
   evidence: .handoff/45b44-mn-a98f88-handoff-wiring-end-to-end-resume-verification.md:36
 - kind: doc_reference
+  issue_id: mn-b7efa6
+  detail: referenced id does not exist on this board
+  evidence: .handoff/68-mn-767817-archive-mode-native-full-width-rebuild-of-agent-sessions.md:534
+- kind: doc_reference
+  issue_id: mn-b7ff4b
+  detail: referenced id does not exist on this board
+  evidence: .handoff/68-mn-767817-archive-mode-native-full-width-rebuild-of-agent-sessions.md:535
+- kind: doc_reference
+  issue_id: mn-1cca0f
+  detail: referenced id does not exist on this board
+  evidence: .handoff/68-mn-767817-archive-mode-native-full-width-rebuild-of-agent-sessions.md:536
+- kind: doc_reference
+  issue_id: mn-a7eb85
+  detail: referenced id does not exist on this board
+  evidence: .handoff/68-mn-767817-archive-mode-native-full-width-rebuild-of-agent-sessions.md:537
+- kind: doc_reference
+  issue_id: mn-2b847f
+  detail: referenced id does not exist on this board
+  evidence: .handoff/68-mn-767817-archive-mode-native-full-width-rebuild-of-agent-sessions.md:538
+- kind: doc_reference
+  issue_id: mn-7dfdb0
+  detail: referenced id does not exist on this board
+  evidence: .handoff/68-mn-767817-archive-mode-native-full-width-rebuild-of-agent-sessions.md:538
+- kind: doc_reference
+  issue_id: mn-73001f
+  detail: referenced id does not exist on this board
+  evidence: .handoff/68-mn-767817-archive-mode-native-full-width-rebuild-of-agent-sessions.md:538
+- kind: doc_reference
   issue_id: mn-4d778d
   detail: referenced id does not exist on this board
   evidence: .handoff/64-mn-13a213-p0-recovery-real-crash-2026-08-14-live-but-younger-server-re-ope.md:143
@@ -108,6 +156,10 @@ findings:
   issue_id: mn-7dfdb0
   detail: referenced id does not exist on this board
   evidence: .handoff/12-mn-9a6145-p0-recovery-add-restore-all-restore-selected-and-recovery-backup.md:38
+- kind: doc_reference
+  issue_id: mn-1cca0f
+  detail: referenced id does not exist on this board
+  evidence: .handoff/71-mn-ac80c9-board-hygiene-reconcile-the-46-drift-findings-and-retire-superse.md:33
 - kind: doc_reference
   issue_id: mn-f79edc
   detail: referenced id does not exist on this board
@@ -212,6 +264,38 @@ findings:
   issue_id: mn-7dfdb0
   detail: referenced id does not exist on this board
   evidence: .zpc/.state/counsel/relit-1788187724/brief-les-7b19e7.md:122
+- kind: doc_reference
+  issue_id: mn-c7e91b
+  detail: referenced id does not exist on this board
+  evidence: /Users/erik/.claude/projects/-Users-erik-Custom-Coding-holy-ghostty/memory/MEMORY.md:4
+- kind: doc_reference
+  issue_id: mn-c7e91b
+  detail: referenced id does not exist on this board
+  evidence: /Users/erik/.claude/projects/-Users-erik-Custom-Coding-holy-ghostty/memory/one-ledger-two-faces-design.md:11
+- kind: doc_reference
+  issue_id: mn-7ef12d
+  detail: referenced id does not exist on this board
+  evidence: /Users/erik/.claude/projects/-Users-erik-Custom-Coding-holy-ghostty/memory/one-ledger-two-faces-design.md:11
+- kind: doc_reference
+  issue_id: mn-86a41b
+  detail: referenced id does not exist on this board
+  evidence: /Users/erik/.claude/projects/-Users-erik-Custom-Coding-holy-ghostty/memory/one-ledger-two-faces-design.md:11
+- kind: doc_reference
+  issue_id: mn-b7efa6
+  detail: referenced id does not exist on this board
+  evidence: /Users/erik/.claude/projects/-Users-erik-Custom-Coding-holy-ghostty/memory/one-ledger-two-faces-design.md:11
+- kind: doc_reference
+  issue_id: mn-1cca0f
+  detail: referenced id does not exist on this board
+  evidence: /Users/erik/.claude/projects/-Users-erik-Custom-Coding-holy-ghostty/memory/one-ledger-two-faces-design.md:11
+- kind: doc_reference
+  issue_id: mn-a7eb85
+  detail: referenced id does not exist on this board
+  evidence: /Users/erik/.claude/projects/-Users-erik-Custom-Coding-holy-ghostty/memory/one-ledger-two-faces-design.md:11
+- kind: doc_reference
+  issue_id: mn-b7ff4b
+  detail: referenced id does not exist on this board
+  evidence: /Users/erik/.claude/projects/-Users-erik-Custom-Coding-holy-ghostty/memory/one-ledger-two-faces-design.md:11
 - kind: prompt_pairing
   issue_id: mn-fe1b48
   detail: prompt pointer .handoff/44-mn-fe1b48-sessions-panel-right-hand-utility-surface-hosting-agent-sessions.md does not resolve to claiming file .handoff/45b44-mn-a98f88-handoff-wiring-end-to-end-resume-verification.md
@@ -222,8 +306,58 @@ findings:
   evidence: handoff_order
   proposed_fix: agent-do manna sync
 - kind: handoff_presentation
-  issue_id: mn-b864b4
-  detail: handoff path is .handoff/mn-b864b4-post-incident-gaps-clear-readopt-wipes-attention-metadata-no-re-k.md, expected .handoff/66-mn-b864b4-post-incident-gaps-clear-readopt-wipes-attention-metadata-no-re-k.md
+  issue_id: mn-7a8cae
+  detail: handoff path is .handoff/69-mn-7a8cae-attention-one-record-roster-and-board-read-coord-holy-writes-its.md, expected .handoff/68-mn-7a8cae-attention-one-record-roster-and-board-read-coord-holy-writes-its.md
+  evidence: handoff_filename
+  proposed_fix: agent-do manna sync
+- kind: handoff_presentation
+  issue_id: mn-ac80c9
+  detail: handoff path is .handoff/71-mn-ac80c9-board-hygiene-reconcile-the-46-drift-findings-and-retire-superse.md, expected .handoff/69-mn-ac80c9-board-hygiene-reconcile-the-46-drift-findings-and-retire-superse.md
+  evidence: handoff_filename
+  proposed_fix: agent-do manna sync
+- kind: handoff_presentation
+  issue_id: mn-40f637
+  detail: handoff path is .handoff/mn-40f637-p1-keystone-codex-harness-session-id-never-lands-for-codex-sessi.md, expected .handoff/70-mn-40f637-p1-keystone-codex-harness-session-id-never-lands-for-codex-sessi.md; rename is held until its live claim releases
+  evidence: handoff_filename
+  proposed_fix: agent-do manna sync
+- kind: handoff_presentation
+  issue_id: mn-456903
+  detail: handoff path is .handoff/mn-456903-p2-agent-state-installer-reports-blocked-on-erik-s-machine-so-la.md, expected .handoff/71-mn-456903-p2-agent-state-installer-reports-blocked-on-erik-s-machine-so-la.md
+  evidence: handoff_filename
+  proposed_fix: agent-do manna sync
+- kind: handoff_presentation
+  issue_id: mn-7681f4
+  detail: handoff path is .handoff/mn-7681f4-p1-security-restore-provider-supplied-resume-command-strings-run.md, expected .handoff/72-mn-7681f4-p1-security-restore-provider-supplied-resume-command-strings-run.md
+  evidence: handoff_filename
+  proposed_fix: agent-do manna sync
+- kind: handoff_presentation
+  issue_id: mn-fe97c2
+  detail: handoff path is .handoff/mn-fe97c2-archive-mode-cockpit-consistent-face-with-agent-sessions-behavio.md, expected .handoff/73-mn-fe97c2-archive-mode-cockpit-consistent-face-with-agent-sessions-behavio.md; rename is held until its live claim releases
+  evidence: handoff_filename
+  proposed_fix: agent-do manna sync
+- kind: handoff_presentation
+  issue_id: mn-4308c4
+  detail: handoff path is .handoff/mn-4308c4-p1-kernel-zone-leak-watch-catch-the-kalloc-1024-leaker-and-build.md, expected .handoff/74-mn-4308c4-p1-kernel-zone-leak-watch-catch-the-kalloc-1024-leaker-and-build.md; rename is held until its live claim releases
+  evidence: handoff_filename
+  proposed_fix: agent-do manna sync
+- kind: handoff_presentation
+  issue_id: mn-d856ee
+  detail: handoff path is .handoff/mn-d856ee-p1-ops-ssh-host-hygiene-retire-the-keepalive-tmux-launchagent-ra.md, expected .handoff/75-mn-d856ee-p1-ops-ssh-host-hygiene-retire-the-keepalive-tmux-launchagent-ra.md; rename is held until its live claim releases
+  evidence: handoff_filename
+  proposed_fix: agent-do manna sync
+- kind: handoff_presentation
+  issue_id: mn-b775ac
+  detail: handoff path is .handoff/mn-b775ac-p0-archive-db-archive-ingest-starves-the-ui-writer-move-to-its-o.md, expected .handoff/76-mn-b775ac-p0-archive-db-archive-ingest-starves-the-ui-writer-move-to-its-o.md
+  evidence: handoff_filename
+  proposed_fix: agent-do manna sync
+- kind: handoff_presentation
+  issue_id: mn-767817
+  detail: completed handoff path is .handoff/68-mn-767817-archive-mode-native-full-width-rebuild-of-agent-sessions.md, expected unnumbered history path .handoff/mn-767817-archive-mode-native-full-width-rebuild-of-agent-sessions.md
+  evidence: handoff_filename
+  proposed_fix: agent-do manna sync
+- kind: handoff_presentation
+  issue_id: mn-3772d7
+  detail: completed handoff path is .handoff/70-mn-3772d7-inbox-narrowing-github-only-two-tab-dock-manna-source-deleted-br.md, expected unnumbered history path .handoff/mn-3772d7-inbox-narrowing-github-only-two-tab-dock-manna-source-deleted-br.md
   evidence: handoff_filename
   proposed_fix: agent-do manna sync
 - kind: handoff_presentation

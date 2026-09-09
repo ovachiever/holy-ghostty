@@ -7,7 +7,7 @@ base_commit: c528bd74b39407bb647a4b36311ef2f0db7d5ea6
 scope: 'Archive mode: cockpit-consistent face with agent-sessions behaviors'
 inputs:
 - Erik, 2026-09-02 13:48, after reviewing mn-767817's first face
-binding: sha256:b49026b855e56c3e39e76ea58bcfbdaa9ea1592db3a088317a0c6c44aebdce05
+binding: sha256:5643ad819d9cc4660ac09c7e3a074c68d8a30a012694ab372ce37d20d6c2a046
 ---
 
 # Handoff: Archive mode: cockpit-consistent face with agent-sessions behaviors
@@ -50,3 +50,7 @@ What landed:
 Verification: `HolyArchiveModeTests` (23), `HolyArchivePresentationTests` (6), `HolyArchiveRenderSmokeTests` (1) green alongside the board suites (30). The render test draws sessions, child, transcript, and research faces from a hermetic fixture; set `TEST_RUNNER_HOLY_ARCHIVE_RENDER_DIR` to keep the PNGs.
 
 Not built (reasons): the TUI's list is limited to the sessions Holy has indexed — the startup pass covers the last 48 hours, so "full reindex" from the reindex menu is what brings all 2,461 parents in; summaries appear once that pass and the import run. Open until Erik's production pass.
+
+### Addendum (2026-09-02 15:35): embedding failures on Erik's first production pass
+
+The installed app raised "Archive update completed with 946 failure(s): … OpenAI embeddings failed with HTTP 400: maximum input length is 8192 tokens". `HolyArchiveEmbeddingInputBounds` now clips inputs at 8,192 × 2 characters (the dense, code-heavy case) and the OpenAI provider halves every input and retries when the API still refuses one as too long; `HolyArchiveEmbeddingBoundsTests` (3) pin the bound, the verdict match, and the halving floor. Chunks that failed earlier stay unembedded until the next update or "generate missing embeddings" from the reindex menu.
