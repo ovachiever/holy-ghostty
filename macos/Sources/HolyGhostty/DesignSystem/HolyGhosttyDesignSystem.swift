@@ -154,6 +154,9 @@ struct HolyGhosttySurfaceFrame<Content: View>: View {
                     halo ? HolyGhosttyTheme.halo.opacity(0.28) : HolyGhosttyTheme.border,
                     lineWidth: halo ? 1 : 0.5
                 )
+                // Decoration must not obscure the terminal's tracking area
+                // or become the target of its selection and link clicks.
+                .allowsHitTesting(false)
             )
             .background(
                 // Cast the halo from a static shape so Core Animation rasterizes

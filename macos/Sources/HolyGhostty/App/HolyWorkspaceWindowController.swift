@@ -48,6 +48,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     let workspaceStore: HolyWorkspaceStore
     let boardModeStore: HolyMannaBoardModeStore
     let archiveModeStore: HolyArchiveModeStore
+    private var modifierEventMonitor: Any?
 
     init(
         ghostty: Ghostty.App,
@@ -121,6 +122,19 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         window.holyWorkspaceController = self
         window.delegate = self
         Self.retain(self)
+        // BaseTerminalController supplies this for stock windows. Workspace
+        // windows have their own controller, so visible unfocused panes need
+        // the same modifier updates to refresh a stationary link hover.
+        modifierEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            guard let self, let window = self.window,
+                  !self.boardModeStore.isPresented,
+                  !self.archiveModeStore.isPresented else { return event }
+            return Self.forwardModifierEvent(
+                event,
+                in: window,
+                to: self.workspaceStore.visiblePaneSessions.map(\.surfaceView)
+            )
+        }
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(ghosttyDidNewSplit(_:)),
@@ -140,6 +154,9 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     }
 
     deinit {
+        if let modifierEventMonitor {
+            NSEvent.removeMonitor(modifierEventMonitor)
+        }
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
@@ -150,6 +167,21 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             self?.workspaceStore.convergeOnSystemWake()
         }
+    }
+
+    /// Keep AppKit's normal first-responder delivery intact and update only
+    /// the other mounted panes. In particular, do not send modifier keys to
+    /// detached sessions or twice to the pane receiving keyboard input.
+    static func forwardModifierEvent(_ event: NSEvent, in window: NSWindow, to surfaces: [NSView]) -> NSEvent {
+        guard event.type == .flagsChanged else { return event }
+        for surface in surfaces {
+            guard surface.window === window,
+                  !surface.isHiddenOrHasHiddenAncestor,
+                  !surface.visibleRect.isEmpty else { continue }
+            if event.window === window && window.firstResponder === surface { continue }
+            surface.flagsChanged(with: event)
+        }
+        return event
     }
 
     @available(*, unavailable)
