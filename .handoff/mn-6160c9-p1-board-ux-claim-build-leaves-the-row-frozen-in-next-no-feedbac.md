@@ -7,7 +7,7 @@ base_commit: b74e8fc7d4fb43f8cfcb48135cf59435920cf42e
 scope: '[P1][BOARD][UX] Claim & build leaves the row frozen in next: no feedback until navigation forces a refresh'
 inputs:
 - Erik live report 2026-09-10 15:22; companion defect to mn-ec34cd's dispatch flow
-binding: sha256:a3547a9c5d6d7342e7b34e7ce4296d74be841bfbf3394ccba5a13134e3bd80fb
+binding: sha256:6aee7aa1b6bf95ccaf61742451ca95b421fd0691478cd45d235fe84f27a3ddf0
 ---
 
 # Handoff: [P1][BOARD][UX] Claim & build leaves the row frozen in next: no feedback until navigation forces a refresh
@@ -38,3 +38,65 @@ Erik 2026-09-10: clicking Claim & build dispatches fine, but the item stays in $
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-6160c9`.
 4. Commit with `Manna: mn-6160c9` and run `agent-do manna done mn-6160c9` only after the work is verified.
+
+## Build receipt, 2026-09-10
+
+Implementation is complete and compiled. Required executed-test and live acceptance remain pending; this item must stay `in_progress`.
+
+- Claimed with `agent-do manna claim mn-6160c9` as `codex-01a08d0beeb473f1`. No claim was stolen.
+- Before editing, verified the complete-content Manna binding against the expected `sha256:a3547a9c5d6d7342e7b34e7ce4296d74be841bfbf3394ccba5a13134e3bd80fb`, handoff frontmatter, and `agent-do manna state --json`. Manna normalizes its one frontmatter `binding:` line to `binding: ''` before hashing. The raw file hash is not the binding.
+- Read the applicable parent `AGENTS.md`, repo README, Xcode scheme/project, and Build and Validation work order. There is no project-local AGENTS.md or CLAUDE.md.
+- Set coord focus and claimed only the four Swift files below plus this handoff. Preserved foreign documentation edits, terminal-mouse lane changes, and other Manna rows.
+- Baseline: `f1931e5ba`. Validation checkout: `/Users/erik/Custom-Coding/holy-ghostty-fix-mn-6160c9-board-dispatch`, created with `agent-do git worktree add fix/mn-6160c9-board-dispatch`. Existing ignored GhosttyKit and generated resources were copied into that checkout; no app was installed or launched. Manna/coord operations stayed in the primary checkout.
+
+### Implemented behavior
+
+1. A confirmed successful launch records the real Holy session UUID in feedback scoped by host, repository, and item. The row displays `dispatched · worker booting`; Claim & build is disabled while waiting. Neither the item status nor its section is changed locally.
+2. The originating board refreshes immediately and every three seconds. Reads coalesce while a CLI read is in flight. A canonical `in_progress` item with a claimant, or a canonical completed item, clears the feedback and cancels convergence. Section membership continues to come from Manna's payload.
+3. An independent 60-second deadline stops convergence even if a read is slow or failing. Expiry removes the waiting state and displays `Worker did not claim within 60s.` with an `open worker session` action. The link selects the captured session through the existing workspace focus path. Navigating to another board cannot display or apply the originating board's feedback there.
+4. Launch/refusal errors create no waiting feedback and continue to report the error without claiming anything. Inspector mutation verbs already await their CLI result and request a refresh. Their required forced refresh is now queued once when another read is in flight, so the earlier read cannot swallow it. Periodic convergence ticks never queue a read beyond their window.
+
+Changed files and SHA-256 of the verified build inputs (byte-identical in primary and validation checkout):
+
+```text
+4eb58e821432a57858eb7a8b38c01e80c30cca525a6ccba74ffba752717d8772  macos/Sources/HolyGhostty/Board/HolyMannaBoardStore.swift
+a84944a39192d4aa872e18a85b04a4abd33204aed8d1e9da6420f582ef5fd20f  macos/Sources/HolyGhostty/Board/HolyMannaBoardView.swift
+da2a270d59b0fd555c9877eb3e66c13cfa094227afcf130f850e51c7e9a91a3c  macos/Sources/HolyGhostty/Workspace/HolyWorkspaceView.swift
+b8392252bd4d77b6d81b9bf98784c2782aa6179e93a04eca04ac1f7150dce635  macos/Tests/HolyGhostty/HolyMannaBoardActionsTests.swift
+```
+
+### Focused validation actually performed
+
+From the primary checkout:
+
+```bash
+swiftlint lint --strict --config macos/.swiftlint.yml macos/Sources/HolyGhostty/Board/HolyMannaBoardStore.swift macos/Sources/HolyGhostty/Board/HolyMannaBoardView.swift macos/Sources/HolyGhostty/Workspace/HolyWorkspaceView.swift macos/Tests/HolyGhostty/HolyMannaBoardActionsTests.swift
+git diff --check -- macos/Sources/HolyGhostty/Board/HolyMannaBoardStore.swift macos/Sources/HolyGhostty/Board/HolyMannaBoardView.swift macos/Sources/HolyGhostty/Workspace/HolyWorkspaceView.swift macos/Tests/HolyGhostty/HolyMannaBoardActionsTests.swift
+```
+
+Both exited 0. SwiftLint reported 0 violations in four files.
+
+From the isolated validation checkout:
+
+```bash
+xcodebuild build-for-testing -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug -destination 'platform=macOS' -derivedDataPath .dev/mn-6160c9/DerivedData -only-testing:GhosttyTests/HolyMannaBoardActionsTests -only-testing:GhosttyTests/HolyMannaBoardTests -only-testing:GhosttyTests/HolyMannaBoardPresentationTests CODE_SIGNING_ALLOWED=NO
+```
+
+Exited 0 with `** TEST BUILD SUCCEEDED **`. The app and test bundle compiled. The log has 0 error lines and 984 warning lines, none referencing the four changed files. This was a Debug test build using the existing core payload, not a ReleaseLocal production-core provenance or installation acceptance.
+
+Added six regression tests for pending feedback and canonical movement, expiry and session linkage, a slow in-flight read at the deadline, failed reads, host/board navigation, and a forced refresh during an existing read. Extended the existing failed-spawn test to assert no feedback remains. The fixture's `now` and `next` arrays now reflect its canonical claim state.
+
+**Executed test cases: 0.** All app-hosted tests were compiled only. No app launch, install, screenshot, live worker/session spawn, push, or pull request occurred.
+
+Build log and source hashes are under `.dev/mn-6160c9/` in the primary checkout. The original isolated build log and test artifacts are under the same relative directory in the validation checkout. The ignored receipts are supplementary; this tracked handoff contains the commands, results, and remaining acceptance.
+
+### Needed next: coordinated acceptance
+
+Coord dependency: `mn-6160c9-live-acceptance`. Do not mark done before these receipts exist:
+
+1. Coordinate a launch window with the other active Holy lanes, then execute the three selected app-hosted suites through the canonical Xcode test path. Retain the actual passed/failed/skipped counts. The build artifacts above have not been executed.
+2. In an accepted build, Erik confirms Claim & build on a ready, sealed item. Observe immediate waiting feedback and disabled dispatch, followed by automatic movement from `$ manna next` to `$ manna now` with the actual claimant, without navigating or dispatching another item.
+3. Observe expiry feedback and the link to the correct worker when no claim arrives, and verify a launch refusal leaves the row canonical and reports the failure. Check the waiting row and inspector at the active workspace width.
+4. Add the executed-test and live acceptance receipts, reseal this handoff, and only then use `agent-do manna done mn-6160c9` from the primary checkout.
+
+Lessons logged: 3 (new) | Decisions logged: 0 (new). Lesson IDs: `les-ec3da3`, `les-ccbdf7`, `les-674c50`.

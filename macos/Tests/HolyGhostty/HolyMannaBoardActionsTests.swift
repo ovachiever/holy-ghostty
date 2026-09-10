@@ -347,9 +347,155 @@ struct HolyMannaBoardActionsTests {
         #expect(spawns == 1)
         #expect(store.dispatchNotice?.contains("synthetic spawn failure") == true)
         #expect(store.state?.item(id: "mn-123456")?.status == "open")
+        #expect(store.dispatchFeedback(for: "mn-123456") == nil)
         #expect(await calls.values.allSatisfy { $0.contains("manna state") || $0.contains("manna estate") })
         #expect(store.workerRefusal(for: try item()) == nil)
         store.dismiss()
+    }
+
+    @Test @MainActor func dispatchShowsFeedbackThenMovesOnlyOnCanonicalClaimAndStopsPolling() async throws {
+        let calls = ActionCalls()
+        let gate = DispatchReadGate()
+        let sessionID = UUID()
+        var spawns = 0
+        let client = fixtureClient(calls: calls) { reads in
+            if reads >= 4 { await gate.wait() }
+            return try stateJSON(claimed: reads >= 4)
+        }
+        let store = HolyMannaBoardModeStore(client: client, workerLauncher: { _ in
+            spawns += 1
+            return sessionID
+        }, workerExecutableResolver: fixtureWorkerResolver(),
+            workerConvergence: .init(interval: .milliseconds(10), timeout: .seconds(1)), prewarmer: ActionPrewarmer())
+        store.prepare(context: context)
+        try await requireBoardLoaded(store)
+        store.requestWorker(try item())
+        #expect(store.dispatchFeedback(for: "mn-123456") == nil)
+        store.confirmWorker()
+        try await eventually { store.dispatchFeedback(for: "mn-123456") != nil }
+        let feedback = try #require(store.dispatchFeedback(for: "mn-123456"))
+        #expect(feedback.sessionID == sessionID)
+        #expect(feedback.message == "dispatched · worker booting")
+        #expect(feedback.isWaiting)
+        #expect(store.state?.now.isEmpty == true)
+        #expect(store.state?.next.map(\.id) == ["mn-123456"])
+        #expect(store.state?.item(id: "mn-123456")?.claimedBy == nil)
+        #expect(store.workerRefusal(for: try item())?.contains("waiting") == true)
+        store.requestWorker(try item())
+        #expect(store.pendingDispatch == nil)
+        #expect(spawns == 1)
+        await gate.release()
+        try await eventually { store.dispatchFeedback(for: "mn-123456") == nil }
+        #expect(store.state?.now.first?.claimedBy == "codex-owner")
+        #expect(store.state?.next.isEmpty == true)
+        let count = await calls.stateReadCount()
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(await calls.stateReadCount() == count)
+        #expect(await calls.values.allSatisfy { !$0.contains("manna claim") })
+    }
+
+    @Test @MainActor func dispatchExpiryKeepsSessionLinkAndCanonicalRowAndStopsPolling() async throws {
+        let calls = ActionCalls()
+        let sessionID = UUID()
+        let store = HolyMannaBoardModeStore(client: fixtureClient(calls: calls), workerLauncher: { _ in sessionID },
+            workerExecutableResolver: fixtureWorkerResolver(),
+            workerConvergence: .init(interval: .milliseconds(10), timeout: .milliseconds(70)), prewarmer: ActionPrewarmer())
+        store.prepare(context: context)
+        try await requireBoardLoaded(store)
+        store.requestWorker(try item())
+        store.confirmWorker()
+        try await eventually { store.dispatchFeedback(for: "mn-123456")?.isWaiting == false }
+        #expect(store.dispatchFeedback(for: "mn-123456")?.sessionID == sessionID)
+        #expect(store.dispatchFeedback(for: "mn-123456")?.message == "Worker did not claim within 60s.")
+        #expect(store.state?.now.isEmpty == true)
+        #expect(store.state?.next.first?.status == "open")
+        #expect(store.workerRefusal(for: try item()) == nil)
+        let count = await calls.stateReadCount()
+        #expect(count >= 4) // Initial read, confirmation, immediate refresh, cadence.
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(await calls.stateReadCount() == count)
+    }
+
+    @Test @MainActor func slowReadCannotExtendDispatchDeadlineOrQueuePollsAfterExpiry() async throws {
+        let calls = ActionCalls()
+        let gate = DispatchReadGate()
+        let client = fixtureClient(calls: calls) { reads in
+            if reads >= 3 { await gate.wait() }
+            return try stateJSON()
+        }
+        let store = HolyMannaBoardModeStore(client: client, workerLauncher: { _ in UUID() },
+            workerExecutableResolver: fixtureWorkerResolver(),
+            workerConvergence: .init(interval: .milliseconds(10), timeout: .milliseconds(60)), prewarmer: ActionPrewarmer())
+        store.prepare(context: context)
+        try await requireBoardLoaded(store)
+        store.requestWorker(try item())
+        store.confirmWorker()
+        try await eventually { store.dispatchFeedback(for: "mn-123456")?.isWaiting == false }
+        #expect(store.isRefreshing)
+        #expect(await calls.stateReadCount() == 3)
+        await gate.release()
+        try await eventually { !store.isRefreshing }
+        try await Task.sleep(for: .milliseconds(40))
+        #expect(await calls.stateReadCount() == 3)
+        #expect(store.state?.next.first?.status == "open")
+    }
+
+    @Test @MainActor func failedReadsKeepFeedbackUntilDeadlineWithoutMovingTheRow() async throws {
+        let calls = ActionCalls()
+        let client = fixtureClient(calls: calls) { reads in
+            if reads >= 3 { throw HolyMannaAskError.unavailable("synthetic read failure") }
+            return try stateJSON()
+        }
+        let store = HolyMannaBoardModeStore(client: client, workerLauncher: { _ in UUID() },
+            workerExecutableResolver: fixtureWorkerResolver(),
+            workerConvergence: .init(interval: .milliseconds(10), timeout: .milliseconds(80)), prewarmer: ActionPrewarmer())
+        store.prepare(context: context)
+        try await requireBoardLoaded(store)
+        store.requestWorker(try item())
+        store.confirmWorker()
+        try await eventually { store.boardFailure != nil }
+        #expect(store.dispatchFeedback(for: "mn-123456")?.isWaiting == true)
+        #expect(store.state?.next.first?.status == "open")
+        try await eventually { store.dispatchFeedback(for: "mn-123456")?.isWaiting == false }
+        let count = await calls.stateReadCount()
+        try await Task.sleep(for: .milliseconds(40))
+        #expect(await calls.stateReadCount() == count)
+    }
+
+    @Test @MainActor func pendingDispatchRemainsScopedAcrossBoardNavigation() async throws {
+        let calls = ActionCalls()
+        let sessionID = UUID()
+        let store = HolyMannaBoardModeStore(client: fixtureClient(calls: calls), workerLauncher: { _ in sessionID },
+            workerExecutableResolver: fixtureWorkerResolver(),
+            workerConvergence: .init(interval: .milliseconds(10), timeout: .milliseconds(70)), prewarmer: ActionPrewarmer())
+        store.prepare(context: context)
+        try await requireBoardLoaded(store)
+        store.requestWorker(try item())
+        store.confirmWorker()
+        try await eventually { store.dispatchFeedback(for: "mn-123456") != nil }
+        store.prepare(context: .init(boardRoot: nil, remoteHost: "other-host"))
+        #expect(store.dispatchFeedback(for: "mn-123456") == nil)
+        #expect(store.state == nil)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(store.state == nil)
+        store.prepare(context: context)
+        #expect(store.dispatchFeedback(for: "mn-123456")?.sessionID == sessionID)
+        #expect(store.dispatchFeedback(for: "mn-123456")?.isWaiting == false)
+    }
+
+    @Test @MainActor func forcedRefreshDuringExistingReadRunsAgainAfterItLands() async throws {
+        let calls = ActionCalls()
+        let gate = DispatchReadGate()
+        let client = fixtureClient(calls: calls) { reads in
+            if reads == 1 { await gate.wait() }
+            return try stateJSON(claimed: reads > 1)
+        }
+        let store = HolyMannaBoardModeStore(client: client, prewarmer: ActionPrewarmer())
+        store.prepare(context: context)
+        store.requestStateRefresh(force: true)
+        await gate.release()
+        try await eventually { store.state?.now.first?.claimedBy == "codex-owner" }
+        #expect(await calls.stateReadCount() == 2)
     }
 
     @Test @MainActor func claimWonByAnotherWorkerDuringConfirmationPreventsSpawn() async throws {
@@ -403,7 +549,7 @@ private func stateJSON(timestamp: String = "now", title: String = "ready work", 
     let ready = itemJSON(title: title, status: claimed ? "in_progress" : "open", claimant: claimed ? "codex-owner" : nil)
     let done = itemJSON(id: "mn-abcdef", title: "finished work", status: "done")
     let value: [String: Any] = ["success": true, "generated_at": timestamp, "name": "board", "root": context.boardRoot!,
-        "total": 2, "counts": [:], "status_counts": [:], "now": [], "next": [ready], "waves": [],
+        "total": 2, "counts": [:], "status_counts": [:], "now": claimed ? [ready] : [], "next": claimed ? [] : [ready], "waves": [],
         "dreams": [], "decisions": [], "tracks": [], "peers": [], "attention": [:], "coord": [:],
         "drift": ["present": false, "count": 0, "kinds": [:], "findings": []],
         "git": ["dirty_paths": 0, "is_repo": true], "board": [:], "all": [ready, done]]
@@ -422,7 +568,8 @@ private actor ActionCalls {
     func stateReadCount() -> Int { values.filter { $0.contains("manna state") }.count }
 }
 
-private func fixtureClient(calls: ActionCalls, claimAfterFirstRead: Bool = false) -> HolyMannaBoardClient {
+private func fixtureClient(calls: ActionCalls, claimAfterFirstRead: Bool = false,
+                           stateReply: (@Sendable (Int) async throws -> String)? = nil) -> HolyMannaBoardClient {
     let identity = HolyMannaActorIdentityStore(fileURL: FileManager.default.temporaryDirectory
         .appendingPathComponent("holy-board-actions-\(UUID()).json"))
     return HolyMannaBoardClient(identityStore: identity) { invocation, _ in
@@ -431,7 +578,26 @@ private func fixtureClient(calls: ActionCalls, claimAfterFirstRead: Bool = false
             throw HolyMannaAskError.unavailable("No synthetic estate")
         }
         let reads = await calls.stateReadCount()
+        if let stateReply {
+            return .init(stdout: try await stateReply(reads), stderr: "", exitCode: 0)
+        }
         return .init(stdout: try stateJSON(claimed: claimAfterFirstRead && reads > 1), stderr: "", exitCode: 0)
+    }
+}
+
+private actor DispatchReadGate {
+    private var isReleased = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isReleased else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        isReleased = true
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
     }
 }
 

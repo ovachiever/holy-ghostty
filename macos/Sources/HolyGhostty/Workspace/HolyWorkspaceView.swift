@@ -342,7 +342,12 @@ struct HolyWorkspaceRootView: View {
             HolyMannaBoardView(
                 store: boardModeStore,
                 onDismiss: { boardModeStore.dismiss() },
-                onFocusPeer: focusMannaPeer
+                onFocusPeer: focusMannaPeer,
+                onFocusWorker: { id in
+                    guard let session = store.sessions.first(where: { $0.id == id }) else { return false }
+                    focus(session)
+                    return true
+                }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {

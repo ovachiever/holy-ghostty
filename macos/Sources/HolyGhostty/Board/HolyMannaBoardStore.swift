@@ -8,6 +8,21 @@ enum HolyMannaBoardSurface: Equatable, Sendable {
     case board
 }
 
+/// Dispatch receipt only. Row membership and ownership always come from Manna.
+struct HolyMannaWorkerFeedback: Equatable {
+    let sessionID: UUID
+    var isWaiting = true
+
+    var message: String {
+        isWaiting ? "dispatched · worker booting" : "Worker did not claim within 60s."
+    }
+}
+
+struct HolyMannaWorkerConvergence {
+    var interval: Duration = .seconds(3)
+    var timeout: Duration = .seconds(60)
+}
+
 @MainActor
 final class HolyMannaBoardModeStore: ObservableObject {
     @Published private(set) var isPresented = false
@@ -67,6 +82,10 @@ final class HolyMannaBoardModeStore: ObservableObject {
     @Published var pendingDispatch: HolyMannaWorkerDispatch?
     @Published private(set) var isDispatching = false
     @Published private(set) var dispatchNotice: String?
+    @Published private var workerFeedback: [String: [String: HolyMannaWorkerFeedback]] = [:]
+    private var workerPolls: [UUID: Task<Void, Never>] = [:]
+    private var workerDeadlines: [UUID: Task<Void, Never>] = [:]
+    private let workerConvergence: HolyMannaWorkerConvergence
     private let asker: any HolyMannaBoardAsking
     private let askTimeout: Duration
     private let workerLauncher: (@MainActor (HolySessionLaunchSpec) throws -> UUID)?
@@ -85,6 +104,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
     private var stateCache: [String: HolyMannaStatePayload] = [:]
     private var stateRefreshedAt: [String: Date] = [:]
     private var stateReadsInFlight: Set<String> = []
+    private var stateReadsNeedingRefresh: Set<String> = []
     private var estateRefreshedAt: Date?
     private var estateReadInFlight = false
     private var liveTask: Task<Void, Never>?
@@ -98,6 +118,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
         askTimeout: Duration = .seconds(60),
         workerLauncher: (@MainActor (HolySessionLaunchSpec) throws -> UUID)? = nil,
         workerExecutableResolver: HolyMannaWorkerExecutableResolver = .shared,
+        workerConvergence: HolyMannaWorkerConvergence = .init(),
         digestService: any HolyMannaBoardDigesting = HolyMannaBoardDigestService.shared,
         prewarmer: (any HolyMannaBoardPrewarming)? = nil,
         usageAssessmentProvider: @escaping () -> HolyClaudeUsageAssessment = {
@@ -108,6 +129,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
         self.askTimeout = askTimeout
         self.workerLauncher = workerLauncher
         self.workerExecutableResolver = workerExecutableResolver
+        self.workerConvergence = workerConvergence
         self.deepModel = UserDefaults.standard.string(forKey: "holy.intelligence.deep.model") ?? "opus"
         let runtime = HolySessionRuntime(rawValue: UserDefaults.standard.string(forKey: "holy.board.worker.runtime") ?? "codex") ?? .codex
         self.workerRuntime = runtime
@@ -402,6 +424,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
 
     func workerRefusal(for item: HolyMannaBoardItem) -> String? {
         if let reason = HolyMannaWorkerDispatch.refusal(for: item, context: context) { return reason }
+        if dispatchFeedback(for: item.id)?.isWaiting == true { return "Dispatched; waiting for the worker's claim." }
         if isDispatching { return "A worker is being opened." }
         if workerLauncher == nil { return "Worker launching is unavailable in this window." }
         if boardFailure != nil { return "Refresh the board before starting a worker." }
@@ -443,13 +466,54 @@ final class HolyMannaBoardModeStore: ObservableObject {
                     throw HolyMannaAskError.unavailable("The handoff changed. Refresh and confirm the new work order.")
                 }
                 let launch = try request.launchSpec(executablePath: executablePath)
-                _ = try workerLauncher(launch)
-                self.dispatchNotice = "Worker session opened for \(item.id). Its claim is pending."
-                self.requestStateRefresh(force: true)
+                let sessionID = try workerLauncher(launch)
+                self.dispatchNotice = nil
+                self.trackWorker(sessionID, itemID: item.id, context: request.context)
             } catch {
                 guard self.context == request.context else { return }
                 self.dispatchNotice = "Worker not started: \(error.localizedDescription)"
             }
+        }
+    }
+
+    func dispatchFeedback(for itemID: String) -> HolyMannaWorkerFeedback? {
+        workerFeedback[Self.cacheKey(context)]?[itemID]
+    }
+
+    private func trackWorker(_ sessionID: UUID, itemID: String, context: HolyMannaBoardContext) {
+        let key = Self.cacheKey(context)
+        workerFeedback[key, default: [:]][itemID] = .init(sessionID: sessionID)
+        requestStateRefresh(for: context, force: true, queueIfReading: false)
+        workerPolls[sessionID] = Task { [weak self, workerConvergence] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: workerConvergence.interval) } catch { return }
+                guard let self,
+                      self.workerFeedback[key]?[itemID]?.sessionID == sessionID,
+                      self.workerFeedback[key]?[itemID]?.isWaiting == true else { return }
+                self.requestStateRefresh(for: context, force: true, queueIfReading: false)
+            }
+        }
+        // Independent of CLI completion: a slow or hung read cannot extend the window.
+        workerDeadlines[sessionID] = Task { [weak self, workerConvergence] in
+            do { try await Task.sleep(for: workerConvergence.timeout) } catch { return }
+            guard let self, self.workerFeedback[key]?[itemID]?.sessionID == sessionID else { return }
+            self.workerFeedback[key]?[itemID]?.isWaiting = false
+            self.stopWorkerPolling(sessionID)
+        }
+    }
+
+    private func stopWorkerPolling(_ sessionID: UUID) {
+        workerPolls.removeValue(forKey: sessionID)?.cancel()
+        workerDeadlines.removeValue(forKey: sessionID)?.cancel()
+    }
+
+    private func reconcileWorkers(_ payload: HolyMannaStatePayload, context: HolyMannaBoardContext, key: String) {
+        guard payload.root == context.boardRoot else { return }
+        for (itemID, feedback) in workerFeedback[key] ?? [:] {
+            guard let item = payload.item(id: itemID),
+                  (item.status == "in_progress" && item.claimedBy != nil) || item.status == "done" else { continue }
+            workerFeedback[key]?[itemID] = nil
+            stopWorkerPolling(feedback.sessionID)
         }
     }
 
@@ -468,7 +532,10 @@ final class HolyMannaBoardModeStore: ObservableObject {
     /// left to finish; a finished read is always kept, so switching away
     /// and back never throws work away or spawns a second CLI.
     func requestStateRefresh(force: Bool = false) {
-        let context = context
+        requestStateRefresh(for: context, force: force)
+    }
+
+    private func requestStateRefresh(for context: HolyMannaBoardContext, force: Bool, queueIfReading: Bool = true) {
         guard context.boardRoot != nil else {
             isRefreshing = false
             return
@@ -480,10 +547,11 @@ final class HolyMannaBoardModeStore: ObservableObject {
             return
         }
         guard stateReadsInFlight.insert(key).inserted else {
+            if force && queueIfReading { stateReadsNeedingRefresh.insert(key) }
             if key == Self.cacheKey(self.context) { isRefreshing = true }
             return
         }
-        isRefreshing = true
+        if key == Self.cacheKey(self.context) { isRefreshing = true }
         let client = self.client
 
         Task { [weak self] in
@@ -491,6 +559,9 @@ final class HolyMannaBoardModeStore: ObservableObject {
             guard let self else { return }
             self.stateReadsInFlight.remove(key)
             self.applyState(result, for: context, key: key)
+            if self.stateReadsNeedingRefresh.remove(key) != nil {
+                self.requestStateRefresh(for: context, force: true)
+            }
         }
     }
 
@@ -644,6 +715,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
         case let .success(payload):
             stateCache[key] = payload
             stateRefreshedAt[key] = .now
+            reconcileWorkers(payload, context: refreshed, key: key)
             scheduleFocusedWarm(payload, context: refreshed)
             guard isCurrent else { return }
             if let hash = askingHash ?? answer?.contentHash,

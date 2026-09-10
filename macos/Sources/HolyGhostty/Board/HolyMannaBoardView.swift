@@ -21,6 +21,7 @@ struct HolyMannaBoardView: View {
     @ObservedObject var store: HolyMannaBoardModeStore
     let onDismiss: () -> Void
     let onFocusPeer: (String) -> Bool
+    var onFocusWorker: (UUID) -> Bool = { _ in false }
 
     @AppStorage("holy.board.inspectorWidth.v1") private var storedInspectorWidth = Double(Metrics.inspectorDefaultWidth)
     @AppStorage("holy.board.summaryOpen.v1") private var summaryOpen = true
@@ -599,11 +600,21 @@ struct HolyMannaBoardView: View {
                 .foregroundStyle(Palette.muted)
                 .lineLimit(1)
                 .frame(width: columns.width("id"), alignment: .leading)
-            Text(store.presentationDigest(for: item) ?? item.title)
-                .foregroundStyle(dimFallback && !store.hasPresentationDigest(for: item) ? Palette.muted : Palette.text)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(width: columns.flexibleWidth, alignment: .leading)
+            VStack(alignment: .leading, spacing: Metrics.s1) {
+                Text(store.presentationDigest(for: item) ?? item.title)
+                    .foregroundStyle(dimFallback && !store.hasPresentationDigest(for: item) ? Palette.muted : Palette.text)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let feedback = store.dispatchFeedback(for: item.id) {
+                    Text(feedback.message)
+                        .font(mono(10))
+                        .foregroundStyle(feedback.isWaiting ? Palette.blue : Palette.red)
+                        .padding(.horizontal, Metrics.s1)
+                        .background(Palette.faint.opacity(0.12))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(width: columns.flexibleWidth, alignment: .leading)
             if showsTrack {
                 Text(Present.shortTrack(item.trackTitle))
                     .foregroundStyle(Palette.faint)
@@ -1055,6 +1066,18 @@ struct HolyMannaBoardView: View {
         if let notice = store.dispatchNotice {
             Text(notice).foregroundStyle(Palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+        if let item = store.selectedItem, let feedback = store.dispatchFeedback(for: item.id) {
+            Text(feedback.message)
+                .foregroundStyle(feedback.isWaiting ? Palette.blue : Palette.red)
+                .fixedSize(horizontal: false, vertical: true)
+            linkButton("open worker session") {
+                if onFocusWorker(feedback.sessionID) {
+                    onDismiss()
+                } else {
+                    store.showToast("Worker session is no longer in this window.")
+                }
+            }
         }
     }
 
