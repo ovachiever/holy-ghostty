@@ -83,7 +83,7 @@ final class HolyMannaLinkPainter: ObservableObject {
         return ghostty_surface_read_text(surface, selection, &text) ? text : nil
     }
 
-    private func snapshot(_ surface: ghostty_surface_t) -> HolyMannaLink.Viewport? {
+    private func snapshot(_ view: Ghostty.SurfaceView, surface: ghostty_surface_t) -> HolyMannaLink.Viewport? {
         let size = ghostty_surface_size(surface)
         let columns = Int(size.columns)
         let rows = Int(size.rows)
@@ -91,20 +91,17 @@ final class HolyMannaLinkPainter: ObservableObject {
               var text = read(surface, cells: 0...0, columns: columns) else { return nil }
         defer { ghostty_surface_free_text(surface, &text) }
         guard text.tl_px_x >= 0, text.tl_px_y >= 0, text.offset_start == 0 else { return nil }
-        var nextColumnX: CGFloat?
-        if columns > 1 {
-            guard var next = read(surface, cells: 1...1, columns: columns) else { return nil }
-            defer { ghostty_surface_free_text(surface, &next) }
-            guard next.offset_start == 1 else { return nil }
-            nextColumnX = next.tl_px_x
-        }
+        let cellSize = view.convertFromBacking(CGSize(width: CGFloat(size.cell_width_px), height: CGFloat(size.cell_height_px)))
         var imeX = 0.0, imeY = 0.0, imeWidth = 0.0, imeHeight = 0.0
         ghostty_surface_ime_point(surface, &imeX, &imeY, &imeWidth, &imeHeight)
         let baseline = CGPoint(x: text.tl_px_x, y: text.tl_px_y)
-        // Keep cell size, baseline, and IME anchor in the same core coordinate
-        // system, even while AppKit's backing scale is changing.
-        return HolyMannaLink.viewport(columns: columns, rows: rows, baseline: baseline, nextColumnX: nextColumnX,
-                                      imeAnchor: CGPoint(x: imeX, y: imeY), cellHeight: imeHeight)
+        // imePoint's height is already in core points, like the text baseline.
+        // Comparing it to AppKit's backing conversion can reject a pane during
+        // scale/focus transitions. Only its cell-bottom coordinate is needed.
+        guard let origin = HolyMannaLink.gridOrigin(baseline: baseline, imeCellBottom: imeY,
+                                                    cellHeight: cellSize.height) else { return nil }
+        return .init(columns: columns, rows: rows,
+                     baseline: baseline, gridOrigin: origin, cellSize: cellSize)
     }
 
     private func sample(_ view: Ghostty.SurfaceView) {
@@ -112,7 +109,7 @@ final class HolyMannaLinkPainter: ObservableObject {
               let surface = view.surface else { return }
         let selecting = ghostty_surface_has_selection(surface)
         if isSelecting != selecting { isSelecting = selecting }
-        guard !selecting, let viewport = snapshot(surface) else { return }
+        guard !selecting, let viewport = snapshot(view, surface: surface) else { return }
         sample(viewport: viewport, readCells: { cells in
             guard var text = self.read(surface, cells: cells, columns: viewport.columns) else { return nil }
             defer { ghostty_surface_free_text(surface, &text) }
