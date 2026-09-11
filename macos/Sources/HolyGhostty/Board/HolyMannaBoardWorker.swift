@@ -221,7 +221,12 @@ struct HolyMannaWorkerDispatch: Equatable {
         // npm's Codex entry point uses /usr/bin/env node. Its sibling node
         // must resolve even when the pane inherited only the system PATH.
         let binaryDirectory = URL(fileURLWithPath: executablePath).deletingLastPathComponent().path
-        spec.command = "PATH=\(quote(binaryDirectory)):\"$PATH\" " + arguments.map(quote).joined(separator: " ")
+        // exec replaces the pane's shell with the runtime: the agent IS the
+        // pane process, so discovery, the hosts sheet, kill targeting, and
+        // liveness all see codex/claude instead of a bash wrapper (mn-37c1b4:
+        // six invisible workers were bash-leader panes).
+        spec.command = "export PATH=\(quote(binaryDirectory)):\"$PATH\"; exec "
+            + arguments.map(quote).joined(separator: " ")
         spec.initialInput = nil
         return spec
     }
