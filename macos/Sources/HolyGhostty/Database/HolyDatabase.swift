@@ -77,12 +77,26 @@ final class HolyDatabase {
         var handle: OpaquePointer?
         let flags: Int32
         if readOnly {
-            flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+            // A READONLY connection to a WAL database cannot create the
+            // -shm/-wal companions, so once a checkpoint removes them every
+            // prepare fails with SQLITE_CANTOPEN (reproduced live on the app
+            // DB, mn-d32871). Open read-write — never CREATE — so SQLite can
+            // rebuild WAL infrastructure; configure() enforces the read-only
+            // contract with query_only. Files this user cannot write (a
+            // federated foreign archive) fall back to a true readonly open.
+            flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
         } else {
             flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         }
 
-        let result = sqlite3_open_v2(url.path, &handle, flags, nil)
+        var result = sqlite3_open_v2(url.path, &handle, flags, nil)
+        if result != SQLITE_OK, readOnly {
+            if let handle {
+                sqlite3_close_v2(handle)
+            }
+            handle = nil
+            result = sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+        }
         guard result == SQLITE_OK, let handle else {
             let message = handle.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "Unknown SQLite error"
             if let handle {
@@ -205,7 +219,12 @@ final class HolyDatabase {
     private func configure(readOnly: Bool) throws {
         try execute("PRAGMA foreign_keys = ON;")
 
-        guard !readOnly else { return }
+        guard !readOnly else {
+            // The connection may be physically read-write (see open); this
+            // pragma is the read-only contract for every caller.
+            try execute("PRAGMA query_only = ON;")
+            return
+        }
 
         try execute("PRAGMA journal_mode = WAL;")
         try execute("PRAGMA synchronous = NORMAL;")
