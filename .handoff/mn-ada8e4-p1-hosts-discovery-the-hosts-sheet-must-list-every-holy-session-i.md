@@ -7,7 +7,7 @@ base_commit: c681f6a468251b3b262b4023e020d546de6cb5ba
 scope: '[P1][HOSTS][DISCOVERY] The hosts sheet must list every holy session it counts: no classification-based drops, no partial-as-complete'
 inputs:
 - Erik screenshot 2026-09-10 19:38 (badge 32, rows fewer, spinner stuck) + Studio ground truth 43 sessions
-binding: sha256:3564ea4445f8e005fb19bfe892d932f6613068b6cae2501468ee17f522a4ccec
+binding: sha256:a544ea6c4d5b09a501472a8df51f77421bb8a7fc32d056b18cd62c01630749c1
 ---
 
 # Handoff: [P1][HOSTS][DISCOVERY] The hosts sheet must list every holy session it counts: no classification-based drops, no partial-as-complete
@@ -110,8 +110,8 @@ Existing warnings outside the new code remain.
 No app launch, installation, screenshot, live session spawn, push, or PR occurred.
 Full command output is under `.dev/mn-ada8e4/`, including
 `build-for-testing.log`, `build-for-testing-final.log`, and `swiftlint.log`.
-The local implementation commit carries `Manna: mn-ada8e4`; its exact hash is
-recorded in `.dev/mn-ada8e4/report.md` after commit creation.
+The local implementation commit is `5acce67263a59f79de960fa6ae1cfb6fb44585bb`
+and carries `Manna: mn-ada8e4`.
 
 Needed next: coordinate one live acceptance window, execute the four selected
 app-hosted suites, then use the approved installed build on the MacBook to
@@ -123,7 +123,14 @@ The selected existing timeout suite includes a scratch tmux-server test, so its
 execution also requires the coordinated session-spawning boundary to be lifted.
 No live or visual acceptance is claimed by this return.
 
-Lessons logged: 4 (new) | Decisions logged: 1 (new).
+Coordination: `mn-ada8e4-build` is published as `awaiting-acceptance`, with the
+open need `mn-ada8e4-live-acceptance`. Source path claims are released; the Manna
+item remains claimed. Report, handoff, and verification receipts were copied
+to iCloud Transfer and the substantive documents saved in Obsidian. A closing
+shell loop initially used zsh's reserved `path` variable; rerunning it with
+`lane_claim_path` released the claims without changing source or Git state.
+
+Lessons logged: 5 (new) | Decisions logged: 1 (new).
 
 ## Completion
 
