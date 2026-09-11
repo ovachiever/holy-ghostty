@@ -193,15 +193,11 @@ struct HolyMannaBoardView: View {
 
     /// `terminal › estate › board`: the outermost crumb is the way out. The
     /// page has no such link because a browser tab is its own exit.
+    /// The way out stays labeled and clickable at every width; compact
+    /// drops only the `via host` suffix (Erik, 2026-09-10).
     private func crumb(compact: Bool) -> some View {
         HStack(spacing: 0) {
-            if compact {
-                linkButton("‹") { onDismiss() }
-                    .help("Return to the terminal (Escape)")
-                    .accessibilityLabel("Return to terminal")
-            } else {
-                terminalCrumb
-            }
+            terminalCrumb
             separator("›")
             linkButton("estate") { store.showEstate() }
             separator("›")
