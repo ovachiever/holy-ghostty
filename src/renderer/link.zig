@@ -526,11 +526,14 @@ test "renderCellMap Manna foreground coexists with URL and OSC8 underline" {
 
     result.clearRetainingCapacity();
     // An OSC8 hover contributes the same underline style before regex matching.
-    try result.put(alloc, .{ .x = 19, .y = 0 }, .{ .underline = true });
+    try result.put(alloc, .{ .x = 20, .y = 0 }, .{ .underline = true });
     try set.renderCellMap(alloc, &result, &state, .{ .x = 12, .y = 0 }, inputpkg.ctrlOrSuper(.{}));
-    try testing.expectEqual(@as(usize, 28), result.count());
+    try testing.expectEqual(@as(usize, 29), result.count());
     try testing.expectEqualDeep(CellStyle{ .underline = true }, result.get(.{ .x = 0, .y = 0 }).?);
-    try testing.expectEqualDeep(CellStyle{ .foreground = 4, .underline = true }, result.get(.{ .x = 19, .y = 0 }).?);
+    try testing.expectEqualDeep(CellStyle{ .underline = true }, result.get(.{ .x = 19, .y = 0 }).?);
+    try testing.expectEqualDeep(CellStyle{ .foreground = 4, .underline = true }, result.get(.{ .x = 20, .y = 0 }).?);
+    try testing.expectEqualDeep(CellStyle{ .foreground = 4, .underline = true }, result.get(.{ .x = 28, .y = 0 }).?);
+    try testing.expect(!result.contains(.{ .x = 29, .y = 0 }));
 }
 
 test "updateCellMap Manna streaming completion invalidation and animation" {

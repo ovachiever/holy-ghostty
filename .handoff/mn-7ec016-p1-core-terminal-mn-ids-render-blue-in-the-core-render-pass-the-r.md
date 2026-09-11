@@ -6,7 +6,7 @@ source: null
 base_commit: b5c7f1763fe1e7d71eabb501c219f4e97681b8f1
 scope: '[P1][CORE][TERMINAL] mn- ids render blue in the core render pass — the renderer is the only painter'
 inputs: []
-binding: sha256:4b4fdf69b886ecce0cd83b8e1b057ba23c0610c9715231b312e8bea4eb1c89f5
+binding: sha256:eebce3c78ddca84f462b8d3d1a9f0c0a5b52ab605a0d0f9a2e4715f24684e7a9
 ---
 
 # Handoff: [P1][CORE][TERMINAL] mn- ids render blue in the core render pass — the renderer is the only painter
@@ -40,7 +40,7 @@ Erik ruling 2026-09-11 (supersedes the overlay approach of mn-4be59b, reverted b
 
 ## Implementation and verification: 2026-09-11
 
-Status: implementation committed locally; core compilation, executed core tests, and installed visual acceptance remain pending. Keep this item `in_progress`.
+Initial local implementation snapshot (see the CI follow-up below for newer evidence): implementation committed locally; no local core compilation or execution. Keep this item `in_progress` until required acceptance is verified.
 
 - Claim owner: `codex-01a090df1edb76b2`. Claim succeeded before other workspace work. No claim was stolen.
 - The original handoff was tracked and verified against canonical `agent-do manna state --json` and `.manna/issues.jsonl`. Its normalized binding was exactly `sha256:25bd308d1640c3472576fd6b3825672bd97284250068870d8b56fc22ef3f85ac`; its raw file SHA-256 was `6f1b67f97e360e128e952094dbb90de028426bd2a704264bc6c7d58d9828faed`.
@@ -84,3 +84,16 @@ Compiled core tests: **0**. Executed core tests: **0**. Compiled app-hosted test
 5. Attach CI test results, artifact/import/install receipts, and the human visual result to this handoff, reseal, and only then run `agent-do manna done mn-7ec016`.
 
 No app launches, installs, screenshots, provider/tmux session spawning, pushes, or PRs occurred in this implementation lane. Lessons logged: 3 (new) | Decisions logged: 0 (new). `agent-do zpc harvest --since last` completed with no format issues or consolidation gaps.
+
+## CI follow-up: run 34616487885
+
+Erik reported that the engine compiled in CI and the first actual core test execution failed `renderCellMap Manna foreground coexists with URL and OSC8 underline`: expected 28 cells, found 29. The fixture expectations were wrong; this correction changes tests only. These CI facts are supplied by Erik, not a new execution from this lane.
+
+- Recounted `https://example.com/mn-abcdef`: 29 ASCII cells, prefix length 20, slash at x=19, and the nine-character ID at x=20 through x=28.
+- Corrected the hovered URL count to 29, asserted underline-only at x=19, and asserted blue plus underline at x=20 and x=28 with no styled cell at x=29. Moved the seeded OSC8 underline to x=20 so it overlaps the ID as intended.
+- Rechecked sibling assertions: `https://example.com` is 19 cells; the unhovered ID remains 9 cells. Those expectations stay unchanged.
+- `.dev/toolchains/zig-aarch64-macos-0.15.2/zig fmt --check src/renderer/link.zig`: exit 0.
+- `.dev/toolchains/zig-aarch64-macos-0.15.2/zig ast-check src/renderer/link.zig`: exit 0. This checks source syntax, not types or linking.
+- `git diff --check`: exit 0. Logs are in `.dev/mn-7ec016/ci-34616487885-fix/`.
+- No compilation or test execution occurred locally. The coordinator owns the re-push and CI rerun. No push, app launch, or install occurred in this correction lane. Keep Manna `in_progress` until the rerun and required visual acceptance pass.
+- Correction-turn lessons logged: 1 (new) | Decisions logged: 0 (new).
