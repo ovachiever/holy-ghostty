@@ -7,7 +7,7 @@ base_commit: abe1f1e556d28622655191d9a12fc43a383dedd9
 scope: '[P1][MOUSE] releaseFromAnotherWindowClearsHoverButSkipsUnmountedPanes fails consistently — mn-9b5b5b closed on compiled-only verification'
 inputs:
 - Executed-test run 2026-09-10 21:23 (FAILED 3/PASSED 111 batch; isolated repro confirmed); cites mn-9b5b5b
-binding: sha256:8de8cf5e6e4285b08937f17782e5f19b43181d087cb061f1e54f92bb2891c6b4
+binding: sha256:32eb1a13a2d121edf0240b674847d79dcb955d1b4025f9ac57d67725f1eb43ab
 ---
 
 # Handoff: [P1][MOUSE] releaseFromAnotherWindowClearsHoverButSkipsUnmountedPanes fails consistently — mn-9b5b5b closed on compiled-only verification
@@ -39,7 +39,48 @@ The mn-9b5b5b terminal-mouse patch (4b8b079e0) was closed (abe1f1e55) while its 
 3. Seal changes with `agent-do manna handoff seal mn-c2b133`.
 4. Commit with `Manna: mn-c2b133` and run `agent-do manna done mn-c2b133` only after the work is verified.
 
-## Revision 2: correction after coordinated executed-red acceptance
+## Executed acceptance and closeout: 2026-09-10
+
+Status: **complete on verified focused-test execution**. The corrected geometry
+in `61da5f00257a5f6889f5dd32b1a63e3072339334` passed both mouse suites in the
+coordinated second acceptance pass. This item's executed-test prerequisite for
+the held installation is satisfied. Installation remains with the coordinated
+release owner; this lane performed no installation or app launch.
+
+The verifier's update is in `.dev/acceptance-c2b133-f4ab17/RECEIPT.md`, section
+`mn-c2b133 executed acceptance #2`, and its Coord drop to this claim-holder.
+The claim-holder independently inspected the native result bundle with
+`xcresulttool get test-results summary` and `get test-results tests`.
+
+Executed command from the primary checkout, as recorded in the verifier's log:
+
+```bash
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath .dev/DerivedData \
+  -resultBundlePath .dev/mn-c2b133-executed-2/mouse.xcresult \
+  -only-testing:GhosttyTests/HolyWorkspaceTerminalMouseTests \
+  -only-testing:GhosttyTests/HolyPaneLayoutTests \
+  test CODE_SIGNING_ALLOWED=NO
+```
+
+Actual result: **TEST SUCCEEDED**. XCResult reports 13 test functions and
+14 expanded cases (6 mouse cases, 8 pane-layout cases), all passed, zero failed,
+zero skipped. The console contains 28 passing result lines; those repeated lines
+are not 28 distinct cases. Both previously failing release regressions are
+explicitly `Passed` in the result tree. The committed controller and unchanged
+test source hashes still match the revision 2 build receipts.
+
+Evidence: `.dev/mn-c2b133-executed-2.log` and
+`.dev/mn-c2b133-executed-2/mouse.xcresult`. Closeout copies and native summary/test
+exports are preserved under `.dev/mn-c2b133/closeout/`.
+No new code or test execution was needed for this closeout. The sections below
+retain the earlier compiled-only and executed-red stages as historical evidence;
+their pending-execution statements are superseded by this acceptance.
+
+Lessons logged: 0 (new in closeout; 7 total) | Decisions logged: 0 (new).
+
+## Historical revision 2: correction after coordinated executed-red acceptance
 
 Status: **in_progress; correction committed and compiled, execution pending**.
 The install remains held. The latest executed result is RED on the prior
