@@ -7,7 +7,7 @@ base_commit: c681f6a468251b3b262b4023e020d546de6cb5ba
 scope: '[P1][HOSTS][DISCOVERY] The hosts sheet must list every holy session it counts: no classification-based drops, no partial-as-complete'
 inputs:
 - Erik screenshot 2026-09-10 19:38 (badge 32, rows fewer, spinner stuck) + Studio ground truth 43 sessions
-binding: sha256:a544ea6c4d5b09a501472a8df51f77421bb8a7fc32d056b18cd62c01630749c1
+binding: sha256:51b42cbe926551b23655b8a076913481f72eb2274b5e2a25a8f9bf52fe0d541d
 ---
 
 # Handoff: [P1][HOSTS][DISCOVERY] The hosts sheet must list every holy session it counts: no classification-based drops, no partial-as-complete
@@ -131,6 +131,27 @@ shell loop initially used zsh's reserved `path` variable; rerunning it with
 `lane_claim_path` released the claims without changing source or Git state.
 
 Lessons logged: 5 (new) | Decisions logged: 1 (new).
+
+## Closure instruction, 2026-09-10
+
+Erik's latest instruction in this session was `close`, following the report
+that implementation and build verification were complete while executed tests
+and live acceptance were still pending. Close the item on that explicit user
+instruction. This supersedes the earlier pending-acceptance disposition for
+tracker closure; it does not certify that those checks passed.
+
+Read-only closure verification confirmed the existing claim belongs to
+`codex-01a08dec15c57081`, the prior handoff seal matches canonical Manna, and all
+five Swift source hashes still match the compiled receipt. Implementation
+`5acce67263a59f79de960fa6ae1cfb6fb44585bb` remains the verified code change.
+
+Verification limits remain explicit: the focused test bundle compiled, zero
+app-hosted tests were executed by this lane, and the MacBook-to-Studio check of
+43 sessions and six VSI workers is unverified. No app launch, install,
+screenshot, live session spawn, push, or PR was performed in the closure turn.
+The prior coordination need is retired because the user requested closure.
+
+Closure lessons logged: 0 (new) | Decisions logged: 0 (new).
 
 ## Completion
 
