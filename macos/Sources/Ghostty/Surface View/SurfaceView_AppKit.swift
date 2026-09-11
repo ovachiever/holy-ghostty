@@ -997,16 +997,18 @@ extension Ghostty {
             let last = first + Int(word.offset_len)
             let row = first / columns
             let originX = word.tl_px_x - CGFloat(first % columns) * cellSize.width
+            let column = Int(floor((pos.x - originX) / cellSize.width))
             if row != last / columns {
-                // A soft-wrapped id remains one word in the core. Only a whole
-                // ASCII id is safe here; partial/out-of-viewport words refuse.
-                guard HolyMannaLink.isIdentifier(value), value.utf8.count == last - first + 1,
-                      last < Int(size.rows) * columns else { return nil }
-                return (value, HolyMannaLink.underlines(
-                    for: value, startingAt: first, columns: columns,
+                // The core unwraps soft wraps. Keep punctuation outside the
+                // clickable range and refuse ambiguous or partial cell maps.
+                guard value.utf8.count == last - first + 1, last < Int(size.rows) * columns,
+                      let range = HolyMannaLink.wrappedMatch(in: value, startingAt: first,
+                                                            columns: columns, clickedColumn: column) else { return nil }
+                let id = (value as NSString).substring(with: range)
+                return (id, HolyMannaLink.underlines(
+                    for: id, startingAt: first + range.location, columns: columns,
                     origin: CGPoint(x: originX, y: word.tl_px_y - CGFloat(row) * cellSize.height), cellSize: cellSize))
             }
-            let column = Int(floor((pos.x - originX) / cellSize.width))
             guard column >= first % columns, column <= last % columns,
                   let line = mannaRow(row, through: columns - 1, surface: surface),
                   let prefix = mannaRow(row, through: column, surface: surface),

@@ -49,6 +49,25 @@ struct HolyMannaBoardLinkTests {
                           CGRect(x: 8, y: 50, width: 63, height: 1)])
     }
 
+    @Test func wrappedPunctuationAndOtherWordsStayOutsideTheLink() {
+        let word = "see/mn-abcdef."
+        for offset in 0..<word.count {
+            let match = HolyMannaLink.wrappedMatch(in: word, startingAt: 37, columns: 40,
+                                                   clickedColumn: (37 + offset) % 40)
+            #expect(match == ((4..<13).contains(offset) ? NSRange(location: 4, length: 9) : nil))
+        }
+        #expect(HolyMannaLink.wrappedMatch(in: "mn-abcdef", startingAt: 37, columns: 40, clickedColumn: 20) == nil)
+        #expect(HolyMannaLink.wrappedMatch(in: "xmn-abcdef", startingAt: 37, columns: 40, clickedColumn: 0) == nil)
+    }
+
+    @Test func wrappedLongIdentifierRefusesAColumnSharedWithPunctuation() {
+        let id = "mn-0123456789abcdef"
+        #expect(HolyMannaLink.wrappedMatch(in: id, startingAt: 7, columns: 10, clickedColumn: 7)
+                == NSRange(location: 0, length: id.count))
+        #expect(HolyMannaLink.wrappedMatch(in: id + ".", startingAt: 7, columns: 10,
+                                         clickedColumn: (7 + id.count) % 10) == nil)
+    }
+
     @Test func originatingBoardWinsEvenIfTheEstateWouldBeAmbiguous() async throws {
         let calls = LinkCalls()
         let client = linkClient(states: ["/a": try linkState(root: "/a"), "/b": try linkState(root: "/b")], calls: calls)

@@ -15,6 +15,23 @@ enum HolyMannaLink {
         match(in: text, atUTF16Offset: 0) == NSRange(location: 0, length: (text as NSString).length)
     }
 
+    /// Core word selections can soft-wrap with punctuation attached. An ASCII
+    /// word shorter than a row identifies the clicked cell by column alone.
+    /// For longer words, every possible cell must name the same match.
+    static func wrappedMatch(in text: String, startingAt cell: Int, columns: Int, clickedColumn: Int) -> NSRange? {
+        guard cell >= 0, columns > 0, (0..<columns).contains(clickedColumn),
+              text.utf8.allSatisfy({ $0 >= 32 && $0 < 127 }) else { return nil }
+        var offset = (clickedColumn - cell % columns + columns) % columns
+        var selected: NSRange?
+        while offset < text.utf8.count {
+            guard let match = match(in: text, atUTF16Offset: offset),
+                  selected == nil || selected == match else { return nil }
+            selected = match
+            offset += columns
+        }
+        return selected
+    }
+
     static func url(for id: String) -> URL? {
         guard isIdentifier(id) else { return nil }
         return URL(string: "holy-ghostty://board?item=\(id)")
