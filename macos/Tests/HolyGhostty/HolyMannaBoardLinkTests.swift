@@ -1,8 +1,5 @@
 import AppKit
-import Combine
-import CoreText
 import Foundation
-import GhosttyKit
 import Testing
 @testable import Ghostty
 
@@ -84,15 +81,19 @@ struct HolyMannaBoardLinkTests {
     }
 
     @Test func atRestRunUsesCellBackgroundAndCoreBaseline() throws {
-        let grid = MannaPaintGrid(["see mn-abcdef."], columns: 14)
-        let runs = try #require(grid.runs(startingIn: 0))
+        let viewport = paintViewport("see mn-abcdef.", columns: 14)
+        let runs = try #require(HolyMannaLink.paintRuns(in: viewport) { cell in
+            String(viewport.text.prefix(cell + 1))
+        })
         #expect(runs == [.init(text: "mn-abcdef", rect: CGRect(x: 38, y: 34, width: 81, height: 18),
                               baseline: CGPoint(x: 38, y: 47))])
     }
 
     @Test func atRestSoftWrappedIDPaintsSeparateRows() throws {
-        let grid = MannaPaintGrid(["......mn-", "abcdef   "], columns: 9, wraps: [0])
-        let runs = try #require(grid.runs(startingIn: 0))
+        let viewport = paintViewport("......mn-abcdef   ", columns: 9, rows: 2)
+        let runs = try #require(HolyMannaLink.paintRuns(in: viewport) { cell in
+            String(viewport.text.prefix(cell + 1))
+        })
         #expect(runs == [.init(text: "mn-", rect: CGRect(x: 56, y: 34, width: 27, height: 18),
                               baseline: CGPoint(x: 56, y: 47)),
                         .init(text: "abcdef", rect: CGRect(x: 2, y: 52, width: 54, height: 18),
@@ -100,145 +101,69 @@ struct HolyMannaBoardLinkTests {
     }
 
     @Test func hardNewlineDoesNotJoinAnIdentifier() {
-        let grid = MannaPaintGrid(["......mn-", "abcdef   "], columns: 9)
-        #expect(grid.runs(startingIn: 0) == [])
+        let viewport = paintViewport("......mn-\nabcdef   ", columns: 9, rows: 2)
+        #expect(HolyMannaLink.paintRuns(in: viewport) { _ in
+            Issue.record("No core prefix reads are needed when there are no matches")
+            return nil
+        } == [])
     }
 
     @Test(arguments: ["xmn-abcdef", "_mn-abcdef", "mn-abcdefg", "mn-abcdef_", "émn-abcdef"])
     func lookalikeRunsNeverPaint(text: String) {
-        let grid = MannaPaintGrid([text], columns: 20)
-        #expect(grid.runs(startingIn: 0) == [])
+        let viewport = paintViewport(text, columns: 20)
+        #expect(HolyMannaLink.paintRuns(in: viewport) { _ in nil } == [])
     }
 
     @Test func wideCharactersBeforeIDUseCoreCellPrefixes() throws {
-        let viewport = MannaPaintGrid([""], columns: 14).viewport
+        let viewport = paintViewport("界🔭mn-abcdef ", columns: 14)
         let prefixes = ["界", "界", "界🔭", "界🔭", "界🔭m", "界🔭mn", "界🔭mn-",
                         "界🔭mn-a", "界🔭mn-ab", "界🔭mn-abc", "界🔭mn-abcd", "界🔭mn-abcde",
                         "界🔭mn-abcdef", "界🔭mn-abcdef "]
-        let runs = try #require(HolyMannaLink.paintRuns(in: viewport, row: 0, text: "界🔭mn-abcdef ") { cells in
-            if cells.lowerBound == 0 { return prefixes[cells.upperBound] }
-            if cells == 4...13 { return "mn-abcdef " }
-            if cells == 4...12 { return "mn-abcdef" }
-            if cells == 3...13 { return "🔭mn-abcdef " } // Core includes a wide glyph when starting on its tail.
-            Issue.record("Unexpected cell read: \(cells)")
-            return nil
-        })
+        let runs = try #require(HolyMannaLink.paintRuns(in: viewport) { prefixes[$0] })
         #expect(runs.first?.rect == CGRect(x: 38, y: 34, width: 81, height: 18))
     }
 
-    @Test func changedContentDuringCellMappingRefusesOnlyThatRow() {
-        let viewport = MannaPaintGrid([""], columns: 14).viewport
-        #expect(HolyMannaLink.paintRuns(in: viewport, row: 0, text: "see mn-abcdef.") { _ in "replaced output" } == nil)
-        #expect(HolyMannaLink.paintRuns(in: viewport, row: 0, text: "see mn-abcdef.") { _ in nil } == nil)
+    @Test func changedContentDuringCellMappingRefusesTheWholeFrame() {
+        let viewport = paintViewport("see mn-abcdef.", columns: 14)
+        #expect(HolyMannaLink.paintRuns(in: viewport) { _ in "replaced output" } == nil)
+        #expect(HolyMannaLink.paintRuns(in: viewport) { _ in nil } == nil)
     }
 
     @Test func hardRowsAndUnprintedCellsKeepTheirPhysicalOffsets() throws {
         // Core omits unprinted trailing cells, retaining the hard newline.
-        let grid = MannaPaintGrid(["first", "mn-abcdef"], columns: 14)
-        let runs = try #require(grid.runs(startingIn: 1))
+        let viewport = paintViewport("first\nmn-abcdef", columns: 14, rows: 2)
+        let runs = try #require(HolyMannaLink.paintRuns(in: viewport) { cell in
+            if cell < 14 { return String("first".prefix(min(cell + 1, 5))) }
+            return "first\n" + String("mn-abcdef".prefix(min(cell - 13, 9)))
+        })
         #expect(runs == [.init(text: "mn-abcdef", rect: CGRect(x: 2, y: 52, width: 81, height: 18),
                               baseline: CGPoint(x: 2, y: 65))])
     }
 
-    @Test(arguments: [0, 2]) @MainActor
-    func animatedRowCannotBlockOrClearAStableIDRow(animatedRow: Int) throws {
-        let painter = HolyMannaLinkPainter()
-        var published: [[String]?] = []
-        let observation = painter.$frame.sink { published.append($0?.runs.map(\.cells.text)) }
-        for tick in 0..<8 {
-            var lines = ["status", "mn-abcdef.", "status"]
-            lines[animatedRow] = "spinner \(tick)"
-            MannaPaintGrid(lines, columns: 20).sample(painter)
-            if tick > 0 {
-                let frame = try #require(painter.frame)
-                #expect(frame.runs.map(\.cells.text) == ["mn-abcdef"])
-            }
+    @Test func scrollAndResizeClearPaintBeforeSettlingAgain() {
+        let first = paintViewport("mn-abcdef     ", columns: 14)
+        let scrolled = paintViewport("mn-123456     ", columns: 14)
+        let resized = paintViewport("mn-123456     ", columns: 7, rows: 2)
+        var state = HolyMannaLink.ViewportStability()
+        func observe(_ viewport: HolyMannaLink.Viewport?, expecting expected: HolyMannaLink.ViewportStability.Observation) {
+            let actual = state.observe(viewport)
+            #expect(actual == expected)
         }
-        // The only publication after the initial nil is the blue frame.
-        #expect(published.count == 2)
-        #expect(published.last! == ["mn-abcdef"])
-        withExtendedLifetime(observation) {}
-    }
-
-    @Test @MainActor func streamingAppendsBelowAnIDNeverUnpaintIt() throws {
-        let painter = HolyMannaLinkPainter()
-        var scrollbar = paintScrollbar(total: 40, offset: 10, len: 4)
-        painter.scrollbarChanged(from: nil, to: scrollbar)
-        let initial = MannaPaintGrid(["mn-abcdef", "", "", ""], columns: 20)
-        initial.sample(painter)
-        initial.sample(painter)
-        let first = try #require(painter.frame).runs.map(\.cells)
-        var publications = 0
-        let observation = painter.$frame.dropFirst().sink { _ in publications += 1 }
-        for tick in 1...8 {
-            let next = paintScrollbar(total: 40 + UInt64(tick), offset: 10, len: 4)
-            painter.scrollbarChanged(from: scrollbar, to: next)
-            scrollbar = next
-            #expect(painter.frame?.runs.map(\.cells) == first)
-            MannaPaintGrid(["mn-abcdef", "output \(tick)", "more \(tick)", "stream \(tick)"], columns: 20).sample(painter)
-            #expect(painter.frame?.runs.map(\.cells) == first)
-        }
-        #expect(publications == 0)
-        withExtendedLifetime(observation) {}
-    }
-
-    @Test @MainActor func transientReadsKeepPaintAndChangedRunsSwapAtomically() throws {
-        let painter = HolyMannaLinkPainter()
-        let first = MannaPaintGrid(["mn-abcdef"], columns: 14)
-        first.sample(painter)
-        first.sample(painter)
-        _ = try #require(painter.frame)
-        var published: [[String]?] = []
-        let observation = painter.$frame.dropFirst().sink { published.append($0?.runs.map(\.cells.text)) }
-        painter.sample(viewport: first.viewport, readCells: { _ in nil }, style: { nil })
-        let next = MannaPaintGrid(["mn-123456"], columns: 14)
-        next.sample(painter)
-        #expect(painter.frame?.runs.map(\.cells.text) == ["mn-abcdef"])
-        next.sample(painter)
-        #expect(painter.frame?.runs.map(\.cells.text) == ["mn-123456"])
-        let erased = MannaPaintGrid(["no link"], columns: 14)
-        erased.sample(painter)
-        erased.sample(painter)
-        #expect(painter.frame?.runs.isEmpty == true)
-        #expect(published.count == 2)
-        #expect(published.allSatisfy { $0 != nil })
-        withExtendedLifetime(observation) {}
-    }
-
-    @Test @MainActor func scrollAndResizeInvalidateImmediatelyEvenWhenTextRepeats() throws {
-        let painter = HolyMannaLinkPainter()
-        let first = MannaPaintGrid(["mn-abcdef"], columns: 14)
-        first.sample(painter)
-        first.sample(painter)
-        _ = try #require(painter.frame)
-        painter.scrollbarChanged(from: paintScrollbar(total: 40, offset: 10, len: 1),
-                                 to: paintScrollbar(total: 40, offset: 11, len: 1))
-        #expect(painter.frame == nil) // No subsequent sample or settle needed.
-        first.sample(painter)
-        #expect(painter.frame == nil)
-        first.sample(painter)
-        _ = try #require(painter.frame)
-        let resized = MannaPaintGrid(["mn-abcdef"], columns: 20)
-        resized.sample(painter)
-        #expect(painter.frame == nil)
-        resized.sample(painter)
-        _ = try #require(painter.frame)
-        painter.invalidate() // Same synchronous path as wheel/cell-size notifications.
-        #expect(painter.frame == nil)
-    }
-
-    @Test(arguments: [".....x", "......"]) func softWrappedLeadingWordBoundaryIsRespected(prefix: String) throws {
-        let grid = MannaPaintGrid([prefix, "mn-abc", "def.  "], columns: 6, wraps: [0, 1])
-        let runs = try #require(grid.runs(startingIn: 1))
-        #expect(runs.map(\.text).joined() == (prefix.hasSuffix("x") ? "" : "mn-abcdef"))
-    }
-
-    @Test(arguments: ["........m", ".......mn"])
-    func identifierPrefixCanSplitAcrossARowEdge(prefix: String) throws {
-        let suffix = prefix.hasSuffix("mn") ? "-abcdef  " : "n-abcdef "
-        let grid = MannaPaintGrid([prefix, suffix], columns: 9, wraps: [0])
-        let runs = try #require(grid.runs(startingIn: 0))
-        #expect(runs.map(\.text).joined() == "mn-abcdef")
+        observe(first, expecting: .clear)
+        observe(first, expecting: .paint)
+        state.didPaint()
+        observe(first, expecting: .keep)
+        observe(scrolled, expecting: .clear)
+        observe(scrolled, expecting: .paint)
+        state.didPaint()
+        observe(resized, expecting: .clear)
+        observe(resized, expecting: .paint)
+        state.didPaint()
+        state.invalidate() // Scrollbar/input notification, even if text repeats.
+        observe(resized, expecting: .clear)
+        observe(resized, expecting: .paint)
+        observe(nil, expecting: .clear)
+        observe(first, expecting: .clear)
     }
 
     @MainActor @Test func painterUsesConfiguredANSIBlue() throws {
@@ -250,8 +175,9 @@ struct HolyMannaBoardLinkTests {
         #expect(blue.alphaComponent == 1)
     }
 
-    private func paintScrollbar(total: UInt64, offset: UInt64, len: UInt64) -> Ghostty.Action.Scrollbar {
-        .init(c: ghostty_action_scrollbar_s(total: total, offset: offset, len: len))
+    private func paintViewport(_ text: String, columns: Int, rows: Int = 1) -> HolyMannaLink.Viewport {
+        .init(text: text, columns: columns, rows: rows, baseline: CGPoint(x: 2, y: 47),
+              gridOrigin: CGPoint(x: 2, y: 34), cellSize: CGSize(width: 9, height: 18))
     }
 
     @Test func originatingBoardWinsEvenIfTheEstateWouldBeAmbiguous() async throws {
@@ -399,50 +325,6 @@ struct HolyMannaBoardLinkTests {
         try await Task.sleep(for: .milliseconds(100))
         #expect(!store.isPresented)
         #expect(store.pendingDispatch == nil && store.pendingMutation == nil)
-    }
-}
-
-/// Fixed cell fixtures for the core read API: omitted trailing cells and
-/// explicit soft-wrap joins. The wide-glyph case supplies its own core reads.
-private struct MannaPaintGrid {
-    let lines: [String]
-    let columns: Int
-    let wraps: Set<Int>
-
-    init(_ lines: [String], columns: Int, wraps: Set<Int> = []) {
-        self.lines = lines
-        self.columns = columns
-        self.wraps = wraps
-    }
-
-    var viewport: HolyMannaLink.Viewport {
-        .init(columns: columns, rows: lines.count, baseline: CGPoint(x: 2, y: 47),
-              gridOrigin: CGPoint(x: 2, y: 34), cellSize: CGSize(width: 9, height: 18))
-    }
-
-    func read(_ cells: ClosedRange<Int>) -> String? {
-        guard cells.lowerBound >= 0, cells.upperBound < columns * lines.count else { return nil }
-        let first = cells.lowerBound / columns
-        let last = cells.upperBound / columns
-        var text = ""
-        for row in first...last {
-            if row > first, !wraps.contains(row - 1) { text += "\n" }
-            let start = row == first ? cells.lowerBound % columns : 0
-            let end = row == last ? cells.upperBound % columns : columns - 1
-            text += String(lines[row].dropFirst(start).prefix(end - start + 1))
-        }
-        while text.hasSuffix("\n") { text.removeLast() }
-        return text
-    }
-
-    func runs(startingIn row: Int) -> [HolyMannaLink.PaintRun]? {
-        HolyMannaLink.paintRuns(in: viewport, row: row, text: lines[row], readCells: read)
-    }
-
-    @MainActor func sample(_ painter: HolyMannaLinkPainter) {
-        painter.sample(viewport: viewport, readCells: read, style: {
-            .init(font: CTFontCreateWithName("Menlo" as CFString, 12, nil), blue: .blue, background: .black)
-        })
     }
 }
 

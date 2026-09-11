@@ -5,7 +5,8 @@ import GhosttyKit
 import SwiftUI
 
 /// The embedded API has no content-revision callback. Poll only presented
-/// panes, retaining each accepted row while other rows stream or animate.
+/// panes, using one bounded viewport read per sample. Resolve cell prefixes
+/// only once output has settled, and verify the sample again before painting.
 @MainActor
 final class HolyMannaLinkPainter: ObservableObject {
     struct GlyphRun {
@@ -21,16 +22,8 @@ final class HolyMannaLinkPainter: ObservableObject {
         let cellWidth: CGFloat
     }
 
-    struct Style {
-        let font: CTFont
-        let blue: NSColor
-        let background: NSColor
-    }
-
     @Published private(set) var frame: Frame?
-    @Published private(set) var isSelecting = false
-    private var rows = HolyMannaLink.RowPaintState()
-    private var viewport: HolyMannaLink.Viewport?
+    private var stability = HolyMannaLink.ViewportStability()
     private var blueOverride: NSColor?
 
     nonisolated static func paletteBlue(_ config: Ghostty.Config) -> NSColor? {
@@ -43,14 +36,8 @@ final class HolyMannaLinkPainter: ObservableObject {
     }
 
     func invalidate() {
-        rows.invalidate()
-        viewport = nil
+        stability.invalidate()
         if frame != nil { frame = nil }
-    }
-
-    func scrollbarChanged(from old: Ghostty.Action.Scrollbar?, to new: Ghostty.Action.Scrollbar?) {
-        // Growing history below an unchanged viewport does not move its rows.
-        if old?.offset != new?.offset || old?.len != new?.len { invalidate() }
     }
 
     func configChanged() {
@@ -64,22 +51,20 @@ final class HolyMannaLinkPainter: ObservableObject {
     }
 
     func watch(_ view: Ghostty.SurfaceView) async {
+        defer { invalidate() }
         while !Task.isCancelled {
             sample(view)
             do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
         }
     }
 
-    private func read(_ surface: ghostty_surface_t, cells: ClosedRange<Int>, columns: Int) -> ghostty_text_s? {
+    private func read(_ surface: ghostty_surface_t, through cell: Int, columns: Int) -> ghostty_text_s? {
         var text = ghostty_text_s()
         let selection = ghostty_selection_s(
-            top_left: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_EXACT,
-                                     x: UInt32(cells.lowerBound % columns), y: UInt32(cells.lowerBound / columns)),
+            top_left: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_EXACT, x: 0, y: 0),
             bottom_right: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_EXACT,
-                                         x: UInt32(cells.upperBound % columns), y: UInt32(cells.upperBound / columns)),
-            // A single physical row must not expand a trailing wide spacer
-            // into the next row. Multirow reads retain core soft-wrap joins.
-            rectangle: cells.lowerBound / columns == cells.upperBound / columns)
+                                         x: UInt32(cell % columns), y: UInt32(cell / columns)),
+            rectangle: false)
         return ghostty_surface_read_text(surface, selection, &text) ? text : nil
     }
 
@@ -88,58 +73,62 @@ final class HolyMannaLinkPainter: ObservableObject {
         let columns = Int(size.columns)
         let rows = Int(size.rows)
         guard columns > 0, rows > 0, size.cell_width_px > 0, size.cell_height_px > 0,
-              var text = read(surface, cells: 0...0, columns: columns) else { return nil }
+              var text = read(surface, through: columns * rows - 1, columns: columns) else { return nil }
         defer { ghostty_surface_free_text(surface, &text) }
         guard text.tl_px_x >= 0, text.tl_px_y >= 0, text.offset_start == 0 else { return nil }
         let cellSize = view.convertFromBacking(CGSize(width: CGFloat(size.cell_width_px), height: CGFloat(size.cell_height_px)))
         var imeX = 0.0, imeY = 0.0, imeWidth = 0.0, imeHeight = 0.0
         ghostty_surface_ime_point(surface, &imeX, &imeY, &imeWidth, &imeHeight)
         let baseline = CGPoint(x: text.tl_px_x, y: text.tl_px_y)
-        // imePoint's height is already in core points, like the text baseline.
-        // Comparing it to AppKit's backing conversion can reject a pane during
-        // scale/focus transitions. Only its cell-bottom coordinate is needed.
-        guard let origin = HolyMannaLink.gridOrigin(baseline: baseline, imeCellBottom: imeY,
-                                                    cellHeight: cellSize.height) else { return nil }
-        return .init(columns: columns, rows: rows,
+        guard abs(imeHeight - cellSize.height) < 0.01,
+              let origin = HolyMannaLink.gridOrigin(baseline: baseline, imeCellBottom: imeY,
+                                                     cellHeight: cellSize.height) else { return nil }
+        return .init(text: String(cString: text.text), columns: columns, rows: rows,
                      baseline: baseline, gridOrigin: origin, cellSize: cellSize)
     }
 
     private func sample(_ view: Ghostty.SurfaceView) {
         guard view.window?.occlusionState.contains(.visible) == true, !view.isHiddenOrHasHiddenAncestor,
-              let surface = view.surface else { return }
-        let selecting = ghostty_surface_has_selection(surface)
-        if isSelecting != selecting { isSelecting = selecting }
-        guard !selecting, let viewport = snapshot(view, surface: surface) else { return }
-        sample(viewport: viewport, readCells: { cells in
-            guard var text = self.read(surface, cells: cells, columns: viewport.columns) else { return nil }
+              let surface = view.surface, !ghostty_surface_has_selection(surface),
+              let viewport = snapshot(view, surface: surface) else {
+            invalidate()
+            return
+        }
+        switch stability.observe(viewport) {
+        case .clear:
+            if frame != nil { frame = nil }
+            return
+        case .keep:
+            return
+        case .paint:
+            break
+        }
+        guard let blue = blueOverride ?? view.derivedConfig.mannaLinkBlue,
+              let fontRaw = ghostty_surface_quicklook_font(surface) else { return }
+        let font = Unmanaged<CTFont>.fromOpaque(fontRaw).takeRetainedValue()
+        let runs = HolyMannaLink.paintRuns(in: viewport) { cell in
+            guard var text = self.read(surface, through: cell, columns: viewport.columns) else { return nil }
             defer { ghostty_surface_free_text(surface, &text) }
             return String(cString: text.text)
-        }, style: {
-            guard let blue = self.blueOverride ?? view.derivedConfig.mannaLinkBlue,
-                  let fontRaw = ghostty_surface_quicklook_font(surface) else { return nil }
-            return Style(font: Unmanaged<CTFont>.fromOpaque(fontRaw).takeRetainedValue(), blue: blue,
-                         background: NSColor(view.backgroundColor ?? view.derivedConfig.backgroundColor))
-        })
-    }
-
-    /// Shared by the surface adapter and deterministic hosted regressions.
-    /// Transient row changes never publish an empty intermediate frame.
-    func sample(viewport: HolyMannaLink.Viewport, readCells: (ClosedRange<Int>) -> String?, style: () -> Style?) {
-        if self.viewport != viewport {
-            invalidate()
-            self.viewport = viewport
         }
-        let runs = rows.sample(viewport, readCells: readCells)
-        guard runs != (frame?.runs.map(\.cells) ?? []), let style = style() else { return }
+        guard let runs, snapshot(view, surface: surface) == viewport else {
+            invalidate()
+            return
+        }
         var glyphRuns: [GlyphRun] = []
         for run in runs {
             let characters = Array(run.text.utf16)
             var glyphs = [CGGlyph](repeating: 0, count: characters.count)
-            guard CTFontGetGlyphsForCharacters(style.font, characters, &glyphs, characters.count) else { return }
+            guard CTFontGetGlyphsForCharacters(font, characters, &glyphs, characters.count) else {
+                invalidate()
+                return
+            }
             glyphRuns.append(.init(cells: run, glyphs: glyphs))
         }
-        frame = Frame(runs: glyphRuns, font: style.font, blue: style.blue.withAlphaComponent(1).cgColor,
-                      background: style.background.withAlphaComponent(1).cgColor,
+        stability.didPaint()
+        guard !glyphRuns.isEmpty else { frame = nil; return }
+        frame = Frame(runs: glyphRuns, font: font, blue: blue.withAlphaComponent(1).cgColor,
+                      background: NSColor(view.backgroundColor ?? view.derivedConfig.backgroundColor).withAlphaComponent(1).cgColor,
                       cellWidth: viewport.cellSize.width)
     }
 }
@@ -150,7 +139,7 @@ struct HolyMannaLinkOverlay: View {
 
     var body: some View {
         Canvas { context, size in
-            guard !painter.isSelecting, let frame = painter.frame else { return }
+            guard let frame = painter.frame else { return }
             context.withCGContext { graphics in
                 graphics.setFillColor(frame.background)
                 // Erase the original glyphs before drawing any replacements.

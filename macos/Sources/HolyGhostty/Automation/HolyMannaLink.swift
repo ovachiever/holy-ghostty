@@ -3,7 +3,6 @@ import Foundation
 /// Shared by terminal hit testing and the read-only automation route.
 enum HolyMannaLink {
     private static let pattern = try? NSRegularExpression(pattern: #"(?<!\w)mn-[a-f0-9]{6,}(?!\w)"#)
-    private static let paintCandidate = try? NSRegularExpression(pattern: #"mn-[a-f0-9]*|mn?$"#)
 
     static func match(in text: String, atUTF16Offset offset: Int) -> NSRange? {
         let length = (text as NSString).length
@@ -13,6 +12,7 @@ enum HolyMannaLink {
     }
 
     struct Viewport: Equatable {
+        let text: String
         let columns: Int
         let rows: Int
         let baseline: CGPoint
@@ -38,52 +38,36 @@ enum HolyMannaLink {
         return CGPoint(x: baseline.x, y: baseline.y - ascent)
     }
 
-    /// Resolve candidates using prefixes of their own physical row. A spinner
-    /// above that row must not poison the cell mapping. Read across row edges
-    /// only while an identifier can continue, preserving core soft-wrap rules.
-    static func paintRuns(in viewport: Viewport, row: Int, text: String,
-                          readCells: (ClosedRange<Int>) -> String?) -> [PaintRun]? {
+    /// Map UTF-16 matches back through core cell selections. No wcwidth or
+    /// Swift character count is substituted for the terminal's Unicode map.
+    /// Non-rectangular reads unwrap soft wraps and retain hard newlines.
+    static func paintRuns(in viewport: Viewport, readPrefix: (Int) -> String?) -> [PaintRun]? {
         guard viewport.columns > 0, viewport.rows > 0,
               viewport.cellSize.width > 0, viewport.cellSize.height > 0 else { return nil }
-        let source = text as NSString
-        let candidates = paintCandidate?.matches(in: text, range: NSRange(location: 0, length: source.length)) ?? []
-        let rowStart = row * viewport.columns
-        let finalCell = viewport.columns * viewport.rows - 1
+        let source = viewport.text as NSString
+        let matches = pattern?.matches(in: viewport.text, range: NSRange(location: 0, length: source.length)) ?? []
         var prefixLengths: [Int: Int] = [:]
         func prefixLength(_ cell: Int) -> Int? {
             if let cached = prefixLengths[cell] { return cached }
-            guard let prefix = readCells(rowStart...cell), source.hasPrefix(prefix) else { return nil }
+            guard let prefix = readPrefix(cell), source.hasPrefix(prefix) else { return nil }
             let length = (prefix as NSString).length
             prefixLengths[cell] = length
             return length
         }
         var result: [PaintRun] = []
-        for candidate in candidates {
-            var lower = rowStart
-            var upper = rowStart + viewport.columns - 1
+        for match in matches {
+            var lower = 0
+            var upper = viewport.columns * viewport.rows - 1
             while lower < upper {
                 let middle = lower + (upper - lower) / 2
                 guard let length = prefixLength(middle) else { return nil }
-                if length <= candidate.range.location { lower = middle + 1 } else { upper = middle }
+                if length <= match.range.location { lower = middle + 1 } else { upper = middle }
             }
-            guard prefixLength(lower) == candidate.range.location + 1 else { return nil }
-            var end = rowStart + viewport.columns - 1
-            guard var tail = readCells(lower...end) else { return nil }
-            while end < finalCell, canContinueIdentifier(tail) {
-                end += viewport.columns
-                guard let extended = readCells(lower...end) else { return nil }
-                tail = extended
-            }
-            guard let match = match(in: tail, atUTF16Offset: 0), match.location == 0 else { continue }
-            let id = (tail as NSString).substring(with: match)
-            let last = lower + id.utf16.count - 1
-            guard last <= finalCell, readCells(lower...last) == id,
-                  let context = readCells(max(0, lower - 1)...min(finalCell, last + 1)) else { return nil }
-            // Include the cells on both sides, even over a soft wrap, so a
-            // row beginning with mn-abcdef cannot link inside a longer word.
-            let range = (context as NSString).range(of: id)
-            guard range.location != NSNotFound,
-                  self.match(in: context, atUTF16Offset: range.location) == range else { continue }
+            let last = lower + match.range.length - 1
+            guard last < viewport.columns * viewport.rows,
+                  prefixLength(lower) == match.range.location + 1,
+                  prefixLength(last) == NSMaxRange(match.range) else { return nil }
+            let id = source.substring(with: match.range)
             var cursor = lower
             var offset = 0
             while offset < id.count {
@@ -102,54 +86,31 @@ enum HolyMannaLink {
         return result
     }
 
-    private static func canContinueIdentifier(_ text: String) -> Bool {
-        text == "m" || text == "mn" || (text.hasPrefix("mn-") && text.utf8.dropFirst(3).allSatisfy {
-            (48...57).contains($0) || (97...102).contains($0)
-        })
-    }
+    /// A changed sample removes the old overlay immediately. Only a second
+    /// identical sample is eligible for painting; callers sample 100ms apart.
+    struct ViewportStability {
+        enum Observation { case clear, paint, keep }
+        private var pending: Viewport?
+        private var painted = false
 
-    /// Accepted rows survive transient changes and failed reads. A row can
-    /// gain paint after two equal samples regardless of every other row.
-    /// Each replacement is returned as one complete set of runs.
-    struct RowPaintState {
-        private struct PaintedRow {
-            let dependencies: [Int: String]
-            let runs: [PaintRun]
+        mutating func observe(_ viewport: Viewport?) -> Observation {
+            guard let viewport else {
+                invalidate()
+                return .clear
+            }
+            guard viewport == pending else {
+                pending = viewport
+                painted = false
+                return .clear
+            }
+            return painted ? .keep : .paint
         }
-        private var previous: [Int: String] = [:]
-        private var painted: [Int: PaintedRow] = [:]
 
-        mutating func sample(_ viewport: Viewport, readCells: (ClosedRange<Int>) -> String?) -> [PaintRun] {
-            var current: [Int: String] = [:]
-            for row in 0..<viewport.rows {
-                current[row] = readCells(row * viewport.columns...(row + 1) * viewport.columns - 1)
-            }
-            defer { previous = current }
-            for row in 0..<viewport.rows {
-                guard let text = current[row], previous[row] == text else { continue }
-                if let cached = painted[row], cached.dependencies.allSatisfy({ current[$0.key] == $0.value }) {
-                    continue
-                }
-                var dependencies: Set<Int> = [row]
-                guard let runs = paintRuns(in: viewport, row: row, text: text, readCells: { cells in
-                    dependencies.formUnion(cells.lowerBound / viewport.columns...cells.upperBound / viewport.columns)
-                    return readCells(cells)
-                }) else { continue }
-                let lastRow = runs.map { Int(round(($0.rect.minY - viewport.gridOrigin.y) / viewport.cellSize.height)) }.max() ?? row
-                // Neighbouring text affects word boundaries. Recompute when
-                // it changes, but only the rows carrying paint must settle.
-                guard (row...lastRow).allSatisfy({ current[$0] != nil && current[$0] == previous[$0] }),
-                      (row...lastRow).allSatisfy({
-                          current[$0] == readCells($0 * viewport.columns...($0 + 1) * viewport.columns - 1)
-                      }) else { continue }
-                painted[row] = PaintedRow(dependencies: current.filter { dependencies.contains($0.key) }, runs: runs)
-            }
-            return painted.keys.sorted().flatMap { painted[$0]?.runs ?? [] }
-        }
+        mutating func didPaint() { painted = true }
 
         mutating func invalidate() {
-            previous = [:]
-            painted = [:]
+            pending = nil
+            painted = false
         }
     }
 
