@@ -62,6 +62,14 @@ extension Ghostty {
             surfaceFocus || lastFocusedSurface?.value === surfaceView
         }
 
+        private var displayedHoverURL: String? {
+            #if canImport(AppKit)
+            surfaceView.mannaHoverURL ?? surfaceView.hoverUrl
+            #else
+            surfaceView.hoverUrl
+            #endif
+        }
+
         var body: some View {
             let center = NotificationCenter.default
 
@@ -108,6 +116,17 @@ extension Ghostty {
                     }
                 }
                 .ghosttySurfaceView(surfaceView)
+                #if canImport(AppKit)
+                .overlay {
+                    GeometryReader { _ in
+                        Path { path in
+                            for rect in surfaceView.mannaUnderlines { path.addRect(rect) }
+                        }
+                        .fill(.primary)
+                    }
+                    .allowsHitTesting(false)
+                }
+                #endif
 
                 // Progress report
                 if let progressReport = surfaceView.progressReport, progressReport.state != .remove {
@@ -136,7 +155,7 @@ extension Ghostty {
 #endif
 
                 // If we have a URL from hovering a link, we show that.
-                if let url = surfaceView.hoverUrl {
+                if let url = displayedHoverURL {
                     let padding: CGFloat = 5
                     let cornerRadius: CGFloat = 9
                     ZStack {

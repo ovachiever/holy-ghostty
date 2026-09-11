@@ -31,7 +31,15 @@ final class HolyMannaBoardModeStore: ObservableObject {
     @Published var boardFilter: HolyMannaBoardFilter = .live
     /// A track id, `HolyMannaBoardPresentation.untrackedFilter`, or nil for every track.
     @Published var trackFilter: String?
-    @Published var grep = "" { didSet { if grep != oldValue { clearAnswer() } } }
+    @Published var grep = "" {
+        didSet {
+            if grep != oldValue {
+                clearAnswer()
+                cancelItemLink()
+                linkedItemID = nil
+            }
+        }
+    }
     @Published private(set) var state: HolyMannaStatePayload?
     @Published private(set) var estate: HolyMannaEstatePayload?
     @Published private(set) var boardFailure: String?
@@ -111,6 +119,11 @@ final class HolyMannaBoardModeStore: ObservableObject {
     private var toastTask: Task<Void, Never>?
     private var digestCache: [String: HolyMannaPresentationResult] = [:]
     private var digestFailures: [String: String] = [:]
+    private var itemLinkTask: Task<Void, Never>?
+    private var itemLinkGeneration = UUID()
+    private var linkedItemID: String?
+    private var linkAllowsSelection = false
+    @Published private(set) var isResolvingItemLink = false
 
     init(
         client: HolyMannaBoardClient = .init(),
@@ -228,6 +241,10 @@ final class HolyMannaBoardModeStore: ObservableObject {
 
     func prepare(context: HolyMannaBoardContext) {
         let contextChanged = self.context != context
+        if contextChanged {
+            cancelItemLink()
+            linkedItemID = nil
+        }
         self.context = context
         if contextChanged {
             clearAnswer()
@@ -266,6 +283,8 @@ final class HolyMannaBoardModeStore: ObservableObject {
     }
 
     func dismiss() {
+        cancelItemLink()
+        linkedItemID = nil
         isPresented = false
         clearAnswer()
         pendingDispatch = nil
@@ -276,6 +295,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
 
     /// The crumb's "estate": the table of every board, the board kept warm.
     func showEstate() {
+        cancelItemLink()
         surface = .estate
         selectedSheet = .board
         lastRefreshedAt = estateRefreshedAt
@@ -283,14 +303,18 @@ final class HolyMannaBoardModeStore: ObservableObject {
     }
 
     func selectSheet(_ sheet: HolyMannaBoardSheet) {
+        cancelItemLink()
         selectedSheet = sheet
     }
 
     func selectFilter(_ filter: HolyMannaBoardFilter) {
+        cancelItemLink()
         boardFilter = filter
     }
 
     func selectItem(_ id: String?) {
+        cancelItemLink()
+        linkedItemID = nil
         selectedItemID = id
         if id != nil {
             selectedPeerID = nil
@@ -299,6 +323,8 @@ final class HolyMannaBoardModeStore: ObservableObject {
     }
 
     func selectPeer(_ id: String?) {
+        cancelItemLink()
+        linkedItemID = nil
         selectedPeerID = id
         if id != nil {
             selectedItemID = nil
@@ -322,6 +348,8 @@ final class HolyMannaBoardModeStore: ObservableObject {
 
     func selectEstateBoard(_ board: HolyMannaEstateBoard) {
         guard board.exists else { return }
+        cancelItemLink()
+        linkAllowsSelection = true
         let next = context.selecting(boardRoot: board.root)
         if next != context {
             clearAnswer()
@@ -331,7 +359,10 @@ final class HolyMannaBoardModeStore: ObservableObject {
             state = stateCache[Self.cacheKey(next)]
             boardFailure = nil
             selectedPeerID = nil
-            selectedItemID = state.flatMap(Self.defaultSelection)
+            selectedItemID = state.flatMap { payload in
+                if let linkedItemID { return payload.item(id: linkedItemID)?.id }
+                return Self.defaultSelection(in: payload)
+            }
             digestText = nil
             digestFailure = nil
         }
@@ -343,6 +374,72 @@ final class HolyMannaBoardModeStore: ObservableObject {
     }
 
     // MARK: Keys
+
+    /// Navigation only. The shipped Claim & build button owns confirmation and
+    /// dispatch; reading scrollback must never request a mutation or a worker.
+    func openItemLink(_ id: String, from origin: HolyMannaBoardContext) {
+        guard HolyMannaLink.isIdentifier(id) else { return }
+        cancelItemLink()
+        present(context: origin)
+        surface = .board
+        clearAnswer()
+        selectedSheet = .board
+        boardFilter = .all
+        trackFilter = nil
+        grep = id
+        linkedItemID = id
+        linkAllowsSelection = false
+        selectedItemID = nil
+        selectedPeerID = nil
+        pendingMutation = nil
+        pendingDispatch = nil
+        dispatchNotice = "Finding \(id)…"
+        isResolvingItemLink = true
+        requestGrepFocus()
+        let generation = itemLinkGeneration
+        itemLinkTask = Task { [weak self, client] in
+            do {
+                let result = try await HolyMannaBoardLinkResolver(client: client).resolve(id, from: origin)
+                guard let self, self.itemLinkGeneration == generation, self.isPresented else { return }
+                self.isResolvingItemLink = false
+                if let estate = result.estate { self.applyEstate(.success(estate)) }
+                if result.matches.count == 1, let payload = result.matches.first,
+                   let item = payload.item(id: id) {
+                    let target = origin.selecting(boardRoot: payload.root)
+                    self.context = target
+                    self.surface = .board
+                    self.linkAllowsSelection = true
+                    self.selectedItemID = id
+                    self.boardFilter = item.effective == "done" ? .done : .all
+                    self.applyState(.success(payload), for: target, key: Self.cacheKey(target))
+                    self.dispatchNotice = nil
+                } else {
+                    self.selectedItemID = nil
+                    self.dispatchNotice = result.matches.isEmpty
+                        ? "No item \(id) was found. Search the board or choose another board from estate."
+                        : "\(id) exists on \(result.matches.map(\.name).joined(separator: ", ")). Choose its board from estate."
+                    if let notice = self.dispatchNotice { self.showToast(notice) }
+                    if self.state == nil { self.boardFailure = self.dispatchNotice }
+                    self.requestGrepFocus()
+                }
+            } catch {
+                guard let self, self.itemLinkGeneration == generation, self.isPresented else { return }
+                self.isResolvingItemLink = false
+                self.selectedItemID = nil
+                self.dispatchNotice = "Could not resolve \(id): \(error.localizedDescription)"
+                if let notice = self.dispatchNotice { self.showToast(notice) }
+                if self.state == nil { self.boardFailure = self.dispatchNotice }
+                self.requestGrepFocus()
+            }
+        }
+    }
+
+    private func cancelItemLink() {
+        itemLinkTask?.cancel()
+        itemLinkTask = nil
+        itemLinkGeneration = UUID()
+        isResolvingItemLink = false
+    }
 
     func requestGrepFocus() {
         grepFocusRequest += 1
@@ -725,7 +822,9 @@ final class HolyMannaBoardModeStore: ObservableObject {
             state = payload
             boardFailure = nil
             lastRefreshedAt = stateRefreshedAt[key]
-            if selectedPeerID == nil, payload.item(id: selectedItemID) == nil {
+            if let linkedItemID {
+                selectedItemID = linkAllowsSelection ? payload.item(id: linkedItemID)?.id : nil
+            } else if selectedPeerID == nil, payload.item(id: selectedItemID) == nil {
                 selectedItemID = Self.defaultSelection(in: payload)
             }
             if let selectedPeerID, payload.peer(id: selectedPeerID) == nil {
@@ -747,7 +846,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
                 state = nil
                 stateCache[key] = nil
                 if isPresented {
-                    surface = .estate
+                    surface = linkedItemID == nil ? .estate : .board
                     requestEstateRefresh(force: estate == nil)
                 }
             }

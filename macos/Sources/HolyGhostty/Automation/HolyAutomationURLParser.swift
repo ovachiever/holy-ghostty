@@ -3,6 +3,19 @@ import Foundation
 enum HolyAutomationURLParser {
     static let scheme = "holy-ghostty"
 
+    static func boardItemID(from url: URL) -> String? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == scheme,
+              routeName(from: components) == "board",
+              components.user == nil, components.password == nil, components.port == nil,
+              components.fragment == nil,
+              components.path.isEmpty || components.path == "/" || components.host == nil,
+              let items = components.queryItems, items.count == 1,
+              items[0].name == "item", let id = items[0].value,
+              HolyMannaLink.isIdentifier(id) else { return nil }
+        return id
+    }
+
     static func launchSpec(from url: URL) -> HolySessionLaunchSpec? {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.scheme?.lowercased() == scheme else {

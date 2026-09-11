@@ -62,6 +62,11 @@ extension Ghostty {
 
         // The hovered URL string
         @Published var hoverUrl: String?
+        @Published private(set) var mannaHoverURL: String?
+        @Published private(set) var mannaUnderlines: [CGRect] = []
+        private var mannaHoverCheckedAt: ContinuousClock.Instant?
+        private var mannaPointerStyle: CursorStyle?
+        private var mannaMouseDownID: String?
 
         // The progress report (if any)
         @Published var progressReport: Action.ProgressReport? {
@@ -556,6 +561,7 @@ extension Ghostty {
                 // DispatchQueue required since this may be called by SwiftUI off
                 // the main thread and Published changes need to be on the main
                 // thread. This caused a crash on macOS <= 14.
+                self.clearMannaHover()
                 self.surfaceSize = size
             }
         }
@@ -944,13 +950,122 @@ extension Ghostty {
             setSurfaceSize(width: UInt32(scaledSize.width), height: UInt32(scaledSize.height))
         }
 
+        private func clearMannaHover() {
+            mannaHoverURL = nil
+            mannaUnderlines = []
+            mannaHoverCheckedAt = nil
+            if let style = mannaPointerStyle {
+                if hoverUrl == nil { pointerStyle = style }
+                mannaPointerStyle = nil
+            }
+        }
+
+        private func updateMannaHover(at pos: CGPoint, modifiers: NSEvent.ModifierFlags, force: Bool = false) {
+            guard modifiers.contains(.command), bounds.contains(pos), surface != nil else {
+                clearMannaHover()
+                return
+            }
+            let now = ContinuousClock.now
+            if !force, let checked = mannaHoverCheckedAt, checked.duration(to: now) < .milliseconds(50) { return }
+            let hit = mannaLink(at: pos)
+            clearMannaHover()
+            mannaHoverCheckedAt = now
+            guard let hit else { return }
+            mannaHoverURL = HolyMannaLink.url(for: hit.id)?.absoluteString
+            mannaUnderlines = hit.lines
+            mannaPointerStyle = pointerStyle
+            pointerStyle = .link
+        }
+
+        /// Quick Look supplies the actual viewport cell and baseline, including
+        /// scrollback and padding, without changing the terminal selection. Read
+        /// the row and its prefix by cells so Unicode before the id cannot skew
+        /// the hit offset. Clicks always read fresh; hover reads are throttled.
+        private func mannaLink(at pos: CGPoint) -> (id: String, lines: [CGRect])? {
+            guard let surface, bounds.contains(pos), hoverUrl == nil,
+                  cellSize.width > 0, cellSize.height > 0 else { return nil }
+            let size = ghostty_surface_size(surface)
+            let columns = Int(size.columns)
+            guard columns > 0 else { return nil }
+            var word = ghostty_text_s()
+            guard ghostty_surface_quicklook_word(surface, &word) else { return nil }
+            defer { ghostty_surface_free_text(surface, &word) }
+            guard word.text_len > 0, word.tl_px_x >= 0, word.tl_px_y >= 0 else { return nil }
+            let value = String(cString: word.text)
+            guard !value.contains("://") else { return nil }
+            let first = Int(word.offset_start)
+            let last = first + Int(word.offset_len)
+            let row = first / columns
+            let originX = word.tl_px_x - CGFloat(first % columns) * cellSize.width
+            if row != last / columns {
+                // A soft-wrapped id remains one word in the core. Only a whole
+                // ASCII id is safe here; partial/out-of-viewport words refuse.
+                guard HolyMannaLink.isIdentifier(value), value.utf8.count == last - first + 1,
+                      last < Int(size.rows) * columns else { return nil }
+                return (value, HolyMannaLink.underlines(
+                    for: value, startingAt: first, columns: columns,
+                    origin: CGPoint(x: originX, y: word.tl_px_y - CGFloat(row) * cellSize.height), cellSize: cellSize))
+            }
+            let column = Int(floor((pos.x - originX) / cellSize.width))
+            guard column >= first % columns, column <= last % columns,
+                  let line = mannaRow(row, through: columns - 1, surface: surface),
+                  let prefix = mannaRow(row, through: column, surface: surface),
+                  line.hasPrefix(prefix) else { return nil }
+            let offset = (prefix as NSString).length - 1
+            guard let range = HolyMannaLink.match(in: line, atUTF16Offset: offset) else { return nil }
+            let id = (line as NSString).substring(with: range)
+            let startColumn = column - (offset - range.location)
+            guard startColumn >= 0 else { return nil }
+            return (id, HolyMannaLink.underlines(
+                for: id, startingAt: startColumn, columns: columns,
+                origin: CGPoint(x: originX, y: word.tl_px_y), cellSize: cellSize))
+        }
+
+        private func mannaRow(_ row: Int, through column: Int, surface: ghostty_surface_t) -> String? {
+            var text = ghostty_text_s()
+            let selection = ghostty_selection_s(
+                top_left: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_EXACT,
+                                         x: 0, y: UInt32(row)),
+                bottom_right: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_EXACT,
+                                             x: UInt32(column), y: UInt32(row)),
+                rectangle: true)
+            guard ghostty_surface_read_text(surface, selection, &text) else { return nil }
+            defer { ghostty_surface_free_text(surface, &text) }
+            return String(cString: text.text)
+        }
+
         override func mouseDown(with event: NSEvent) {
             guard let surface = self.surface else { return }
+            if event.modifierFlags.contains(.command), event.clickCount == 1 {
+                let pos = convert(event.locationInWindow, from: nil)
+                ghostty_surface_mouse_pos(surface, pos.x, frame.height - pos.y, Ghostty.ghosttyMods(event.modifierFlags))
+                if let hit = mannaLink(at: pos) {
+                    mannaMouseDownID = hit.id
+                    return
+                }
+            }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
         }
 
         override func mouseUp(with event: NSEvent) {
+            if let id = mannaMouseDownID {
+                mannaMouseDownID = nil
+                prevPressureStage = 0
+                let pos = convert(event.locationInWindow, from: nil)
+                if let surface {
+                    ghostty_surface_mouse_pos(surface, pos.x, frame.height - pos.y, Ghostty.ghosttyMods(event.modifierFlags))
+                }
+                // Re-read on release. A drag or changing scrollback cannot open
+                // the stale id that happened to be under the press.
+                if event.modifierFlags.contains(.command), mannaLink(at: pos)?.id == id,
+                   let url = HolyMannaLink.url(for: id),
+                   let delegate = NSApp.delegate as? AppDelegate {
+                    clearMannaHover()
+                    delegate.handleHolyAutomationURL(url, from: self)
+                }
+                return
+            }
             // If this mouse-up corresponds to a focus-only click transfer,
             // suppress it so we don't emit a release without a press.
             if suppressNextLeftMouseUp {
@@ -1039,9 +1154,11 @@ extension Ghostty {
                 mods: .init(nsFlags: event.modifierFlags)
             )
             surfaceModel.sendMousePos(mouseEvent)
+            updateMannaHover(at: pos, modifiers: event.modifierFlags, force: true)
         }
 
         override func mouseExited(with event: NSEvent) {
+            clearMannaHover()
             mouseOverSurface = false
             mouseLocationInSurface = nil
             guard let surfaceModel else { return }
@@ -1077,6 +1194,7 @@ extension Ghostty {
             surfaceModel.sendMousePos(mouseEvent)
 
             // Handle focus-follows-mouse
+            updateMannaHover(at: pos, modifiers: event.modifierFlags)
             if let window,
                let controller = window.windowController as? BaseTerminalController,
                !controller.commandPaletteIsShowing,
@@ -1100,6 +1218,7 @@ extension Ghostty {
         }
 
         override func scrollWheel(with event: NSEvent) {
+            clearMannaHover()
             guard let surfaceModel else { return }
 
             var x = event.scrollingDeltaX
@@ -1143,6 +1262,7 @@ extension Ghostty {
         }
 
         override func keyDown(with event: NSEvent) {
+            clearMannaHover()
             if holyWorkspaceController?.handleSessionCycleKey(event) == true {
                 return
             }
@@ -1425,6 +1545,12 @@ extension Ghostty {
         }
 
         override func flagsChanged(with event: NSEvent) {
+            if mouseOverSurface, let window {
+                updateMannaHover(at: convert(window.mouseLocationOutsideOfEventStream, from: nil),
+                                 modifiers: event.modifierFlags, force: true)
+            } else {
+                clearMannaHover()
+            }
             let mod: UInt32
             switch event.keyCode {
             case 0x39: mod = GHOSTTY_MODS_CAPS.rawValue

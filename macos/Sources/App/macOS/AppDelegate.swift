@@ -1582,7 +1582,22 @@ class AppDelegate: NSObject,
     }
 
     @MainActor
-    private func handleHolyAutomationURL(_ url: URL) {
+    func handleHolyAutomationURL(_ url: URL, from source: Ghostty.SurfaceView? = nil) {
+        if let id = HolyAutomationURLParser.boardItemID(from: url) {
+            let sourceWorkspace = source?.window?.windowController as? HolyWorkspaceWindowController
+            // A Board URL must never seed a default terminal session.
+            let workspace = sourceWorkspace ?? preferredWorkspace(createIfNeeded: false)
+                ?? HolyWorkspaceWindowController(ghostty: ghostty, seedDefaultSession: false)
+            let session = source.flatMap { source in
+                workspace.workspaceStore.sessions.first { $0.surfaceView === source }
+            } ?? (source == nil ? workspace.workspaceStore.selectedSession : nil)
+            let context = session.map { HolyMannaBoardContext.focused(session: $0) }
+                ?? HolyMannaBoardContext(boardRoot: source?.pwd, remoteHost: nil)
+            workspace.archiveModeStore.dismiss()
+            workspace.boardModeStore.openItemLink(id, from: context)
+            workspace.showAndActivate()
+            return
+        }
         guard let launchSpec = HolyAutomationURLParser.launchSpec(from: url) else {
             AppDelegate.logger.warning(
                 "Ignored unsupported automation URL: \(url.absoluteString, privacy: .public)"
