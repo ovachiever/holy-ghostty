@@ -116,19 +116,9 @@ extension Ghostty {
                     }
                 }
                 .ghosttySurfaceView(surfaceView)
-                #if canImport(AppKit)
-                .overlay {
-                    GeometryReader { _ in
-                        Path { path in
-                            for rect in surfaceView.mannaUnderlines { path.addRect(rect) }
-                        }
-                        // Manna links are purple, distinct from URL styling
-                        // and readable over any program's text color.
-                        .fill(Color.purple)
-                    }
-                    .allowsHitTesting(false)
-                }
-                #endif
+                // Manna links draw no hover underline (Erik, 2026-09-11):
+                // the at-rest blue id itself is the affordance (mn-4be59b);
+                // hover keeps the pointer change and the URL caption.
 
                 // Progress report
                 if let progressReport = surfaceView.progressReport, progressReport.state != .remove {

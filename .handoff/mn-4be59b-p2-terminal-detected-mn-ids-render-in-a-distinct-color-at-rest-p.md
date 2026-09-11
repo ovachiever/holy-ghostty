@@ -4,9 +4,9 @@ manna: mn-4be59b
 track: mn-9a97cc
 source: null
 base_commit: 065ff58584b5ce1b3b1515a589998982f0185148
-scope: '[P2][TERMINAL] Detected mn- ids render in a distinct color at rest — purple, not the program''s own text color'
+scope: '[P1][TERMINAL] mn- ids render blue at rest in every pane — no hover underline'
 inputs: []
-binding: sha256:960ad5705afa7e7cfb9025ba34753e8f9aae2b79003a9aa4e3a3ddd1e4b709d3
+binding: sha256:0e5fa10a56a2c9d7a7543458b82c96672c25e4fe9f35030c351fe95a1ec6b874
 ---
 
 # Handoff: [P2][TERMINAL] Detected mn- ids render in a distinct color at rest — purple, not the program's own text color
