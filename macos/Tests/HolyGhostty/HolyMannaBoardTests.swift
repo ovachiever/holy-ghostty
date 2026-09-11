@@ -430,9 +430,10 @@ struct HolyMannaBoardTests {
         #expect(!HolyMannaMutation.claim("mn-live001").isDestructive)
     }
 
-    @Test func refusalEnvelopeSurfacesTheCliErrorAndTheDirectoryTried() async throws {
+    @Test(arguments: [Int32(0), 2])
+    func refusalEnvelopeSurfacesTheCliErrorAndTheDirectoryTried(exitCode: Int32) async throws {
         let client = HolyMannaBoardClient { _, _ in
-            .init(stdout: HolyMannaBoardFixtures.storageNotInitialized, stderr: "", exitCode: 0)
+            .init(stdout: HolyMannaBoardFixtures.storageNotInitialized, stderr: "", exitCode: exitCode)
         }
         let context = HolyMannaBoardContext(boardRoot: "/srv/nowhere", remoteHost: "builder@example.com")
 
@@ -455,6 +456,20 @@ struct HolyMannaBoardTests {
             #expect(description.contains("/srv/nowhere"))
             #expect(!description.contains("canonical JSON contract"))
             #expect(error.meansNoBoardHere)
+        }
+    }
+
+    @Test(arguments: ["not JSON", #"{"success":true}"#])
+    func nonzeroExitWithoutARefusalPreservesTheTransportFailure(stdout: String) async throws {
+        let client = HolyMannaBoardClient { _, _ in
+            .init(stdout: stdout, stderr: "ssh: connection closed\n", exitCode: 255)
+        }
+        await #expect(throws: HolyMannaBoardClientError.commandFailed(
+            command: "builder@example.com: agent-do manna state --json",
+            code: 255,
+            detail: "ssh: connection closed"
+        )) {
+            _ = try await client.state(for: .init(boardRoot: "/srv/holy-ghostty", remoteHost: "builder@example.com"))
         }
     }
 
@@ -491,9 +506,11 @@ struct HolyMannaBoardTests {
         }
     }
 
-    @Test func estateRefusalIsSurfacedInItsOwnWords() async throws {
+    @Test(arguments: [Int32(0), 2])
+    func estateRefusalIsSurfacedInItsOwnWords(exitCode: Int32) async throws {
         let client = HolyMannaBoardClient { _, _ in
-            .init(stdout: #"{"success": false, "error": "estate read failed: registry unreadable"}"#, stderr: "", exitCode: 0)
+            .init(stdout: #"{"success": false, "error": "estate read failed: registry unreadable"}"#,
+                  stderr: "", exitCode: exitCode)
         }
         await #expect(throws: HolyMannaBoardClientError.rejected(
             command: "builder@example.com: agent-do manna estate --json",

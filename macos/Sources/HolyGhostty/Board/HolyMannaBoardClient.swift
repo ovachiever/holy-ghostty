@@ -105,7 +105,7 @@ struct HolyMannaBoardClient: Sendable {
             needsBoardRoot: true,
             identity: nil
         )
-        let output = try await checkedRun(invocation, timeout: Self.stateTimeout)
+        let output = try await checkedRun(invocation, context: context, timeout: Self.stateTimeout)
         let payload = try Self.decodeReply(
             HolyMannaStatePayload.self,
             from: output.stdout,
@@ -129,7 +129,7 @@ struct HolyMannaBoardClient: Sendable {
             needsBoardRoot: false,
             identity: nil
         )
-        let output = try await checkedRun(invocation, timeout: Self.estateTimeout)
+        let output = try await checkedRun(invocation, context: context, timeout: Self.estateTimeout)
         return try Self.decodeReply(
             HolyMannaEstatePayload.self,
             from: output.stdout,
@@ -218,7 +218,7 @@ struct HolyMannaBoardClient: Sendable {
                 needsBoardRoot: true,
                 identity: identity
             )
-            let output = try await checkedRun(invocation, timeout: Self.mutationTimeout)
+            let output = try await checkedRun(invocation, context: context, timeout: Self.mutationTimeout)
             receipts.append(.init(
                 command: invocation.displayCommand,
                 output: output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -338,10 +338,21 @@ struct HolyMannaBoardClient: Sendable {
 
     private func checkedRun(
         _ invocation: HolyMannaProcessInvocation,
+        context: HolyMannaBoardContext,
         timeout: TimeInterval
     ) async throws -> HolyMannaProcessOutput {
         let output = try await runner(invocation, timeout)
         guard output.exitCode == 0 else {
+            // Canonical JSON refusals use stdout even with a nonzero exit.
+            // Preserve their reason so an absent board can reach estate search.
+            if let envelope = try? JSONDecoder().decode(HolyMannaReplyEnvelope.self, from: Data(output.stdout.utf8)),
+               envelope.success == false {
+                throw HolyMannaBoardClientError.rejected(
+                    command: invocation.displayCommand,
+                    error: envelope.error ?? "the command reported failure without a reason",
+                    directory: Self.directoryDescription(invocation: invocation, context: context)
+                )
+            }
             let detail = output.stderr
                 .components(separatedBy: .newlines)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }

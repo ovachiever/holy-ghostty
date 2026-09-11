@@ -111,9 +111,11 @@ struct HolyMannaBoardLinkTests {
         }
     }
 
-    @Test func missingFocusedBoardStillSearchesTheEstate() async throws {
+    @Test(arguments: [Optional<String>.none, "builder@example.com"])
+    func missingFocusedBoardStillSearchesTheEstate(host: String?) async throws {
         let client = linkClient(states: ["/b": try linkState(root: "/b")], missingRoot: "/a")
-        let result = try await HolyMannaBoardLinkResolver(client: client).resolve("mn-abcdef", from: linkOrigin)
+        let result = try await HolyMannaBoardLinkResolver(client: client).resolve(
+            "mn-abcdef", from: .init(boardRoot: "/a", remoteHost: host))
         #expect(result.matches.map(\.root) == ["/b"])
     }
 
@@ -225,23 +227,24 @@ private func linkClient(states: [String: String], calls: LinkCalls = LinkCalls()
                         delay: Duration = .zero) -> HolyMannaBoardClient {
     let identity = HolyMannaActorIdentityStore(fileURL: FileManager.default.temporaryDirectory
         .appendingPathComponent("holy-link-tests-\(UUID()).json"))
+    let roots = Array(states.keys) + (missingRoot.map { [$0] } ?? [])
     return HolyMannaBoardClient(identityStore: identity) { invocation, _ in
         await calls.record(invocation)
         if delay > .zero { try? await Task.sleep(for: delay) }
         if invocation.displayCommand.contains("estate") {
             return .init(stdout: try linkEstate(roots: states.keys.sorted()), stderr: "", exitCode: 0)
         }
-        let root = invocation.currentDirectoryPath ?? states.keys.first { invocation.arguments.joined().contains($0 + "'") }
+        let root = invocation.currentDirectoryPath ?? roots.first { invocation.arguments.joined().contains($0 + "'") }
         if root == missingRoot {
             return .init(stdout: #"{"success":false,"error":"Storage not initialized. Run 'manna-core init' first."}"#,
-                         stderr: "", exitCode: 1)
+                         stderr: "", exitCode: 2)
         }
         return .init(stdout: states[root ?? ""] ?? "invalid fixture root", stderr: "", exitCode: 0)
     }
 }
 
 private func linkState(root: String, includesItem: Bool = true, status: String = "open", kind: String = "item") throws -> String {
-    var item: [String: Any] = ["id": "mn-abcdef", "title": "cited work", "status": status,
+    var item: [String: Any] = ["id": "mn-abcdef", "title": "cited work", "title_plain": "cited work", "status": status,
         "effective": status == "open" ? (kind == "dream" ? "dream" : "ready") : status,
         "kind": kind, "decision": false, "blocked_by": [], "blockers": [], "dependents": [], "commits": [],
         "prompt": ".handoff/cited.md", "handoff_digest": "sha256:synthetic", "handoff_exists": true]
