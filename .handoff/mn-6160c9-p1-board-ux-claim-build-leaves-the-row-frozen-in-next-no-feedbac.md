@@ -7,7 +7,7 @@ base_commit: b74e8fc7d4fb43f8cfcb48135cf59435920cf42e
 scope: '[P1][BOARD][UX] Claim & build leaves the row frozen in next: no feedback until navigation forces a refresh'
 inputs:
 - Erik live report 2026-09-10 15:22; companion defect to mn-ec34cd's dispatch flow
-binding: sha256:6aee7aa1b6bf95ccaf61742451ca95b421fd0691478cd45d235fe84f27a3ddf0
+binding: sha256:a943c742638e9363fe8ce760aa6a12151445fd83704f943f7251ec7fee121a54
 ---
 
 # Handoff: [P1][BOARD][UX] Claim & build leaves the row frozen in next: no feedback until navigation forces a refresh
@@ -41,7 +41,7 @@ Erik 2026-09-10: clicking Claim & build dispatches fine, but the item stays in $
 
 ## Build receipt, 2026-09-10
 
-Implementation is complete and compiled. Required executed-test and live acceptance remain pending; this item must stay `in_progress`.
+Implementation is complete and compiled in commit `c681f6a468251b3b262b4023e020d546de6cb5ba`. Erik explicitly directed closure on 2026-09-10: completed work closes without a human-verification gate; any subsequently found defect gets a new ticket. This supersedes the original live acceptance requirement and the earlier instruction to keep this item `in_progress`.
 
 - Claimed with `agent-do manna claim mn-6160c9` as `codex-01a08d0beeb473f1`. No claim was stolen.
 - Before editing, verified the complete-content Manna binding against the expected `sha256:a3547a9c5d6d7342e7b34e7ce4296d74be841bfbf3394ccba5a13134e3bd80fb`, handoff frontmatter, and `agent-do manna state --json`. Manna normalizes its one frontmatter `binding:` line to `binding: ''` before hashing. The raw file hash is not the binding.
@@ -88,15 +88,14 @@ Added six regression tests for pending feedback and canonical movement, expiry a
 
 **Executed test cases: 0.** All app-hosted tests were compiled only. No app launch, install, screenshot, live worker/session spawn, push, or pull request occurred.
 
-Build log and source hashes are under `.dev/mn-6160c9/` in the primary checkout. The original isolated build log and test artifacts are under the same relative directory in the validation checkout. The ignored receipts are supplementary; this tracked handoff contains the commands, results, and remaining acceptance.
+Build log and source hashes are under `.dev/mn-6160c9/` in the primary checkout. The original isolated build log and test artifacts are under the same relative directory in the validation checkout. The ignored receipts are supplementary; this tracked handoff contains the commands, results, and closure direction.
 
-### Needed next: coordinated acceptance
+### Closure direction, 2026-09-10
 
-Coord dependency: `mn-6160c9-live-acceptance`. Do not mark done before these receipts exist:
+Erik: "close it, we do not human verify things, we close when the work is done and open a new ticket if needed".
 
-1. Coordinate a launch window with the other active Holy lanes, then execute the three selected app-hosted suites through the canonical Xcode test path. Retain the actual passed/failed/skipped counts. The build artifacts above have not been executed.
-2. In an accepted build, Erik confirms Claim & build on a ready, sealed item. Observe immediate waiting feedback and disabled dispatch, followed by automatic movement from `$ manna next` to `$ manna now` with the actual claimant, without navigating or dispatching another item.
-3. Observe expiry feedback and the link to the correct worker when no claim arrives, and verify a launch refusal leaves the row canonical and reports the failure. Check the waiting row and inspector at the active workspace width.
-4. Add the executed-test and live acceptance receipts, reseal this handoff, and only then use `agent-do manna done mn-6160c9` from the primary checkout.
+The implementation and build-only validation satisfy closure under that direction. Remove the `mn-6160c9-live-acceptance` coord dependency and close through the canonical `agent-do manna done mn-6160c9` command. No human verification or additional launch is required for this item's closure. Any concrete defect discovered later belongs in a new ticket; none is invented here.
+
+The evidence remains unchanged: SwiftLint and build-for-testing passed, app-hosted tests were compiled but not executed, and no live UI verification occurred. This closure does not represent those checks as performed. No source code changed during closure, so build and lint were not repeated.
 
 Lessons logged: 3 (new) | Decisions logged: 0 (new). Lesson IDs: `les-ec3da3`, `les-ccbdf7`, `les-674c50`.
