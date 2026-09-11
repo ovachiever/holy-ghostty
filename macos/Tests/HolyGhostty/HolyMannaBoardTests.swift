@@ -347,7 +347,11 @@ struct HolyMannaBoardTests {
     @Test @MainActor func backgroundBoardRefreshStartsWarmWithoutDelayingState() async throws {
         let directory = try temporaryDirectory(named: "holy-board-preload")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let digestRecorder = HolyMannaDigestRecorder()
+        let generation = AsyncStream<Void>.makeStream()
+        defer { generation.continuation.finish() }
+        let digestRecorder = HolyMannaDigestRecorder(beforeReturning: {
+            for await _ in generation.stream { break }
+        })
         let client = HolyMannaBoardClient(
             identityStore: HolyMannaActorIdentityStore(
                 fileURL: directory.appendingPathComponent("manna-actor.json")
@@ -361,28 +365,37 @@ struct HolyMannaBoardTests {
                 exitCode: 0
             )
         }
-        let store = HolyMannaBoardModeStore(
+        let warmer = HolyMannaBoardPrewarmer(
             client: client,
             digestService: digestRecorder
         )
+        let store = HolyMannaBoardModeStore(client: client, prewarmer: warmer)
 
         store.prepare(context: .init(
             boardRoot: "/srv/holy-ghostty",
             remoteHost: "builder@example.com"
         ))
-        for _ in 0 ..< 400 where store.state == nil {
-            try await Task.sleep(nanoseconds: 5_000_000)
-        }
         for _ in 0 ..< 400 {
             if await digestRecorder.callCount > 0 { break }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
-        let digestCallCount = await digestRecorder.callCount
 
+        // Generation is still suspended: canonical state must already be usable.
+        #expect(await digestRecorder.callCount == 1)
         #expect(store.state != nil)
+        #expect(store.selectedItemID == "mn-live001")
+        #expect(!store.isRefreshing)
         #expect(!store.isPresented)
         #expect(!store.isDigestLoading)
-        #expect(digestCallCount == 1)
+        #expect(store.digestText == nil)
+
+        // A service call records its start before the prewarmer delivers its
+        // result to the MainActor sink. Wait for that delivery, not callCount.
+        generation.continuation.finish()
+        await warmer.waitUntilIdle()
+
+        #expect(await digestRecorder.callCount == 1)
+        #expect(!store.isDigestLoading)
         #expect(store.digestText == "Warm summary for Native Board")
         #expect(store.presentationDigest(for: try #require(store.selectedItem)) == "Warm Native Board")
     }
@@ -586,6 +599,11 @@ private struct HolyMannaRecordedBatch: Sendable {
 private actor HolyMannaDigestRecorder: HolyMannaBoardDigesting {
     private(set) var callCount = 0
     private(set) var batches: [HolyMannaRecordedBatch] = []
+    private let beforeReturning: @Sendable () async -> Void
+
+    init(beforeReturning: @escaping @Sendable () async -> Void = {}) {
+        self.beforeReturning = beforeReturning
+    }
 
     func presentations(
         for items: [HolyMannaBoardItem],
@@ -594,6 +612,7 @@ private actor HolyMannaDigestRecorder: HolyMannaBoardDigesting {
     ) async throws -> [HolyMannaPresentationResult] {
         callCount += 1
         batches.append(.init(root: context.boardRoot, count: items.count))
+        await beforeReturning()
         return items.map { item in
             .init(
                 itemID: item.id,
