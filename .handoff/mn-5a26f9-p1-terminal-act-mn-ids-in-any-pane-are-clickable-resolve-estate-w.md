@@ -7,7 +7,7 @@ base_commit: 516e6e530f24c0ed9f9449baa5bcc3f68c7a7a88
 scope: '[P1][TERMINAL][ACT] mn- ids in any pane are clickable: resolve estate-wide, then Claim & build behind the confirm'
 inputs:
 - 'Erik request 2026-09-10 10:07 (screenshot: dm-ephemeris ids cited in-pane)'
-binding: sha256:bf245a40747ab212cf66014d40ff5fba2bae1c07c70de15b9220cdfe85a90d0b
+binding: sha256:13011d38b89b4ed36f0e4669a983d774e1beb08a678be28d13797c522ac2f020
 ---
 
 # Handoff: [P1][TERMINAL][ACT] mn- ids in any pane are clickable: resolve estate-wide, then Claim & build behind the confirm
@@ -39,9 +39,37 @@ Erik 2026-09-10: manna ids printed in terminal output (agents cite them constant
 3. Seal changes with `agent-do manna handoff seal mn-5a26f9`.
 4. Commit with `Manna: mn-5a26f9` and run `agent-do manna done mn-5a26f9` only after the work is verified.
 
+## Executed acceptance and closure: 2026-09-11
+
+Lane acceptance is **EXECUTED GREEN**. Erik explicitly instructed the claim-holder to reseal this receipt and run `agent-do manna done mn-5a26f9`. Erik's live command-click acceptance rides the coordinated install, outside this lane. This supersedes the earlier RED status and the earlier requirement to keep this item open for installed acceptance.
+
+- Verifier `session-17a022e17710` re-executed the four focused suites at HEAD `732dfca522d5417f46218a30a934630f366a23ad`, including correction `acd983cebbadeeeb094f29023ce4104f4d8509fe`.
+- Result: **0 failed / 188 passed**, `TEST SUCCEEDED`, with no skipped tests. These are execution-log occurrences; the result bundle reports 65 passed test identifiers and 94 parameterized cases per device/configuration. All 20 prior failure occurrences resolved, including landing, selection, done-row, and confirmation behavior; the new refusal regressions pass.
+- Independently inspected the verifier's receipt, execution log, and result-bundle summary. Verified that the tracked macOS source still matches the executed commit and that the existing claim and input handoff seal `sha256:bf245a40747ab212cf66014d40ff5fba2bae1c07c70de15b9220cdfe85a90d0b` match canonical Manna state.
+- Canonical executed receipts: `.dev/acceptance-c2b133-f4ab17/RECEIPT.md`, `.dev/mn-5a26f9-executed-2.log`, and `.dev/mn-5a26f9-executed-2/suites.xcresult`. Closure verification and hashes: `.dev/mn-5a26f9/closure/verification.json` and `executed-summary.json`. Both earlier RED receipts and build-only correction receipts remain preserved as history.
+
+The verifier executed this command in the primary checkout:
+
+```bash
+/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild \
+  -project macos/Ghostty.xcodeproj -scheme Ghostty \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath .dev/DerivedData \
+  -resultBundlePath .dev/mn-5a26f9-executed-2/suites.xcresult \
+  -only-testing:GhosttyTests/HolyMannaBoardLinkTests \
+  -only-testing:GhosttyTests/HolyMannaBoardActionsTests \
+  -only-testing:GhosttyTests/HolyMannaBoardTests \
+  -only-testing:GhosttyTests/HolyWorkspaceTerminalMouseTests \
+  test CODE_SIGNING_ALLOWED=NO
+```
+
+This is an **executed** test pass, not merely compilation. The close turn inspected the existing receipts and performed no additional test execution, app launch, install, screenshot, live session spawn, push, or PR. No code changes were needed. Other workers' changes remain preserved.
+
+Lessons logged: 0 (new) | Decisions logged: 0 (new) for this receipt-only close. The correction's two prior lessons remain recorded below.
+
 ## Correction receipts: 2026-09-11
 
-Current status: **EXECUTED RED; correction compiled and committed, awaiting coordinated rerun.** Keep `mn-5a26f9` `in_progress`, claimed by `codex-01a08e805e527011`. Execution returns through Erik and verifier `session-17a022e17710`. Do not mark done or start app-hosted execution from this lane.
+Historical status before re-execution: **EXECUTED RED; correction compiled and committed, awaiting coordinated rerun.** At that point `mn-5a26f9` remained `in_progress`, claimed by `codex-01a08e805e527011`. The executed GREEN receipt and Erik's closure instruction above now supersede this status.
 
 ### Executed evidence and diagnosis
 
@@ -149,15 +177,14 @@ Receipts in primary `.dev/mn-5a26f9/`: `verification.json`, `source-hashes.json`
 
 Lessons logged: 7 (new) | Decisions logged: 0 (new). ZPC harvest completed with zero format issues.
 
-## Required acceptance at close
+## Installed acceptance owned by Erik
 
-Coordinate one live window with Erik and the `mn-235e6d` field-acceptance lane. The build-only boundary remains in force until that window is authorized.
+Erik explicitly assigned live command-click acceptance to the coordinated install, outside this closed implementation lane. The remaining field checks below belong to Erik and the `mn-235e6d` acceptance workstream. The executed suite pass above does not claim these visual checks were performed.
 
-1. Return execution through Erik and verifier `session-17a022e17710`: rerun the four focused app-hosted suites above through the repository's Xcode test path on the corrected source. Preserve the executed result bundle and actual pass/fail counts. The latest execution is RED; the correction build receipts do not satisfy this step.
-2. Use the canonical coordinated build/install path for the verified source. Retain the CI core fingerprint; do not attempt a local Zig engine rebuild or an alternate launcher.
-3. In the installed app, command-hover and command-click valid ids in local and SSH sessions, focused and unfocused panes, and scrollback. Check underline, pointer, preview, Unicode-before-id alignment, wrapping, modifier release, and ordinary URL behavior. Short, uppercase, and word-embedded strings must not link.
-4. Check a cited id belonging to another repository, source-board precedence, and unknown/ambiguous search behavior. Click a completed id in scrollback and verify its selected done row is visible.
-5. Opening an id must create no worker and request no mutation. A dream refuses dispatch; a claimed item names its claimant. On a ready item with a valid seal, Claim & build must show the shipped confirmation. Cancel must launch nothing; one accepted confirmation must dispatch exactly one worker with the full item id in its note.
-6. Record receipts, fix any failures, reseal this handoff, and only then run `agent-do manna done mn-5a26f9`.
+1. Use the canonical coordinated build/install path for the verified source. Retain the CI core fingerprint; do not attempt a local Zig engine rebuild or an alternate launcher.
+2. In the installed app, command-hover and command-click valid ids in local and SSH sessions, focused and unfocused panes, and scrollback. Check underline, pointer, preview, Unicode-before-id alignment, wrapping, modifier release, and ordinary URL behavior. Short, uppercase, and word-embedded strings must not link.
+3. Check a cited id belonging to another repository, source-board precedence, and unknown/ambiguous search behavior. Click a completed id in scrollback and verify its selected done row is visible.
+4. Opening an id must create no worker and request no mutation. A dream refuses dispatch; a claimed item names its claimant. On a ready item with a valid seal, Claim & build must show the shipped confirmation. Cancel must launch nothing; one accepted confirmation must dispatch exactly one worker with the full item id in its note.
+5. Record the live receipts in the coordinated install/field-acceptance workstream and diagnose any failures there.
 
-This is required acceptance, not optional polish. The item remains open until it passes.
+These live checks remain required for install acceptance. Erik authorized closing `mn-5a26f9` after the executed GREEN result; they do not keep this implementation lane open.
