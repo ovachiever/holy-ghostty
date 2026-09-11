@@ -5,6 +5,7 @@ import GhosttyKit
 
 private enum HolyWorkspaceKeyCode {
     static let tab: UInt16 = 48
+    static let delete: UInt16 = 51
     static let escape: UInt16 = 53
 }
 
@@ -126,8 +127,9 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         // windows have their own controller, so visible unfocused panes need
         // the same modifier updates to refresh a stationary link hover.
         modifierEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            guard let self, let window = self.window,
-                  !self.boardModeStore.isPresented,
+            guard let self, let window = self.window else { return event }
+            self.updateRosterModifiers(event)
+            guard !self.boardModeStore.isPresented,
                   !self.archiveModeStore.isPresented else { return event }
             return Self.forwardModifierEvent(
                 event,
@@ -186,6 +188,11 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
             surface.flagsChanged(with: event)
         }
         return event
+    }
+
+    func updateRosterModifiers(_ event: NSEvent) {
+        guard event.type == .flagsChanged else { return }
+        workspaceStore.rosterCommandHeld = window?.isKeyWindow == true && event.modifierFlags.contains(.command)
     }
 
     @available(*, unavailable)
@@ -295,6 +302,19 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         }
 
         let relevantFlags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+
+        if event.keyCode == HolyWorkspaceKeyCode.delete, relevantFlags == .command {
+            // Preserve editing shortcuts in notes, search, and presented sheets.
+            guard window?.attachedSheet == nil,
+                  !(window?.firstResponder is NSTextView),
+                  !(window?.firstResponder is NSTextField),
+                  !workspaceStore.commandPaletteIsShowing,
+                  let selected = workspaceStore.selectedSession else { return false }
+            // Repeated key-down events must not consume the next row merely
+            // because the user has not yet released Delete.
+            if !event.isARepeat { workspaceStore.killSessionFromRoster(selected) }
+            return true
+        }
 
         if key == "a", relevantFlags == [.command, .shift] {
             boardModeStore.dismiss()
@@ -438,6 +458,7 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        workspaceStore.rosterCommandHeld = NSEvent.modifierFlags.contains(.command)
         constrainToVisibleScreen()
         guard !boardModeStore.isPresented,
               !archiveModeStore.isPresented,
@@ -445,7 +466,12 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         Ghostty.moveFocus(to: selected.surfaceView)
     }
 
+    func windowDidResignKey(_ notification: Notification) {
+        workspaceStore.rosterCommandHeld = false
+    }
+
     func windowWillClose(_ notification: Notification) {
+        workspaceStore.rosterCommandHeld = false
         HolyWorkspaceWindow.keyDebugLogger.error(
             "lifecycle: workspace windowWillClose — sessions=\(self.workspaceStore.sessions.count)"
         )

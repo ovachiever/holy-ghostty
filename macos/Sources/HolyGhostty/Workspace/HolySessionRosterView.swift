@@ -17,68 +17,16 @@ struct HolySessionRosterView: View {
     var inboxEngine: HolyInboxEngine?
     var onToggleCollapse: (() -> Void)?
 
-    @AppStorage("holy.workspace.rosterLayout.v1") private var rosterLayoutRaw = HolyRosterLayout.classic.rawValue
+    @AppStorage(HolyRosterLayout.defaultsKey) private var rosterLayoutRaw = HolyRosterLayout.classic.rawValue
 
     private var layout: HolyRosterLayout {
         HolyRosterLayout(rawValue: rosterLayoutRaw) ?? .classic
     }
 
+    @State private var pointerInRoster = false
+
     private var sections: [HolyRosterSection] {
-        switch layout {
-        case .classic:
-            return runtimeSections
-        case .triage:
-            return triageSections
-        case .focus:
-            return focusSections
-        }
-    }
-
-    // Classic / Calm — sessions grouped by runtime (Codex, Claude, …).
-    private var runtimeSections: [HolyRosterSection] {
-        HolySessionRuntime.rosterOrder.compactMap { runtime in
-            let sessions = HolySessionRosterOrdering.orderedSessions(store.sessions, matching: runtime)
-            guard !sessions.isEmpty else { return nil }
-            return HolyRosterSection(id: "runtime.\(runtime.rawValue)", title: runtime.displayName, sessions: sessions)
-        }
-    }
-
-    // Triage — sessions regrouped into status lanes so what needs you floats up.
-    private var triageSections: [HolyRosterSection] {
-        let lanes = Dictionary(grouping: store.sessions) { session in
-            HolyRosterTriageLane(kind: store.attentionPresentation(for: session).kind)
-        }
-        return HolyRosterTriageLane.allCases.compactMap { lane in
-            guard let sessions = lanes[lane], !sessions.isEmpty else { return nil }
-            return HolyRosterSection(
-                id: "lane.\(lane.rawValue)",
-                title: lane.title,
-                sessions: HolySessionRosterOrdering.orderedSessions(sessions),
-                accent: lane.accent
-            )
-        }
-    }
-
-    // Focus — pinned "Today" sessions float to a zone on top; the rest dim back.
-    private var focusSections: [HolyRosterSection] {
-        let pinned = store.sessions.filter(\.isFocused)
-        guard !pinned.isEmpty else { return runtimeSections }
-
-        var result: [HolyRosterSection] = [
-            HolyRosterSection(
-                id: "focus.today",
-                title: "Today",
-                sessions: HolySessionRosterOrdering.orderedSessions(pinned),
-                accent: HolyGhosttyTheme.halo
-            )
-        ]
-        for runtime in HolySessionRuntime.rosterOrder {
-            let rest = HolySessionRosterOrdering.orderedSessions(store.sessions, matching: runtime)
-                .filter { !$0.isFocused }
-            guard !rest.isEmpty else { continue }
-            result.append(HolyRosterSection(id: "focus.\(runtime.rawValue)", title: runtime.displayName, sessions: rest, dimmed: true))
-        }
-        return result
+        HolyRosterSections(store: store, layout: layout).sections
     }
 
     // Split a section's sessions into agent runs (preserving order). Used to
@@ -119,6 +67,11 @@ struct HolySessionRosterView: View {
             onArchive: { store.close(session) },
             canKillTmux: store.canKillTmuxSession(session),
             onKillTmux: { store.killTmuxSession(session) },
+            commandHeld: store.rosterCommandHeld,
+            pointerInRoster: pointerInRoster,
+            killPending: store.pendingRosterKills.contains(session.id),
+            killError: store.rosterKillErrors[session.id],
+            onInstantKill: { store.killSessionFromRoster(session) },
             onRename: { store.rename(session, to: $0) },
             onSetNote: { store.setNote(session, to: $0) },
             onSetFocus: { store.setFocus(session, $0) },
@@ -192,6 +145,8 @@ struct HolySessionRosterView: View {
                 .scrollIndicators(.hidden)
             }
         }
+        .onHover { pointerInRoster = $0 }
+        .onDisappear { pointerInRoster = false }
     }
 
     private var workspaceToolbar: some View {
@@ -199,7 +154,7 @@ struct HolySessionRosterView: View {
             HStack(spacing: 8) {
                 Image("HolyGhosttyLogo")
                     .resizable()
-                    .aspectRatio(contentMode: .fit)
+                    .scaledToFit()
                     .frame(height: 22)
                     .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
 
@@ -533,15 +488,82 @@ enum HolySessionRosterOrdering {
     }
 }
 
-private struct HolyRosterSection: Identifiable {
+struct HolyRosterSection: Identifiable {
     let id: String
     let title: String
     let sessions: [HolySession]
-    var accent: Color? = nil
+    var accent: Color?
     var dimmed: Bool = false
 }
 
+/// Shared by rendering and post-kill selection, including triage and Today.
+@MainActor
+struct HolyRosterSections {
+    let store: HolyWorkspaceStore
+    let layout: HolyRosterLayout
+
+    var sections: [HolyRosterSection] {
+        switch layout {
+        case .classic:
+            return runtimeSections
+        case .triage:
+            return triageSections
+        case .focus:
+            return focusSections
+        }
+    }
+
+    // Classic / Calm — sessions grouped by runtime (Codex, Claude, …).
+    private var runtimeSections: [HolyRosterSection] {
+        HolySessionRuntime.rosterOrder.compactMap { runtime in
+            let sessions = HolySessionRosterOrdering.orderedSessions(store.sessions, matching: runtime)
+            guard !sessions.isEmpty else { return nil }
+            return HolyRosterSection(id: "runtime.\(runtime.rawValue)", title: runtime.displayName, sessions: sessions)
+        }
+    }
+
+    // Triage — sessions regrouped into status lanes so what needs you floats up.
+    private var triageSections: [HolyRosterSection] {
+        let lanes = Dictionary(grouping: store.sessions) { session in
+            HolyRosterTriageLane(kind: store.attentionPresentation(for: session).kind)
+        }
+        return HolyRosterTriageLane.allCases.compactMap { lane in
+            guard let sessions = lanes[lane], !sessions.isEmpty else { return nil }
+            return HolyRosterSection(
+                id: "lane.\(lane.rawValue)",
+                title: lane.title,
+                sessions: HolySessionRosterOrdering.orderedSessions(sessions),
+                accent: lane.accent
+            )
+        }
+    }
+
+    // Focus — pinned "Today" sessions float to a zone on top; the rest dim back.
+    private var focusSections: [HolyRosterSection] {
+        let pinned = store.sessions.filter(\.isFocused)
+        guard !pinned.isEmpty else { return runtimeSections }
+
+        var result: [HolyRosterSection] = [
+            HolyRosterSection(
+                id: "focus.today",
+                title: "Today",
+                sessions: HolySessionRosterOrdering.orderedSessions(pinned),
+                accent: HolyGhosttyTheme.halo
+            )
+        ]
+        for runtime in HolySessionRuntime.rosterOrder {
+            let rest = HolySessionRosterOrdering.orderedSessions(store.sessions, matching: runtime)
+                .filter { !$0.isFocused }
+            guard !rest.isEmpty else { continue }
+            result.append(HolyRosterSection(id: "focus.\(runtime.rawValue)", title: runtime.displayName, sessions: rest, dimmed: true))
+        }
+        return result
+    }
+
+}
+
 enum HolyRosterLayout: String, CaseIterable, Identifiable {
+    static let defaultsKey = "holy.workspace.rosterLayout.v1"
     case classic
     case triage
     case focus
@@ -632,7 +654,7 @@ private struct HolyRosterActionButtonStyle: ButtonStyle {
 private struct HolyRosterSectionHeader: View {
     let title: String
     let count: Int
-    var accent: Color? = nil
+    var accent: Color?
 
     var body: some View {
         HStack(spacing: 6) {
@@ -702,7 +724,7 @@ private struct HolyRosterRow: View {
     let paneSlot: Int?
     let coordination: HolySessionCoordination
     let attention: HolySessionAttentionPresentation
-    var watcherFireAt: Date? = nil
+    var watcherFireAt: Date?
     let isSelected: Bool
     var layout: HolyRosterLayout = .classic
     var dimmed: Bool = false
@@ -720,6 +742,11 @@ private struct HolyRosterRow: View {
     let onArchive: () -> Void
     let canKillTmux: Bool
     let onKillTmux: () -> Void
+    let commandHeld: Bool
+    let pointerInRoster: Bool
+    let killPending: Bool
+    let killError: String?
+    let onInstantKill: () -> Void
     let onRename: (String) -> Void
     let onSetNote: (String?) -> Void
     let onSetFocus: (Bool) -> Void
@@ -742,13 +769,15 @@ private struct HolyRosterRow: View {
             // Working must be glanceable across the whole roster, not just the
             // selected row (40466c243 fixed this once already). The 15fps
             // periodic tick keeps N concurrent spinners cheap.
-            HolyAgentStatusOrb(
-                state: displayActivityState,
-                isAnimated: true,
-                needsUserSymbolName: attention.symbolName
+            HolyRosterIndicator(
+                attention: attention,
+                commandHeld: commandHeld,
+                pointerInRoster: pointerInRoster,
+                killPending: killPending,
+                sessionTitle: primaryTitle,
+                onKill: onInstantKill
             )
             .frame(width: 18, height: 18)
-            .help(attention.helpText)
 
             if isRenaming {
                 TextField("Session name", text: $renameText, onCommit: commitRename)
@@ -939,6 +968,14 @@ private struct HolyRosterRow: View {
 
             if !compact {
                 noteLine
+            }
+
+            if let killError {
+                Text(killError)
+                    .font(.system(size: 9))
+                    .foregroundStyle(HolyGhosttyTheme.danger)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(killError)
             }
 
             if let paneLabel, !isEditingNote {
@@ -1502,6 +1539,84 @@ private struct HolyRowActionContextMenuOverlay: NSViewRepresentable {
     }
 }
 
+/// Keeps the hit target in the orb's existing slot. AppKit owns the click so
+/// the enclosing SwiftUI row gesture cannot select the victim first.
+struct HolyRosterIndicator: View {
+    let attention: HolySessionAttentionPresentation
+    let commandHeld: Bool
+    let pointerInRoster: Bool
+    let killPending: Bool
+    let sessionTitle: String
+    let onKill: () -> Void
+
+    var body: some View {
+        Group {
+            if commandHeld && pointerInRoster {
+                HolyRosterKillButton(isEnabled: !killPending, sessionTitle: sessionTitle, onKill: onKill)
+            } else {
+                HolyAgentStatusOrb(
+                    state: attention.kind,
+                    isAnimated: true,
+                    needsUserSymbolName: attention.symbolName
+                )
+                .help(attention.helpText)
+            }
+        }
+        .frame(width: 18, height: 18)
+        .transaction { $0.animation = nil }
+    }
+}
+
+private struct HolyRosterKillButton: NSViewRepresentable {
+    let isEnabled: Bool
+    let sessionTitle: String
+    let onKill: () -> Void
+
+    func makeNSView(context: Context) -> HolyRosterKillButtonView {
+        HolyRosterKillButtonView()
+    }
+
+    func updateNSView(_ button: HolyRosterKillButtonView, context: Context) {
+        button.isEnabled = isEnabled
+        button.onKill = onKill
+        button.toolTip = isEnabled ? "Kill \(sessionTitle) immediately (⌘ held)" : "Killing \(sessionTitle)…"
+        button.setAccessibilityLabel("Kill \(sessionTitle)")
+    }
+}
+
+final class HolyRosterKillButtonView: NSButton {
+    var onKill: () -> Void = {}
+
+    init() {
+        super.init(frame: .zero)
+        isBordered = false
+        imagePosition = .imageOnly
+        image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Kill session")
+        contentTintColor = .systemRed
+        setButtonType(.momentaryChange)
+        target = self
+        action = #selector(killFromAccessibility)
+        setAccessibilityIdentifier("holy-roster-instant-kill")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var acceptsFirstResponder: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        // Check the actual event as well as the rendered state: a release can
+        // arrive before SwiftUI removes this view. Never fall through to select.
+        guard isEnabled, event.type == .leftMouseDown, event.modifierFlags.contains(.command) else { return }
+        onKill()
+    }
+
+    @objc private func killFromAccessibility() {
+        guard isEnabled, NSEvent.modifierFlags.contains(.command) else { return }
+        onKill()
+    }
+}
+
 private struct HolyAgentStatusOrb: View {
     let state: HolySessionAttentionKind
     var isAnimated = true
@@ -1763,7 +1878,6 @@ private extension String {
         isEmpty ? nil : self
     }
 }
-
 
 /// Four-way roster layout switcher — one tap, visible active state. Lives
 /// in the left rail's footer beside the pane buttons.

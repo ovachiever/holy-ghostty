@@ -121,6 +121,9 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published var composerBusy: Bool = false
     @Published var composerErrorMessage: String?
     @Published var tmuxSessionTerminationError: String?
+    @Published var rosterCommandHeld = false
+    @Published private(set) var rosterKillErrors: [UUID: String] = [:]
+    @Published private(set) var pendingRosterKills: Set<UUID> = []
     @Published var historyPresented: Bool = false
     /// Which pane the single right-hand region hosts (nil = hidden). Inbox
     /// today; the archive surface adds its case, never a second panel.
@@ -140,6 +143,7 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     private let sessionSupervisor: HolySessionSupervisor
+    private let tmuxSessionKiller: (HolyTmuxLiveIdentity) async -> Result<HolyTmuxKillOutcome, HolyTmuxLifecycleFailure>
     private(set) lazy var restoreEngine = HolyRestoreEngine(
         batchResolver: HolyArchiveRestoreResolver(),
         tmux: HolyRestoreTmuxService(),
@@ -239,8 +243,14 @@ final class HolyWorkspaceStore: ObservableObject {
 
     /// An explicitly supplied supervisor allows isolated lifecycle tests to
     /// exercise real roster mutations without restoring or polling live hosts.
-    init(sessionSupervisor: HolySessionSupervisor) {
+    init(
+        sessionSupervisor: HolySessionSupervisor,
+        tmuxSessionKiller: @escaping (HolyTmuxLiveIdentity) async -> Result<HolyTmuxKillOutcome, HolyTmuxLifecycleFailure> = {
+            await HolyTmuxLifecycleService.killVerified($0)
+        }
+    ) {
         self.sessionSupervisor = sessionSupervisor
+        self.tmuxSessionKiller = tmuxSessionKiller
     }
 
     convenience init(ghostty: Ghostty.App, seedDefaultSession: Bool = true) {
@@ -1387,14 +1397,49 @@ final class HolyWorkspaceStore: ObservableObject {
             || launchSpec.transport.sshDestination?.holyTerminatorTrimmed.nilIfEmpty != nil
     }
 
-    func killTmuxSession(_ session: HolySession) {
+    /// Both rapid-cull gestures enter here without selecting the target first.
+    /// A pending target stays visible until the existing kill verifies absence.
+    func killSessionFromRoster(_ session: HolySession) {
+        guard sessions.contains(where: { $0.id == session.id }),
+              !pendingRosterKills.contains(session.id) else { return }
+        rosterKillErrors[session.id] = nil
+        if session.record.launchSpec.tmux == nil {
+            guard !session.record.launchSpec.transport.isRemote else {
+                rosterKillErrors[session.id] = "Holy Ghostty left \(session.displayTitle) in the roster because its remote tmux identity is missing. Use Hosts to choose the exact session."
+                return
+            }
+            // Plain terminals own their child process through the surface;
+            // the existing close path releases it and preserves the archive.
+            archive(session, selecting: rosterSuccessor(after: session.id))
+        } else {
+            killTmuxSession(session, inline: true)
+        }
+    }
+
+    private func rosterSuccessor(after sessionID: UUID) -> UUID? {
+        let layout = HolyRosterLayout(rawValue: UserDefaults.standard.string(forKey: HolyRosterLayout.defaultsKey) ?? "") ?? .classic
+        let orderedIDs = HolyRosterSections(store: self, layout: layout).sections.flatMap { $0.sessions.map(\.id) }
+        guard let index = orderedIDs.firstIndex(of: sessionID) else { return nil }
+        return orderedIDs.dropFirst(index + 1).first ?? orderedIDs.prefix(index).last
+    }
+
+    func killTmuxSession(_ session: HolySession, inline: Bool = false) {
         let sessionID = session.id
         let sessionTitle = session.displayTitle
         let launchSpec = session.record.launchSpec
-        tmuxSessionTerminationError = nil
+        guard pendingRosterKills.insert(sessionID).inserted else { return }
+        if !inline { tmuxSessionTerminationError = nil }
+        let reportError: (String) -> Void = { [weak self] message in
+            if inline {
+                self?.rosterKillErrors[sessionID] = message
+            } else {
+                self?.tmuxSessionTerminationError = message
+            }
+        }
 
         Task { [weak self] in
             guard let self else { return }
+            defer { self.pendingRosterKills.remove(sessionID) }
 
             let identity: HolyTmuxLiveIdentity
             if let exactIdentity = HolyTmuxLiveIdentity(exactLaunchSpec: launchSpec) {
@@ -1407,7 +1452,7 @@ final class HolyWorkspaceStore: ObservableObject {
                     AppDelegate.logger.error(
                         "Holy Ghostty could not inspect tmux before killing \(sessionTitle, privacy: .public): \(error.localizedDescription, privacy: .public)"
                     )
-                    self.tmuxSessionTerminationError = "Holy Ghostty left \(sessionTitle) in the roster because its saved tmux identity is incomplete and the app could not inspect the server. \(error.localizedDescription)"
+                    reportError("Holy Ghostty left \(sessionTitle) in the roster because its saved tmux identity is incomplete and the app could not inspect the server. \(error.localizedDescription)")
                     return
                 }
 
@@ -1419,10 +1464,10 @@ final class HolyWorkspaceStore: ObservableObject {
                 case let .matched(match):
                     discoveredSession = match
                 case .notFound:
-                    self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because no live tmux session could be matched safely. Refresh Hosts and attach or kill the exact discovered session there."
+                    reportError("Holy Ghostty did not kill \(sessionTitle) because no live tmux session could be matched safely. Refresh Hosts and attach or kill the exact discovered session there.")
                     return
                 case .ambiguous:
-                    self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because more than one live tmux session matched its saved metadata. Use Hosts to choose the exact session."
+                    reportError("Holy Ghostty did not kill \(sessionTitle) because more than one live tmux session matched its saved metadata. Use Hosts to choose the exact session.")
                     return
                 }
 
@@ -1436,7 +1481,7 @@ final class HolyWorkspaceStore: ObservableObject {
                     among: discoveredSessions
                 )
                 guard activeMatches[sessionID] == discoveredSession else {
-                    self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because another roster record resolves to the same live tmux session. Resolve the duplicate in Hosts before killing it."
+                    reportError("Holy Ghostty did not kill \(sessionTitle) because another roster record resolves to the same live tmux session. Resolve the duplicate in Hosts before killing it.")
                     return
                 }
 
@@ -1444,7 +1489,7 @@ final class HolyWorkspaceStore: ObservableObject {
                     transport: launchSpec.transport,
                     discoveredSession: discoveredSession
                 ) else {
-                    self.tmuxSessionTerminationError = "Holy Ghostty did not kill \(sessionTitle) because the discovered tmux identity did not match its transport."
+                    reportError("Holy Ghostty did not kill \(sessionTitle) because the discovered tmux identity did not match its transport.")
                     return
                 }
                 identity = discoveredIdentity
@@ -1455,12 +1500,12 @@ final class HolyWorkspaceStore: ObservableObject {
                 }
             }
 
-            switch await HolyTmuxLifecycleService.killVerified(identity) {
+            switch await self.tmuxSessionKiller(identity) {
             case let .failure(failure):
                 AppDelegate.logger.error(
                     "Holy Ghostty failed to kill tmux session \(sessionTitle, privacy: .public): \(failure.message, privacy: .public)"
                 )
-                self.tmuxSessionTerminationError = "Holy Ghostty left \(sessionTitle) in the roster. \(failure.message)"
+                reportError("Holy Ghostty left \(sessionTitle) in the roster. \(failure.message)")
                 return
             case let .success(outcome):
                 if outcome == .alreadyAbsent {
@@ -1474,7 +1519,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 return
             }
 
-            self.archive(currentSession)
+            self.archive(currentSession, selecting: inline ? self.rosterSuccessor(after: sessionID) : nil)
         }
     }
 
@@ -1583,10 +1628,16 @@ final class HolyWorkspaceStore: ObservableObject {
         persist()
     }
 
-    func archive(_ session: HolySession) {
+    func archive(_ session: HolySession, selecting successorID: UUID? = nil) {
         let previousSelectedSessionID = selectedSessionID
         let result = sessionSupervisor.archive(session, in: currentSessionStoreState)
-        applySessionStoreState(result.state)
+        var state = result.state
+        if previousSelectedSessionID == session.id,
+           let successorID, state.sessions.contains(where: { $0.id == successorID }) {
+            state.selectedSessionID = successorID
+        }
+        rosterKillErrors[session.id] = nil
+        applySessionStoreState(state)
         var pendingEvents = result.pendingEvents
         pendingEvents.append(contentsOf: selectionEvents(from: previousSelectedSessionID, to: selectedSessionID))
         persist(pendingEvents: pendingEvents)
