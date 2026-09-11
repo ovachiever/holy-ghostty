@@ -178,11 +178,10 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
             guard surface.window === window,
                   !surface.isHiddenOrHasHiddenAncestor,
                   !surface.visibleRect.isEmpty else { continue }
-            // Non-clipping ancestors can leave visibleRect nonempty beyond the
-            // window. Require overlap with the window's content viewport too.
-            let visibleInContent = contentView.convert(surface.visibleRect, from: surface)
-            let visibleInWindow = visibleInContent.intersection(contentView.bounds)
-            guard !visibleInWindow.isEmpty else { continue }
+            // With non-clipping ancestors, visibleRect can extend beyond the
+            // pane. Its own bounds must overlap the window's content viewport.
+            let frameInContent = contentView.convert(surface.bounds, from: surface)
+            guard frameInContent.intersects(contentView.bounds) else { continue }
             if event.window === window && window.firstResponder === surface { continue }
             surface.flagsChanged(with: event)
         }
