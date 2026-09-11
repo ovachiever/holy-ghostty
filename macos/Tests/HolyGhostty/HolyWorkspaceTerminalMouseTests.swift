@@ -86,10 +86,13 @@ struct HolyWorkspaceTerminalMouseTests {
             window.close()
             otherWindow.close()
         }
+        let contentView = try #require(window.contentView)
+        contentView.clipsToBounds = false
         let visible = addProbe(to: window)
         let hidden = addProbe(to: window, x: 150)
         hidden.isHidden = true
         let clipped = addProbe(to: window, x: 1_000)
+        #expect(!clipped.visibleRect.isEmpty)
         let foreign = addProbe(to: otherWindow)
         let detached = MouseProbeView(frame: visible.frame)
         #expect(window.makeFirstResponder(visible))
@@ -102,6 +105,39 @@ struct HolyWorkspaceTerminalMouseTests {
         #expect(clipped.modifiers.isEmpty)
         #expect(foreign.modifiers.isEmpty)
         #expect(detached.modifiers.isEmpty)
+    }
+
+    @Test func releaseReachesPartiallyVisibleNestedPaneButSkipsPaneBeyondWindow() throws {
+        let window = makeWindow()
+        let otherWindow = makeWindow()
+        defer {
+            window.close()
+            otherWindow.close()
+        }
+        let contentView = try #require(window.contentView)
+        contentView.clipsToBounds = false
+        let container = NSView(frame: NSRect(x: 500, y: 50, width: 100, height: 200))
+        container.bounds.origin = NSPoint(x: 25, y: 10)
+        container.clipsToBounds = false
+        contentView.addSubview(container)
+        // The panes straddle or lie beyond the window's right edge after the
+        // container's offset and bounds origin are applied.
+        let partial = MouseProbeView(frame: NSRect(x: 75, y: 10, width: 100, height: 100))
+        let outside = MouseProbeView(frame: NSRect(x: 125, y: 10, width: 100, height: 100))
+        container.addSubview(partial)
+        container.addSubview(outside)
+        #expect(!partial.visibleRect.isEmpty)
+        #expect(!outside.visibleRect.isEmpty)
+        #expect(window.makeFirstResponder(partial))
+
+        let event = try modifierEvent(in: otherWindow, flags: [])
+        let returned = HolyWorkspaceWindowController.forwardModifierEvent(
+            event, in: window, to: [partial, outside]
+        )
+        #expect(returned === event)
+        #expect(partial.modifiers.count == 1)
+        #expect(partial.modifiers.last === event)
+        #expect(outside.modifiers.isEmpty)
     }
 
     private func makeWindow() -> NSWindow {

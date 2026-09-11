@@ -173,11 +173,16 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
     /// the other mounted panes. In particular, do not send modifier keys to
     /// detached sessions or twice to the pane receiving keyboard input.
     static func forwardModifierEvent(_ event: NSEvent, in window: NSWindow, to surfaces: [NSView]) -> NSEvent {
-        guard event.type == .flagsChanged else { return event }
+        guard event.type == .flagsChanged, let contentView = window.contentView else { return event }
         for surface in surfaces {
             guard surface.window === window,
                   !surface.isHiddenOrHasHiddenAncestor,
                   !surface.visibleRect.isEmpty else { continue }
+            // Non-clipping ancestors can leave visibleRect nonempty beyond the
+            // window. Require overlap with the window's content viewport too.
+            let visibleInContent = contentView.convert(surface.visibleRect, from: surface)
+            let visibleInWindow = visibleInContent.intersection(contentView.bounds)
+            guard !visibleInWindow.isEmpty else { continue }
             if event.window === window && window.firstResponder === surface { continue }
             surface.flagsChanged(with: event)
         }
