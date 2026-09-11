@@ -6,7 +6,7 @@ source: null
 base_commit: 065ff58584b5ce1b3b1515a589998982f0185148
 scope: '[P1][TERMINAL] mn- ids render blue at rest in every pane — no hover underline'
 inputs: []
-binding: sha256:028c335c31bda86fa504119bed7fbdacb9eab8f9be6a00f5fa100cee09e06d1f
+binding: sha256:f512c7a3be78db7cb9c9b13f4e6907e0193bfd81925cf3bb22948a16edaac516
 ---
 
 # Handoff: [P1][TERMINAL] Manna IDs render blue at rest in every pane
@@ -103,13 +103,15 @@ Earlier failures are retained in `build-for-testing-attempt-1.log` (actor isolat
 
 Implementation commit: `5d4473ba6`, `fix(terminal): preserve Manna ID paint across row updates`, with exact trailer `Manna: mn-4be59b`.
 
+Final core-coordinate correction: `b93858177`, `fix(terminal): derive Manna paint geometry from core points`, with the same trailer. The final validation below includes both commits.
+
 The failed build's whole-viewport equality gate and transient `frame = nil` publication have been removed. `RowPaintState` samples physical rows independently. A row unchanged across two samples can gain paint while any other row changes; accepted rows survive transient changes or failed reads. The painter publishes one complete replacement only when the resulting runs differ, including a valid empty frame when IDs have actually disappeared. Selection temporarily hides the retained frame without discarding its row state.
 
 Cell mapping now starts at the candidate's own physical row, so animation above it cannot invalidate its prefix reads. Read ranges extend across rows only while the identifier can continue, and check the neighboring cells for word boundaries. Core selections still determine Unicode cell positions and soft wraps. Single-row reads use rectangular selection to prevent a wide spacer at the right edge from pulling text out of the next row.
 
 Scrollbar changes clear paint only when `offset` or `len` changes. Growth in `total` at a fixed viewport retains paint. Repeated size notifications with unchanged dimensions and ordinary keyboard, mouse-down, or general binding actions no longer discard paint. Wheel scrolling, changed size/cell metrics, and config/palette/background changes retain immediate invalidation.
 
-IME check: `src/apprt/embedded.zig:1905` forwards `imePoint()` directly. `src/Surface.zig:2089` computes the cursor cell bottom and `src/Surface.zig:2129` returns cell height divided by the core content scale, independent of focus or preedit text height. The text baseline also uses core point coordinates. The old `abs(imeHeight - cellSize.height) < 0.01` compared that value with a separate AppKit backing conversion and was not needed to derive the grid origin. It has been removed. Cursor-row/asymmetric-padding/fractional-size geometry fixtures remain. Installed focus/IME behavior still requires Erik's check.
+IME check: `src/apprt/embedded.zig:1905` forwards `imePoint()` directly. `src/Surface.zig:2089` computes the cursor cell bottom and `src/Surface.zig:2129` returns cell height divided by the core content scale, independent of focus or preedit text height. The text baseline also uses core point coordinates. The old `abs(imeHeight - cellSize.height) < 0.01` compared that value with a separate AppKit backing conversion and was not needed to derive the grid origin. It has been removed. Final review also removed the mixed coordinate sources: cell width comes from adjacent core selection origins, cell height from core IME height, and a one-column grid uses its cursor midpoint to recover width. AppKit backing conversion no longer determines paint geometry. Cursor-row/asymmetric-padding/fractional-size geometry fixtures remain, with a new core-point metric regression covering one-column and wider grids. Installed focus/IME behavior still requires Erik's check.
 
 Required regression coverage is in the production painter's published frame, not only its helper return values:
 
@@ -130,7 +132,7 @@ xcodebuild -quiet -project macos/Ghostty.xcodeproj -scheme Ghostty \
   -configuration Debug -destination 'platform=macOS' \
   -derivedDataPath .dev/mn-4be59b/TestDerivedData \
   SYMROOT=/Users/erik/Custom-Coding/holy-ghostty/.dev/mn-4be59b/test-products \
-  -resultBundlePath .dev/mn-4be59b/row-persistence/validation/build-for-testing.xcresult \
+  -resultBundlePath .dev/mn-4be59b/row-persistence/validation/build-for-testing-core-geometry.xcresult \
   -only-testing:GhosttyTests/HolyMannaBoardLinkTests \
   -jobs 4 build-for-testing CODE_SIGNING_ALLOWED=NO
 
@@ -155,10 +157,10 @@ agent-do coord guard check --staged
 
 Results: imported ReleaseFast core unchanged and verified at input fingerprint `9d9f76225c12968b5518f7477263b66f6635faff03ff9b9840852de3a38a02be`; focused Debug build-for-testing succeeded with 0 errors, 497 warnings, and 0 warnings attributed to the four changed Swift files; ReleaseLocal build succeeded; code signature valid on disk and satisfies its designated requirement; strict SwiftLint found 0 violations; whitespace and staged ownership checks passed. Both builds passed on the first repair attempt. These are build receipts, not runtime or visual acceptance.
 
-Evidence: `.dev/mn-4be59b/row-persistence/validation/` contains `core-verify.log`, `build-for-testing.log`, `build-for-testing.xcresult`, `build-results.json`, `release-build.log`, `codesign.log`, `swiftlint.log`, and `source-hashes.txt`. The earlier `.dev/mn-4be59b/validation/` evidence remains intact. Portable handoff and validation copies are under iCloud Transfer's `mn-4be59b-5d4473ba6` folder, with a dated repair note in the Obsidian vault.
+Final evidence: `.dev/mn-4be59b/row-persistence/validation/` contains `core-verify.log`, `build-for-testing-core-geometry.log`, `build-for-testing-core-geometry.xcresult`, `build-results-core-geometry.json`, `release-build-core-geometry.log`, `codesign-core-geometry.log`, `swiftlint-core-geometry.log`, and `source-hashes.txt`. The first repair build and earlier `.dev/mn-4be59b/validation/` evidence remain intact. Portable handoff and validation copies are under iCloud Transfer's `mn-4be59b-5d4473ba6` folder, with a dated repair note in the Obsidian vault.
 
-Repair lessons logged: 2 (new) | Decisions logged: 1 (new).
-Lesson IDs: `les-32f912`, `les-a6d5be`. Decision: `dec-1f25dd`. The earlier `dec-da3fb1` was retracted with the installed failure receipt because its whole-viewport settling requirement was wrong.
+Repair lessons logged: 3 (new) | Decisions logged: 1 (new).
+Lesson IDs: `les-32f912`, `les-a6d5be`, `les-8ed98e`. Decision: `dec-1f25dd`. The earlier `dec-da3fb1` was retracted with the installed failure receipt because its whole-viewport settling requirement was wrong.
 
 ### Required coordinated acceptance after the repair
 
