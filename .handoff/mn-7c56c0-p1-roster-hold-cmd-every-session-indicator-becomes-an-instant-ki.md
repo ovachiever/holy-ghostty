@@ -6,7 +6,7 @@ source: null
 base_commit: 8386b2dbd864b8cf23413b4cedd2b7e15bea9508
 scope: '[P1][ROSTER] Hold cmd: every session indicator becomes an instant-kill X — no confirmation, plus cmd-delete on the selected row'
 inputs: []
-binding: sha256:2ad15254bc60b8a1acdd754b42bfd8e419c27d6f44ab5368be0c4be025023f9a
+binding: sha256:3b5f4ed7d9da6fa03c5a012287e7ef55f7c6223466ee6bab70e9e7e8742f118d
 ---
 
 # Handoff: [P1][ROSTER] Hold cmd: every session indicator becomes an instant-kill X — no confirmation, plus cmd-delete on the selected row
@@ -40,7 +40,7 @@ Erik 2026-09-11: dispatch is now so fast that culling needs to match — 'click 
 
 ## Implementation and verification receipt (2026-09-11)
 
-Implementation is committed. Required executed and human acceptance remain open; this item must stay `in_progress`.
+Implementation and build verification are committed. Erik confirmed acceptance on 2026-09-11 with the exact instruction: "works, close". That acceptance and explicit closure instruction resolve the prior closing hold. App-hosted tests remain compiled only; no executed-test results are claimed.
 
 - Owner: `codex-01a090bf786d7de2`. The first command was `agent-do manna claim mn-7c56c0`, which succeeded without takeover.
 - Initial canonical row, handoff frontmatter, and recomputed binding all matched `sha256:4e89d42e2c8c8daa251c8238b220e46852a859cb11b5cf866bd9891c17a88675` before implementation.
@@ -100,15 +100,15 @@ git diff --check
 | Focused strict SwiftLint | Exit 0. Zero violations across all four changed Swift files. |
 | Diff whitespace validation | Exit 0. |
 | App-hosted test execution | NOT RUN: zero tests executed under the no-launch boundary. |
-| Erik batch-cull / installed acceptance | NOT RUN. Required before `manna done`. |
+| Erik acceptance | CONFIRMED on 2026-09-11: "works, close". Individual scenario results and the installed commit were not supplied. |
 
 Xcode still emits warnings in the existing shared target. A successful build is not a warning-free build or a passing test run. The first intermediate test build also succeeded; the final receipt above includes the additional missing-identity and text-field guards.
 
 Detailed logs, Xcode result bundles, extracted build summaries, signature output, strict-lint output, and compiled source hashes are under `.dev/mn-7c56c0/validation/`. `source-sha256.json` binds all four source/test files to the reviewed commit. No app launch, installation, screenshot, live session creation, test execution, push, or pull request occurred in this lane.
 
-### Required coordinated acceptance
+### Acceptance plan recorded before Erik's confirmation
 
-The closing coordinator must authorize and execute the app-hosted pass. This command is recorded for that pass and has NOT been run here:
+This command was prepared for the coordinated app-hosted pass and has NOT been run by this lane. It is retained as a reproducible validation command; Erik subsequently accepted the feature and explicitly instructed closure.
 
 ```bash
 xcodebuild -quiet -project macos/Ghostty.xcodeproj -scheme Ghostty \
@@ -125,16 +125,20 @@ xcodebuild -quiet -project macos/Ghostty.xcodeproj -scheme Ghostty \
 
 The lifecycle suite uses isolated disposable tmux namespaces. The new store tests use synthetic terminal processes and absent unique tmux sockets. Executing these suites launches the test app, so it belongs in the coordinated pass.
 
-Then use the repository's supported installation path during the agreed install window and have Erik verify:
+The original field checklist is retained below for context. It does not assert that Erik supplied a separate result for every scenario:
 
 1. Hold Command over the roster and click X-X-X through disposable workers in a few seconds. Check that each X stays in the indicator slot and no victim is focused before its kill.
 2. Release Command while stationary over a row; its real indicator must return immediately. Leave/re-enter the roster and change windows to check modifier clearing.
 3. Select a middle row and press Command-Delete repeatedly. Check successor selection and chaining in the displayed order, including the final row and a populated split layout.
 4. Verify local managed, adopted, and SSH-remote sessions use the existing kill path and remain absent after discovery reconciles.
 5. With a controlled unavailable transport, attempt a remote kill. The row must remain with an inline failure, with no dialog; retry after recovery must work.
-6. Confirm retained transcripts in Archive. Record test counts, failures/skips, the installed commit, and Erik's visual acceptance in this canonical handoff; reseal before marking done.
+6. Confirm retained transcripts in Archive and record available acceptance evidence in this canonical handoff.
+
+### Closure authorization (2026-09-11)
+
+Erik's "works, close" is the user acceptance receipt and authorization to close `mn-7c56c0`. `agent-do manna done mn-7c56c0` succeeded on 2026-09-11 at 14:31:31 UTC, and canonical Manna state reports `done`. The Coord acceptance hold is cleared. The implementation commit and all existing build receipts remain unchanged. No additional app launches, installations, screenshots, sessions, or test executions were performed for closure.
 
 Lessons logged: 3 (new) | Decisions logged: 1 (new).
 Lesson IDs: `les-729d6d`, `les-33de6f`, `les-e5d072`. Decision ID: `dec-540356`.
 
-**TL;DR (12th grade):** Holding Command and clicking an indicator X, or pressing Command-Delete, now invokes the session kill flow. The change is committed, the app and focused tests compile, and lint and signature checks pass. Running the tests and Erik's real batch-cull check are still required before this item is done.
+**TL;DR (12th grade):** Erik confirmed that the fast kill controls work, and the item is now closed in Manna. Existing build and lint checks passed; app-hosted tests were compiled but not run by this lane.
