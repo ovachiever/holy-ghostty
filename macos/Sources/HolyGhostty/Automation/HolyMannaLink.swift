@@ -38,6 +38,19 @@ enum HolyMannaLink {
         return CGPoint(x: baseline.x, y: baseline.y - ascent)
     }
 
+    /// All inputs are core point coordinates. Adjacent selection origins give
+    /// cell width; IME height gives cell height. A one-column grid always has
+    /// cursor column zero, whose IME x anchor is the cell's midpoint.
+    static func viewport(columns: Int, rows: Int, baseline: CGPoint, nextColumnX: CGFloat?,
+                         imeAnchor: CGPoint, cellHeight: CGFloat) -> Viewport? {
+        guard columns > 0, rows > 0, columns == 1 || nextColumnX != nil else { return nil }
+        let width = nextColumnX.map { $0 - baseline.x } ?? 2 * (imeAnchor.x - baseline.x)
+        guard width.isFinite, width > 0,
+              let origin = gridOrigin(baseline: baseline, imeCellBottom: imeAnchor.y, cellHeight: cellHeight) else { return nil }
+        return .init(columns: columns, rows: rows, baseline: baseline, gridOrigin: origin,
+                     cellSize: CGSize(width: width, height: cellHeight))
+    }
+
     /// Resolve candidates using prefixes of their own physical row. A spinner
     /// above that row must not poison the cell mapping. Read across row edges
     /// only while an identifier can continue, preserving core soft-wrap rules.

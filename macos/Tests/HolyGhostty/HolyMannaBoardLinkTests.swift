@@ -90,6 +90,21 @@ struct HolyMannaBoardLinkTests {
                               baseline: CGPoint(x: 38, y: 47))])
     }
 
+    @Test(arguments: [0, 1, 25, 90])
+    func viewportUsesCorePointMetricsForCellSize(cursorRow: Int) throws {
+        for columns in [1, 14] {
+            let viewport = try #require(HolyMannaLink.viewport(
+                columns: columns, rows: 26, baseline: CGPoint(x: 2.5, y: 42.5),
+                nextColumnX: columns > 1 ? 11.5 : nil,
+                imeAnchor: CGPoint(x: 7, y: 34 + CGFloat(cursorRow + 1) * 12.5), cellHeight: 12.5))
+            #expect(viewport.gridOrigin == CGPoint(x: 2.5, y: 34))
+            #expect(viewport.cellSize == CGSize(width: 9, height: 12.5))
+        }
+        // No AppKit backing-scale input can reject or rescale the core metrics.
+        #expect(HolyMannaLink.viewport(columns: 14, rows: 26, baseline: .zero, nextColumnX: nil,
+                                       imeAnchor: .zero, cellHeight: 12.5) == nil)
+    }
+
     @Test func atRestSoftWrappedIDPaintsSeparateRows() throws {
         let grid = MannaPaintGrid(["......mn-", "abcdef   "], columns: 9, wraps: [0])
         let runs = try #require(grid.runs(startingIn: 0))
