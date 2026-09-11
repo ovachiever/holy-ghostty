@@ -7,7 +7,7 @@ base_commit: 516e6e530f24c0ed9f9449baa5bcc3f68c7a7a88
 scope: '[P1][TERMINAL][ACT] mn- ids in any pane are clickable: resolve estate-wide, then Claim & build behind the confirm'
 inputs:
 - 'Erik request 2026-09-10 10:07 (screenshot: dm-ephemeris ids cited in-pane)'
-binding: sha256:b657efadad2ff572ff3296211dc83c355c1c9361652185c59930f55fc58ea08a
+binding: sha256:c48337533f60cd022ee91401c54aa782f170ff001708872611599739f6da988e
 ---
 
 # Handoff: [P1][TERMINAL][ACT] mn- ids in any pane are clickable: resolve estate-wide, then Claim & build behind the confirm
@@ -38,3 +38,83 @@ Erik 2026-09-10: manna ids printed in terminal output (agents cite them constant
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-5a26f9`.
 4. Commit with `Manna: mn-5a26f9` and run `agent-do manna done mn-5a26f9` only after the work is verified.
+
+## Implementation receipts: 2026-09-10
+
+Status: implemented and compiled. Required executed-test and installed-app acceptance is pending. Keep this item `in_progress`, claimed by `codex-01a08e805e527011`. Do not mark done from these build receipts.
+
+- The first command, `agent-do manna claim mn-5a26f9`, succeeded. The handoff content binding was recomputed using Manna's canonical binding normalization and matched its frontmatter, canonical state, and the expected `sha256:b657efadad2ff572ff3296211dc83c355c1c9361652185c59930f55fc58ea08a` before editing.
+- Read `.private/AGENTS.md` and `.private/macos/AGENTS.md`, the available repository guides. Established primary-checkout Coord focus and exact path claims. The existing claim on `HolyMannaBoardView.swift` was respected; that file was not edited.
+- Isolated implementation and compilation in `/Users/erik/Custom-Coding/holy-ghostty-codex-mn-5a26f9`, branch `codex/mn-5a26f9`, based on `a03e5a231`. All canonical Manna operations stayed in the primary checkout.
+- Used the explicitly permitted native macOS implementation. Ghostty's read-only Quick Look word API supplies viewport cells and baselines, including scrollback. Row/prefix reads preserve cell offsets after Unicode text. Command-hover draws an underline and URL preview; press/release revalidation opens the read-only Board route. Wrapped ASCII references retain their regex boundaries; ambiguous or partly invisible wrapped cell mappings refuse instead of guessing.
+- Added strict `holy-ghostty://board?item=<id>` parsing. The native click supplies the originating pane, so its repository and SSH host determine the lookup context. Opening Board never requests a mutation or dispatch and creates no default session when a workspace is needed.
+- Resolution prefers a canonical match on the originating board, then reads `manna estate --json` and all existing boards through `manna state --json`, with at most four concurrent reads. Incomplete item coverage, failed reads, and mismatched roots cannot establish uniqueness. Unknown or ambiguous ids open Board search; ambiguous results name the matching boards for explicit selection through the existing estate chooser.
+- Landing resets unrelated filters and selects the full item id. Completed items select the done filter and visible done row. The shipped Claim & build confirmation, dream refusal, claimant display, sealed-handoff recheck, and worker launch path remain authoritative.
+- Added focused regressions for identifier boundaries, strict URL parsing, Unicode prose, wrapped punctuation and underline geometry, local precedence, nested cwd roots, cross-board and SSH-host resolution, ambiguity, missing boards, failed or incomplete reads, done-row landing, confirmation, dream/claim refusal, and late-result cancellation.
+
+Local commits on primary `main`, both with `Manna: mn-5a26f9`:
+
+1. `3b27bf3f3999effe56078421674c129d1f85ab11` (`feat(board): open Manna items from terminal links`). Isolated commit: `bb396f29c`.
+2. `7baec439e` (`fix(terminal): preserve wrapped Manna link boundaries`). Isolated commit: `3d04d2bab`.
+
+The eight changed source/test files in primary were verified byte-for-byte against the compiled isolated checkout. Unrelated README, changelog, engineering-guide, and interoperability edits were preserved. No push or pull request was made.
+
+## Focused validation
+
+All commands below ran in the isolated checkout. No app launch, installation, screenshot, or live session spawn was performed by this lane. The tests are app-hosted: they were compiled, not executed.
+
+Imported and verified the existing CI core artifact without a local Zig rebuild:
+
+```bash
+scripts/build-holy-ghostty-core.sh import /Users/erik/Custom-Coding/holy-ghostty/.dev/core-artifacts/ac7148c18/HolyGhostty-Core-ReleaseFast.zip
+scripts/build-holy-ghostty-core.sh verify
+```
+
+Both exited 0. Core: ReleaseFast, Zig 0.15.2, input fingerprint `9d9f76225c12968b5518f7477263b66f6635faff03ff9b9840852de3a38a02be`.
+
+```bash
+swiftlint lint --strict --quiet \
+  macos/Sources/HolyGhostty/Automation/HolyMannaLink.swift \
+  macos/Sources/HolyGhostty/Automation/HolyAutomationURLParser.swift \
+  macos/Sources/HolyGhostty/Board/HolyMannaBoardLink.swift \
+  macos/Sources/HolyGhostty/Board/HolyMannaBoardStore.swift \
+  macos/Sources/App/macOS/AppDelegate.swift \
+  'macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift' \
+  'macos/Sources/Ghostty/Surface View/SurfaceView.swift' \
+  macos/Tests/HolyGhostty/HolyMannaBoardLinkTests.swift
+git diff --check
+```
+
+Both exited 0. Strict SwiftLint: zero violations in all eight touched Swift files.
+
+```bash
+/usr/bin/xcodebuild -quiet \
+  -project macos/Ghostty.xcodeproj -scheme Ghostty \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath .dev/DerivedData-mn-5a26f9 \
+  -resultBundlePath .dev/mn-5a26f9/build-for-testing-wrapped.xcresult \
+  -only-testing:GhosttyTests/HolyMannaBoardLinkTests \
+  -only-testing:GhosttyTests/HolyMannaBoardActionsTests \
+  -only-testing:GhosttyTests/HolyMannaBoardTests \
+  -only-testing:GhosttyTests/HolyWorkspaceTerminalMouseTests \
+  build-for-testing CODE_SIGNING_ALLOWED=NO
+```
+
+Final result: exit 0, `succeeded`, zero build errors, 504 warnings outside the touched files, zero touched-file warnings. The four selected suites compiled; **zero tests executed**. The earlier two build-for-testing passes also succeeded. Initial test-helper lint findings were corrected before the recorded green checks.
+
+Receipts in primary `.dev/mn-5a26f9/`: `verification.json`, `source-hashes.json`, `core-verify.log`, `swiftlint-wrapped.log`, `build-for-testing-wrapped.log`, `build-for-testing-wrapped.xcresult`, and `build-results-wrapped.json`. Build products remain in the isolated checkout's `.dev/DerivedData-mn-5a26f9/`.
+
+Lessons logged: 7 (new) | Decisions logged: 0 (new). ZPC harvest completed with zero format issues.
+
+## Required acceptance at close
+
+Coordinate one live window with Erik and the `mn-235e6d` field-acceptance lane. The build-only boundary remains in force until that window is authorized.
+
+1. Execute the four focused app-hosted suites above through the repository's Xcode test path. Preserve the executed result bundle and actual pass/fail counts. The current build receipts do not satisfy this step.
+2. Use the canonical coordinated build/install path for the verified source. Retain the CI core fingerprint; do not attempt a local Zig engine rebuild or an alternate launcher.
+3. In the installed app, command-hover and command-click valid ids in local and SSH sessions, focused and unfocused panes, and scrollback. Check underline, pointer, preview, Unicode-before-id alignment, wrapping, modifier release, and ordinary URL behavior. Short, uppercase, and word-embedded strings must not link.
+4. Check a cited id belonging to another repository, source-board precedence, and unknown/ambiguous search behavior. Click a completed id in scrollback and verify its selected done row is visible.
+5. Opening an id must create no worker and request no mutation. A dream refuses dispatch; a claimed item names its claimant. On a ready item with a valid seal, Claim & build must show the shipped confirmation. Cancel must launch nothing; one accepted confirmation must dispatch exactly one worker with the full item id in its note.
+6. Record receipts, fix any failures, reseal this handoff, and only then run `agent-do manna done mn-5a26f9`.
+
+This is required acceptance, not optional polish. The item remains open until it passes.
