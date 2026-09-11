@@ -1424,6 +1424,12 @@ link: RepeatableLink = .{},
 /// `link`). If you want to customize URL matching, use `link` and disable this.
 @"link-url": bool = true,
 
+/// Color standalone lowercase Manna IDs (`mn-` followed by at least six hex
+/// digits) with palette color 4 (ANSI blue) in the terminal render pass.
+/// This adds no underline and does not change mouse actions. Selection and
+/// search colors keep their normal precedence. Can be changed at runtime.
+@"holy-manna-highlight": bool = true,
+
 /// Show link previews for a matched URL.
 ///
 /// When true, link previews are shown for all matched URLs. When false, link
@@ -10332,6 +10338,20 @@ test "parse e: command and args" {
     try testing.expectEqualStrings(cmd.direct[0], "echo");
     try testing.expectEqualStrings(cmd.direct[1], "foo");
     try testing.expectEqualStrings(cmd.direct[2], "bar baz");
+}
+
+test "holy-manna-highlight defaults on and parses off" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var config = try Config.default(alloc);
+    defer config.deinit();
+    try testing.expect(config.@"holy-manna-highlight");
+
+    var it: TestIterator = .{ .data = &.{"--holy-manna-highlight=false"} };
+    try config.loadIter(alloc, &it);
+    try testing.expect(!config.@"holy-manna-highlight");
+    try testing.expectEqual(@as(usize, 0), config._diagnostics.items().len);
 }
 
 test "clone default" {

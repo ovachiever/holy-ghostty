@@ -222,6 +222,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// The render state we update per loop.
         terminal_state: terminal.RenderState = .empty,
 
+        /// Styling used by the cached GPU rows in the previous frame.
+        link_cells: link.CellMap = .empty,
+
         /// The number of frames since the last terminal state reset.
         /// We reset the terminal state after ~100,000 frames (about 10 to
         /// 15 minutes at 120Hz) to prevent wasted memory buildup from
@@ -602,6 +605,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 const links = try link.Set.fromConfig(
                     alloc,
                     config.link.links.items,
+                    config.@"holy-manna-highlight",
                 );
 
                 return .{
@@ -800,6 +804,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         pub fn deinit(self: *Self) void {
             if (self.overlay) |*overlay| overlay.deinit(self.alloc);
             self.terminal_state.deinit(self.alloc);
+            self.link_cells.deinit(self.alloc);
             if (self.search_selected_match) |*m| m.arena.deinit();
             if (self.search_matches) |*m| m.arena.deinit();
             self.swap_chain.deinit();
@@ -1162,7 +1167,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             };
 
             // Update all our data as tightly as possible within the mutex.
-            var critical: Critical = critical: {
+            const critical: Critical = critical: {
                 // const start = try std.time.Instant.now();
                 // const start_micro = std.time.microTimestamp();
                 // defer {
@@ -1279,17 +1284,25 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             };
 
-            // Outside the critical area we can update our links to contain
-            // our regex results.
+            // Resolve OSC8 and regex styling from this frame's snapshot.
+            var link_cells: link.CellMap = .empty;
+            for (critical.links.keys()) |pt|
+                try link_cells.put(arena_alloc, pt, .{ .underline = true });
             self.config.links.renderCellMap(
                 arena_alloc,
-                &critical.links,
+                &link_cells,
                 &self.terminal_state,
-                state.mouse.point,
-                state.mouse.mods,
+                critical.mouse.point,
+                critical.mouse.mods,
             ) catch |err| {
                 log.warn("error searching for regex links err={}", .{err});
             };
+            try link.updateCellMap(
+                self.alloc,
+                &self.link_cells,
+                &link_cells,
+                &self.terminal_state,
+            );
 
             // Clear our highlight state and update.
             if (self.search_matches_dirty or self.terminal_state.dirty != .false) {
@@ -1368,7 +1381,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         .focused = self.focused,
                         .blink_visible = cursor_blink_visible,
                     }),
-                    &critical.links,
+                    &self.link_cells,
                 ) catch |err| {
                     // This means we weren't able to allocate our buffer
                     // to update the cells. In this case, we continue with
@@ -2308,7 +2321,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self: *Self,
             preedit: ?renderer.State.Preedit,
             cursor_style_: ?renderer.CursorStyle,
-            links: *const terminal.RenderState.CellSet,
+            links: *const link.CellMap,
         ) Allocator.Error!void {
             const state: *terminal.RenderState = &self.terminal_state;
 
@@ -2615,7 +2628,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             preedit_range: ?PreeditRange,
             selection: ?[2]terminal.size.CellCountInt,
             highlights: *const std.ArrayList(terminal.RenderState.Highlight),
-            links: *const terminal.RenderState.CellSet,
+            links: *const link.CellMap,
         ) !void {
             const state = &self.terminal_state;
 
@@ -2798,6 +2811,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .bold = self.config.bold_color,
                 });
 
+                const link_style: link.CellStyle = links.get(.{
+                    .x = @intCast(x),
+                    .y = @intCast(y),
+                }) orelse .{};
+
                 // The final background color for the cell.
                 const bg = switch (selected) {
                     // If we have an explicit selection background color
@@ -2867,7 +2885,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             .@"cell-background" => if (style.flags.inverse) fg_style else final_bg,
                         },
 
-                        .false => if (style.flags.inverse)
+                        .false => if (link_style.foreground) |index|
+                            state.colors.palette[index]
+                        else if (style.flags.inverse)
                             final_bg
                         else
                             fg_style,
@@ -2931,10 +2951,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // an underline, in which case use a double underline to
                 // distinguish them.
                 const underline: terminal.Attribute.Underline = underline: {
-                    if (links.contains(.{
-                        .x = @intCast(x),
-                        .y = @intCast(y),
-                    })) {
+                    if (link_style.underline) {
                         break :underline if (style.flags.underline == .single)
                             .double
                         else

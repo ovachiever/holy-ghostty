@@ -70,6 +70,15 @@ jobs:
           zig version
           xcodebuild -version
 
+      - name: Test renderer link styling and Manna config
+        run: >-
+          zig build test
+          -Dtest-filter=renderer.link
+          -Dtest-filter=holy-manna-highlight
+          -Demit-macos-app=false
+          -Demit-xcframework=false
+          --summary all
+
       # The macOS app build is intentionally NOT run here. The GitHub runner's
       # Xcode is older than the local toolchain and rejects code the local
       # Xcode accepts (Swift 6 strict-concurrency). We only need CI for the

@@ -57,6 +57,7 @@ test {
     // Our comptime-chosen renderer
     _ = Renderer;
 
+    _ = @import("renderer/link.zig");
     _ = cursor;
     _ = message;
     _ = shadertoy;
