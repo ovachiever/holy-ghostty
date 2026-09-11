@@ -7,7 +7,7 @@ base_commit: abe1f1e556d28622655191d9a12fc43a383dedd9
 scope: '[P1][BOARD] backgroundBoardRefreshStartsWarmWithoutDelayingState fails — mn-6160c9 closed on compiled-only verification'
 inputs:
 - Executed-test run 2026-09-10 21:23; cites mn-6160c9
-binding: sha256:a1d5c787df90f0f7ebf4b04c7a83d23225a291ecfc60157bc99690c0166fe606
+binding: sha256:b62dcc1a639841f5fd23cf467804c5dcde82da8cf9415b8e334eefef53164953
 ---
 
 # Handoff: [P1][BOARD] backgroundBoardRefreshStartsWarmWithoutDelayingState fails — mn-6160c9 closed on compiled-only verification
@@ -34,7 +34,7 @@ The mn-6160c9 dispatch-feedback work (c681f6a46) was closed (82dd218f0) with zer
 
 ## Verification receipt, 2026-09-10
 
-The regression repair is implemented and compiled. **Required executed acceptance remains pending.** This item stays `in_progress` under `codex-01a08e4e961a70a1`; no `manna done` was run.
+The regression repair was implemented and compiled in `afe1bf38698c64d77722a1b5ac2d1ed34a64ce2e`. The initial implementation lane executed no app-hosted tests and kept the item open. **Required executed verification is now complete**, as recorded in the coordinated acceptance receipt below; Erik explicitly directed canonical closure.
 
 ### Authority and ownership
 
@@ -84,19 +84,43 @@ All exited 0. SwiftLint reported 0 violations in the changed file. Xcode reporte
 
 The primary checkout contains copies of the build/lint logs, original failure extraction, source patch, and SHA-256 receipts in `.dev/mn-f4ab17/`. The original build products and `.xctestrun` remain under the isolated checkout's `.dev/mn-f4ab17/DerivedData/`. The tracked handoff carries the commands and outcomes so ignored logs are supplementary evidence.
 
-### Required acceptance at coordinated close
+### Coordinated executed acceptance and closure, 2026-09-10
 
-The lane's explicit no-launch instruction prevents executing the app-hosted tests mid-lane. Keep `mn-f4ab17` open until the coordinated pass executes the three Board suites and records zero failures. Queue execution through coord under `mn-f4ab17-executed-board-suites`; do not infer execution from compilation or from the archived pre-fix passing host.
+Verifier/integrator `claude-17a022e177104975` executed the coordinated pass at HEAD `a5b24f978`. Erik supplied the receipt and explicitly instructed this claim-holder to update and reseal the handoff, then run `agent-do manna done mn-f4ab17`. The same receipt arrived through the coord drop. The closure turn inspected existing files and the xcresult only; it performed no app launch or test rerun.
 
-After coordination authorizes the test host, use the same isolated checkout and products:
+Executed command, copied from the recorded invocation:
 
 ```bash
-xcodebuild test-without-building -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath .dev/mn-f4ab17/DerivedData -resultBundlePath .dev/mn-f4ab17/focused-executed.xcresult -only-testing:GhosttyTests/HolyMannaBoardActionsTests -only-testing:GhosttyTests/HolyMannaBoardTests -only-testing:GhosttyTests/HolyMannaBoardPresentationTests CODE_SIGNING_ALLOWED=NO
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath .dev/DerivedData -resultBundlePath .dev/acceptance-c2b133-f4ab17/combined.xcresult -only-testing:GhosttyTests/HolyWorkspaceTerminalMouseTests -only-testing:GhosttyTests/HolyPaneLayoutTests -only-testing:GhosttyTests/HolyMannaBoardActionsTests -only-testing:GhosttyTests/HolyMannaBoardTests -only-testing:GhosttyTests/HolyMannaBoardPresentationTests test CODE_SIGNING_ALLOWED=NO
 ```
 
-Record actual passed/failed/skipped counts and reconcile the complete xcresult action issues with the console, then update and reseal this handoff. Erik's live dispatch chip/row acceptance remains queued behind executed green: confirm the booting chip, movement only after the canonical claim, and the bounded expiry/session link. No app launch, install, screenshot, live session spawn, push, or pull request occurred in this lane.
+Results counted from the console, including both parallel hosts:
 
-Lessons logged: 4 (new) | Decisions logged: 0 (new). Lessons: `les-87ff4d`, `les-1e1e4a`, `les-74d9c1`, `les-11b777`.
+| Suite | Passed invocations | Failed invocations |
+| --- | ---: | ---: |
+| HolyMannaBoardActionsTests | 56 | 0 |
+| HolyMannaBoardTests | 32 | 0 |
+| HolyMannaBoardPresentationTests | 28 | 0 |
+| Board total | 116 | 0 |
+
+`backgroundBoardRefreshStartsWarmWithoutDelayingState()` passed on both test hosts, 2/2, with 0 failures. These are executed results, not compilation receipts.
+
+The full combined run recorded **140 passed / 4 failed** console invocations and `TEST FAILED` overall. All four failures are two `HolyWorkspaceTerminalMouseTests` cases on two hosts. Inspection of the complete xcresult action issue records confirms four mouse failure records and zero Board failure records. The xcresult summary uses a different denominator: 65 passed / 2 failed unique test identifiers, 70 passed / 2 failed parameter-expanded cases per device, and 0 skipped. No whole-run green result is claimed.
+
+Receipts:
+
+- `.dev/acceptance-c2b133-f4ab17/RECEIPT.md`, SHA-256 `ecd5d93bd835ce4c3e75242ff486c7ca92e8121f00cd2c01a7159fce73d44a50`.
+- `.dev/acceptance-c2b133-f4ab17.log`, SHA-256 `020f79f5f4ff35fc6ca28bdd5fc5b0ffde3a1784b6f827d752d15409d9fca871`.
+- `.dev/acceptance-c2b133-f4ab17/combined.xcresult`.
+- `.dev/mn-f4ab17/coordinated-action-failures.json`, the read-only extraction of all four action failure records.
+
+The test source at implementation commit `afe1bf386`, executed HEAD `a5b24f978`, current HEAD, and the working tree matches the verified SHA-256 `0c71503be540af556526dde272f07d1362a17a8c977d1728385157de73365202`.
+
+The Board work order's executed-verification requirement is satisfied. Erik's explicit closure instruction removes any remaining chip/row observation gate for this item. The unrelated mouse failures and the held install remain with `mn-c2b133`; this closure does not certify them. No launch, install, screenshot, live session spawn, push, or pull request occurred during this closure.
+
+Implementation lessons logged: 4 (new) | Decisions logged: 0 (new). Lessons: `les-87ff4d`, `les-1e1e4a`, `les-74d9c1`, `les-11b777`.
+
+Closure lessons logged: 1 (new) | Decisions logged: 0 (new). Lesson: `les-f8d7a9`.
 
 ## Completion
 
