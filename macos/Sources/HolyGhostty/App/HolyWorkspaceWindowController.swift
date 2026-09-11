@@ -23,16 +23,26 @@ private final class HolyWorkspaceWindow: NSWindow {
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let handled = holyWorkspaceController?.handleWorkspaceKeyEquivalent(event) == true
-        if event.modifierFlags.contains(.command) {
-            Self.keyDebugLogger.error(
-                "performKeyEquivalent key=\(event.charactersIgnoringModifiers ?? "?", privacy: .public) flags=\(event.modifierFlags.rawValue) handledByWorkspace=\(handled) controllerWired=\(self.holyWorkspaceController != nil)"
-            )
-        }
         if handled {
+            if event.modifierFlags.contains(.command) {
+                Self.keyDebugLogger.error(
+                    "performKeyEquivalent key=\(event.charactersIgnoringModifiers ?? "?", privacy: .public) flags=\(event.modifierFlags.rawValue) handledByWorkspace=true controllerWired=\(self.holyWorkspaceController != nil)"
+                )
+            }
             return true
         }
 
-        return super.performKeyEquivalent(with: event)
+        let superHandled = super.performKeyEquivalent(with: event)
+        if event.modifierFlags.contains(.command) {
+            // superHandled says whether a VIEW consumed the key before the
+            // main menu could; fr names who holds keyboard focus at that
+            // instant (mn-7afa94 / archive-paste hunt).
+            let responder = firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
+            Self.keyDebugLogger.error(
+                "performKeyEquivalent key=\(event.charactersIgnoringModifiers ?? "?", privacy: .public) flags=\(event.modifierFlags.rawValue) handledByWorkspace=false superHandled=\(superHandled) fr=\(responder, privacy: .public) controllerWired=\(self.holyWorkspaceController != nil)"
+            )
+        }
+        return superHandled
     }
 
     override func performClose(_ sender: Any?) {
