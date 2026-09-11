@@ -51,6 +51,9 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var remoteDiscoveryErrorsByHostID: [UUID: String] = [:]
     @Published private(set) var localTmuxDiscoveryBusy: Bool = false
     @Published private(set) var remoteDiscoveryBusyHostIDs: Set<UUID> = []
+    @Published private(set) var localHostsDiscoveryProgress: HolyHostsDiscoveryProgress?
+    @Published private(set) var remoteHostsDiscoveryProgress: [UUID: HolyHostsDiscoveryProgress] = [:]
+    private var remoteMetadataRefreshHostIDs: Set<UUID> = []
     @Published private(set) var remoteHostImportMessage: String?
     @Published private(set) var coordinationBySessionID: [UUID: HolySessionCoordination] = [:]
     @Published private(set) var attentionMetadataBySessionID: [UUID: HolySessionAttentionMetadata] = [:]
@@ -80,8 +83,7 @@ final class HolyWorkspaceStore: ObservableObject {
     @Published private(set) var isConverging = false
     private var lastConvergeStartedAt: Date?
     /// Per-host wall-clock cap on the converge discovery sweep (spec's 5s/host).
-    /// Applied only at the converge call sites so the Hosts panel and metadata
-    /// refresh keep answering slow-but-alive hosts uncapped.
+    /// Hosts uses a separate deadline that also includes SSH admission.
     private static let convergeDiscoveryTimeoutSeconds: TimeInterval = 5
     /// Kill preflight uses a constant-time identity inventory rather than rich
     /// discovery. Keep it bounded independently from converge so a wedged local
@@ -1163,7 +1165,10 @@ final class HolyWorkspaceStore: ObservableObject {
         successfulRemoteHostIDs: Set<UUID>
     ) {
         let discoveries = Array(discoveredByMatchKey.values)
-        if localDiscoverySucceeded {
+        // Once Hosts owns an inventory, only its complete discovery path may
+        // replace it. A concurrent converge result cannot erase partial/error
+        // state or reintroduce classification-based omissions.
+        if localDiscoverySucceeded && localHostsDiscoveryProgress == nil {
             discoveredLocalTmuxSessions = discoveries
                 .filter { $0.host == nil }
                 .map(\.session)
@@ -1171,7 +1176,7 @@ final class HolyWorkspaceStore: ObservableObject {
             localTmuxDiscoveryError = nil
         }
 
-        for hostID in successfulRemoteHostIDs {
+        for hostID in successfulRemoteHostIDs where remoteHostsDiscoveryProgress[hostID] == nil {
             discoveredRemoteSessionsByHostID[hostID] = discoveries
                 .filter { $0.host?.id == hostID }
                 .map(\.session)
@@ -2043,6 +2048,7 @@ final class HolyWorkspaceStore: ObservableObject {
         discoveredRemoteSessionsByHostID.removeValue(forKey: host.id)
         remoteDiscoveryErrorsByHostID.removeValue(forKey: host.id)
         remoteDiscoveryBusyHostIDs.remove(host.id)
+        remoteHostsDiscoveryProgress.removeValue(forKey: host.id)
 
         if selectedRemoteHostID == host.id {
             selectedRemoteHostID = remoteHosts.first?.id
@@ -2081,13 +2087,25 @@ final class HolyWorkspaceStore: ObservableObject {
 
         localTmuxDiscoveryBusy = true
         localTmuxDiscoveryError = nil
+        discoveredLocalTmuxSessions = []
+        localHostsDiscoveryProgress = .init(
+            socketCount: HolyRemoteTmuxDiscoveryService.shared.localProbedSocketNames.count
+        )
 
         Task { [weak self] in
             do {
-                let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverLocalSessionsThrowing(
-                    hostID: HolyLocalMachineIdentity.localHostID,
-                    hostLabel: HolyLocalMachineIdentity.current.displayName
+                let host = HolyRemoteHostRecord(
+                    id: HolyLocalMachineIdentity.localHostID,
+                    label: HolyLocalMachineIdentity.current.displayName,
+                    sshDestination: "localhost"
                 )
+                let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverHostsSessions(
+                    for: host,
+                    usesSSH: false
+                ) { [weak self] sessions, progress in
+                    self?.discoveredLocalTmuxSessions = sessions
+                    self?.localHostsDiscoveryProgress = progress
+                }
                 await MainActor.run {
                     guard let self else { return }
                     // Runs every 15s now — skip the publish when nothing moved.
@@ -2103,7 +2121,6 @@ final class HolyWorkspaceStore: ObservableObject {
             } catch {
                 await MainActor.run {
                     guard let self else { return }
-                    self.discoveredLocalTmuxSessions = []
                     self.localTmuxDiscoveryBusy = false
                     self.localTmuxDiscoveryError = error.localizedDescription
                 }
@@ -2116,12 +2133,23 @@ final class HolyWorkspaceStore: ObservableObject {
 
         remoteDiscoveryBusyHostIDs.insert(host.id)
         remoteDiscoveryErrorsByHostID.removeValue(forKey: host.id)
+        discoveredRemoteSessionsByHostID[host.id] = []
+        remoteHostsDiscoveryProgress[host.id] = .init(
+            socketCount: HolyRemoteTmuxDiscoveryService.shared.probedSocketNames(for: host).count
+        )
 
         Task { [weak self] in
             do {
-                let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverSessionsThrowing(for: host)
+                let sessions = try await HolyRemoteTmuxDiscoveryService.shared.discoverHostsSessions(
+                    for: host,
+                    usesSSH: true
+                ) { [weak self] sessions, progress in
+                    guard let self, self.remoteHostsDiscoveryProgress[host.id] != nil else { return }
+                    self.discoveredRemoteSessionsByHostID[host.id] = sessions
+                    self.remoteHostsDiscoveryProgress[host.id] = progress
+                }
                 await MainActor.run {
-                    guard let self else { return }
+                    guard let self, self.remoteHostsDiscoveryProgress[host.id] != nil else { return }
                     self.discoveredRemoteSessionsByHostID[host.id] = sessions
                     let changed = self.applyDiscoveredRemoteSessionMetadata(sessions, on: host)
                     self.remoteDiscoveryBusyHostIDs.remove(host.id)
@@ -2133,8 +2161,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 }
             } catch {
                 await MainActor.run {
-                    guard let self else { return }
-                    self.discoveredRemoteSessionsByHostID[host.id] = []
+                    guard let self, self.remoteHostsDiscoveryProgress[host.id] != nil else { return }
                     self.remoteDiscoveryBusyHostIDs.remove(host.id)
                     self.remoteDiscoveryErrorsByHostID[host.id] = error.localizedDescription
                 }
@@ -3310,8 +3337,26 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     private func refreshActiveRemoteTmuxSessionMetadata() {
-        for host in activeRemoteTmuxDiscoveryHosts() {
-            refreshRemoteSessions(for: host)
+        for host in activeRemoteTmuxDiscoveryHosts() where !remoteMetadataRefreshHostIDs.contains(host.id) {
+            remoteMetadataRefreshHostIDs.insert(host.id)
+            // An active session can name just one socket under the saved
+            // automatic host's ID. That narrower probe updates metadata only;
+            // it must never replace the Hosts sheet's complete inventory.
+            Task { [weak self] in
+                defer { self?.remoteMetadataRefreshHostIDs.remove(host.id) }
+                do {
+                    let discovered = try await HolyRemoteTmuxDiscoveryService.shared.discoverHostsSessions(
+                        for: host,
+                        usesSSH: true,
+                        onProgress: { _, _ in }
+                    )
+                    if let self, self.applyDiscoveredRemoteSessionMetadata(discovered, on: host) {
+                        self.persist()
+                    }
+                } catch {
+                    Self.attentionDebugLogger.notice("Remote metadata refresh incomplete for \(host.displayTitle, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
         }
     }
 

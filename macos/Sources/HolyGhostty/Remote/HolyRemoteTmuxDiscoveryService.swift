@@ -4,6 +4,7 @@ import OSLog
 
 actor HolyRemoteTmuxDiscoveryService {
     static let shared = HolyRemoteTmuxDiscoveryService()
+    typealias HostsProgress = @MainActor @Sendable ([HolyDiscoveredTmuxSession], HolyHostsDiscoveryProgress) async -> Void
     private static let timeoutQueue = DispatchQueue(
         label: "org.holyghostty.remote-discovery-timeout",
         qos: .userInitiated
@@ -24,8 +25,7 @@ actor HolyRemoteTmuxDiscoveryService {
 
     /// - Parameter timeout: Optional hard wall-clock cap applied per discovery
     ///   process. Passed by the converge sweep (5s) so a hung host can never
-    ///   stall the run; left nil by the Hosts panel and metadata refresh, where
-    ///   a slow-but-alive host must still be allowed to answer.
+    ///   stall the run. Hosts uses its own bounded inventory/detail sweep.
     func discoverSessionsThrowing(
         for host: HolyRemoteHostRecord,
         timeout: TimeInterval? = nil,
@@ -69,6 +69,117 @@ actor HolyRemoteTmuxDiscoveryService {
         ) { _, socketName in
             await runLocalDiscovery(socketName: socketName, timeout: timeout)
         }
+    }
+
+    /// Hosts inventories every session before attempting expensive runtime and
+    /// git inspection. The deadline includes waiting for SSH admission, and a
+    /// detail failure leaves the already-published inventory visible.
+    func discoverHostsSessions(
+        for host: HolyRemoteHostRecord,
+        usesSSH: Bool,
+        timeout: TimeInterval = 30,
+        onProgress: @escaping HostsProgress
+    ) async throws -> [HolyDiscoveredTmuxSession] {
+        let host = host.normalized()
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        return try await withThrowingTaskGroup(of: [HolyDiscoveredTmuxSession].self) { group in
+            group.addTask {
+                let discover: @Sendable () async throws -> [HolyDiscoveredTmuxSession] = {
+                    try await self.discoverHostsInventory(for: host, usesSSH: usesSSH, onProgress: onProgress) { socket, inventory in
+                        let remaining = deadline - ProcessInfo.processInfo.systemUptime
+                        guard remaining > 0, !Task.isCancelled else {
+                            return .timedOut(context: host.displayTitle, seconds: timeout)
+                        }
+                        let script = await self.hostsDiscoveryScript(socketName: socket, inventory: inventory, usesSSH: usesSSH)
+                        if usesSSH {
+                            return await self.runRemoteDiscovery(for: host, script: script, timeout: remaining)
+                        }
+                        return await self.runLocalDiscovery(script: script, timeout: remaining)
+                    }
+                }
+                if usesSSH {
+                    return try await HolySSHAdmissionController.shared.withControlPermit(
+                        for: host.sshDestination,
+                        operation: .discovery,
+                        discover
+                    )
+                }
+                return try await discover()
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(timeout))
+                throw HolyTmuxDiscoveryExecutionError.timedOut(context: host.displayTitle, seconds: timeout)
+            }
+            defer { group.cancelAll() }
+            return try await group.next() ?? []
+        }
+    }
+
+    private func hostsDiscoveryScript(socketName: String?, inventory: Bool, usesSSH: Bool) -> String {
+        inventory
+            ? identityDiscoveryScript(socketName: socketName)
+            : remoteDiscoveryScript(socketName: socketName, includeGitMetadata: usesSSH)
+    }
+
+    private func discoverHostsInventory(
+        for host: HolyRemoteHostRecord,
+        usesSSH: Bool,
+        onProgress: HostsProgress,
+        using runDiscovery: (String?, Bool) async -> HolyProcessRunOutcome
+    ) async throws -> [HolyDiscoveredTmuxSession] {
+        let targets = probeTargets(for: host)
+        var progress = HolyHostsDiscoveryProgress(socketCount: targets.count)
+        var inventory: [String: HolyDiscoveredTmuxSession] = [:]
+        await onProgress([], progress)
+
+        // Membership comes from the cheap census, never from the classifier.
+        for inventoryPass in [true, false] {
+            for target in targets {
+                try Task.checkCancellation()
+                let expected = inventory.values.filter { $0.tmuxSocketName == target.socketName }
+                if !inventoryPass && expected.isEmpty { continue }
+                let result = try commandResult(from: await runDiscovery(target.socketName, inventoryPass))
+                try Task.checkCancellation()
+                guard result.exitCode == 0 else {
+                    throw friendlyDiscoveryError(for: host, result: result, usesSSH: usesSSH)
+                }
+                let sessions = try parseHostsSessions(output: result.stdout, host: host, socketName: target.socketName)
+                for session in sessions { inventory[session.id] = session }
+                if inventoryPass { progress.inspectedSocketCount += 1 }
+                await onProgress(sortedSessions(Array(inventory.values)), progress)
+                if !inventoryPass {
+                    let returnedIDs = Set(sessions.map(\.id))
+                    let missingCount = expected.filter { !returnedIDs.contains($0.id) }.count
+                    if missingCount > 0 {
+                        throw HolyTmuxDiscoveryExecutionError.incomplete(
+                            "Details omitted \(missingCount) inventoried sessions. Refresh to reconcile the inventory."
+                        )
+                    }
+                }
+            }
+        }
+        return sortedSessions(Array(inventory.values))
+    }
+
+    private func parseHostsSessions(
+        output: String,
+        host: HolyRemoteHostRecord,
+        socketName: String?
+    ) throws -> [HolyDiscoveredTmuxSession] {
+        let lines = output.split(whereSeparator: \.isNewline)
+        guard lines.allSatisfy({ line in
+            let fields = line.split(separator: "\u{1F}", omittingEmptySubsequences: false)
+            return fields.count >= 10 && !fields[0].isEmpty
+        }) else {
+            throw HolyTmuxDiscoveryExecutionError.incomplete("Tmux returned a malformed session row.")
+        }
+        return parseSessions(
+            output: output,
+            host: host,
+            tmuxSocketName: socketName,
+            discoveredAt: .now,
+            includeHiddenSessions: true
+        )
     }
 
     /// Returns only the stable identity fields required to authorize a
@@ -448,6 +559,7 @@ actor HolyRemoteTmuxDiscoveryService {
           local value="$1"
           value=${value//$'\\n'/ }
           value=${value//$'\\r'/ }
+          value=${value//$'\\x1f'/ }
           printf '%s' "$value"
         }
 
@@ -745,6 +857,17 @@ actor HolyRemoteTmuxDiscoveryService {
             "$(sanitize "$conflicted_count")"
         }
 
+        inventory=$("${tmux_cmd[@]}" list-sessions -F $'#{session_name}\\t#{session_attached}\\t#{session_windows}' 2>&1)
+        inventory_status=$?
+        if (( inventory_status != 0 )); then
+          lowered="${inventory:l}"
+          if [[ "$lowered" == *"no server running"* || "$lowered" == *"no such file or directory"* || "$lowered" == *"connection refused"* ]]; then
+            exit 0
+          fi
+          printf '%s' "$inventory" >&2
+          exit "$inventory_status"
+        fi
+
         while IFS=$'\\t' read -r session_name attached windows; do
           [[ -z "$session_name" ]] && continue
           title=$(option_value "$session_name" @holy_title)
@@ -796,7 +919,7 @@ actor HolyRemoteTmuxDiscoveryService {
             "$sep" "$(sanitize "$note_updated_at_v1")" \
             "$sep" "$(sanitize "$today_pin_v1")" \
             "$sep" "$(sanitize "$today_pin_updated_at_v1")"
-        done < <("${tmux_cmd[@]}" list-sessions -F $'#{session_name}\\t#{session_attached}\\t#{session_windows}' 2>/dev/null || true)
+        done <<<"$inventory"
         """
     }
 
@@ -834,7 +957,7 @@ actor HolyRemoteTmuxDiscoveryService {
         exit_status=$?
         if (( exit_status != 0 )); then
           lowered="${sessions:l}"
-          if [[ "$lowered" == *"no server running"* || "$lowered" == *"failed to connect to server"* || "$lowered" == *"error connecting to"* ]]; then
+          if [[ "$lowered" == *"no server running"* || "$lowered" == *"no such file or directory"* || "$lowered" == *"connection refused"* ]]; then
             exit 0
           fi
           printf '%s' "$sessions" >&2
@@ -966,6 +1089,7 @@ private enum HolyProcessRunOutcome {
 private enum HolyTmuxDiscoveryExecutionError: LocalizedError {
     case launchFailed(context: String, description: String)
     case timedOut(context: String, seconds: TimeInterval)
+    case incomplete(String)
 
     var errorDescription: String? {
         switch self {
@@ -976,6 +1100,8 @@ private enum HolyTmuxDiscoveryExecutionError: LocalizedError {
                 ? String(Int(seconds))
                 : String(format: "%.1f", seconds)
             return "Tmux inspection for \(context) timed out after \(secondsDescription) seconds. The session was left untouched."
+        case let .incomplete(detail):
+            return "Tmux inspection is incomplete. \(detail)"
         }
     }
 }
@@ -1026,6 +1152,33 @@ private extension String {
 
 #if DEBUG
 extension HolyRemoteTmuxDiscoveryService {
+    enum HostsTestReply {
+        case output(String)
+        case failure(Int32, String)
+        case timeout
+    }
+
+    static func hostsDiscoveryForTesting(
+        host: HolyRemoteHostRecord,
+        inventory: [String: HostsTestReply],
+        details: [String: HostsTestReply],
+        onProgress: @escaping HostsProgress
+    ) async throws -> [HolyDiscoveredTmuxSession] {
+        try await shared.discoverHostsInventory(for: host, usesSSH: true, onProgress: onProgress) { socket, inventoryPass in
+            let reply = (inventoryPass ? inventory : details)[socket ?? "default"]
+            switch reply {
+            case let .output(output):
+                return .completed(.init(stdout: output, stderr: "", exitCode: 0))
+            case let .failure(code, error):
+                return .completed(.init(stdout: "", stderr: error, exitCode: code))
+            case .timeout:
+                return .timedOut(context: host.displayTitle, seconds: 30)
+            case nil:
+                return .launchFailed(context: host.displayTitle, description: "Missing discovery fixture")
+            }
+        }
+    }
+
     /// Runs `/bin/sleep <sleepSeconds>` under the wall-clock cap and returns a
     /// user-facing error when the cap fires. Exercises the timeout end to end -
     /// no SSH, roster, or dependency-injection scaffolding required.

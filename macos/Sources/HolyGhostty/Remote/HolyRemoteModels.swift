@@ -60,6 +60,56 @@ struct HolyRemoteHostRecord: Codable, Equatable, Identifiable {
     }
 }
 
+/// Inventory progress is independent of runtime classification. Every known
+/// session already has a row, including while its details are still loading.
+struct HolyHostsDiscoveryProgress: Equatable {
+    var inspectedSocketCount = 0
+    let socketCount: Int
+
+    var inventoryComplete: Bool { inspectedSocketCount == socketCount }
+
+    func summary(sessionCount: Int, isBusy: Bool, error: String?) -> String {
+        let count = "Showing \(sessionCount) of \(sessionCount) discovered so far."
+        if let error {
+            return "\(count) Discovery incomplete. \(error)"
+        }
+        if isBusy {
+            let phase = inventoryComplete
+                ? "Reading session details."
+                : "Inventory incomplete: checked \(inspectedSocketCount) of \(socketCount) tmux servers."
+            return "\(count) \(phase)"
+        }
+        return sessionCount == 1 ? "1 tmux session discovered" : "\(sessionCount) tmux sessions discovered"
+    }
+}
+
+/// The badge and the rendered groups consume exactly the same row set.
+struct HolyHostsSessionList {
+    struct Group: Identifiable {
+        let runtime: HolySessionRuntime?
+        let sessions: [HolyDiscoveredTmuxSession]
+
+        var id: String { runtime?.rawValue ?? "unclassified" }
+    }
+
+    let groups: [Group]
+    var sessions: [HolyDiscoveredTmuxSession] { groups.flatMap(\.sessions) }
+    var count: Int { groups.reduce(0) { $0 + $1.sessions.count } }
+
+    init(_ sessions: [HolyDiscoveredTmuxSession]) {
+        let grouped = Dictionary(grouping: sessions, by: \.runtime)
+        let order: [HolySessionRuntime?] = [.claude, .codex, .opencode, .shell, nil]
+        groups = order.compactMap { runtime in
+            guard let rows = grouped[runtime], !rows.isEmpty else { return nil }
+            return Group(runtime: runtime, sessions: rows.sorted { lhs, rhs in
+                let comparison = lhs.hostsDisplayTitle.localizedCaseInsensitiveCompare(rhs.hostsDisplayTitle)
+                if comparison != .orderedSame { return comparison == .orderedAscending }
+                return lhs.id < rhs.id
+            })
+        }
+    }
+}
+
 struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
     let hostID: UUID
     let hostLabel: String
@@ -94,6 +144,13 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
 
     var connectionRuntime: HolySessionRuntime {
         runtime ?? .shell
+    }
+
+    var hostsDisplayTitle: String { runtime == nil ? sessionName : displayTitle }
+
+    var unclassifiedHostsDetail: String? {
+        guard runtime == nil else { return nil }
+        return workingDirectory?.holyTrimmed.nilIfEmpty ?? "Working directory unavailable"
     }
 
     var isHolyManaged: Bool {

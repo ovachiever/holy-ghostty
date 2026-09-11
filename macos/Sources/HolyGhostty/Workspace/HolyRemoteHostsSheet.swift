@@ -157,7 +157,7 @@ struct HolyRemoteHostsSheet: View {
                             symbolName: "desktopcomputer",
                             isSelected: selectedConnection == .remote(host.id),
                             isBusy: store.isRemoteDiscoveryBusy(for: host),
-                            sessionCount: primaryRemoteSessions(for: host).count,
+                            sessionCount: HolyHostsSessionList(store.remoteSessions(for: host)).count,
                             statusText: remoteConnectionStatusText(for: host),
                             statusColor: remoteConnectionStatusColor(for: host),
                             onSelect: { selectRemoteHost(host) }
@@ -316,7 +316,7 @@ struct HolyRemoteHostsSheet: View {
                     Text(content.status)
                         .font(.system(size: 10))
                         .foregroundStyle(content.statusColor)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -468,6 +468,7 @@ struct HolyRemoteHostsSheet: View {
                 sessions: localConnectionSessions,
                 isBusy: store.localTmuxDiscoveryBusy,
                 error: store.localTmuxDiscoveryError,
+                progress: store.localHostsDiscoveryProgress,
                 emptyTitle: "No local tmux sessions",
                 emptySubtitle: "No sessions were found on the default tmux server or the holy socket."
             ),
@@ -484,6 +485,7 @@ struct HolyRemoteHostsSheet: View {
                 sessions: sortedConnectionSessions(store.remoteSessions(for: host)),
                 isBusy: store.isRemoteDiscoveryBusy(for: host),
                 error: store.remoteDiscoveryError(for: host),
+                progress: store.remoteHostsDiscoveryProgress[host.id],
                 emptyTitle: "No tmux sessions found",
                 emptySubtitle: emptyDiscoverySubtitle(for: host)
             ),
@@ -522,29 +524,35 @@ struct HolyRemoteHostsSheet: View {
                 }
             }
 
-            if content.isBusy && content.sessions.isEmpty {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(HolyGhosttyTheme.halo)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 10)
-            } else if let error = content.error {
-                HolyGhosttyEmptyStateView(
-                    title: "Can’t inspect tmux",
-                    subtitle: error,
-                    symbol: "exclamationmark.triangle"
-                )
-                .frame(maxWidth: .infinity)
-            } else if content.sessions.isEmpty {
+            if content.isBusy || content.error != nil {
+                HStack(alignment: .top, spacing: 8) {
+                    if content.isBusy {
+                        ProgressView().controlSize(.small).tint(HolyGhosttyTheme.halo)
+                    } else {
+                        Image(systemName: "exclamationmark.triangle")
+                    }
+                    Text(content.progress?.summary(
+                        sessionCount: content.sessions.count,
+                        isBusy: content.isBusy,
+                        error: content.error
+                    ) ?? content.error ?? "Discovering sessions…")
+                    .font(.system(size: 11))
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundStyle(content.error == nil ? HolyGhosttyTheme.textSecondary : HolyGhosttyTheme.danger)
+                .padding(.vertical, 8)
+            }
+
+            if content.sessions.isEmpty && !content.isBusy && content.error == nil {
                 HolyGhosttyEmptyStateView(
                     title: content.emptyTitle,
                     subtitle: content.emptySubtitle,
                     symbol: "rectangle.stack"
                 )
                 .frame(maxWidth: .infinity)
-            } else {
+            } else if !content.sessions.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(groupedConnectionSessions(content.sessions)) { group in
+                    ForEach(HolyHostsSessionList(content.sessions).groups) { group in
                         VStack(alignment: .leading, spacing: 0) {
                             sessionGroupLabel(group.runtime, count: group.sessions.count)
 
@@ -730,14 +738,14 @@ struct HolyRemoteHostsSheet: View {
             .tracking(0.5)
     }
 
-    private func sessionGroupLabel(_ runtime: HolySessionRuntime, count: Int) -> some View {
+    private func sessionGroupLabel(_ runtime: HolySessionRuntime?, count: Int) -> some View {
         HStack(spacing: 7) {
-            Image(systemName: runtime.connectionSymbolName)
+            Image(systemName: runtime?.connectionSymbolName ?? "square.dashed")
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(runtime.connectionTint)
+                .foregroundStyle(runtime?.connectionTint ?? HolyGhosttyTheme.textTertiary)
                 .frame(width: 12)
 
-            Text(runtime.displayName.uppercased())
+            Text((runtime?.displayName ?? "Unclassified").uppercased())
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(HolyGhosttyTheme.textSecondary)
                 .lineLimit(1)
@@ -1000,6 +1008,13 @@ struct HolyRemoteHostsSheet: View {
     }
 
     private var localDiscoverySummary: String {
+        if let progress = store.localHostsDiscoveryProgress {
+            return progress.summary(
+                sessionCount: localConnectionSessions.count,
+                isBusy: store.localTmuxDiscoveryBusy,
+                error: store.localTmuxDiscoveryError
+            )
+        }
         if let error = store.localTmuxDiscoveryError?.nilIfBlank {
             return error
         }
@@ -1013,19 +1028,9 @@ struct HolyRemoteHostsSheet: View {
     }
 
     private func remoteConnectionStatusText(for host: HolyRemoteHostRecord) -> String {
-        if let discoveryError = store.remoteDiscoveryError(for: host)?.nilIfBlank {
-            return discoveryError
-        }
-
-        let sessions = store.remoteSessions(for: host)
-        guard !sessions.isEmpty else { return host.tmuxSummary }
-
-        let primaryCount = primaryRemoteSessions(for: host).count
-        if primaryCount == sessions.count {
-            return sessions.count == 1 ? "1 live tmux session" : "\(sessions.count) live tmux sessions"
-        }
-
-        return "\(primaryCount) active · \(sessions.count) total"
+        if store.remoteDiscoveryError(for: host) != nil { return "Discovery incomplete" }
+        if store.isRemoteDiscoveryBusy(for: host) { return "Discovery in progress" }
+        return discoverySummary(for: host)
     }
 
     private func remoteConnectionStatusColor(for host: HolyRemoteHostRecord) -> Color {
@@ -1033,6 +1038,13 @@ struct HolyRemoteHostsSheet: View {
     }
 
     private func discoverySummary(for host: HolyRemoteHostRecord) -> String {
+        if let progress = store.remoteHostsDiscoveryProgress[host.id] {
+            return progress.summary(
+                sessionCount: HolyHostsSessionList(store.remoteSessions(for: host)).count,
+                isBusy: store.isRemoteDiscoveryBusy(for: host),
+                error: store.remoteDiscoveryError(for: host)
+            )
+        }
         if let error = store.remoteDiscoveryError(for: host)?.nilIfBlank {
             return error
         }
@@ -1046,56 +1058,11 @@ struct HolyRemoteHostsSheet: View {
             return emptyDiscoverySubtitle(for: host)
         }
 
-        let primaryCount = primaryRemoteSessions(for: host).count
-        if primaryCount != sessions.count {
-            return "\(primaryCount) active/attached, \(sessions.count) total tmux sessions discovered"
-        }
-
         return sessions.count == 1 ? "1 tmux session discovered" : "\(sessions.count) tmux sessions discovered"
     }
 
-    private func primaryRemoteSessions(for host: HolyRemoteHostRecord) -> [HolyDiscoveredTmuxSession] {
-        let sessions = sortedConnectionSessions(store.remoteSessions(for: host))
-        let primarySessions = sessions.filter { session in
-            session.attachedClientCount > 0 || session.isHolyManaged
-        }
-
-        return primarySessions.isEmpty ? sessions : primarySessions
-    }
-
-    private func groupedConnectionSessions(_ sessions: [HolyDiscoveredTmuxSession]) -> [HolyDiscoveredTmuxSessionGroup] {
-        let grouped = Dictionary(grouping: sortedConnectionSessions(sessions)) { session in
-            session.connectionRuntime
-        }
-
-        return HolySessionRuntime.connectionRosterOrder.compactMap { runtime in
-            guard let sessions = grouped[runtime], !sessions.isEmpty else {
-                return nil
-            }
-
-            return .init(runtime: runtime, sessions: sessions)
-        }
-    }
-
     private func sortedConnectionSessions(_ sessions: [HolyDiscoveredTmuxSession]) -> [HolyDiscoveredTmuxSession] {
-        sessions.sorted { lhs, rhs in
-            if lhs.connectionRuntime != rhs.connectionRuntime {
-                let lhsRank = HolySessionRuntime.connectionRosterOrder.firstIndex(of: lhs.connectionRuntime) ?? Int.max
-                let rhsRank = HolySessionRuntime.connectionRosterOrder.firstIndex(of: rhs.connectionRuntime) ?? Int.max
-                return lhsRank < rhsRank
-            }
-
-            let titleComparison = lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle)
-            if titleComparison != .orderedSame {
-                return titleComparison == .orderedAscending
-            }
-
-            if lhs.isHolyManaged != rhs.isHolyManaged {
-                return lhs.isHolyManaged && !rhs.isHolyManaged
-            }
-
-            return lhs.sessionName.localizedCaseInsensitiveCompare(rhs.sessionName) == .orderedAscending
-        }
+        HolyHostsSessionList(sessions).sessions
     }
 
     private func emptyDiscoverySubtitle(for host: HolyRemoteHostRecord) -> String {
@@ -1183,6 +1150,7 @@ private struct HolyConnectionSessionListContent {
     let sessions: [HolyDiscoveredTmuxSession]
     let isBusy: Bool
     let error: String?
+    let progress: HolyHostsDiscoveryProgress?
     let emptyTitle: String
     let emptySubtitle: String
 }
@@ -1225,16 +1193,7 @@ private struct HolyDiscoveredKillRequest: Identifiable {
     }
 }
 
-private struct HolyDiscoveredTmuxSessionGroup: Identifiable {
-    let runtime: HolySessionRuntime
-    let sessions: [HolyDiscoveredTmuxSession]
-
-    var id: String { runtime.rawValue }
-}
-
 private extension HolySessionRuntime {
-    static let connectionRosterOrder: [HolySessionRuntime] = [.claude, .codex, .opencode, .shell]
-
     var connectionSymbolName: String {
         switch self {
         case .claude:
@@ -1304,16 +1263,15 @@ private struct HolyConnectionRow: View {
                     ProgressView()
                         .controlSize(.small)
                         .tint(HolyGhosttyTheme.halo)
-                } else {
-                    VStack(alignment: .trailing, spacing: 1) {
-                        Text("\(sessionCount)")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .foregroundStyle(HolyGhosttyTheme.textPrimary)
+                }
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("\(sessionCount)")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(HolyGhosttyTheme.textPrimary)
 
-                        Text(sessionCount == 1 ? "session" : "sessions")
-                            .font(.system(size: 9))
-                            .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                    }
+                    Text(sessionCount == 1 ? "session" : "sessions")
+                        .font(.system(size: 9))
+                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
                 }
             }
             .padding(.horizontal, 12)
@@ -1350,13 +1308,13 @@ private struct HolyDiscoveredTmuxSessionRow: View {
             .buttonStyle(.plain)
             .help(isSelected ? "Deselect session" : "Select session")
 
-            Image(systemName: session.connectionRuntime.connectionSymbolName)
+            Image(systemName: session.runtime?.connectionSymbolName ?? "square.dashed")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(session.connectionRuntime.connectionTint)
+                .foregroundStyle(session.runtime?.connectionTint ?? HolyGhosttyTheme.textTertiary)
                 .frame(width: 18)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(session.displayTitle)
+                Text(session.hostsDisplayTitle)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(HolyGhosttyTheme.textPrimary)
                     .lineLimit(1)
@@ -1410,6 +1368,7 @@ private struct HolyDiscoveredTmuxSessionRow: View {
     }
 
     private var secondaryLine: String {
+        if let detail = session.unclassifiedHostsDetail { return detail }
         if let taskTitle = session.taskTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
            !taskTitle.isEmpty {
             return taskTitle
