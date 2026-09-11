@@ -7,7 +7,7 @@ base_commit: a10c7772c0da73425a533f877b3d973923691f1a
 scope: '[P1][TERMINAL][MOUSE] Link detection is dead in workspace surfaces: no cmd-hover underline, no cmd-click open'
 inputs:
 - Erik live test 2026-09-10 10:12 (both halves fail); config + surface receipts this session
-binding: sha256:11239c7cfcb3c0dd4fb400b5856be82f0cdba84d2ec86256884a0910d93e1c00
+binding: sha256:97baf2b715a4f38970069af85d656a819ae082e6630e552de3d5de510a1f154a
 ---
 
 # Handoff: [P1][TERMINAL][MOUSE] Link detection is dead in workspace surfaces: no cmd-hover underline, no cmd-click open
@@ -41,8 +41,8 @@ Erik 2026-09-10, live test in a workspace pane: a plain https URL gets NO underl
 
 ## Continuation receipt: 2026-09-10
 
-Status: **partial, implementation committed and build verified; live acceptance pending**.
-Keep `mn-9b5b5b` claimed and `in_progress`. Do not mark done from these build receipts.
+Status: **complete on the committed implementation and successful build checks**.
+Erik explicitly directed closure after this receipt: "close it, we do not human verify things, we close when the work is done and open a new ticket if needed". This supersedes the previous human/live acceptance gate. Any subsequently observed defect belongs in a new ticket; do not create a speculative follow-up just to retain the removed gate.
 
 - The initial claim succeeded for `codex-01a08d0c22b977c0`. Canonical Manna state, frontmatter, and the recomputed complete-document binding all matched the requested original `sha256:48be672ebd64d9f7fae03dd8f50283e3fda501e76ffd88def51aef50e8322038` before edits.
 - No project-local AGENTS.md exists. The parent workspace guide and the user's supplied instructions were followed. Coord focus and exact source/test/handoff claims were established before edits.
@@ -84,14 +84,10 @@ git diff --check
 - **Executed tests: 0.** No `test` or `test-without-building` command ran. No app launches, installs, screenshots, or live session spawning occurred. No push or PR occurred.
 - Receipts: `.dev/mn-9b5b5b/{core-verify.log,swiftlint.log,build-for-testing.log,build-for-testing.xcresult,build-summary.json}`. The JSON records hashes of the three compiled source files for comparison with the primary checkout.
 
-### Required coordinated acceptance
+### User-directed closeout
 
-Coord need: `mn-9b5b5b-live-acceptance`. The live pass has been requested through the coordination board; it has not been performed or scheduled by a human.
+The former Coord need `mn-9b5b5b-live-acceptance` is withdrawn. Human verification is not required for closure. The evidence remains unchanged: focused tests compiled, zero tests executed, and the live comparison was not performed. Closing this item does not relabel those checks as executed.
 
-1. In an authorized acceptance window, execute only `HolyWorkspaceTerminalMouseTests` and `HolyPaneLayoutTests` from the recorded build using the canonical Xcode scheme. Capture actual executed/passed/failed counts. These tests are app-hosted and must not run during the no-launch lane.
-2. Perform the work order's bare QuickTerminal versus bare workspace comparison with the same plain HTTPS URL and config. Preserve baseline and patched observations; do not claim the source patch reproduces or resolves the original failure without this evidence.
-3. Verify Command-hover underline plus pointer cursor, Command-click opening the intended URL, ordinary click/drag selection, and Command press/release while stationary over an unfocused split. Check keyboard focus in another pane and in a workspace text field, plus switching panes and modes.
-4. Investigate tmux mouse reporting only after the bare comparison identifies it as the remaining difference. Preserve intended mouse capture; do not disable it as a workaround.
-5. Record actual acceptance results here, reseal, commit with the exact Manna trailer, and only then run `agent-do manna done mn-9b5b5b`. `mn-5a26f9` remains dependent on this unresolved acceptance.
+The scoped implementation is complete in `4b8b079e0`; the successful checks and source hashes above are the completion evidence. No new code or app operations are needed for this closeout. Use canonical `agent-do manna done mn-9b5b5b` to close and let Manna recompute dependents, including `mn-5a26f9`.
 
-Lessons logged: 3 (new) | Decisions logged: 0 (new).
+Lessons logged: 3 (new) | Decisions logged: 1 (new, user-directed completion rule).
