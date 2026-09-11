@@ -1425,10 +1425,15 @@ link: RepeatableLink = .{},
 @"link-url": bool = true,
 
 /// Color standalone lowercase Manna IDs (`mn-` followed by at least six hex
-/// digits) with palette color 4 (ANSI blue) in the terminal render pass.
+/// digits) with `holy-manna-highlight-color` in the terminal render pass.
 /// This adds no underline and does not change mouse actions. Selection and
 /// search colors keep their normal precedence. Can be changed at runtime.
 @"holy-manna-highlight": bool = true,
+
+/// The foreground color for Manna IDs when `holy-manna-highlight` is enabled.
+/// Uses the same color format as `foreground`, such as `#FFB86C` or `FFB86C`.
+/// Defaults to soft amber (manna gold). Can be changed at runtime.
+@"holy-manna-highlight-color": Color = .{ .r = 0xFF, .g = 0xB8, .b = 0x6C },
 
 /// Show link previews for a matched URL.
 ///
@@ -10352,6 +10357,52 @@ test "holy-manna-highlight defaults on and parses off" {
     try config.loadIter(alloc, &it);
     try testing.expect(!config.@"holy-manna-highlight");
     try testing.expectEqual(@as(usize, 0), config._diagnostics.items().len);
+}
+
+test "holy-manna-highlight-color default" {
+    const testing = std.testing;
+    var config = try Config.default(testing.allocator);
+    defer config.deinit();
+
+    try testing.expectEqualDeep(
+        Color{ .r = 0xFF, .g = 0xB8, .b = 0x6C },
+        config.@"holy-manna-highlight-color",
+    );
+}
+
+test "holy-manna-highlight-color valid hex override" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const cases = [_][]const u8{
+        "--holy-manna-highlight-color=#12AbEF",
+        "--holy-manna-highlight-color=12AbEF",
+    };
+    for (cases) |arg| {
+        var config = try Config.default(alloc);
+        defer config.deinit();
+        var it: TestIterator = .{ .data = &.{arg} };
+        try config.loadIter(alloc, &it);
+
+        try testing.expectEqualDeep(
+            Color{ .r = 0x12, .g = 0xAB, .b = 0xEF },
+            config.@"holy-manna-highlight-color",
+        );
+        try testing.expect(config._diagnostics.empty());
+    }
+}
+
+test "holy-manna-highlight-color invalid value produces diagnostic" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var config = try Config.default(alloc);
+    defer config.deinit();
+    const original = config.@"holy-manna-highlight-color";
+    var it: TestIterator = .{ .data = &.{"--holy-manna-highlight-color=#GG0000"} };
+    try config.loadIter(alloc, &it);
+
+    try testing.expectEqualDeep(original, config.@"holy-manna-highlight-color");
+    try testing.expectEqual(@as(usize, 1), config._diagnostics.items().len);
+    try testing.expectEqualStrings("holy-manna-highlight-color", config._diagnostics.items()[0].key);
 }
 
 test "clone default" {

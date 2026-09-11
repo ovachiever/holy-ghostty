@@ -606,6 +606,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     alloc,
                     config.link.links.items,
                     config.@"holy-manna-highlight",
+                    config.@"holy-manna-highlight-color".toTerminalRGB(),
                 );
 
                 return .{
@@ -2885,8 +2886,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             .@"cell-background" => if (style.flags.inverse) fg_style else final_bg,
                         },
 
-                        .false => if (link_style.foreground) |index|
-                            state.colors.palette[index]
+                        .false => if (link_style.foreground) |color|
+                            color
                         else if (style.flags.inverse)
                             final_bg
                         else

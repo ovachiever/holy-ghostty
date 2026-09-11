@@ -6,7 +6,7 @@ source: null
 base_commit: b5c7f1763fe1e7d71eabb501c219f4e97681b8f1
 scope: '[P1][CORE][TERMINAL] mn- ids render blue in the core render pass — the renderer is the only painter'
 inputs: []
-binding: sha256:eebce3c78ddca84f462b8d3d1a9f0c0a5b52ab605a0d0f9a2e4715f24684e7a9
+binding: sha256:5ef6f4f370dd5e19ac9e1ebdc437700c7fb8f88b0cd51673aec032b198fd6135
 ---
 
 # Handoff: [P1][CORE][TERMINAL] mn- ids render blue in the core render pass — the renderer is the only painter
@@ -28,6 +28,10 @@ agent-do manna claim mn-7ec016
 - None declared.
 
 ## Work order
+
+Current amendment from Erik, 2026-09-11: use a unique RGB color, default `#FFB86C` (soft amber, manna gold), configurable through runtime-changeable `holy-manna-highlight-color` using Ghostty's existing `Color` type. This supersedes all prior ANSI palette-color instructions, including palette 12. `CellStyle.foreground` carries `terminal.color.RGB`. Keep the existing `holy-manna-highlight` gate, selection/search precedence, and mouse behavior. Add default, valid-hex and invalid-value diagnostic config tests, and update RGB style expectations. Stability acceptance already passed according to Erik; matching and invalidation must remain unchanged. Local validation is formatting and AST checks only. The coordinator owns the push and CI/artifact/install cycle.
+
+Historical architecture work order, retained for provenance (its palette-color requirement is superseded above):
 
 Erik ruling 2026-09-11 (supersedes the overlay approach of mn-4be59b, reverted b5c7f1763/6d6c2d2b1/9699989dd): ONE GRID, ONE PAINTER — text-anchored styling lives in the terminal renderer, never in an AppKit overlay shadowing it over a polling API; the overlay was structurally one frame behind (flicker on stream, stuck-white on animated viewports, blink on scroll — one disease, three views). Implementation, in-core: src/renderer/link.zig already regex-matches the viewport per frame into a cell map with per-rule highlight modes (URL hover-underline rides it, and URLs never flicker — that is the proof of home). Add a built-in Holy rule: pattern mn-[a-f0-9]{6,} with word boundaries (reject ids embedded in longer tokens), highlight always (not hover-gated), style = foreground palette color 4 (ANSI blue, follows the user theme), no underline. Gate behind config key holy-manna-highlight default true. The macOS cmd-click/hover hit-testing (mn-5a26f9) is event-side and stays untouched. CONSTRAINT (house law, scroll-regression postmortem): the engine builds via CI ReleaseFast artifact ONLY — local Zig linking is broken on macOS 26; Zig source edits + core-side unit tests land in the repo, the artifact rides CI, and the install that carries it follows the CI cycle. Tests: core-side matcher boundaries (short hex, uppercase, embedded), cell-map runs for wrapped ids, config gate off = no styling. Acceptance: Erik sees blue mn- ids at rest that are rock-steady during streaming, spinners, and scrolling — by construction, since the same pass draws text and color.
 
@@ -71,7 +75,7 @@ Compiled core tests: **0**. Executed core tests: **0**. Compiled app-hosted test
 
 ## Required continuation and acceptance
 
-1. After Erik separately authorizes publishing, the committed source must reach the canonical **Build Holy macOS core** CI workflow. This lane must not push or open a PR.
+1. The coordinator publishes this revision and reruns the canonical **Build Holy macOS core** CI workflow. This lane must not push or open a PR.
 2. On the CI runner, execute the checked-in focused command and retain its real test counts/results:
 
    ```sh
@@ -80,7 +84,7 @@ Compiled core tests: **0**. Executed core tests: **0**. Compiled app-hosted test
 
    Then `scripts/build-holy-ghostty-core.sh build` and `scripts/build-holy-ghostty-core.sh verify` must succeed. Preserve the commit-addressed ReleaseFast artifact and its provenance. A failed test blocks artifact production.
 3. Coordinate with the live acceptance/install owner through Coord. Once the no-launch boundary is lifted for that pass, import the matching artifact through the canonical core tool and use the canonical installer. Do not substitute an older engine, bypass its fingerprint checks, or link the engine locally.
-4. Erik must observe standalone lowercase Manna IDs in theme ANSI blue at rest, with steady color during streaming, spinners, and scrolling. Check wrapped IDs, removed/invalidated tokens, config-off behavior, and the existing cmd-click/hover behavior. No AppKit painter is added; the macOS event-side implementation is unchanged.
+4. Stability acceptance at rest and during streaming, spinners, and scrolling has already passed according to Erik. Preserve matching and invalidation. The coordinator's next cycle validates the unique configurable RGB color, default `#FFB86C`; it must not substitute an ANSI palette entry. No AppKit painter is added; the macOS event-side implementation is unchanged.
 5. Attach CI test results, artifact/import/install receipts, and the human visual result to this handoff, reseal, and only then run `agent-do manna done mn-7ec016`.
 
 No app launches, installs, screenshots, provider/tmux session spawning, pushes, or PRs occurred in this implementation lane. Lessons logged: 3 (new) | Decisions logged: 0 (new). `agent-do zpc harvest --since last` completed with no format issues or consolidation gaps.
@@ -97,3 +101,16 @@ Erik reported that the engine compiled in CI and the first actual core test exec
 - `git diff --check`: exit 0. Logs are in `.dev/mn-7ec016/ci-34616487885-fix/`.
 - No compilation or test execution occurred locally. The coordinator owns the re-push and CI rerun. No push, app launch, or install occurred in this correction lane. Keep Manna `in_progress` until the rerun and required visual acceptance pass.
 - Correction-turn lessons logged: 1 (new) | Decisions logged: 0 (new).
+
+## RGB color update: 2026-09-11
+
+This revision changes color plumbing only. `CellStyle.foreground` is now optional `terminal.color.RGB`; the renderer consumes the resolved RGB directly. `holy-manna-highlight-color` uses the same `Config.Color` parser as foreground/background and defaults to `#FFB86C`. The existing config reload path rebuilds the link configuration and marks the renderer dirty.
+
+- Updated all styled-cell test expectations to RGB while retaining the corrected URL cell count and boundaries.
+- Added three config tests: the default, valid mixed-case hex overrides with and without `#`, and an invalid hex value that records a diagnostic and retains the previous value.
+- Added one color-change test using the existing `updateCellMap` path: unchanged ID cells receive the new RGB value and their cached row becomes dirty. Matching and invalidation implementations are byte-for-byte unchanged from `87023ecc7`; their combined source SHA-256 is `0fc4ef6ebed727124f90fde40f229e9679b6e1fb84c5ac0b59b058ec942b80fd`.
+- The existing CI filters already select all four new tests (`renderer.link` and `holy-manna-highlight`); no workflow change is required.
+- `.dev/toolchains/zig-aarch64-macos-0.15.2/zig fmt --check src/renderer/link.zig src/renderer/generic.zig src/config/Config.zig`: exit 0.
+- `zig ast-check` with that same pinned executable on each of those three files: all exit 0. `git diff --check`: exit 0. Logs are in `.dev/mn-7ec016/rgb-color/`.
+- These are source checks, not type checking, compilation, or executed tests. No local core/test compilation, test execution, app launch, install, or push occurred. The coordinator owns the remaining CI and color acceptance cycle; the already-passed stability acceptance is preserved.
+- Color-update lessons logged: 1 (new) | Decisions logged: 0 (new).

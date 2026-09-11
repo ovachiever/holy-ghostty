@@ -12,7 +12,7 @@ const log = std.log.scoped(.renderer_link);
 
 /// Renderer-only styling. These rules do not add clickable input links.
 pub const CellStyle = struct {
-    foreground: ?u8 = null,
+    foreground: ?terminal.color.RGB = null,
     underline: bool = false,
 };
 
@@ -46,6 +46,7 @@ pub const Set = struct {
         alloc: Allocator,
         config: []const inputpkg.Link,
         holy_manna_highlight: bool,
+        holy_manna_highlight_color: terminal.color.RGB,
     ) !Set {
         var links: std.ArrayList(Link) = .empty;
         defer links.deinit(alloc);
@@ -72,7 +73,7 @@ pub const Set = struct {
             try links.append(alloc, .{
                 .regex = regex,
                 .highlight = .always,
-                .style = .{ .foreground = 4 },
+                .style = .{ .foreground = holy_manna_highlight_color },
             });
         }
 
@@ -201,6 +202,8 @@ pub fn updateCellMap(
         previous.putAssumeCapacity(pt, style);
 }
 
+const test_manna_gold: terminal.color.RGB = .{ .r = 0xFF, .g = 0xB8, .b = 0x6C };
+
 test "renderCellMap" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -234,7 +237,7 @@ test "renderCellMap" {
             .action = .{ .open = {} },
             .highlight = .{ .always = {} },
         },
-    }, false);
+    }, false, test_manna_gold);
     defer set.deinit(alloc);
 
     // Get our matches
@@ -288,7 +291,7 @@ test "renderCellMap hover links" {
             .action = .{ .open = {} },
             .highlight = .{ .always = {} },
         },
-    }, false);
+    }, false, test_manna_gold);
     defer set.deinit(alloc);
 
     // Not hovering over the first link
@@ -367,7 +370,7 @@ test "renderCellMap mods no match" {
             .action = .{ .open = {} },
             .highlight = .{ .always_mods = .{ .ctrl = true } },
         },
-    }, false);
+    }, false, test_manna_gold);
     defer set.deinit(alloc);
 
     // Get our matches
@@ -395,7 +398,7 @@ test "renderCellMap Manna matcher boundaries" {
     const alloc = testing.allocator;
     try oni.testing.ensureInit();
 
-    var set = try Set.fromConfig(alloc, &.{}, true);
+    var set = try Set.fromConfig(alloc, &.{}, true, test_manna_gold);
     defer set.deinit(alloc);
 
     const cases = [_]struct { text: []const u8, cells: usize }{
@@ -432,7 +435,7 @@ test "renderCellMap Manna matcher boundaries" {
 
         try testing.expectEqual(case.cells, result.count());
         for (result.values()) |style|
-            try testing.expectEqualDeep(CellStyle{ .foreground = 4 }, style);
+            try testing.expectEqualDeep(CellStyle{ .foreground = test_manna_gold }, style);
     }
 }
 
@@ -450,7 +453,7 @@ test "renderCellMap Manna wrapped cell runs" {
     var state: terminal.RenderState = .empty;
     defer state.deinit(alloc);
     try state.update(alloc, &t);
-    var set = try Set.fromConfig(alloc, &.{}, true);
+    var set = try Set.fromConfig(alloc, &.{}, true, test_manna_gold);
     defer set.deinit(alloc);
     var result: CellMap = .empty;
     defer result.deinit(alloc);
@@ -460,7 +463,7 @@ test "renderCellMap Manna wrapped cell runs" {
     for (0..18) |i| {
         const style = result.get(.{ .x = @intCast(i % 6), .y = @intCast(i / 6) });
         if (i >= 2 and i < 13) {
-            try testing.expectEqualDeep(CellStyle{ .foreground = 4 }, style.?);
+            try testing.expectEqualDeep(CellStyle{ .foreground = test_manna_gold }, style.?);
         } else {
             try testing.expect(style == null);
         }
@@ -476,7 +479,12 @@ test "renderCellMap Manna config off preserves URL hover" {
     var config = try Config.default(alloc);
     defer config.deinit();
     config.@"holy-manna-highlight" = false;
-    var set = try Set.fromConfig(alloc, config.link.links.items, config.@"holy-manna-highlight");
+    var set = try Set.fromConfig(
+        alloc,
+        config.link.links.items,
+        config.@"holy-manna-highlight",
+        config.@"holy-manna-highlight-color".toTerminalRGB(),
+    );
     defer set.deinit(alloc);
     var t: terminal.Terminal = try .init(alloc, .{ .cols = 40, .rows = 1 });
     defer t.deinit(alloc);
@@ -506,7 +514,12 @@ test "renderCellMap Manna foreground coexists with URL and OSC8 underline" {
 
     var config = try Config.default(alloc);
     defer config.deinit();
-    var set = try Set.fromConfig(alloc, config.link.links.items, config.@"holy-manna-highlight");
+    var set = try Set.fromConfig(
+        alloc,
+        config.link.links.items,
+        config.@"holy-manna-highlight",
+        config.@"holy-manna-highlight-color".toTerminalRGB(),
+    );
     defer set.deinit(alloc);
     var t: terminal.Terminal = try .init(alloc, .{ .cols = 40, .rows = 1 });
     defer t.deinit(alloc);
@@ -522,7 +535,7 @@ test "renderCellMap Manna foreground coexists with URL and OSC8 underline" {
     try set.renderCellMap(alloc, &result, &state, null, .{});
     try testing.expectEqual(@as(usize, 9), result.count());
     for (result.values()) |style|
-        try testing.expectEqualDeep(CellStyle{ .foreground = 4 }, style);
+        try testing.expectEqualDeep(CellStyle{ .foreground = test_manna_gold }, style);
 
     result.clearRetainingCapacity();
     // An OSC8 hover contributes the same underline style before regex matching.
@@ -531,8 +544,8 @@ test "renderCellMap Manna foreground coexists with URL and OSC8 underline" {
     try testing.expectEqual(@as(usize, 29), result.count());
     try testing.expectEqualDeep(CellStyle{ .underline = true }, result.get(.{ .x = 0, .y = 0 }).?);
     try testing.expectEqualDeep(CellStyle{ .underline = true }, result.get(.{ .x = 19, .y = 0 }).?);
-    try testing.expectEqualDeep(CellStyle{ .foreground = 4, .underline = true }, result.get(.{ .x = 20, .y = 0 }).?);
-    try testing.expectEqualDeep(CellStyle{ .foreground = 4, .underline = true }, result.get(.{ .x = 28, .y = 0 }).?);
+    try testing.expectEqualDeep(CellStyle{ .foreground = test_manna_gold, .underline = true }, result.get(.{ .x = 20, .y = 0 }).?);
+    try testing.expectEqualDeep(CellStyle{ .foreground = test_manna_gold, .underline = true }, result.get(.{ .x = 28, .y = 0 }).?);
     try testing.expect(!result.contains(.{ .x = 29, .y = 0 }));
 }
 
@@ -541,7 +554,7 @@ test "updateCellMap Manna streaming completion invalidation and animation" {
     const alloc = testing.allocator;
     try oni.testing.ensureInit();
 
-    var set = try Set.fromConfig(alloc, &.{}, true);
+    var set = try Set.fromConfig(alloc, &.{}, true, test_manna_gold);
     defer set.deinit(alloc);
     var t: terminal.Terminal = try .init(alloc, .{ .cols = 6, .rows = 4 });
     defer t.deinit(alloc);
@@ -616,14 +629,14 @@ test "updateCellMap Manna config off clears cached styling" {
     var current: CellMap = .empty;
     defer current.deinit(alloc);
 
-    var enabled = try Set.fromConfig(alloc, &.{}, true);
+    var enabled = try Set.fromConfig(alloc, &.{}, true, test_manna_gold);
     defer enabled.deinit(alloc);
     try enabled.renderCellMap(alloc, &current, &state, null, .{});
     try updateCellMap(alloc, &previous, &current, &state);
     state.dirty = .false;
     @memset(state.row_data.items(.dirty), false);
 
-    var disabled = try Set.fromConfig(alloc, &.{}, false);
+    var disabled = try Set.fromConfig(alloc, &.{}, false, test_manna_gold);
     defer disabled.deinit(alloc);
     current.clearRetainingCapacity();
     try disabled.renderCellMap(alloc, &current, &state, null, .{});
@@ -638,7 +651,7 @@ test "updateCellMap Manna scrolling remaps viewport rows" {
     const alloc = testing.allocator;
     try oni.testing.ensureInit();
 
-    var set = try Set.fromConfig(alloc, &.{}, true);
+    var set = try Set.fromConfig(alloc, &.{}, true, test_manna_gold);
     defer set.deinit(alloc);
     var t: terminal.Terminal = try .init(alloc, .{ .cols = 12, .rows = 3 });
     defer t.deinit(alloc);
@@ -667,7 +680,62 @@ test "updateCellMap Manna scrolling remaps viewport rows" {
     try testing.expectEqual(@as(usize, 9), previous.count());
     for (previous.keys(), previous.values()) |pt, style| {
         try testing.expectEqual(@as(usize, 0), pt.y);
-        try testing.expectEqualDeep(CellStyle{ .foreground = 4 }, style);
+        try testing.expectEqualDeep(CellStyle{ .foreground = test_manna_gold }, style);
     }
     try testing.expect(!previous.contains(.{ .x = 0, .y = 1 }));
+}
+
+test "updateCellMap Manna RGB config change updates cached styling" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const Config = @import("../config/Config.zig");
+    try oni.testing.ensureInit();
+
+    var config = try Config.default(alloc);
+    defer config.deinit();
+    var original = try Set.fromConfig(
+        alloc,
+        config.link.links.items,
+        config.@"holy-manna-highlight",
+        config.@"holy-manna-highlight-color".toTerminalRGB(),
+    );
+    defer original.deinit(alloc);
+    var t: terminal.Terminal = try .init(alloc, .{ .cols = 12, .rows = 1 });
+    defer t.deinit(alloc);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("mn-abcdef");
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+    var previous: CellMap = .empty;
+    defer previous.deinit(alloc);
+    var current: CellMap = .empty;
+    defer current.deinit(alloc);
+
+    try original.renderCellMap(alloc, &current, &state, null, .{});
+    try updateCellMap(alloc, &previous, &current, &state);
+    for (previous.values()) |style|
+        try testing.expectEqualDeep(CellStyle{ .foreground = test_manna_gold }, style);
+    state.dirty = .false;
+    @memset(state.row_data.items(.dirty), false);
+
+    config.@"holy-manna-highlight-color" = .{ .r = 0x12, .g = 0xAB, .b = 0xEF };
+    var updated = try Set.fromConfig(
+        alloc,
+        config.link.links.items,
+        config.@"holy-manna-highlight",
+        config.@"holy-manna-highlight-color".toTerminalRGB(),
+    );
+    defer updated.deinit(alloc);
+    current.clearRetainingCapacity();
+    try updated.renderCellMap(alloc, &current, &state, null, .{});
+    try updateCellMap(alloc, &previous, &current, &state);
+    try testing.expectEqual(@as(usize, 9), previous.count());
+    for (previous.values()) |style|
+        try testing.expectEqualDeep(CellStyle{
+            .foreground = .{ .r = 0x12, .g = 0xAB, .b = 0xEF },
+        }, style);
+    try testing.expectEqual(.partial, state.dirty);
+    try testing.expect(state.row_data.items(.dirty)[0]);
 }
