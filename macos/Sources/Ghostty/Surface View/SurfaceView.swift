@@ -122,7 +122,9 @@ extension Ghostty {
                         Path { path in
                             for rect in surfaceView.mannaUnderlines { path.addRect(rect) }
                         }
-                        .fill(.primary)
+                        // Manna links are purple, distinct from URL styling
+                        // and readable over any program's text color.
+                        .fill(Color.purple)
                     }
                     .allowsHitTesting(false)
                 }
