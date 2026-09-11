@@ -51,7 +51,9 @@ extension Ghostty {
         // surface is first created and any time the cell size changes (i.e.
         // when the font size changes). This is used to allow windows to be
         // resized in discrete steps of a single cell.
-        @Published var cellSize: NSSize = .zero
+        @Published var cellSize: NSSize = .zero {
+            didSet { if cellSize != oldValue { mannaPainter.invalidate() } }
+        }
 
         // The health state of the surface. This currently only reflects the
         // renderer health. In the future we may want to make this an enum.
@@ -67,6 +69,7 @@ extension Ghostty {
         private var mannaHoverCheckedAt: ContinuousClock.Instant?
         private var mannaPointerStyle: CursorStyle?
         private var mannaMouseDownID: String?
+        let mannaPainter = HolyMannaLinkPainter()
 
         // The progress report (if any)
         @Published var progressReport: Action.ProgressReport? {
@@ -245,7 +248,9 @@ extension Ghostty {
         }
         /// Current scrollbar state, cached here for persistence across rebuilds
         /// of the SwiftUI view hierarchy, for example when changing splits
-        var scrollbar: Ghostty.Action.Scrollbar?
+        var scrollbar: Ghostty.Action.Scrollbar? {
+            didSet { mannaPainter.invalidate() }
+        }
 
         // Notification identifiers associated with this surface
         var notificationIdentifiers: Set<String> = []
@@ -562,6 +567,7 @@ extension Ghostty {
                 // the main thread and Published changes need to be on the main
                 // thread. This caused a crash on macOS <= 14.
                 self.clearMannaHover()
+                self.mannaPainter.invalidate()
                 self.surfaceSize = size
             }
         }
@@ -823,7 +829,9 @@ extension Ghostty {
 
             // Update our derived config
             DispatchQueue.main.async { [weak self] in
-                self?.derivedConfig = DerivedConfig(config)
+                guard let self else { return }
+                self.derivedConfig = DerivedConfig(config)
+                self.mannaPainter.configChanged()
             }
         }
 
@@ -836,6 +844,12 @@ extension Ghostty {
             case .background:
                 DispatchQueue.main.async { [weak self] in
                     self?.backgroundColor = change.color
+                    self?.mannaPainter.invalidate()
+                }
+
+            case .palette(index: 4):
+                DispatchQueue.main.async { [weak self] in
+                    self?.mannaPainter.paletteChanged(change.color)
                 }
 
             default:
@@ -1037,6 +1051,7 @@ extension Ghostty {
         }
 
         override func mouseDown(with event: NSEvent) {
+            mannaPainter.invalidate()
             guard let surface = self.surface else { return }
             if event.modifierFlags.contains(.command), event.clickCount == 1 {
                 let pos = convert(event.locationInWindow, from: nil)
@@ -1221,6 +1236,7 @@ extension Ghostty {
 
         override func scrollWheel(with event: NSEvent) {
             clearMannaHover()
+            mannaPainter.invalidate()
             guard let surfaceModel else { return }
 
             var x = event.scrollingDeltaX
@@ -1265,6 +1281,7 @@ extension Ghostty {
 
         override func keyDown(with event: NSEvent) {
             clearMannaHover()
+            mannaPainter.invalidate()
             if holyWorkspaceController?.handleSessionCycleKey(event) == true {
                 return
             }
@@ -1743,6 +1760,7 @@ extension Ghostty {
         }
 
         private func performBindingAction(_ action: String) {
+            mannaPainter.invalidate()
             guard let surface = self.surface else { return }
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
                 AppDelegate.logger.warning("action failed action=\(action)")
@@ -2061,6 +2079,7 @@ extension Ghostty {
 
         struct DerivedConfig {
             let backgroundColor: Color
+            let mannaLinkBlue: NSColor?
             let backgroundOpacity: Double
             let backgroundBlur: Ghostty.Config.BackgroundBlur
             let macosWindowShadow: Bool
@@ -2070,6 +2089,7 @@ extension Ghostty {
 
             init() {
                 self.backgroundColor = Color(NSColor.windowBackgroundColor)
+                self.mannaLinkBlue = nil
                 self.backgroundOpacity = 1
                 self.backgroundBlur = .disabled
                 self.macosWindowShadow = true
@@ -2080,6 +2100,7 @@ extension Ghostty {
 
             init(_ config: Ghostty.Config) {
                 self.backgroundColor = config.backgroundColor
+                self.mannaLinkBlue = HolyMannaLinkPainter.paletteBlue(config)
                 self.backgroundOpacity = config.backgroundOpacity
                 self.backgroundBlur = config.backgroundBlur
                 self.macosWindowShadow = config.macosWindowShadow

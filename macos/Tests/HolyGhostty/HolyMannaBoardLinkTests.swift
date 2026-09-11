@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import Ghostty
@@ -66,6 +67,117 @@ struct HolyMannaBoardLinkTests {
                 == NSRange(location: 0, length: id.count))
         #expect(HolyMannaLink.wrappedMatch(in: id + ".", startingAt: 7, columns: 10,
                                          clickedColumn: (7 + id.count) % 10) == nil)
+    }
+
+    @Test(arguments: [0, 1, 25, 90])
+    func viewportOriginIncludesAsymmetricPaddingRegardlessOfCursorRow(cursorRow: Int) {
+        #expect(HolyMannaLink.gridOrigin(baseline: CGPoint(x: 2, y: 47),
+                                         imeCellBottom: 34 + CGFloat(cursorRow + 1) * 18,
+                                         cellHeight: 18) == CGPoint(x: 2, y: 34))
+        #expect(HolyMannaLink.gridOrigin(baseline: CGPoint(x: 2.5, y: 42.5),
+                                         imeCellBottom: 34 + CGFloat(cursorRow + 1) * 12.5,
+                                         cellHeight: 12.5) == CGPoint(x: 2.5, y: 34))
+        #expect(HolyMannaLink.gridOrigin(baseline: .zero, imeCellBottom: 10, cellHeight: 0) == nil)
+    }
+
+    @Test func atRestRunUsesCellBackgroundAndCoreBaseline() throws {
+        let viewport = paintViewport("see mn-abcdef.", columns: 14)
+        let runs = try #require(HolyMannaLink.paintRuns(in: viewport) { cell in
+            String(viewport.text.prefix(cell + 1))
+        })
+        #expect(runs == [.init(text: "mn-abcdef", rect: CGRect(x: 38, y: 34, width: 81, height: 18),
+                              baseline: CGPoint(x: 38, y: 47))])
+    }
+
+    @Test func atRestSoftWrappedIDPaintsSeparateRows() throws {
+        let viewport = paintViewport("......mn-abcdef   ", columns: 9, rows: 2)
+        let runs = try #require(HolyMannaLink.paintRuns(in: viewport) { cell in
+            String(viewport.text.prefix(cell + 1))
+        })
+        #expect(runs == [.init(text: "mn-", rect: CGRect(x: 56, y: 34, width: 27, height: 18),
+                              baseline: CGPoint(x: 56, y: 47)),
+                        .init(text: "abcdef", rect: CGRect(x: 2, y: 52, width: 54, height: 18),
+                              baseline: CGPoint(x: 2, y: 65))])
+    }
+
+    @Test func hardNewlineDoesNotJoinAnIdentifier() {
+        let viewport = paintViewport("......mn-\nabcdef   ", columns: 9, rows: 2)
+        #expect(HolyMannaLink.paintRuns(in: viewport) { _ in
+            Issue.record("No core prefix reads are needed when there are no matches")
+            return nil
+        } == [])
+    }
+
+    @Test(arguments: ["xmn-abcdef", "_mn-abcdef", "mn-abcdefg", "mn-abcdef_", "émn-abcdef"])
+    func lookalikeRunsNeverPaint(text: String) {
+        let viewport = paintViewport(text, columns: 20)
+        #expect(HolyMannaLink.paintRuns(in: viewport) { _ in nil } == [])
+    }
+
+    @Test func wideCharactersBeforeIDUseCoreCellPrefixes() throws {
+        let viewport = paintViewport("界🔭mn-abcdef ", columns: 14)
+        let prefixes = ["界", "界", "界🔭", "界🔭", "界🔭m", "界🔭mn", "界🔭mn-",
+                        "界🔭mn-a", "界🔭mn-ab", "界🔭mn-abc", "界🔭mn-abcd", "界🔭mn-abcde",
+                        "界🔭mn-abcdef", "界🔭mn-abcdef "]
+        let runs = try #require(HolyMannaLink.paintRuns(in: viewport) { prefixes[$0] })
+        #expect(runs.first?.rect == CGRect(x: 38, y: 34, width: 81, height: 18))
+    }
+
+    @Test func changedContentDuringCellMappingRefusesTheWholeFrame() {
+        let viewport = paintViewport("see mn-abcdef.", columns: 14)
+        #expect(HolyMannaLink.paintRuns(in: viewport) { _ in "replaced output" } == nil)
+        #expect(HolyMannaLink.paintRuns(in: viewport) { _ in nil } == nil)
+    }
+
+    @Test func hardRowsAndUnprintedCellsKeepTheirPhysicalOffsets() throws {
+        // Core omits unprinted trailing cells, retaining the hard newline.
+        let viewport = paintViewport("first\nmn-abcdef", columns: 14, rows: 2)
+        let runs = try #require(HolyMannaLink.paintRuns(in: viewport) { cell in
+            if cell < 14 { return String("first".prefix(min(cell + 1, 5))) }
+            return "first\n" + String("mn-abcdef".prefix(min(cell - 13, 9)))
+        })
+        #expect(runs == [.init(text: "mn-abcdef", rect: CGRect(x: 2, y: 52, width: 81, height: 18),
+                              baseline: CGPoint(x: 2, y: 65))])
+    }
+
+    @Test func scrollAndResizeClearPaintBeforeSettlingAgain() {
+        let first = paintViewport("mn-abcdef     ", columns: 14)
+        let scrolled = paintViewport("mn-123456     ", columns: 14)
+        let resized = paintViewport("mn-123456     ", columns: 7, rows: 2)
+        var state = HolyMannaLink.ViewportStability()
+        func observe(_ viewport: HolyMannaLink.Viewport?, expecting expected: HolyMannaLink.ViewportStability.Observation) {
+            let actual = state.observe(viewport)
+            #expect(actual == expected)
+        }
+        observe(first, expecting: .clear)
+        observe(first, expecting: .paint)
+        state.didPaint()
+        observe(first, expecting: .keep)
+        observe(scrolled, expecting: .clear)
+        observe(scrolled, expecting: .paint)
+        state.didPaint()
+        observe(resized, expecting: .clear)
+        observe(resized, expecting: .paint)
+        state.didPaint()
+        state.invalidate() // Scrollbar/input notification, even if text repeats.
+        observe(resized, expecting: .clear)
+        observe(resized, expecting: .paint)
+        observe(nil, expecting: .clear)
+        observe(first, expecting: .clear)
+    }
+
+    @MainActor @Test func painterUsesConfiguredANSIBlue() throws {
+        let config = try TemporaryConfig("palette = 4=#123456")
+        let blue = try #require(HolyMannaLinkPainter.paletteBlue(config)?.usingColorSpace(.sRGB))
+        #expect(abs(blue.redComponent - 0x12 / 255.0) < 0.001)
+        #expect(abs(blue.greenComponent - 0x34 / 255.0) < 0.001)
+        #expect(abs(blue.blueComponent - 0x56 / 255.0) < 0.001)
+        #expect(blue.alphaComponent == 1)
+    }
+
+    private func paintViewport(_ text: String, columns: Int, rows: Int = 1) -> HolyMannaLink.Viewport {
+        .init(text: text, columns: columns, rows: rows, baseline: CGPoint(x: 2, y: 47),
+              gridOrigin: CGPoint(x: 2, y: 34), cellSize: CGSize(width: 9, height: 18))
     }
 
     @Test func originatingBoardWinsEvenIfTheEstateWouldBeAmbiguous() async throws {

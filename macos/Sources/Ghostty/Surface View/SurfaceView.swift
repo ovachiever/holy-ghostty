@@ -119,6 +119,9 @@ extension Ghostty {
                 // Manna links draw no hover underline (Erik, 2026-09-11):
                 // the at-rest blue id itself is the affordance (mn-4be59b);
                 // hover keeps the pointer change and the URL caption.
+#if canImport(AppKit)
+                HolyMannaLinkOverlay(surfaceView: surfaceView, painter: surfaceView.mannaPainter)
+#endif
 
                 // Progress report
                 if let progressReport = surfaceView.progressReport, progressReport.state != .remove {
