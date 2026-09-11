@@ -163,7 +163,7 @@ struct HolyMannaBoardView: View {
     private func boardTopbar(width: CGFloat, inspectorWidth: CGFloat, showsInspector: Bool) -> some View {
         let compact = width < Metrics.measure
         return HStack(spacing: Metrics.s4) {
-            crumb(compact: compact)
+            crumb
             tabs.fixedSize()
             grepField(compact: compact)
             Spacer(minLength: 0)
@@ -178,7 +178,7 @@ struct HolyMannaBoardView: View {
                     .buttonStyle(.plain)
                     .help(compactInspectorPresented ? "close detail" : "show detail")
                 }
-                topbarRight(compact: compact)
+                topbarRight
             }
             .frame(width: showsInspector ? inspectorWidth : nil, alignment: .trailing)
             .padding(.leading, showsInspector ? Metrics.s4 : 0)
@@ -193,9 +193,9 @@ struct HolyMannaBoardView: View {
 
     /// `terminal › estate › board`: the outermost crumb is the way out. The
     /// page has no such link because a browser tab is its own exit.
-    /// The way out stays labeled and clickable at every width; compact
-    /// drops only the `via host` suffix (Erik, 2026-09-10).
-    private func crumb(compact: Bool) -> some View {
+    /// Nothing on this line hides at any width; the grep field's width is
+    /// the compression valve (Erik, 2026-09-10).
+    private var crumb: some View {
         HStack(spacing: 0) {
             terminalCrumb
             separator("›")
@@ -205,7 +205,7 @@ struct HolyMannaBoardView: View {
                 .fontWeight(.semibold)
                 .foregroundStyle(Palette.text)
                 .help(store.context.boardRoot ?? "")
-            if !compact, let host = store.context.remoteHost {
+            if let host = store.context.remoteHost {
                 Text("via \(host)")
                     .foregroundStyle(Palette.blue)
                     .padding(.leading, Metrics.s2)
@@ -284,23 +284,19 @@ struct HolyMannaBoardView: View {
 
     /// updated Ns ago | ● live | refresh — the mark is lit only while the
     /// board is being kept current and its last read landed.
-    private func topbarRight(compact: Bool) -> some View {
+    private var topbarRight: some View {
         TimelineView(.periodic(from: .now, by: clockInterval)) { timeline in
             HStack(spacing: Metrics.s1) {
-                if !compact {
-                    Text(Present.updatedLabel(since: store.lastRefreshedAt, now: timeline.date))
-                    separator("|")
-                }
+                Text(Present.updatedLabel(since: store.lastRefreshedAt, now: timeline.date))
+                separator("|")
                 Text(store.isLive ? "●" : "○")
                     .foregroundStyle(store.isLive ? Palette.green : Palette.faint)
-                if !compact {
-                    Text(Present.connectionLabel(
-                        isLive: store.isLive,
-                        isRefreshing: store.surface == .estate ? store.isEstateRefreshing : store.isRefreshing,
-                        hasState: store.surface == .estate ? store.estate != nil : store.state != nil,
-                        failed: store.surface == .estate ? store.estateFailure != nil : store.boardFailure != nil
-                    ))
-                }
+                Text(Present.connectionLabel(
+                    isLive: store.isLive,
+                    isRefreshing: store.surface == .estate ? store.isEstateRefreshing : store.isRefreshing,
+                    hasState: store.surface == .estate ? store.estate != nil : store.state != nil,
+                    failed: store.surface == .estate ? store.estateFailure != nil : store.boardFailure != nil
+                ))
                 separator("|")
                 if store.surface == .estate ? store.isEstateRefreshing : store.isRefreshing {
                     Text("reading…").foregroundStyle(Palette.faint)
@@ -1547,7 +1543,7 @@ struct HolyMannaBoardView: View {
                 .lineLimit(1)
                 .fixedSize()
                 Spacer(minLength: 0)
-                topbarRight(compact: width <= Metrics.narrowBreakpoint)
+                topbarRight
             }
             .frame(width: max(0, width - 2 * pagePadding(width)))
             .padding(.horizontal, pagePadding(width))
