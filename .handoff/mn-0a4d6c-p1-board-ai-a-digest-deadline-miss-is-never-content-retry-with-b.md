@@ -6,7 +6,7 @@ source: null
 base_commit: b59c57b942591bc754483e57ec06124feca98439
 scope: '[P1][BOARD][AI] A digest deadline miss is never content: retry with backoff, honest pending state, and a real deadline'
 inputs: []
-binding: sha256:143d34bd84e3a655c2f0903dd488471b6e4aaabbdad9d5ce428debf4219ae9f1
+binding: sha256:d8666804c11751a3e6e83cabaeed5bea307c71c0a99dd8163ec12b861d0241e8
 ---
 
 # Handoff: [P1][BOARD][AI] A digest deadline miss is never content: retry with backoff, honest pending state, and a real deadline
@@ -40,9 +40,9 @@ Erik 2026-09-14 (screenshot, mn-56f896 inspector): AI SUMMARY renders 'Holy fast
 
 ## Implementation receipt, 2026-09-14
 
-Implementation and build-only validation are complete. Required executed and
-live acceptance remain **PENDING**. Keep the item `in_progress`; do not infer
-acceptance from compilation.
+Implementation, build validation, executed digest regressions, and live Board
+acceptance are complete. The coordinated acceptance receipt below records the
+two unrelated failures without treating the whole run as green.
 
 - Claim owner: `codex-01a0a306bd467040`.
 - Work started at `7f672ca526f953fb9c2320612f187012fa978e92`.
@@ -86,7 +86,7 @@ acceptance from compilation.
    cache test also checks missing-item deadline forwarding and the 2x retry.
    The render-smoke fixture only gained the protocol's retry-attempt parameter.
 
-### Focused validation
+### Focused build-only validation, 2026-09-14
 
 All commands ran from `/Users/erik/Custom-Coding/holy-ghostty`.
 
@@ -125,24 +125,77 @@ xcodebuild build-for-testing -project macos/Ghostty.xcodeproj -scheme Ghostty -c
 | `macos/Tests/HolyGhostty/HolyMannaBoardTests.swift` | `97a3e47c4df5fd354ceb26695123ac5e5434267a968da4d3ad7ef2fd430f6655` |
 | `macos/Tests/HolyGhostty/HolyMannaBoardRenderSmokeTests.swift` | `f6aebbf9cf5334dcdc078416a8b409cbffd7f8eed22935b485dc454b74d5342f` |
 
-### Needed next: coordinated acceptance
+### Coordinated acceptance complete, 2026-09-15
 
-Coord dependency: `mn-0a4d6c-live-acceptance`. This builder has not received an
-executed test or live acceptance receipt.
+Accepted implementation: `8fbf2b4011048ceb5d8e075d5760080cce24e791`.
+The four source/test hashes above still match both that commit and the current
+files. No implementation changes were needed during closure.
 
-1. The coordinator runs `HolyMannaBoardTests`, `HolyMannaBoardActionsTests`, and
-   `HolyMannaBoardPresentationTests` through the canonical Xcode test path in the
-   agreed launch window. Capture invocation counts, failures, source/commit pin,
-   and the xcresult. Do not execute render-smoke tests as part of this request.
-2. Through the supported candidate, open Board after a burst of real new items.
-   Verify summaries appear or retain the quiet pending affordance, and no
-   deadline message occupies AI SUMMARY. Confirm normal selection and usage
-   refusal behavior. Do not mutate the database/cache or spawn artificial live
-   workers to manufacture a pass.
-3. Record the actual receipts here, reseal, and only then mark Manna done.
+The coordinator's executed command, preserved from the log, was:
 
-Lessons logged: 5 (new) | Decisions logged: 0 (new).
+```sh
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath .dev/DerivedData -resultBundlePath .dev/mn-0a4d6c-executed/suites.xcresult -only-testing:GhosttyTests/HolyMannaBoardTests -only-testing:GhosttyTests/HolyMannaBoardActionsTests -only-testing:GhosttyTests/HolyMannaBoardPresentationTests -only-testing:GhosttyTests/HolyMannaBoardRenderSmokeTests test CODE_SIGNING_ALLOWED=NO
+```
 
-**TL;DR (12th grade):** The retry fix is implemented and builds successfully.
-Slow items stay pending while other summaries can finish. Tests were compiled
-but not run; executed and live acceptance must pass before this issue closes.
+The actual console record contains **144 passed / 2 failed invocations**:
+
+| Suite | Passed invocations | Failed invocations |
+| --- | ---: | ---: |
+| `HolyMannaBoardTests` | 60 | 0 |
+| `HolyMannaBoardActionsTests` | 54 | 2 |
+| `HolyMannaBoardPresentationTests` | 28 | 0 |
+| `HolyMannaBoardRenderSmokeTests` | 2 | 0 |
+
+The coordinator also executed the render-smoke suite; its two passes are included
+in this aggregate. This closure turn only inspected existing receipts.
+
+Every digest-lane regression passed, including deadline retry with pending UI,
+content-hash parking, changed-content retry, split-batch salvage and caching,
+refusal messages, usage protection during backoff, and unchanged-estate retry.
+These are executed results, separate from the earlier compile-only receipt.
+
+Both failures name
+`HolyMannaBoardActionsTests/dispatchNoteSurvivesTmuxDetachDiscoveryAndReadoption()`.
+The xcresult identifies the failure as `created.exitCode` equal to 1 with
+`Holy host state mirror failed: CalledProcessError`. Its summary aggregates by
+test identity (62 passed / 1 failed, 63 total), while the console above counts
+individual invocations, including dynamic parameters and repeated test hosts.
+The overall Xcode run remains `TEST FAILED`; it is not relabeled green.
+
+The coordinator reproduced the same failure at parent commit
+`7f672ca526f953fb9c2320612f187012fa978e92` with the digest commit's four files
+reverted. `.dev/mn-0a4d6c-parent.log` records the same test failing on both hosts.
+Canonical item `mn-cf5f48`, filed in commit `6d80481bc`, owns this unrelated
+host-state-mirror failure and its discriminator evidence. It remains open.
+
+Erik explicitly confirmed in the 2026-09-15 closure request that the build was
+installed and the live Board burst check passed: summaries or pending state,
+with no deadline text rendered as content. This newer confirmation completes
+the live gate that the coordinator's earlier `2026-09-15T19:28:23Z` drop still
+listed as pending. The builder did not repeat the live check.
+
+#### Acceptance receipts
+
+- `.dev/mn-0a4d6c-executed.log`, SHA-256
+  `6684a28f454731096d4de9aac91a8ccf80bfdb777595d94a10052b5c3f22df83`.
+- `.dev/mn-0a4d6c-parent.log`, SHA-256
+  `9cf45d79a18a1d15e24bea0823f9179bf13c603421f50a3f4f5137206e8ea8b2`.
+- `.dev/mn-0a4d6c-executed/suites.xcresult`.
+- Coord drop from `session-17a022e17710`, addressed to
+  `codex-01a0a306bd467040`, pointing to the executed log.
+- `.dev/mn-0a4d6c/acceptance-closure-receipt.json` records the parsed console
+  counts, xcresult summary, final source hashes, and live confirmation source.
+
+All required acceptance for `mn-0a4d6c` is complete. The user explicitly
+instructed resealing this handoff and running `agent-do manna done mn-0a4d6c`.
+The separate `mn-cf5f48` failure is not a remaining blocker for this item.
+
+No tests, app launches, installs, screenshots, live session spawns, pushes, or
+pull requests were performed during this closure turn.
+
+Implementation lane: 5 lessons logged. Closure: 1 additional lesson logged.
+Lessons logged: 1 (new) | Decisions logged: 0 (new).
+
+**TL;DR (12th grade):** The digest fix passed its executed tests and Erik's live
+Board check. The two failures belong to a separate tmux issue that also fails
+without this fix. All acceptance required to close this item is complete.
