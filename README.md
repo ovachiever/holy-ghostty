@@ -22,420 +22,158 @@
   <img src="./docs/holy-ghostty/assets/holy-ghostty-app.jpg" alt="Holy Ghostty workspace" width="920">
 </p>
 
-## Current State
+Holy Ghostty runs durable coding sessions and puts project work and conversation
+history beside the terminal. Ghostty provides terminal rendering. The native
+macOS workspace manages sessions, Board, Archive, and GitHub attention.
 
-Holy Ghostty is a product fork of Ghostty. The terminal core remains Ghostty. The Holy layer adds a native macOS workspace for launching, attaching, supervising, archiving, and restoring terminal-backed coding sessions.
+## Workspace
 
-Current Holy Ghostty release: `0.50`.
+| Surface | Capability |
+|---|---|
+| Terminal | Local and SSH/tmux sessions for Shell, Claude, Codex, and OpenCode, with single, side-by-side, stacked, and quad layouts. |
+| Board | Manna estate and project ledgers, human asks, peer activity, confirmed actions, cited board answers, and Claude or Codex worker dispatch. |
+| Archive | Five-provider history indexing, transcripts, parent and child sessions, tags, notes, hybrid search, research chat, and remote archive browsing. |
+| Inbox | GitHub attention for all repositories or the selected session's repository. |
 
-The app currently supports:
+`New` starts a tmux session from the default launch profile. `Hosts` manages SSH
+hosts and discovers existing sessions. `Clear` detaches the roster while tmux
+keeps running. `Sync` reconciles known sessions with the discovered inventory.
+`Archive` and `Board` fill the terminal area; `‹ terminal` returns to live panes.
+`Command-P` opens the GitHub dock.
 
-- Embedded live Ghostty surfaces.
-- Shell, Claude, Codex, and OpenCode session runtimes.
-- Local shell sessions.
-- Local and remote SSH sessions attached through tmux.
-- Remote host records with SSH config and Tailscale import.
-- Remote tmux discovery and attach.
-- Launch profiles for local and SSH/tmux session starts, including a persisted default target for `New`.
-- Durable SQLite workspace persistence with migrations, WAL, and event history.
-- Session archive, search, relaunch, and recovery context.
-- Session Restore: per-shutdown restore groups after any tmux server death, resuming the exact agent conversation for Claude, Codex, and OpenCode sessions.
-- GitHub attention dock (`⌘P`) with focused-repository and all-repositories tabs.
-- Per-session notes, shown in the roster and in Session Restore.
-- Four roster layouts: Classic, Calm, Triage, and Focus.
-- Launch templates and external task records.
-- Authoritative six-state agent indicators driven by structured lifecycle hooks for Claude Code, Codex, and OpenCode, with a metadata-only wire contract.
-- A watcher eye marking sessions armed with a scheduled `/loop` wakeup, with the fire time in the tooltip.
-- Deterministic agent notifications (replied, needs you, failed) with restart-safe deduplication.
-- Runtime telemetry inferred from terminal state, shell integration, and runtime output.
-- Budget telemetry and budget enforcement policy fields.
-- Git snapshot tracking for local and remote sessions.
-- Worktree and branch coordination checks for non-shell agent sessions.
-- Runtime-grouped left roster sorted by project/folder context.
-- Holy-owned pane layouts: single session, side-by-side split, stacked split, and quad.
-- Detach-all, per-session detach, and tmux kill controls for session cleanup.
-- URL scheme, shell helper, and AppleScript session spawn entrypoints.
+Manna IDs highlighted in any pane Command-click through to their board item.
+Holding Command over the roster turns session indicators into immediate kill
+controls.
 
-## User Interface
+The roster sorts by runtime, attention, or pinned Today sessions. Session notes,
+launch profiles, pane layouts, and workspace state persist locally. Explicit
+launch runtimes control grouping. Git state and worktree checks identify shared
+checkouts, branch drift, and changed-file overlap across distinct worktrees.
 
-Standard mode defaults to two working regions:
+## Shared Session State
 
-- Left roster: active sessions grouped by runtime (`Claude`, `Codex`, `OpenCode`, `Shell`) and sorted by project/folder context.
-- Center surface: selected live Ghostty terminal surface.
-- Optional inspector: git risk, coordination, verification, actions, and launch details for the selected session.
+Enable **Authoritative Agent Indicators** from the app menu to install lifecycle
+hooks for Claude Code, Codex, and OpenCode. The hooks publish metadata without
+prompt or response text. Codex requires handler approval through `/hooks`.
 
-Roster rows are intentionally dense. Each row leads with the project or parent folder name, uses a single activity orb on the left, and only shows compact risk icons when there is something to notice.
+The roster distinguishes working, needs-you, unread, used-today, inactive, and
+sleeping sessions. Seen acknowledgements and prompt recency belong to the tmux
+host, so attached Macs share the same state. A host-side journal restores missing
+registers after reboot. Selecting a session in a background window does not mark
+it read. Questions and permissions remain until the provider resolves them.
 
-Left rail controls are scoped to the tmux roster.
+Session Restore groups interrupted sessions by shutdown. Captured conversation
+identity selects the provider session. The native archive resolves fallback
+candidates, with a picker for ambiguity and an explicit shell-only option when
+history is absent. Claude, Codex, and OpenCode resume through provider-specific
+commands.
 
-Session roster controls:
+## Board and Archive
 
-- `New`: start a tmux-backed session from the selected default launch profile.
-- `Clear`: detach all visible sessions from the workspace roster without stopping tmux.
-- `Sync`: refresh and reconnect tmux sessions in the roster.
-- `Hosts`: open local and remote tmux hosts.
-- `More`: launch profiles, templates, hosts, history, duplicate, detach, and kill from roster.
+Board requires `agent-do` and a Manna board on the selected host. It reads
+`manna state --json` and `manna estate --json`. Changes require confirmation.
+Type to filter the board; press Enter to ask a question. Answers link to cited
+items. `Claim & build` opens a confirmed worker with the item's sealed handoff.
 
-Holy Ghostty creates generated launch profiles for `Local Mac` and configured SSH hosts. The default `New` profile is stored in local SQLite state, so personal choices such as defaulting `New` to a remote workstation never need to be committed to the public repo.
+Archive reads Claude Code, Codex, Droid, Cursor, and OpenCode history into
+`holy-archive.sqlite3`. Keyword search works locally without model credentials.
+Semantic search requires a configured embedding provider and generated vectors.
+Research chat uses an OpenAI API key available to the app process. Board model
+requests use the configured Claude CLI or OpenAI route.
 
-Layout controls:
+Configured SSH hosts contribute their own indexed archives. Remote rows show the
+source host and freshness. Tags and notes are edited on the owning host.
+Claude, Codex, and OpenCode conversations resume into that host's roster.
+Droid and Cursor history is browsable.
 
-- `Single`, `Split Right`, `Split Down`, and `Quad` live at the bottom of the left rail.
-- Layout changes are Holy visual layouts over durable tmux sessions, not tmux panes.
-- Sessions shown in a split layout get `Left` / `Right`, `Top` / `Bottom`, or quadrant labels in the roster.
-- A dormant Diff implementation is preserved in code for a later explicit agent/worktree comparison mode; it is not exposed in the primary Level 1 chrome.
-- `Tasks` and `Inspect` are hidden from the standard workspace.
+See the [guide](docs/holy-ghostty/README.md) for setup, search syntax, model
+configuration, and session controls.
 
-The selected session's `...` menu separates cleanup actions:
+## Usage Guard
 
-- `Detach From Roster`: remove Holy's attachment while leaving the tmux session alive.
-- `Kill from Roster`: attempt to kill the backing tmux session and always remove Holy's roster attachment.
+Enable **Claude Usage Guard…** from the app menu. Account usage appears beside
+the clock in the tmux status bar. **Claude Usage…** in the roster menu opens
+reset times, projected caps, account readings, refresh, and manual wrap-up.
 
-Session cleanup shortcuts:
+The defaults notify Claude at 75%, block new worker spawns at 90%, and request a
+checkpoint and pause at 95% or within 20 minutes of the projected cap. Existing
+work continues at the 90% tier. Per-session readings take precedence for their
+account windows. Stale readings carry an age marker.
 
-- `Command-W`: detach the selected session from the Holy workspace.
-- `Option-Q`: kill the selected tmux session when the selected session has a tmux target.
-
-Window behavior:
-
-- The standard workspace removes empty native toolbar chrome; only the left rail reserves traffic-light clearance.
-- The terminal surface starts at the top edge to maximize live terminal space.
-- Holy defaults add top terminal padding so the first prompt row clears macOS window controls without adding a separate app bar.
-- The bundled Holy background image stretches to the live terminal surface size.
-- App content does not drag the window.
-- The left roster width is persisted and can be resized below its default.
-- The inspector is collapsed by default to reserve space for the terminal.
-
-## Agent Indicators
-
-Session status has two layers: authoritative indicators driven by structured
-lifecycle hooks, and heuristic phase telemetry inferred from terminal output.
-
-The authoritative layer is the roster's vocabulary. Claude Code, Codex, and
-OpenCode publish lifecycle facts (working, needs-user, finished, failed, idle,
-ended) through Holy-installed hooks into a metadata-only wire envelope; the
-envelope never contains prompts, responses, or terminal text. Holy derives
-exactly six mutually exclusive states from those facts plus seen and prompt
-recency stored on the owning tmux session. Every attached Mac reads the same
-host truth; the local database is a rebuildable cache:
-
-- Spinner: the agent is working, backed by a committed lifecycle event within
-  its lease, extended past the lease only while the agent process is alive and
-  visibly producing output, and dropped within a second of the process dying.
-- Question mark: the agent needs you (a committed question, permission
-  request, or failure).
-- Green dot: an unread agent reply, cleared everywhere only by genuinely
-  focusing the session on any attached Holy.
-- Blue dot: you prompted this session within 24 hours. Blue is earned by the
-  operator alone; agent activity never fakes it.
-- Grey dot: no prompt from you in 24 hours, but the session saw activity on
-  some axis within 48.
-- Sleeping Z: everything quiet for 48 hours or more.
-
-A separate static watcher eye marks sessions armed with a scheduled `/loop`
-wakeup, with the next fire time in the tooltip. Motion in the roster always
-means compute burning; the eye is a promise to wake, so it does not move.
-
-Hook installation is explicit and consent-gated behind the
-`Enable Authoritative Agent Indicators` menu action. Holy merges only
-exact-owned handlers, leaves unrelated configuration intact, and fails closed
-on anything it does not own. Codex hook trust remains a manual `/hooks`
-approval, and a foreign Codex notifier that chains Holy's adapter is accepted
-as a delegation rather than blocked.
-
-Finished events, real user prompts, and seen acknowledgements survive local
-Clear plus Attach All because their bounded metadata lives on the tmux server
-that owns the session. Re-attaching from another Mac reconstructs the same
-dots and ages without treating the new local row as recent activity. Mark
-Unread writes an explicit shared tombstone; questions and permissions still
-remain until the agent publishes a resolving event.
-
-The heuristic layer supplements this with phase labels (`Ready`, `Working`,
-`Needs Input`, `Complete`, `Issue`) inferred from Ghostty surface state,
-OSC 133 shell integration, visible output, tmux metadata, and SSH git probes.
-It feeds the bottom status chrome and stall detection; it never decides the
-roster's six-state vocabulary. Shared worktree, shared branch, branch drift,
-and overlapping-file risks use quiet inline icons beside the orb. Two
-sessions attached to the same checkout report their shared uncommitted file
-count (`N uncommitted files in the shared checkout`) instead of claiming
-cross-session overlap.
-
-## Claude Usage Guard
-
-A claude.ai Max subscription has three windows that each end work when they
-cap: the 5-hour session window, the weekly all-models window, and the weekly
-per-model window (Fable). A capped window kills subagents and teammates
-outright; only the main session waits for the reset, and everything a worker
-had in flight is lost. The Claude Usage Guard watches all three and tells
-every running Claude session to reach a checkpoint, then pause, before the
-cap lands.
-
-Enable it with `Enable Claude Usage Guard…` in the app menu, beside `Enable
-Claude Model Indicator…`. Holy installs two generated helpers it owns,
-`claude-usage-probe.py` and `claude-usage-guard.py`, in
-`~/Library/Application Support/Holy Ghostty/`, and adds Holy-owned hook
-entries on `PreToolUse` (all tools) and `UserPromptSubmit` in
-`~/.claude/settings.json`. Other hooks and settings are untouched; disabling
-removes only Holy's own entries and helpers and leaves the `usage/` history
-on disk.
-
-The probe reads the signed-in account's OAuth token from the macOS keychain
-item `Claude Code-credentials` over a pipe (never on a command line), asks
-`https://api.anthropic.com/api/oauth/usage` for the live windows, and writes
-a normalized snapshot: `usage/latest.json`, a `usage/history.jsonl` pruned
-to one weekly window, and a last-known `usage/accounts/<email>.json` per
-account. Each window carries its burn rate (percent per hour over the
-trailing tenth of the window) and a projected time-to-cap. Holy runs the
-probe once a minute and never touches the network itself. With the Claude
-Model Indicator enabled, the status line also records each session's own
-5-hour and weekly numbers to `usage/sessions/<session_id>.json` and shows
-them as `· 5h N% · wk N%` in the pane's own status row — the bar itself
-carries no model or effort (the green bar
-keeps usage only beside the clock); that reading stays correct for a
-session still running under a previous account after `/login` elsewhere,
-and the guard prefers it.
-
-Every window sits at one of four levels — normal, warn, critical, capped —
-decided by one evaluator in Holy and mirrored exactly in the hook:
-
-- Warn at 75%, when the projected cap is within 40 minutes and the window
-  is already past half the warn threshold, or when Anthropic reports a
-  non-normal severity. Sessions are told once, then reminded every half
-  lead window: checkpoint now, no new subagents or long tasks.
-- Critical at 90%, or when the projected cap is within 20 minutes. Every
-  tool call carries the instruction to stop at a safe point, commit or
-  write state, reply with a note beginning `PAUSED (usage cap):`, and end
-  the turn. The `Agent`, `Task`, and `Workflow` tools are denied so no
-  subagent is spawned into a dying window.
-- Capped at 100%, handled like critical.
-
-The hook never blocks by exit code, and user prompts are informed, never
-blocked. If the snapshot goes stale because Holy is not running, the hook
-runs the probe itself in the background, so the guard works without the
-app. Thresholds and cadence are
-`defaults write org.holyghostty.app holy.claudeUsage.warnPercent|criticalPercent|leadMinutes|pollSeconds`;
-Holy writes them to `usage/policy.json` so the hook applies the same numbers.
-
-The gauge also reads Codex: the probe asks `codex app-server` (the
-JSON-RPC `account/rateLimits/read` method — no tokens spent, auth handled
-by codex itself) for the account's windows and every per-model limit the
-endpoint reports, so a future top model appears without a code change.
-The bar gains a `⌁ codex wk 8%` group, with per-model chips shown while
-they carry usage; if the RPC fails, the newest session rollout file's
-recorded snapshot serves as last-known. Codex numbers never trigger the
-wrap-up guard — that hook speaks only to Claude sessions.
-
-The numbers live in the green tmux bar itself, on the right beside the
-clock: a `⌁ claude 5h 30% · wk 41% · Fable 79%` segment,
-identical in every session because it is machine-global, published by the
-probe as the server-wide `@holy_usage_v1` option. A calm window stays plain
-black-on-green; a warn window becomes a yellow chip, critical or capped a
-red one; an active wrap-up shows `⏸ WRAP UP` and a failed probe a
-`(stale Nm)` tag. `Claude Usage…` in the roster's `…` menu opens a
-popover with the account and tier, each window's reset time, burn rate, and
-ETA with threshold ticks, the sessions reporting their own windows, the
-last-known numbers for every account Holy has seen (only the signed-in one
-is live), `Refresh`, and `Wrap up all sessions`. Wrap-up treats every
-session as critical on its next tool call for one lead window, or until the
-keychain account changes; `Cancel wrap-up` withdraws it. macOS notifications
-fire on each window's first upward level crossing (replacing, not stacking)
-and say to `/login` on an account with headroom; critical and capped also
-bounce the Dock.
-
-Known limits: only the signed-in account is polled live; the per-model
-(Fable) weekly window exists only in the probe's machine-wide snapshot, not
-in per-session readings; the endpoint is undocumented, matched to the
-observed behavior of Claude Code's own `/usage` screen; and a session that
-just ran `/login` may receive one stale warning before its own reading
-refreshes.
-
-## Session Restore
-
-After any tmux server death — a crash, a reboot, or a deliberate kill — a
-workspace banner, `View ▸ Restore Sessions…`, and a callout in Session
-History open Session Restore. Interrupted sessions are grouped per shutdown,
-each group washed in a recency hue, and restorable per shutdown or per row.
-
-Restore resumes the exact conversation, not just a shell. Conversations are
-resolved through one `agent-sessions resolve-batch` call (with a scoped
-reindex), and assignment is globally unique: no two sessions can receive the
-same conversation. Each row resumes with the exact provider argv —
-`claude --resume`, `codex resume`, or `opencode --session` — with the
-executable pinned to an absolute path whenever discovery came from fallback
-directories such as per-version nvm bins. An ambiguous match offers a
-candidate picker; a session with no recoverable history is offered only as a
-labeled shell-only recreate. Machine-titled helper shells are collapsed
-inside their group, and rows carry the session's note. The restored identity
-is the argv itself; nothing re-resolves after restore.
-
-## GitHub Attention Dock
-
-`⌘P` or `View ▸ Inbox Panel` opens a GitHub-only right dock. The focused tab
-shows pull-request attention for the selected session's owned repository; the
-All tab shows every repository. Needs-review items lead, maintainer sweeps
-follow, and bot authors collapse into per-repository digests. Rows clear when
-the next GitHub sweep says the underlying condition cleared, and the unread
-badge refreshes every five minutes while the dock is hidden. Alerts continue
-through native notifications and retain delivery history in SQLite.
+Codex contributes rate-limit, per-model, and reset-credit readings through
+`codex app-server`. These are usage gauges; the installed guard hooks act on
+Claude sessions. Provider limits still determine when requests are accepted.
 
 ## Requirements
 
 - macOS 15 or newer.
-- Xcode 26 or newer.
-- Xcode Metal Toolchain component:
+- Xcode 26 or newer with the Metal Toolchain component.
+- Zig 0.15.2 for the Ghostty core.
+- tmux and the selected runtime executable on each session host.
+- SSH access and Python 3 on remote hosts for metadata and archive queries.
+- `agent-do` on hosts used for Board; authenticated GitHub access for the Inbox.
+
+Install the Xcode component if needed:
 
 ```bash
 xcodebuild -downloadComponent MetalToolchain
 ```
 
-- Zig 0.15.2.
+## Build and Install
 
-Zig minor versions are not interchangeable for this project.
-
-## Build
-
-Build, verify, install, and launch the supported app:
+The supported installer builds and verifies the core and app before replacing
+the installed bundle:
 
 ```bash
 scripts/install-holy-ghostty.sh
 open -a "Holy Ghostty"
 ```
 
-The installer builds the complete core payload (`GhosttyKit.xcframework` plus
-its generated resources) with Zig 0.15.2 and `ReleaseFast`, fingerprints its
-inputs and outputs, builds the Swift app with `ReleaseLocal`, and refuses to
-replace the installed app unless the finished executable reports that exact
-verified core. The prior app is staged as a rollback until the replacement is
-signed, registered, and reverified. It also checks the resolved ReleaseLocal
-settings (`-O`, whole-module compilation, and assertions off) before building.
+It builds the core with `ReleaseFast` and the Swift app with `ReleaseLocal`.
+Source and payload fingerprints bind the framework and generated resources to
+the executable. Installation retains the previous app for rollback until
+signing, registration, and final verification pass.
 
-If Zig 0.15.2 cannot link against the installed macOS SDK, run the repository's
-**Build Holy macOS core** workflow or download its newest
-`HolyGhostty-Core-ReleaseFast-<commit>` artifact for the same core inputs. Then
-import the zip contained in that download and rerun the installer:
-
-```bash
-scripts/build-holy-ghostty-core.sh import /path/to/HolyGhostty-Core-ReleaseFast.zip
-scripts/install-holy-ghostty.sh
-```
-
-The artifact contains the framework, generated resources, and the same build
-receipt. Different Swift-only commits are safe, while an incomplete, Debug,
-wrong-source, or modified payload is rejected before the installed app is
-touched. Main is rebuilt monthly so the 90-day Actions artifact does not expire
-during normal repository operation.
-
-For a build without installation, build the verified core first and then the
-app:
+For a build without installation:
 
 ```bash
 scripts/build-holy-ghostty-core.sh build
 xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal SYMROOT=build build
 ```
 
-Do not substitute a bare `zig build -Demit-xcframework`: Zig defaults that
-command to Debug, and an Xcode-only build does not rebuild the core.
-
-Installed app path:
-
-```text
-/Applications/Holy Ghostty.app
-```
-
-Build only the shared Ghostty core:
+The **Build Holy macOS core** workflow produces a verified core archive when the
+local Zig toolchain cannot link the installed SDK. Import its contained zip:
 
 ```bash
-scripts/build-holy-ghostty-core.sh build
+scripts/build-holy-ghostty-core.sh import /path/to/HolyGhostty-Core-ReleaseFast.zip
+scripts/install-holy-ghostty.sh
 ```
 
-## Studio Host Guards
+The importer checks current core inputs and all payload hashes. A bare
+`zig build -Demit-xcframework` does not produce the supported release payload.
+The installed bundle is `/Applications/Holy Ghostty.app`.
 
-The Mac Studio has an explicit host-side guard install for SSH capacity and
-kernel-zone leak receipts. This is separate from the application installer:
+## Data and Automation
 
-```bash
-scripts/test-holy-studio-guards.sh
-sudo scripts/install-holy-studio-guards.sh
-scripts/holy-kernel-zone-watch.sh report
-```
+Workspace and Archive databases live under
+`~/Library/Application Support/org.holyghostty.app/HolyGhostty/`.
+Debug builds use the `org.holyghostty.app.debug` container.
+Claude bridge helpers and usage history live under
+`~/Library/Application Support/Holy Ghostty/`.
+Provider history stays in each provider's own directory.
 
-The installer adds `MaxSessions 110` through the stock
-`/etc/ssh/sshd_config.d/` include, then proves the effective value with
-`sshd -T`. It hash-checks the main SSH configuration and Apple's sealed
-`ssh.plist` before and after the install, and does not restart active SSH
-connections.
+Sessions can also be created through `holy-ghostty://spawn`, AppleScript `spawn`,
+and `scripts/holy-spawn-session.sh`.
 
-The root launch daemon samples every `data.kalloc.*` size class once an hour.
-Each TSV row includes the boot identity, current element count, derived bytes,
-concurrent `ssh`/`sshd`/`tmux` counts, and the visible launchd SSH counters.
-The report command isolates the latest boot and calculates the
-`data.kalloc.1024` growth rate. It withholds an hourly rate until samples span
-at least 30 minutes, so startup jitter cannot masquerade as a leak. It does not
-tune kernel limits.
+Optional host administration tools are documented in the
+[engineering spec](docs/holy-ghostty/engineering-spec.md#host-administration).
 
-## Data Locations
+## Repository
 
-Local app bundle identifier:
+- `src/` contains the Ghostty terminal core.
+- `macos/Sources/HolyGhostty/` contains the native workspace.
+- `docs/holy-ghostty/` contains the product guide and engineering contracts.
+- `scripts/` contains build, installation, and session helpers.
 
-```text
-org.holyghostty.app
-```
-
-Workspace database:
-
-```text
-~/Library/Application Support/org.holyghostty.app.debug/HolyGhostty/holy-ghostty.sqlite3
-```
-
-Claude Usage Guard helpers and usage snapshots (the helpers exist only while
-the guard is enabled; `usage/` persists after disable):
-
-```text
-~/Library/Application Support/Holy Ghostty/claude-usage-probe.py
-~/Library/Application Support/Holy Ghostty/claude-usage-guard.py
-~/Library/Application Support/Holy Ghostty/usage/
-```
-
-User Claude state is outside the repo and is not managed by Holy Ghostty:
-
-```text
-~/.claude
-```
-
-Mac Studio host-guard receipts:
-
-```text
-/Library/Logs/Holy Ghostty/kernel-zone-watch/samples.tsv
-/Library/Logs/Holy Ghostty/kernel-zone-watch/errors.log
-/Library/Logs/Holy Ghostty/kernel-zone-watch/install-receipt.txt
-```
-
-## Repository Layout
-
-- `src/`: Ghostty Zig terminal core.
-- `macos/`: macOS application target.
-- `macos/Sources/HolyGhostty/`: Holy Ghostty Swift app layer.
-- `docs/holy-ghostty/`: Holy Ghostty documentation.
-- `scripts/`: local build, install, and spawn helpers.
-- `pkg/`: vendored build dependencies used by Ghostty.
-
-## Public Scope
-
-This repository is source-release ready. GitHub releases may include an ad-hoc signed macOS app bundle zip. It is not notarized or distributed through a packaged installer channel.
-
-Known gaps:
-
-- Phase telemetry (the bottom status chrome) is heuristic; the roster's
-  six-state indicators are hook-driven and authoritative.
-- Remote orchestration is tmux/SSH based.
-- Broadcast input and dependency-chain automation are not implemented.
-- External task status writeback is not implemented.
-- User-facing preferences are limited.
-- Developer ID signing, notarization, packaged installer, and automated release workflow are not configured.
-
-## Upstream
-
-Holy Ghostty depends on Ghostty.
-
-- Upstream repository: <https://github.com/ghostty-org/ghostty>
-- Upstream documentation: <https://ghostty.org/docs>
+Holy Ghostty is a macOS fork of [Ghostty](https://github.com/ghostty-org/ghostty).
+Ghostty's terminal documentation is at [ghostty.org/docs](https://ghostty.org/docs).

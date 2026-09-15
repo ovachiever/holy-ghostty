@@ -4,86 +4,107 @@ All notable Holy Ghostty changes are recorded in this file.
 
 ## Unreleased
 
-The cap no longer kills the swarm: the Claude Usage Guard watches the three
-claude.ai Max windows and tells every running session to checkpoint, then
-pause, before one of them lands.
+The workspace brings live terminals, project boards, and conversation archives onto one native surface, with shared session identity and host-owned attention state.
 
-### Fixed
-
-- The left-rail footer no longer clips when the roster is narrow: the new
-  attention bell, board toggle, and inbox tray plus a fifth layout button
-  had outgrown the row, and an oversized row clips both edges ("Ready"
-  losing its head). The footer now degrades explicitly — full row, then
-  without the phase text, then scrollable — and the phase text sizes to
-  its content instead of reserving a fixed 70 points.
-- The footer attention bell is gone (Erik's ruling: it duplicated the
-  inbox). The inbox tray carries the notification badge again, in both
-  the expanded footer and the collapsed rail.
+<!-- Headline option: One ledger, two faces: the terminal became the whole surface. -->
 
 ### Added
 
-- Codex usage gauge beside the Claude one: the probe queries
-  `codex app-server` (`account/rateLimits/read`, `account/usage/read`) at
-  zero token cost for the weekly window and every per-model limit —
-  future models appear dynamically — plus plan, spend control, reset
-  credits, and lifetime stats; the green bar gains a `⌁ codex` chip
-  group, the newest session rollout file serves as last-known when the
-  RPC fails, and codex windows never trigger the Claude wrap-up guard.
-  Banked rate-limit reset credits ride the codex group as a dim ↻N
-  counter.
-
-- Claude Usage Guard (`Enable Claude Usage Guard…`, beside the Claude Model
-  Indicator): a Holy-owned probe reads the signed-in account's OAuth token
-  from the keychain over a pipe, polls Anthropic's usage endpoint once a
-  minute, and writes the normalized 5-hour, weekly, and per-model (Fable)
-  windows with burn rate and projected time-to-cap to
-  `~/Library/Application Support/Holy Ghostty/usage/`. Holy itself never
-  touches the network.
-- A Holy-owned hook on `PreToolUse` and `UserPromptSubmit` injects a
-  checkpoint instruction at 75% (once, then every half lead window), and at
-  90% or within 20 minutes of a projected cap tells the session on every
-  tool call to commit, reply `PAUSED (usage cap):`, and end the turn, while
-  denying `Agent`, `Task`, and `Workflow` so no subagent spawns into a dying
-  window. Never blocks by exit code; prompts are informed, never blocked.
-  Thresholds via `defaults write org.holyghostty.app holy.claudeUsage.*`,
-  mirrored to `usage/policy.json`; the Swift evaluator and its Python
-  mirror are tested for parity.
-- Usage in the green tmux bar, beside the clock and machine-global (the
-  bar shows session name and pane title on the left; model and effort
-  appear only in the pane's printed status row): `⌁ claude`
-  plus one chip per window (plain when calm, yellow at warn, red at
-  critical/capped, `⏸ WRAP UP` while a wrap-up stands, `(stale Nm)` when
-  the probe fails), published by the probe as the server-wide
-  `@holy_usage_v1` option. `Claude Usage…` in the roster's `…` menu opens
-  the details sheet: account and tier, reset time, burn rate,
-  and ETA per window with threshold ticks, sessions reporting their own
-  windows, last-known numbers for every account Holy has seen, Refresh, and
-  `Wrap up all sessions`, which treats every session as critical for one
-  lead window or until the keychain account changes. After `/login` to
-  another account, the previous account's snapshot is dropped at once
-  rather than served through a backoff.
-- The Claude Model Indicator status line now records each session's own
-  5-hour and weekly windows to `usage/sessions/<session_id>.json` and shows
-  `· 5h N% · wk N%` in the pane's printed status row (the bar's model
-  label stays model-only); the guard prefers that reading, so a session still
-  running under a previous account after `/login` elsewhere is judged by
-  its own numbers.
-- macOS notifications on each window's first upward level crossing
-  (replacing, not stacking); critical and capped bounce the Dock and say to
-  `/login` on an account with headroom.
-- When Holy is not running, the hook runs the probe itself once the
-  snapshot goes stale, so the guard works without the app. Disabling
-  removes only Holy's hooks and helpers and leaves `usage/` history on disk.
+- Native Board mode fills the terminal area with an estate strip, work ledger,
+  asks, peer activity, claims, needs, and board health. It reads Manna's `state`
+  and `estate` contracts through `agent-do` on the selected local or SSH host.
+- Board actions run the corresponding CLI verbs after confirmation. The search
+  bar filters while typing and answers board questions on Enter, with clickable
+  item citations and the selected model shown beside the answer.
+- `Claim & build` starts a confirmed Claude or Codex worker in the board's
+  repository. The worker receives the sealed handoff and instructions to claim
+  before editing. Unready, claimed, or unsealed items cannot dispatch.
+- Native Archive mode indexes Claude Code, Codex, Droid, Cursor, and OpenCode
+  history into its own SQLite database. It includes parent and child sessions,
+  transcripts, tags, notes, generated titles, keyword and semantic search, and
+  saved research chats with archive tools.
+- Federated Archive browsing combines local history with indexed history from
+  configured SSH hosts. Rows retain host identity, cache age, and read failures.
+  Supported conversations resume through the owning host's managed roster.
+- Harness conversation identity persists independently of lifecycle state and
+  joins restore records to the provider conversation. Claude and Codex hooks
+  capture identity at the source; explicit launch runtimes govern roster groups.
+- Seen acknowledgements, finished events, and user-prompt recency are shared on
+  the session's tmux host. A host-side SQLite journal restores missing registers
+  after reboot without replacing live values. Mark Unread propagates to other
+  viewers; questions and permissions remain until resolved.
+- The SSH transport manager shares two interactive masters and one control
+  master per destination. Admission queues bound surface and control work,
+  reserve lifecycle capacity, and limit concurrent discovery.
+- Claude Usage Guard reads account and per-session windows, reset times, burn
+  rates, and projected caps. Its default tiers notify at 75%, deny new worker
+  spawns at 90%, and request checkpoint-and-pause at 95% or an imminent cap.
+  Manual wrap-up, account changes, stale readings, and HTTP 429 backoff have
+  explicit handling. Hooks continue refreshing while the app is closed.
+- Codex usage readings share the tmux status bar through `codex app-server`
+  rate-limit and usage calls. They include reported per-model limits and banked
+  reset credits, with rollout snapshots as last-known fallback. Codex readings
+  do not activate Claude's hook guard.
+- Optional host administration scripts install an SSH session-capacity setting
+  and collect kernel-zone samples with boot identity and process counts.
+- Manna IDs render in a configurable highlight color in the terminal render
+  pass (`holy-manna-highlight`, `holy-manna-highlight-color`, default manna
+  gold `#FFB86C`). Command-click opens the item in Board mode, resolved
+  estate-wide with the session's own board preferred; dispatch keeps its
+  confirmation sheet.
+- Holding Command over the roster turns each session indicator into an
+  immediate kill control; Command-Delete kills the selected session. Kills
+  route through the transport-aware path and report failures inline.
 
 ### Changed
 
-- The right dock is now GitHub only, with one tab for the focused repository
-  and one for all repositories. The old Manna rows, in-dock alert rows, and
-  dormant `brief holy` renderer are retired. Native notifications still fire,
-  and their delivery history remains in the `alerts` table.
-- Database migration 10 removes the unused `agent_sessions_*_v1` read-model
-  views. Holy owns its archive natively; `agent-sessions` remains the external
-  conversation oracle used by crash restore.
+- Board and Archive replace the terminal area while preserving the session
+  roster. Both use full-width ledgers, resizable columns, and compact detail
+  navigation when the window narrows.
+- Board snapshots appear from cache while refreshing. Content-keyed digests and
+  summaries prewarm in the background and retain their source fields.
+- Crash restore resolves through the native Archive in process. Captured
+  conversation IDs take precedence; fallback candidates receive unique
+  assignments across the restore group, with a picker for ambiguous matches.
+- The right dock contains GitHub attention only. All repositories is the default
+  tab; the project tab follows the selected session's owned repository.
+  Notifications retain their separate SQLite delivery history.
+- The roster offers Classic, Triage, and Focus sorting. Archive, Board, and Inbox
+  sit below session actions; pane controls remain in the footer.
+- The database removes the external index compatibility views. Archive ingest
+  and embedding writes use a separate database and bounded writer transactions.
+- The Board topbar keeps the terminal crumb, host tag, and status labels
+  visible at every window width.
+
+### Fixed
+
+- Clear detaches sessions without dereferencing freed terminal surfaces or
+  closing the workspace through stale callbacks.
+- Codex identity survives later lifecycle events and remains available to
+  reboot recovery. Read and prompt ages reconstruct from the owning host.
+- Agent-state conflicts recover when valid events arrive. Lost finish signals
+  recover from the independent finish register, and process evidence stops stale
+  working indicators.
+- Ledger divider drags resize the adjacent columns and preserve the dropped
+  position. Narrow windows retain reachable controls and detail views.
+- Archive project labels use provider working-directory metadata with explicit
+  fallbacks. Ingest staging keeps partial writes out of visible sessions and
+  yields between batches so indexing does not monopolize the workspace writer.
+- Restored window frames stay on the visible display and resist unintended
+  collapse to the minimum size.
+- SSH control paths fit the Unix socket limit and retain a full host hash.
+  Bounded discovery returns after inherited pipes outlive their parent process.
+  Failures distinguish channel saturation, authentication, connection, and
+  process-launch errors.
+- Shared executable discovery waits for concurrent callers during Board startup.
+- Usage labels are sanitized before tmux format expansion. Percent signs survive
+  status formatting, account changes discard foreign snapshots, and installed
+  Holy-owned helpers refresh when their generated content changes.
+- Read-only database connections survive WAL checkpoints, restoring board
+  digests and every other reader after the companion files are removed.
+- Modifier key releases skip panes outside the window's content area.
+- Dispatched workers exec the runtime as the pane process, so discovery,
+  grouping, and kill targeting see the agent rather than a wrapper shell.
 
 ## 0.50 (2026-08-22)
 

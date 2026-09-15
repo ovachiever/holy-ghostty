@@ -1,50 +1,57 @@
 # Holy Ghostty and agent-sessions Interoperability
 
-Last updated: 2026-09-01
+Holy Ghostty owns its conversation archive and production crash resolver.
+Archive browsing, search, and restore do not require the `agent-sessions`
+executable or its database.
 
-Holy Ghostty uses `agent-sessions` for one narrow boundary: resolving an
-interrupted Holy session to the exact provider conversation that can be
-resumed. Holy owns its roster and archive natively. `agent-sessions` remains
-a standalone CLI and legacy cross-provider index.
+## Provider Boundary
 
-## Crash-Restore Resolution
+`HolyArchiveProviderRegistry` reads Claude Code, Codex, Droid, Cursor, and
+OpenCode history directly. It normalizes sessions, messages, parent-child
+relationships, provider IDs, and project paths into Holy's archive database.
+The source history remains owned by each provider.
 
-The Holy implementation lives in
-`macos/Sources/HolyGhostty/Restore/HolyRestoreResolveClient.swift`.
-`agent-sessions` owns the corresponding `resolve` and `resolve-batch` verbs.
+Archive displays command-style labels such as `agent-sessions list` and
+`agent-sessions search`. These labels describe the view; they do not execute
+an external indexer.
 
-Contract:
+## Restore Contract
 
-- Holy sends the whole restore sheet through one `resolve-batch --json` call.
-- `agent-sessions` performs its own scoped reindex of the relevant harness and
-  project scopes, with a per-scope hold-off so repeated restore attempts do not
-  thrash the index.
-- Runtime names are translated at the boundary. Holy calls them `claude`,
-  `codex`, and `opencode`; the index calls them harnesses.
-- Holy fails closed. A missing executable or verb, subprocess failure,
-  timeout, or undecodable payload leaves rows retryable. It never invents a
-  conversation match.
-- Holy assigns returned candidates globally and uniquely. Two rows cannot
-  receive the same conversation identity.
-- The final resumable identity is the exact argv, such as
-  `claude --resume <id>`, `codex resume <id>`, or
-  `opencode --session <id>`. Nothing re-resolves after launch.
+`HolyWorkspaceStore` supplies `HolyArchiveRestoreResolver` to the restore engine.
+The resolver implements the single and batch resolution protocols in process.
+Single resolution is lookup-only. Batch resolution refreshes stale provider and
+project scopes before looking up candidates.
 
-## Database Boundary
+Captured conversation identity takes precedence over time-based matching.
+Fallback queries carry a working directory, harness, and activity timestamp in
+Unix seconds. Results distinguish exact, ambiguous, absent, and unavailable.
+`HolyRestoreAssignment` assigns candidates uniquely across the restore group.
+An unavailable resolver keeps the row retryable.
 
-Holy's SQLite schema is private to Holy. Migration 10 drops the historical
-`agent_sessions_sessions_v1`, `agent_sessions_resume_targets_v1`,
-`agent_sessions_events_v1`, and `agent_sessions_annotations_v1` views.
-The planned `agent-sessions` provider for those views is retired.
+The resume command builder selects provider-specific arguments from the runtime
+and conversation ID. Claude, Codex, and OpenCode support roster resume.
+Droid and Cursor remain archive providers without a Holy launch runtime.
 
-`agent-sessions` does not read Holy's database, and Holy does not read the
-index's internal files. The supported seam is the versioned CLI and JSON
-contract above.
+`HolyRestoreResolveClient.swift` retains external CLI data types and a process
+client for compatibility. The production workspace injects the native resolver.
 
-## Ownership
+## Database Ownership
 
-- Holy owns active sessions, the native archive, persistence, assignment,
-  restore UI, and final launch argv.
-- `agent-sessions` owns provider-history indexing and candidate resolution.
-- Neither product writes the other's database.
-- Holy does not promise transcript fidelity from preview text or telemetry.
+Holy owns `holy-ghostty.sqlite3` for workspace state and `holy-archive.sqlite3`
+for provider history, search, annotations, and research chats. Both live in
+Holy's application-support container. The standalone `agent-sessions` index
+remains separate. Neither product requires access to the other's database.
+
+## Remote Archives
+
+Federation reads the existing Holy archive on configured SSH hosts through
+Python 3 and SQLite in read-only mode. It preserves the source host and provider
+ID, caches bounded pages, and exposes stale results and host failures.
+It does not execute the standalone `agent-sessions` CLI or reindex remote
+provider history.
+
+Remote resume builds a Holy launch specification for the source host's SSH
+destination and tmux socket. Remote annotations are edited on that host.
+
+See the [guide](README.md#archive) for user controls and the
+[engineering spec](engineering-spec.md#archive) for storage and search details.
