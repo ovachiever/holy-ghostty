@@ -173,8 +173,8 @@ struct HolyMannaBoardTests {
             #"{"items":[{"id":"mn-generated","digest":"Generate one shared line","summary":"Generate the missing explanation once, then keep it in the stable item slot."}]}"#,
             #"{"items":[{"id":"mn-generated","digest":"Regenerate the changed line","summary":"Only this changed item should ask the fast role for new presentation text."}]}"#,
         ])
-        let service = HolyMannaBoardDigestService(databaseURL: databaseURL) { role, prompt, workingDirectory in
-            await completion.complete(role: role, prompt: prompt, workingDirectory: workingDirectory)
+        let service = HolyMannaBoardDigestService(databaseURL: databaseURL) { role, prompt, workingDirectory, timeout in
+            await completion.complete(role: role, prompt: prompt, workingDirectory: workingDirectory, timeout: timeout)
         }
         let context = HolyMannaBoardContext(boardRoot: "/srv/presentation", remoteHost: nil)
         let attached = try HolyMannaBoardFixtures.item(
@@ -206,6 +206,7 @@ struct HolyMannaBoardTests {
         #expect(firstCalls[0].prompt.contains("mn-generated"))
         #expect(!firstCalls[0].prompt.contains("mn-attached"))
         #expect(firstCalls[0].workingDirectory == "/srv/presentation")
+        #expect(firstCalls[0].timeout == 65, "Only the missing item contributes to the batch deadline")
 
         let second = try await service.presentations(
             for: [attached, generated],
@@ -237,10 +238,12 @@ struct HolyMannaBoardTests {
         let changedResult = try await service.presentations(
             for: [changed],
             context: context,
-            allowGeneration: true
+            allowGeneration: true,
+            retryAttempt: 1
         )
         #expect(changedResult.first?.digest == "Regenerate the changed line")
         #expect(await completion.calls.count == 2)
+        #expect(await completion.calls.last?.timeout == 130)
         #expect(
             try database.scalarInt64(
                 "SELECT COUNT(*) FROM board_digest_cache WHERE role = 'fast';"
@@ -398,6 +401,249 @@ struct HolyMannaBoardTests {
         #expect(!store.isDigestLoading)
         #expect(store.digestText == "Warm summary for Native Board")
         #expect(store.presentationDigest(for: try #require(store.selectedItem)) == "Warm Native Board")
+    }
+
+    @Test(arguments: [false, true]) @MainActor
+    func deadlineMissKeepsInspectorPendingUntilRetrySucceeds(networkTimeout: Bool) async throws {
+        let directory = try temporaryDirectory(named: "holy-board-deadline-pending")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let gate = AsyncStream<Void>.makeStream()
+        defer { gate.continuation.finish() }
+        let delays = HolyMannaDelayRecorder()
+        let recorder = HolyMannaDigestRecorder(attemptHandler: { _, _, attempt in
+            if attempt == 0 {
+                if networkTimeout { throw URLError(.timedOut) }
+                throw HolyMannaBoardClientError.timedOut("Holy fast model")
+            }
+        })
+        let (store, warmer) = warmStore(directory: directory, digestService: recorder, retrySleep: { delay in
+            await delays.append(delay)
+            for await _ in gate.stream { break }
+        })
+        store.prepare(context: .init(boardRoot: "/srv/holy-ghostty", remoteHost: "builder@example.com"))
+        for _ in 0 ..< 400 {
+            if await !delays.values.isEmpty { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        #expect(await recorder.callCount == 1)
+        #expect(await delays.values == [5_000_000_000])
+        #expect(store.digestText == nil)
+        #expect(store.digestFailure == nil)
+        #expect(store.isDigestLoading)
+        // Selection churn must not restore a saved deadline message.
+        store.selectItem(nil)
+        store.selectItem("mn-live001")
+        #expect(store.digestFailure == nil)
+        #expect(store.isDigestLoading)
+
+        gate.continuation.finish()
+        await warmer.waitUntilIdle()
+        #expect(await recorder.batches.map(\.retryAttempt) == [0, 1])
+        #expect(store.digestText == "Warm summary for Native Board")
+        #expect(store.digestFailure == nil)
+        #expect(!store.isDigestLoading)
+    }
+
+    @Test(arguments: [false, true]) @MainActor
+    func presentationRefusalsRemainVisibleWithoutRetry(binaryMissing: Bool) async throws {
+        let directory = try temporaryDirectory(named: "holy-board-refusal")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recorder = HolyMannaDigestRecorder(attemptHandler: { _, _, _ in
+            if binaryMissing { throw HolyIntelligenceError.binaryMissing }
+            throw HolyIntelligenceError.usageGuard("account at cap")
+        })
+        let (store, warmer) = warmStore(directory: directory, digestService: recorder)
+        store.prepare(context: .init(boardRoot: "/srv/holy-ghostty", remoteHost: "builder@example.com"))
+        for _ in 0 ..< 400 {
+            if await recorder.callCount > 0 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        await warmer.waitUntilIdle()
+        #expect(await recorder.callCount == 1)
+        #expect(store.digestText == nil)
+        #expect(!store.isDigestLoading)
+        let refusal = binaryMissing ? HolyIntelligenceError.binaryMissing : .usageGuard("account at cap")
+        #expect(store.digestFailure == refusal.localizedDescription)
+    }
+
+    @Test @MainActor func usageGuardShowsWhyUncachedPresentationIsPaused() async throws {
+        let directory = try temporaryDirectory(named: "holy-board-guarded")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recorder = HolyMannaDigestRecorder()
+        let (store, warmer) = warmStore(directory: directory, digestService: recorder, usageLevel: .restrain)
+        store.prepare(context: .init(boardRoot: "/srv/holy-ghostty", remoteHost: "builder@example.com"))
+        for _ in 0 ..< 400 {
+            if await recorder.callCount > 0 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        await warmer.waitUntilIdle()
+        #expect(await recorder.callCount == 1)
+        #expect(await recorder.batches.allSatisfy { !$0.allowGeneration })
+        #expect(store.digestText == nil)
+        #expect(store.digestFailure == HolyIntelligenceError.usageGuard("account at cap").localizedDescription)
+        #expect(!store.isDigestLoading)
+    }
+
+    @Test @MainActor func splitBatchSalvagesAndCachesEveryItemExceptTheSlowOne() async throws {
+        let directory = try temporaryDirectory(named: "holy-board-salvage")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("holy.sqlite3")
+        let database = try HolyDatabase.open(at: databaseURL)
+        try HolyDatabaseMigrator.migrate(database)
+        let completion = HolyMannaSlowCompletionRecorder(slowItemID: "mn-batch000")
+        let service = HolyMannaBoardDigestService(databaseURL: databaseURL) { _, prompt, _, timeout in
+            try await completion.complete(prompt: prompt, timeout: timeout)
+        }
+        let delays = HolyMannaDelayRecorder()
+        let warmer = HolyMannaBoardPrewarmer(
+            client: .init(),
+            digestService: service,
+            pacer: .init(isForeground: { false }, sleep: { _ in }),
+            retrySleep: { await delays.append($0) }
+        )
+        let context = HolyMannaBoardContext(boardRoot: "/srv/focus", remoteHost: nil)
+        let payload = try JSONDecoder().decode(
+            HolyMannaStatePayload.self,
+            from: Data(HolyMannaBoardFixtures.state(itemCount: 13, root: "/srv/focus").utf8)
+        )
+        var resolved: [HolyMannaPresentationResult] = []
+        var failures: [String] = []
+        var pending: [String] = []
+        await warmer.enqueueFocused(payload, context: context, allowGeneration: true, usageGuardReason: nil) { event in
+            switch event {
+            case let .resolved(_, results): resolved.append(contentsOf: results)
+            case let .failed(_, _, message): failures.append(message)
+            case let .pending(_, ids): pending.append(contentsOf: ids)
+            }
+        }
+        await warmer.waitUntilIdle()
+
+        let calls = await completion.batches
+        // The second original batch progresses before the first one's retry.
+        #expect(calls.prefix(3).map(\.count) == [12, 1, 12])
+        let slowCalls = calls.filter { $0.contains("mn-batch000") }
+        #expect(slowCalls.map(\.count) == [12, 12, 6, 3, 2, 1])
+        #expect(await completion.timeouts.prefix(3) == [120, 65, 240])
+        #expect(await delays.values.contains(10_000_000_000))
+        #expect(failures.isEmpty)
+        #expect(pending.contains("mn-batch000"))
+        #expect(resolved.count == 12)
+        #expect(resolved.allSatisfy { $0.itemID != "mn-batch000" && $0.isComplete })
+        #expect(try database.scalarInt64("SELECT COUNT(*) FROM board_digest_cache;") == 12)
+        let cached = try await service.presentations(
+            for: Array(payload.allVisibleItems.prefix(12)), context: context, allowGeneration: false
+        )
+        #expect(cached.filter(\.isComplete).count == 11)
+        #expect(cached.first { $0.itemID == "mn-batch000" }?.summary == nil)
+    }
+
+    @Test(arguments: [false, true]) @MainActor
+    func queuedRefreshCannotResetRetryAllowanceButChangedContentCan(contentChanged: Bool) async throws {
+        let gate = AsyncStream<Void>.makeStream()
+        defer { gate.continuation.finish() }
+        let delays = HolyMannaDelayRecorder()
+        let recorder = HolyMannaDigestRecorder(attemptHandler: { _, _, _ in
+            throw HolyMannaBoardClientError.timedOut("Holy fast model")
+        })
+        let warmer = HolyMannaBoardPrewarmer(
+            client: .init(),
+            digestService: recorder,
+            pacer: .init(isForeground: { false }, sleep: { _ in }),
+            retrySleep: { delay in
+                await delays.append(delay)
+                for await _ in gate.stream { break }
+            }
+        )
+        let context = HolyMannaBoardContext(boardRoot: "/srv/focus", remoteHost: nil)
+        let original = HolyMannaBoardFixtures.state(itemCount: 1, root: "/srv/focus")
+        let payload = try JSONDecoder().decode(HolyMannaStatePayload.self, from: Data(original.utf8))
+        let next = try JSONDecoder().decode(HolyMannaStatePayload.self, from: Data(
+            (contentChanged ? original.replacingOccurrences(of: "Generate complete presentation 0.", with: "New content.") : original).utf8
+        ))
+        let sink: HolyMannaWarmSink = { event in
+            if case .failed = event { Issue.record("A deadline miss must stay pending") }
+        }
+        await warmer.enqueueFocused(payload, context: context, allowGeneration: true, usageGuardReason: nil, sink: sink)
+        for _ in 0 ..< 400 {
+            if await !delays.values.isEmpty { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try #require(await recorder.callCount == 1)
+        await warmer.enqueueFocused(next, context: context, allowGeneration: true, usageGuardReason: nil, sink: sink)
+        gate.continuation.finish()
+        await warmer.waitUntilIdle()
+        let expected = contentChanged ? [0, 1, 0, 1] : [0, 1]
+        #expect(await recorder.batches.map(\.retryAttempt) == expected)
+
+        // Only a new warm cycle gives parked content a fresh bounded attempt.
+        await warmer.enqueueFocused(next, context: context, allowGeneration: true, usageGuardReason: nil, sink: sink)
+        await warmer.waitUntilIdle()
+        #expect(await recorder.batches.map(\.retryAttempt) == expected + [0, 1])
+    }
+
+    @Test @MainActor func usageGuardRefreshStopsGenerationBeforeTheQueuedRetry() async throws {
+        let gate = AsyncStream<Void>.makeStream()
+        defer { gate.continuation.finish() }
+        let delays = HolyMannaDelayRecorder()
+        let recorder = HolyMannaDigestRecorder(attemptHandler: { _, allowGeneration, _ in
+            if allowGeneration { throw HolyMannaBoardClientError.timedOut("Holy fast model") }
+        })
+        let warmer = HolyMannaBoardPrewarmer(
+            client: .init(), digestService: recorder,
+            pacer: .init(isForeground: { false }, sleep: { _ in }),
+            retrySleep: { delay in
+                await delays.append(delay)
+                for await _ in gate.stream { break }
+            }
+        )
+        let context = HolyMannaBoardContext(boardRoot: "/srv/focus", remoteHost: nil)
+        let payload = try JSONDecoder().decode(
+            HolyMannaStatePayload.self,
+            from: Data(HolyMannaBoardFixtures.state(itemCount: 1, root: "/srv/focus").utf8)
+        )
+        var failures: [String] = []
+        let sink: HolyMannaWarmSink = { event in
+            if case let .failed(_, _, message) = event { failures.append(message) }
+        }
+        await warmer.enqueueFocused(payload, context: context, allowGeneration: true, usageGuardReason: nil, sink: sink)
+        for _ in 0 ..< 400 {
+            if await !delays.values.isEmpty { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try #require(await recorder.callCount == 1)
+        await warmer.enqueueFocused(
+            payload, context: context, allowGeneration: false, usageGuardReason: "account at cap", sink: sink
+        )
+        gate.continuation.finish()
+        await warmer.waitUntilIdle()
+        #expect(await recorder.batches.map(\.allowGeneration) == [true, false])
+        #expect(failures == [HolyIntelligenceError.usageGuard("account at cap").localizedDescription])
+    }
+
+    @Test @MainActor func unchangedEstateRetriesAfterDeadlineMissInsteadOfBeingMarkedComplete() async throws {
+        let recorder = HolyMannaDigestRecorder(attemptHandler: { _, _, _ in throw URLError(.networkConnectionLost) })
+        let client = HolyMannaBoardClient { invocation, _ in
+            .init(stdout: HolyMannaBoardFixtures.state(itemCount: 1, root: invocation.currentDirectoryPath!), stderr: "", exitCode: 0)
+        }
+        let warmer = HolyMannaBoardPrewarmer(
+            client: client, digestService: recorder,
+            pacer: .init(isForeground: { false }, sleep: { _ in }), retrySleep: { _ in }
+        )
+        let estate = try JSONDecoder().decode(
+            HolyMannaEstatePayload.self,
+            from: Data(HolyMannaBoardFixtures.estateJSON(otherLatestUpdate: "unchanged").utf8)
+        )
+        for _ in 0 ..< 2 {
+            await warmer.enqueueEstate(
+                estate, baseContext: .init(boardRoot: "/srv/focus", remoteHost: nil), focusedRoot: "/srv/focus",
+                allowGeneration: true, usageGuardReason: nil
+            ) { event in
+                if case .failed = event { Issue.record("Transport failure must remain pending") }
+            }
+            await warmer.waitUntilIdle()
+        }
+        #expect(await recorder.batches.map(\.retryAttempt) == [0, 1, 0, 1])
     }
 
     @Test func databaseMigrationCreatesBoundedDigestCacheSurface() throws {
@@ -598,6 +844,25 @@ struct HolyMannaBoardTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
     }
+
+    @MainActor private func warmStore(
+        directory: URL,
+        digestService: any HolyMannaBoardDigesting,
+        usageLevel: HolyClaudeUsageLevel = .normal,
+        retrySleep: @escaping @Sendable (UInt64) async throws -> Void = { _ in }
+    ) -> (HolyMannaBoardModeStore, HolyMannaBoardPrewarmer) {
+        let client = HolyMannaBoardClient(
+            identityStore: HolyMannaActorIdentityStore(fileURL: directory.appendingPathComponent("actor.json"))
+        ) { _, _ in .init(stdout: HolyMannaBoardFixtures.state, stderr: "", exitCode: 0) }
+        let warmer = HolyMannaBoardPrewarmer(
+            client: client, digestService: digestService,
+            pacer: .init(isForeground: { false }, sleep: { _ in }), retrySleep: retrySleep
+        )
+        let store = HolyMannaBoardModeStore(client: client, prewarmer: warmer, usageAssessmentProvider: {
+            .init(level: usageLevel, decidingBucket: nil, reason: "account at cap")
+        })
+        return (store, warmer)
+    }
 }
 
 private actor HolyMannaInvocationRecorder {
@@ -611,30 +876,39 @@ private actor HolyMannaInvocationRecorder {
 private struct HolyMannaRecordedBatch: Sendable {
     let root: String?
     let count: Int
+    let retryAttempt: Int
+    let allowGeneration: Bool
 }
 
 private actor HolyMannaDigestRecorder: HolyMannaBoardDigesting {
     private(set) var callCount = 0
     private(set) var batches: [HolyMannaRecordedBatch] = []
     private let beforeReturning: @Sendable () async -> Void
+    private let attemptHandler: @Sendable ([HolyMannaBoardItem], Bool, Int) async throws -> Void
 
-    init(beforeReturning: @escaping @Sendable () async -> Void = {}) {
+    init(
+        beforeReturning: @escaping @Sendable () async -> Void = {},
+        attemptHandler: @escaping @Sendable ([HolyMannaBoardItem], Bool, Int) async throws -> Void = { _, _, _ in }
+    ) {
         self.beforeReturning = beforeReturning
+        self.attemptHandler = attemptHandler
     }
 
     func presentations(
         for items: [HolyMannaBoardItem],
         context: HolyMannaBoardContext,
-        allowGeneration: Bool
+        allowGeneration: Bool,
+        retryAttempt: Int
     ) async throws -> [HolyMannaPresentationResult] {
         callCount += 1
-        batches.append(.init(root: context.boardRoot, count: items.count))
+        batches.append(.init(root: context.boardRoot, count: items.count, retryAttempt: retryAttempt, allowGeneration: allowGeneration))
+        try await attemptHandler(items, allowGeneration, retryAttempt)
         await beforeReturning()
         return items.map { item in
             .init(
                 itemID: item.id,
-                digest: item.digest ?? "Warm \(item.titlePlain)",
-                summary: item.summary ?? "Warm summary for \(item.titlePlain)",
+                digest: item.digest ?? (allowGeneration ? "Warm \(item.titlePlain)" : nil),
+                summary: item.summary ?? (allowGeneration ? "Warm summary for \(item.titlePlain)" : nil),
                 contentHash: HolyMannaBoardDigestService.contentHash(for: item),
                 model: "test",
                 wasCached: false
@@ -643,10 +917,32 @@ private actor HolyMannaDigestRecorder: HolyMannaBoardDigesting {
     }
 }
 
+private actor HolyMannaSlowCompletionRecorder {
+    let slowItemID: String
+    private(set) var batches: [[String]] = []
+    private(set) var timeouts: [TimeInterval] = []
+
+    init(slowItemID: String) { self.slowItemID = slowItemID }
+
+    func complete(prompt: String, timeout: TimeInterval) throws -> HolyIntelligenceResponse {
+        let input = try #require(prompt.components(separatedBy: "INPUT_JSON:\n").last)
+        let payload = try #require(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+        let items = try #require(payload["items"] as? [[String: Any]])
+        let ids = try items.map { try #require($0["id"] as? String) }
+        batches.append(ids)
+        timeouts.append(timeout)
+        if ids.contains(slowItemID) { throw HolyMannaBoardClientError.timedOut("Holy fast model") }
+        let reply = ["items": ids.map { ["id": $0, "digest": "A saved digest", "summary": "A saved summary"] }]
+        let data = try JSONSerialization.data(withJSONObject: reply)
+        return .init(text: try #require(String(bytes: data, encoding: .utf8)), model: "test-fast")
+    }
+}
+
 private struct HolyMannaRecordedCompletion: Sendable {
     let role: HolyIntelligenceRole
     let prompt: String
     let workingDirectory: String?
+    let timeout: TimeInterval
 }
 
 private actor HolyMannaCompletionRecorder {
@@ -660,9 +956,10 @@ private actor HolyMannaCompletionRecorder {
     func complete(
         role: HolyIntelligenceRole,
         prompt: String,
-        workingDirectory: String?
+        workingDirectory: String?,
+        timeout: TimeInterval
     ) -> HolyIntelligenceResponse {
-        calls.append(.init(role: role, prompt: prompt, workingDirectory: workingDirectory))
+        calls.append(.init(role: role, prompt: prompt, workingDirectory: workingDirectory, timeout: timeout))
         let text = responses.isEmpty ? #"{"items":[]}"# : responses.removeFirst()
         return .init(text: text, model: "test-fast")
     }

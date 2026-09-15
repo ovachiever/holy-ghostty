@@ -128,7 +128,8 @@ private actor RenderDigestStub: HolyMannaBoardDigesting {
     func presentations(
         for items: [HolyMannaBoardItem],
         context: HolyMannaBoardContext,
-        allowGeneration: Bool
+        allowGeneration: Bool,
+        retryAttempt: Int
     ) async throws -> [HolyMannaPresentationResult] {
         items.map { item in
             .init(

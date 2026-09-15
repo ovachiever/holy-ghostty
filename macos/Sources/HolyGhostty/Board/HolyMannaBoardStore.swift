@@ -991,8 +991,10 @@ final class HolyMannaBoardModeStore: ObservableObject {
     }
 
     private func applyWarmEvent(_ event: HolyMannaWarmEvent) {
+        let eventContext: HolyMannaBoardContext
         switch event {
         case let .resolved(context, results):
+            eventContext = context
             for result in results {
                 digestCache[Self.presentationKey(
                     context: context,
@@ -1001,18 +1003,18 @@ final class HolyMannaBoardModeStore: ObservableObject {
                 )] = result
                 digestFailures[Self.failureKey(context: context, itemID: result.itemID)] = nil
             }
+        case let .pending(context, itemIDs):
+            eventContext = context
+            for itemID in itemIDs {
+                digestFailures[Self.failureKey(context: context, itemID: itemID)] = nil
+            }
         case let .failed(context, itemIDs, message):
+            eventContext = context
             for itemID in itemIDs {
                 digestFailures[Self.failureKey(context: context, itemID: itemID)] = message
             }
         }
-        if case let .resolved(eventContext, _) = event,
-           eventContext == context {
-            loadSelectedDigest()
-        } else if case let .failed(eventContext, itemIDs, _) = event,
-                  eventContext == context,
-                  let selectedItemID,
-                  itemIDs.contains(selectedItemID) {
+        if eventContext == context {
             loadSelectedDigest()
         }
     }
