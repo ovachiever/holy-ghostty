@@ -87,6 +87,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
     @Published var workerModel: String {
         didSet { UserDefaults.standard.set(workerModel, forKey: "holy.board.worker.\(workerRuntime.rawValue).model") }
     }
+    @Published var workerLevel: HolyMannaWorkerLevel = .max
     @Published var pendingDispatch: HolyMannaWorkerDispatch?
     @Published private(set) var isDispatching = false
     @Published private(set) var dispatchNotice: String?
@@ -531,7 +532,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
     func requestWorker(_ item: HolyMannaBoardItem) {
         if let reason = workerRefusal(for: item) { dispatchNotice = reason; return }
         pendingDispatch = .init(item: item, context: context,
-                                profile: .init(runtime: workerRuntime, model: workerModel))
+                                profile: .init(runtime: workerRuntime, model: workerModel, level: workerLevel))
         dispatchNotice = nil
     }
 

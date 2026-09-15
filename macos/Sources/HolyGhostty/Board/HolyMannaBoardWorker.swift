@@ -1,8 +1,40 @@
 import Foundation
 
+enum HolyMannaWorkerLevel: String, CaseIterable, Identifiable {
+    case low, med, high, xhigh, max
+
+    var id: String { rawValue }
+    var effort: String { self == .med ? "medium" : rawValue }
+}
+
 struct HolyMannaWorkerProfile: Equatable {
     var runtime: HolySessionRuntime = .codex
     var model = ""
+    var level: HolyMannaWorkerLevel = .max
+
+    var resolvedModel: String {
+        let override = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !override.isEmpty { return override }
+        switch runtime {
+        case .codex: return "gpt-6-astra"
+        case .claude: return "fable"
+        default: return ""
+        }
+    }
+
+    /// Dispatch-host probes: Codex 0.154.0 help + bundled Astra catalog,
+    /// Claude Code 2.1.272 help (2026-09-15). Full mapping/receipts: mn-d9e12d handoff.
+    /// A model override changes only the model; the selected effort stays explicit.
+    var launchArguments: [String] {
+        switch runtime {
+        case .codex:
+            return ["--model", resolvedModel, "-c", "model_reasoning_effort=\"\(level.effort)\""]
+        case .claude:
+            return ["--model", resolvedModel, "--effort", level.effort]
+        default:
+            return []
+        }
+    }
 }
 
 enum HolyMannaWorkerLaunchError: LocalizedError, Equatable {
@@ -156,7 +188,7 @@ struct HolyMannaWorkerDispatch: Equatable {
     }
 
     var confirmation: String {
-        "Start a new \(profile.runtime.rawValue) worker (\(profile.model.isEmpty ? "runtime default model" : profile.model)) "
+        "Start a new \(profile.runtime.rawValue) worker (intelligence \(profile.level.rawValue), model \(profile.resolvedModel)) "
             + "in \(context.remoteHost.map { "\($0):" } ?? "")\(context.boardRoot ?? "") for \(item.id)? "
             + "The worker will claim first and read \(item.prompt ?? ""). No launches, installs, screenshots, or push."
     }
@@ -164,6 +196,8 @@ struct HolyMannaWorkerDispatch: Equatable {
     var brief: String {
         """
         Claim and build \(item.id) in \(context.boardRoot ?? "").
+
+        Worker profile: \(profile.runtime.rawValue), intelligence level \(profile.level.rawValue), model \(profile.resolvedModel).
 
         First run: agent-do manna claim \(item.id)
         If the claim fails or another worker owns the item, stop and report the refusal. Never steal a claim.
@@ -212,10 +246,7 @@ struct HolyMannaWorkerDispatch: Equatable {
             spec.transport = .init(kind: .ssh, hostLabel: host, sshDestination: host)
         }
         spec.tmux?.sessionName = "holy-worker-\(UUID().uuidString.lowercased())"
-        var arguments = [executablePath]
-        let model = profile.model.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !model.isEmpty { arguments += ["--model", model] }
-        arguments += ["--", brief]
+        let arguments = [executablePath] + profile.launchArguments + ["--", brief]
         // The prompt is one startup argument, never terminal input or an executable claim command.
         let quote: (String) -> String = { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         // npm's Codex entry point uses /usr/bin/env node. Its sibling node

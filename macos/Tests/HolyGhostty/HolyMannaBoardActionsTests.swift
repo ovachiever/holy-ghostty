@@ -3,6 +3,86 @@ import Testing
 @testable import Ghostty
 
 struct HolyMannaBoardActionsTests {
+    @Test(arguments: [HolySessionRuntime.codex, .claude]) @MainActor
+    func workerIntelligenceDefaultsToMax(runtime: HolySessionRuntime) {
+        #expect(HolyMannaWorkerProfile(runtime: runtime).level == .max)
+        let store = makeStore(calls: ActionCalls())
+        store.workerRuntime = runtime
+        #expect(store.workerLevel == .max)
+        #expect(HolyMannaWorkerLevel.allCases.map(\.rawValue) == ["low", "med", "high", "xhigh", "max"])
+    }
+
+    // Exact dispatch-host receipts: Codex 0.154.0, Claude Code 2.1.272 (mn-d9e12d).
+    @Test(arguments: [HolySessionRuntime.codex, .claude], [
+        (HolyMannaWorkerLevel.low, "low"), (.med, "medium"), (.high, "high"), (.xhigh, "xhigh"), (.max, "max")
+    ])
+    func workerLevelsMapToReceiptedArguments(runtime: HolySessionRuntime, mapping: (HolyMannaWorkerLevel, String)) throws {
+        let (level, effort) = mapping
+        let profile = HolyMannaWorkerProfile(runtime: runtime, level: level)
+        let expectedModel = runtime == .codex ? "gpt-6-astra" : "fable"
+        let expectedEffort = runtime == .codex ? ["-c", "model_reasoning_effort=\"\(effort)\""] : ["--effort", effort]
+        #expect(profile.resolvedModel == expectedModel)
+        #expect(profile.launchArguments == ["--model", expectedModel] + expectedEffort)
+        #expect(HolyMannaWorkerProfile(runtime: runtime, model: " \n\t", level: level).launchArguments == profile.launchArguments)
+        let override = HolyMannaWorkerProfile(runtime: runtime, model: "  custom-model\n", level: level)
+        #expect(override.resolvedModel == "custom-model")
+        #expect(override.launchArguments == ["--model", "custom-model"] + expectedEffort)
+
+        for selected in [profile, override] {
+            let request = HolyMannaWorkerDispatch(item: try item(), context: context, profile: selected)
+            #expect(request.confirmation.contains("intelligence \(level.rawValue), model \(selected.resolvedModel)"))
+            #expect(request.brief.contains("Worker profile: \(runtime.rawValue), intelligence level \(level.rawValue), model \(selected.resolvedModel)."))
+            let spec = try request.launchSpec(executablePath: "/synthetic/\(runtime.rawValue)")
+            let command = try #require(spec.command)
+            #expect(command.contains("exec '/synthetic/\(runtime.rawValue)' '--model' '\(selected.resolvedModel)'"))
+            #expect(command.contains(expectedEffort.map { "'\($0)'" }.joined(separator: " ") + " '--' '"))
+        }
+    }
+
+    @Test(arguments: [HolySessionRuntime.codex, .claude]) @MainActor
+    func confirmationFreezesSelectedWorkerProfile(runtime: HolySessionRuntime) async throws {
+        var launched: HolySessionLaunchSpec?
+        let store = makeStore(calls: ActionCalls(), launcher: { launched = $0; return UUID() })
+        store.workerRuntime = runtime
+        let previousModel = store.workerModel
+        defer { store.workerModel = previousModel; store.dismiss() }
+        store.workerLevel = .xhigh
+        store.workerModel = "explicit-model"
+        store.prepare(context: context)
+        try await requireBoardLoaded(store)
+        store.requestWorker(try item())
+        #expect(store.pendingDispatch?.profile == .init(runtime: runtime, model: "explicit-model", level: .xhigh))
+        store.workerLevel = .low
+        store.workerModel = "later-model"
+        store.confirmWorker()
+        try await eventually { !store.isDispatching }
+        let command = try #require(launched?.command)
+        #expect(command.contains("'--model' 'explicit-model'"))
+        #expect(command.contains(runtime == .codex ? "'-c' 'model_reasoning_effort=\"xhigh\"'" : "'--effort' 'xhigh'"))
+        #expect(!command.contains("later-model"))
+    }
+
+    @Test(arguments: [HolySessionRuntime.codex, .claude], HolyMannaWorkerLevel.allCases)
+    func workerLevelsPreserveRefusalGates(runtime: HolySessionRuntime, level: HolyMannaWorkerLevel) throws {
+        let profile = HolyMannaWorkerProfile(runtime: runtime, level: level)
+        let invalidFields: [[String: Any]] = [
+            ["kind": "dream"], ["claimed_by": "codex-owner"], ["status": "done"], ["effective": "blocked"],
+            ["prompt": NSNull()], ["handoff_exists": false], ["handoff_digest": NSNull()]
+        ]
+        for fields in invalidFields {
+            let row = itemJSON().merging(fields) { _, replacement in replacement }
+            let invalid = try JSONDecoder().decode(HolyMannaBoardItem.self, from: JSONSerialization.data(withJSONObject: row))
+            #expect(HolyMannaWorkerDispatch.refusal(for: invalid, context: context) != nil)
+            let request = HolyMannaWorkerDispatch(item: invalid, context: context, profile: profile)
+            #expect(throws: (any Error).self) { try request.launchSpec(executablePath: "/synthetic/\(runtime.rawValue)") }
+        }
+        for root in [nil, "relative/board", "/board\u{0}"] as [String?] {
+            let invalidContext = HolyMannaBoardContext(boardRoot: root, remoteHost: nil)
+            let request = HolyMannaWorkerDispatch(item: try item(), context: invalidContext, profile: profile)
+            #expect(throws: (any Error).self) { try request.launchSpec(executablePath: "/synthetic/\(runtime.rawValue)") }
+        }
+    }
+
     @Test(arguments: [HolySessionRuntime.codex, .claude])
     func runtimeLookupIsSharedAndScopedToExecutionHost(runtime: HolySessionRuntime) async throws {
         let calls = ActionCalls()
@@ -105,8 +185,8 @@ struct HolyMannaBoardActionsTests {
         }
     }
 
-    @Test(arguments: [HolySessionRuntime.codex, .claude])
-    func fallbackFindsOlderNvmRuntimeAndLaunchWorksWithBareSystemPath(runtime: HolySessionRuntime) async throws {
+    @Test(arguments: [HolySessionRuntime.codex, .claude], HolyMannaWorkerLevel.allCases)
+    func fallbackFindsOlderNvmRuntimeAndLaunchWorksWithBareSystemPath(runtime: HolySessionRuntime, level: HolyMannaWorkerLevel) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("holy-worker-'\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
         let bin = root.appendingPathComponent(".nvm/versions/node/v22.16.0/bin")
@@ -129,11 +209,12 @@ struct HolyMannaBoardActionsTests {
         #expect(output.exitCode == 0)
         #expect(output.stdout == "HOLY_WORKER_EXECUTABLE=\(executable.path)\n")
         let request = HolyMannaWorkerDispatch(item: try item(), context: context,
-                                            profile: .init(runtime: runtime, model: "model'$(touch forbidden)"))
+                                            profile: .init(runtime: runtime, model: "model'$(touch forbidden)", level: level))
         let spec = try request.launchSpec(executablePath: executable.path)
         let launched = try await actionShell(try #require(spec.command), environment: ["PATH": "/usr/bin:/bin"])
         #expect(launched.exitCode == 0)
-        #expect(launched.stdout == "\(executable.path)\n--model\nmodel'$(touch forbidden)\n--\n\(request.brief)\n")
+        let effortArguments = runtime == .codex ? "-c\nmodel_reasoning_effort=\"\(level.effort)\"" : "--effort\n\(level.effort)"
+        #expect(launched.stdout == "\(executable.path)\n--model\nmodel'$(touch forbidden)\n\(effortArguments)\n--\n\(request.brief)\n")
         #expect(launched.stderr.isEmpty)
     }
 
@@ -319,7 +400,7 @@ struct HolyMannaBoardActionsTests {
         #expect(spec.workingDirectory == context.boardRoot)
         #expect(spec.runtime == .codex)
         #expect(spec.title == "board")
-        #expect(spec.command?.contains("'/synthetic/codex' '--model' 'model'\\''$(touch forbidden)' '--' '") == true)
+        #expect(spec.command?.contains("'/synthetic/codex' '--model' 'model'\\''$(touch forbidden)' '-c' 'model_reasoning_effort=\"max\"' '--' '") == true)
         #expect(spec.command?.contains("First run: agent-do manna claim") == true)
         #expect(spec.tmux?.sessionName != (try request.launchSpec(executablePath: "/synthetic/codex")).tmux?.sessionName)
         let remote = HolyMannaWorkerDispatch(item: try item(),
