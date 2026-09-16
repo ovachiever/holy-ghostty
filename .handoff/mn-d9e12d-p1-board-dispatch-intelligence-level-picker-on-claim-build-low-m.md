@@ -6,7 +6,7 @@ source: null
 base_commit: c4fce47f3d105ae22b1ae70e5061140f65dd1053
 scope: '[P1][BOARD][DISPATCH] Intelligence level picker on Claim & build — low/med/high/xhigh/max, default max for both runtimes'
 inputs: []
-binding: sha256:603ef5722a3308bf70823e61205c3677e7e8f58ae122983b43cca55d9c1e6490
+binding: sha256:5a1d0bf0da84ee964965d47dada6ec63fed0c8db5bc3cb257993d165433e0b87
 ---
 
 # Handoff: [P1][BOARD][DISPATCH] Intelligence level picker on Claim & build — low/med/high/xhigh/max, default max for both runtimes
@@ -38,12 +38,16 @@ Erik 2026-09-15: the board's worker dispatch chooses only Codex or Claude (plus 
 3. Seal changes with `agent-do manna handoff seal mn-d9e12d`.
 4. Commit with `Manna: mn-d9e12d` and run `agent-do manna done mn-d9e12d` only after the work is verified.
 
-## Builder return, 2026-09-15
+## Builder return, 2026-09-16
 
-**Partial implementation. Do not mark done.** The model, command, confirmation,
-brief, and store plumbing are committed and compile. The picker is not applied:
-Coord refused the exact view path because `session-17a022e17710` still holds it.
-Executed tests and the coordinated live acceptance remain outstanding.
+**Implementation complete. Coordinator acceptance is pending; do not mark done.**
+The picker now sits beside the runtime choice, binds to the five intelligence
+levels, and starts at `max` through the existing Board store default. The
+confirmation and brief name the selected level. The optional model override is
+on the following line to preserve room in the inspector. Strict lint, the
+focused Board test build, and the optimized app build passed. Tests remain
+compiled-only in this lane; execution, installation, and Erik's live acceptance
+belong to the coordinator.
 
 - Claim owner: `codex-01a0a6bac33f70f2`.
 - Incoming expected binding, frontmatter binding, computed normalized content
@@ -52,13 +56,15 @@ Executed tests and the coordinated live acceptance remain outstanding.
 - Original handoff was tracked. No repository-local `AGENTS.md` exists; the
   supplied global instructions, parent workspace guide, this work order, and
   `docs/holy-ghostty/engineering-spec.md` supplied the working rules.
-- Implementation commit: `c244f2af010462aaa507bf16a87651f655b15665`,
+- Backend implementation commit: `c244f2af010462aaa507bf16a87651f655b15665`,
   `feat(board): map worker intelligence levels to launch arguments`, with
   `Manna: mn-d9e12d`.
 - Build worktree: `/Users/erik/Custom-Coding/holy-ghostty/.dev/worktrees/mn-d9e12d`.
-  Its base is `c4d550125c2063ba046578f357d48fa396fb19b5`. The three compiled source
-  files were copied back only after verifying the primary originals still
-  matched that base and the copied bytes matched the build receipt.
+  Its base is `c4d550125c2063ba046578f357d48fa396fb19b5`. The three backend source
+  files were already identical to the primary committed versions. The final
+  view change was copied back only after verifying the primary view still
+  matched `5837603bb2e53ec6500df5264f61b359a5f8c46b` and its copied bytes matched
+  the compiled receipt. All four final source hashes are recorded below.
 - Canonical Manna and Coord operations belong in the primary checkout,
   `/Users/erik/Custom-Coding/holy-ghostty`.
 
@@ -66,6 +72,8 @@ Executed tests and the coordinated live acceptance remain outstanding.
 
 - `HolyMannaWorkerLevel`: `low`, `med`, `high`, `xhigh`, `max`.
 - Both the worker profile and a fresh Board store default to `max`.
+- The item detail shows the level picker beside the runtime choice, with an
+  optional model override on the following line.
 - Each runtime has one explicit default model; level controls its effort.
 - A nonempty, trimmed model override changes only the model argument.
 - Confirmation and the generated brief name runtime, intelligence level, and
@@ -127,7 +135,7 @@ Probe receipts are under `.dev/mn-d9e12d/probes/`: `codex-help.txt`,
 No authenticated runtime/model request was made, so account entitlement and
 live execution are not established by these probes.
 
-### Focused validation receipts
+### Initial backend validation receipts, 2026-09-15
 
 1. `git diff --check`: passed.
 2. Focused SwiftLint: passed, zero violations across the three changed Swift files.
@@ -172,46 +180,107 @@ confirmation selections, existing refusal gates, and the extended shell
 injection regression at every runtime/level combination. No test pass is
 claimed until the coordinator executes the suite.
 
-Compiled source SHA-256:
+### Final picker validation receipts, 2026-09-16
+
+The coordinator released the historical `mn-61fb80` view claim. This worker
+verified the path was free, acquired it under the existing Manna owner, and
+cleared `mn-d9e12d-board-view-release`. Before editing, canonical ownership and
+the previous seal were verified against normalized contents and Manna state:
+`sha256:603ef5722a3308bf70823e61205c3677e7e8f58ae122983b43cca55d9c1e6490`.
+The prepared `.dev/mn-d9e12d/picker-pending.patch` was then applied unchanged.
+It is retained as the original draft receipt, and is no longer pending work.
+
+From the retained build worktree, strict SwiftLint passed with zero violations
+across all four Swift files changed for this item:
+
+```bash
+swiftlint lint --strict --config macos/.swiftlint.yml \
+  macos/Sources/HolyGhostty/Board/HolyMannaBoardView.swift \
+  macos/Sources/HolyGhostty/Board/HolyMannaBoardWorker.swift \
+  macos/Sources/HolyGhostty/Board/HolyMannaBoardStore.swift \
+  macos/Tests/HolyGhostty/HolyMannaBoardActionsTests.swift
+```
+
+`git diff --check` and `scripts/build-holy-ghostty-core.sh verify` also passed.
+The core input hash remains
+`1bee2b6a6d03f263c352ee999916e5ff65dd0e18c69842f83da977401fbc607a`.
+
+The final Debug app and test bundle compiled with the five Board suite selectors:
+
+```bash
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /Users/erik/Custom-Coding/holy-ghostty/.dev/mn-d9e12d/DerivedData \
+  SYMROOT=/Users/erik/Custom-Coding/holy-ghostty/.dev/mn-d9e12d/build \
+  -only-testing:GhosttyTests/HolyMannaBoardActionsTests \
+  -only-testing:GhosttyTests/HolyMannaBoardTests \
+  -only-testing:GhosttyTests/HolyMannaBoardPresentationTests \
+  -only-testing:GhosttyTests/HolyMannaBoardRenderSmokeTests \
+  -only-testing:GhosttyTests/HolyMannaBoardLinkTests \
+  -resultBundlePath /Users/erik/Custom-Coding/holy-ghostty/.dev/mn-d9e12d/build-picker.xcresult \
+  build-for-testing
+```
+
+Result: exit 0, `TEST BUILD SUCCEEDED`, zero errors, 32 warnings, and zero
+warnings attributed to `HolyMannaBoardView.swift`. The xcresult records build
+status `succeeded` and execution action `notRequested`. **Executed tests: 0.**
+The result bundle and `build-picker.log`, `build-picker-summary.json`,
+`swiftlint-picker.log`, and `core-verify-picker.log` are under `.dev/mn-d9e12d/`.
+
+The optimized app also rebuilt successfully without being run or installed:
+
+```bash
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty \
+  -configuration ReleaseLocal -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /Users/erik/Custom-Coding/holy-ghostty/.dev/mn-d9e12d/DerivedData \
+  SYMROOT=/Users/erik/Custom-Coding/holy-ghostty/.dev/mn-d9e12d/build \
+  -resultBundlePath /Users/erik/Custom-Coding/holy-ghostty/.dev/mn-d9e12d/build-picker-release.xcresult \
+  build
+```
+
+Result: exit 0, `BUILD SUCCEEDED`, zero errors, 55 warnings; execution action
+`notRequested`. `lipo -archs` reports `x86_64 arm64`. The executable SHA-256 is
+`21af6a9534c3dac9bc896b9b40069aa528ae3faf88ccffe21d5ba8cd869ece33`.
+The result bundle, `build-picker-release.log`, and
+`build-picker-release-summary.json` are under `.dev/mn-d9e12d/`.
+
+Final compiled source SHA-256 (also `compiled-picker-source-sha256.json`):
 
 | File | SHA-256 |
 | --- | --- |
+| `macos/Sources/HolyGhostty/Board/HolyMannaBoardView.swift` | `bee753f84b6e4d500c3aa73e24dfaf234001c86cd92f606323bace176ae0b786` |
 | `macos/Sources/HolyGhostty/Board/HolyMannaBoardWorker.swift` | `afcb7bb47a944e4a2ba8b8199c9bf103c4f0cdf67a58ad2166ad16883cd72f8d` |
 | `macos/Sources/HolyGhostty/Board/HolyMannaBoardStore.swift` | `3168b80f6e1a2f90b244f6ee2520112f6d8df7e5cd929490cd021cbacf8d53ff` |
 | `macos/Tests/HolyGhostty/HolyMannaBoardActionsTests.swift` | `6c13d63fa787df4c07a28d9e549f77c10b5fd5b6e717436fc7a4ab7506d9ba62` |
 
 ### Needed next
 
-1. Resolve `mn-d9e12d-board-view-release` through the coordinator. The failed
-   `agent-do coord claim macos/Sources/HolyGhostty/Board/HolyMannaBoardView.swift`
-   returned `already claimed by session-17a022e17710`. Its reason is the older
-   `mn-61fb80 terminal crumb unconditional` lane. Its owner must release the
-   path before this worker claims and edits it. No ownership takeover occurred.
-2. Add the picker next to the runtime choice. A reviewable, **unapplied and
-   uncompiled** draft is `.dev/mn-d9e12d/picker-pending.patch`; it binds the five
-   cases to `store.workerLevel`, shows a level label, and moves the optional
-   model field below so it retains space in the narrow inspector. Recheck the
-   view's current contents before applying it. Then repeat focused lint and
-   `build-for-testing` on the final source.
-3. Coordinator: execute `GhosttyTests/HolyMannaBoardActionsTests` using canonical
-   Xcode `test` or `test-without-building`, with a fresh result bundle and the
-   final source/build. This suite is app-hosted and includes the existing
-   isolated tmux note test; execution belongs in the coordinated launch window.
-4. Coordinator/Erik: complete the supported install and live acceptance from
+1. Coordinator: execute the five Board suites using canonical Xcode `test` or
+   `test-without-building`, with a fresh result bundle and the final source/build.
+   Repeat all five `-only-testing` selectors above during execution: the
+   generated `.dev/mn-d9e12d/build/Ghostty_Ghostty_macosx26.4-arm64.xctestrun`
+   includes both test targets and does not store `OnlyTestIdentifiers`.
+   `picker-test-plan.json` records that inspection. Tests are app-hosted and the
+   Actions suite includes the existing isolated tmux note test; execution
+   belongs in the coordinated launch window. The coordinator dependency remains
+   `mn-d9e12d-executed-live-acceptance`.
+2. Coordinator/Erik: complete the supported install and live acceptance from
    the work order. Open Claim & build, verify the picker defaults to max, dispatch
    one Codex and one Claude worker, and inspect their pane command lines for
    the mapped model/effort flags. Preserve the no-push/no-PR boundary.
-5. Append actual executed/live receipts, reseal this handoff, and mark done only
+3. Append actual executed/live receipts, reseal this handoff, and mark done only
    after the required acceptance is verified.
 
 No app launches, app installations, screenshots, or live worker spawning were
 performed in this builder lane. No push or pull request was made.
 
-Lessons logged: 6 (new) | Decisions logged: 1 (new).
-Lesson IDs: `les-370f5d`, `les-e4b3f8`, `les-7dca28`, `les-2e6afc`, `les-b7c3a4`,
-`les-d56c19`. Decision: `dec-dd2a2f`. `zpc harvest --since last` completed locally.
+This continuation: Lessons logged: 1 (new) | Decisions logged: 0 (new).
+New lesson: `les-7a8c90`. Initial lane: 6 lessons and 1 decision (`les-370f5d`,
+`les-e4b3f8`, `les-7dca28`, `les-2e6afc`, `les-b7c3a4`, `les-d56c19`,
+`dec-dd2a2f`). `zpc harvest --since last` completed locally after the new lesson.
 
-**TL;DR (12th grade):** The intelligence settings and launch commands are built
-and committed, but the visible picker is still blocked by another worker's file
-claim. Tests compiled and have not run. Release that file, finish the picker,
-and run the coordinated tests and live checks before closing this item.
+**TL;DR (12th grade):** The level picker is implemented beside the runtime
+choice, with max as the starting setting. Strict lint, the Board test build,
+and the optimized app build passed. Tests have not run, and the app has not been
+launched or installed in this lane. The coordinator performs those checks and
+returns Erik's acceptance before this item closes.

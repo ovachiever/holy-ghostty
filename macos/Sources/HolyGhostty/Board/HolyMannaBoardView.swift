@@ -1137,13 +1137,21 @@ struct HolyMannaBoardView: View {
 
         itemMeta(item)
 
-        HStack {
-            Text("worker").foregroundStyle(Palette.muted)
-            Picker("Runtime", selection: $store.workerRuntime) {
-                Text("Codex").tag(HolySessionRuntime.codex)
-                Text("Claude").tag(HolySessionRuntime.claude)
-            }.labelsHidden().frame(maxWidth: 110)
-            TextField("default model", text: $store.workerModel).textFieldStyle(.plain)
+        VStack(alignment: .leading, spacing: Metrics.s2) {
+            HStack {
+                Text("worker").foregroundStyle(Palette.muted)
+                Picker("Runtime", selection: $store.workerRuntime) {
+                    Text("Codex").tag(HolySessionRuntime.codex)
+                    Text("Claude").tag(HolySessionRuntime.claude)
+                }.labelsHidden().frame(maxWidth: 110)
+                Text("level").foregroundStyle(Palette.muted)
+                Picker("Intelligence level", selection: $store.workerLevel) {
+                    ForEach(HolyMannaWorkerLevel.allCases) { level in
+                        Text(level.rawValue).tag(level)
+                    }
+                }.labelsHidden().frame(maxWidth: 80)
+            }
+            TextField("model override (optional)", text: $store.workerModel).textFieldStyle(.plain)
         }
         workerButton(item)
         if let refusal = store.workerRefusal(for: item) {
