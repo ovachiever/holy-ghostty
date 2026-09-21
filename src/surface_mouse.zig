@@ -31,6 +31,37 @@ over_link: bool,
 /// True if the mouse pointer is currently hidden.
 hidden: bool,
 
+/// Command is a host-side modifier on macOS: the terminal mouse protocol
+/// cannot encode it. Links must remain available while tmux captures mice.
+pub fn commandLinkOverride(mods: input.Mods) bool {
+    return builtin.target.os.tag.isDarwin() and mods.super;
+}
+
+/// Link detection uses effective reporting, including the user's reporting
+/// toggle. Keep keyboard and pointer hover on the same capture policy.
+pub fn linksAllowed(reporting: bool, mods: input.Mods, shift_capture: bool) bool {
+    return !reporting or commandLinkOverride(mods) or (mods.shift and !shift_capture);
+}
+
+/// A Command-link gesture claimed before its press reaches a mouse-reporting
+/// application. Its release also belongs to the terminal, even if cancelled.
+/// The caller owns the target string.
+pub const LinkClick = struct {
+    point: terminal.point.Coordinate,
+    screen: terminal.ScreenSet.Key,
+    target: [:0]const u8,
+    cancelled: bool = false,
+
+    pub fn move(self: *LinkClick, point: terminal.point.Coordinate, screen: terminal.ScreenSet.Key, inside: bool) void {
+        if (!inside or !self.point.eql(point) or self.screen != screen) self.cancelled = true;
+    }
+
+    pub fn matches(self: LinkClick, point: terminal.point.Coordinate, screen: terminal.ScreenSet.Key, target: []const u8) bool {
+        return !self.cancelled and self.point.eql(point) and self.screen == screen and
+            std.mem.eql(u8, self.target, target);
+    }
+};
+
 /// Translates key state to mouse shape (cursor) state, based on a state
 /// machine.
 ///
@@ -114,6 +145,42 @@ fn eligibleMouseShapeKeyEvent(physical_key: input.Key) bool {
 
 fn isMouseModeOverrideState(mods: input.Mods) bool {
     return mods.shift;
+}
+
+test "links under mouse capture" {
+    const testing = std.testing;
+    // Ordinary tmux input stays captured. Command opens host links on macOS,
+    // while Control remains available to terminal applications.
+    try testing.expect(!linksAllowed(true, .{}, false));
+    try testing.expect(!linksAllowed(true, .{ .ctrl = true }, false));
+    try testing.expectEqual(builtin.target.os.tag.isDarwin(), linksAllowed(true, .{ .super = true }, true));
+    try testing.expect(linksAllowed(true, .{ .shift = true }, false));
+    try testing.expect(!linksAllowed(true, .{ .shift = true }, true));
+    // Disabling mouse reporting also restores link detection, even if the
+    // terminal program left its mouse-request mode enabled.
+    try testing.expect(linksAllowed(false, .{}, true));
+}
+
+test "captured link click cancellation and target identity" {
+    const testing = std.testing;
+    const point: terminal.point.Coordinate = .{ .x = 3, .y = 2 };
+    const click: LinkClick = .{ .point = point, .screen = .primary, .target = "https://example.com" };
+    try testing.expect(click.matches(point, .primary, "https://example.com"));
+    try testing.expect(!click.matches(point, .primary, "https://other.example"));
+    try testing.expect(!click.matches(point, .alternate, "https://example.com"));
+
+    var dragged = click;
+    dragged.move(.{ .x = 4, .y = 2 }, .primary, true);
+    dragged.move(point, .primary, true);
+    try testing.expect(!dragged.matches(point, .primary, click.target));
+
+    var exited = click;
+    exited.move(point, .primary, false);
+    try testing.expect(!exited.matches(point, .primary, click.target));
+
+    var switched = click;
+    switched.move(point, .alternate, true);
+    try testing.expect(!switched.matches(point, .primary, click.target));
 }
 
 /// Returns true if our modifiers put us in a state where dragging

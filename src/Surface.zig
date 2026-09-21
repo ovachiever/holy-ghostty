@@ -261,6 +261,9 @@ const Mouse = struct {
     /// The last x/y in the cursor position for links. We use this to
     /// only process link hover events when the mouse actually moves cells.
     link_point: ?terminal.point.Coordinate = null,
+
+    /// Host-owned Command-link press while the terminal requests mouse reports.
+    captured_link_click: ?SurfaceMouse.LinkClick = null,
 };
 
 /// Keyboard state for the surface.
@@ -795,6 +798,8 @@ pub fn init(
 }
 
 pub fn deinit(self: *Surface) void {
+    self.clearCapturedLinkClick();
+
     // Stop search thread
     if (self.search) |*s| s.deinit();
 
@@ -1533,6 +1538,9 @@ fn modsChanged(self: *Surface, mods: input.Mods) void {
         // The mouse mods only contain binding modifiers since we don't
         // want caps/num lock or sided modifiers to affect the mouse.
         self.mouse.mods = mods.binding();
+        // Pointer events can carry a modifier change without a key callback
+        // (for example in an unfocused workspace pane). Recheck this cell.
+        self.mouse.link_point = null;
 
         // We also need to update the renderer so it knows if it should
         // highlight links. Additionally, mark the screen as dirty so
@@ -1572,6 +1580,8 @@ fn mouseRefreshLinks(
     // Update the last point that we checked for links so we don't
     // recheck if the mouse moves some pixels to the same point.
     self.mouse.link_point = pos_vp;
+    self.mouse.over_link = false;
+    self.renderer_state.mouse.point = null;
 
     // We use an arena for everything below to make things easy to clean up.
     // In the case we don't do any allocs this is very cheap to setup
@@ -1584,12 +1594,15 @@ fn mouseRefreshLinks(
     // isn't a link OR if we shouldn't be showing links for some reason
     // (see further comments for cases).
     const link_: ?apprt.action.MouseOverLink, const preview: bool = link: {
+        if (self.mouse.captured_link_click) |click| {
+            if (click.cancelled) break :link .{ null, false };
+        }
         // If we clicked and our mouse moved cells then we never
         // highlight links until the mouse is unclicked. This follows
         // standard macOS and Linux behavior where a click and drag cancels
         // mouse actions.
         const left_idx = @intFromEnum(input.MouseButton.left);
-        if (self.mouse.click_state[left_idx] == .press) click: {
+        if (self.mouse.click_state[left_idx] == .press and self.mouse.captured_link_click == null) click: {
             const pin = self.mouse.left_click_pin orelse break :click;
             const click_pt = self.io.terminal.screens.active.pages.pointFromPin(
                 .viewport,
@@ -2695,39 +2708,19 @@ pub fn keyCallback(
         // Update our modifiers, this will update mouse mods too
         self.modsChanged(event.mods);
 
-        // We only refresh links if
-        // 1. mouse reporting is off
-        // OR
-        // 2. mouse reporting is on and we are not reporting shift to the terminal
-        if (self.io.terminal.flags.mouse_event == .none or
-            (self.mouse.mods.shift and !self.mouseShiftCapture(false)))
-        {
-            // Refresh our link state
-            const pos = self.rt_surface.getCursorPos() catch break :mouse_mods;
-            self.renderer_state.mutex.lock();
-            defer self.renderer_state.mutex.unlock();
-            self.mouseRefreshLinks(
-                pos,
-                self.posToViewport(pos.x, pos.y),
-                self.mouse.over_link,
-            ) catch |err| {
-                log.warn("failed to refresh links err={}", .{err});
-                break :mouse_mods;
-            };
-        } else if (self.io.terminal.flags.mouse_event != .none and !self.mouse.mods.shift) {
-            // If we have mouse reports on and we don't have shift pressed, we reset state
-            _ = try self.rt_app.performAction(
-                .{ .surface = self },
-                .mouse_shape,
-                self.io.terminal.mouse_shape,
-            );
-            _ = try self.rt_app.performAction(
-                .{ .surface = self },
-                .mouse_over_link,
-                .{ .url = "" },
-            );
-            try self.queueRender();
-        }
+        // linkAtPos owns capture policy for both keyboard and pointer events.
+        // Refresh even when capture resumes so stale hover state is cleared.
+        const pos = self.rt_surface.getCursorPos() catch break :mouse_mods;
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+        self.mouseRefreshLinks(
+            pos,
+            self.posToViewport(pos.x, pos.y),
+            self.mouse.over_link,
+        ) catch |err| {
+            log.warn("failed to refresh links err={}", .{err});
+            break :mouse_mods;
+        };
     }
 
     // Process the cursor state logic. This will update the cursor shape if
@@ -3407,6 +3400,8 @@ pub fn scrollCallback(
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
 
+    if (self.mouse.captured_link_click) |*click| click.cancelled = true;
+
     // Always show the mouse again if it is hidden
     if (self.mouse.hidden) self.showMouse();
 
@@ -3745,6 +3740,23 @@ pub fn mouseButtonCallback(
     // Update our modifiers if they changed
     self.modsChanged(mods);
 
+    // A Command-link press under tmux capture belongs entirely to the host.
+    // Consume its release even if Command was released or the drag cancelled,
+    // so tmux never receives half of a click. Plain clicks keep reporting.
+    if (button == .left) {
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+        const pos = try self.rt_surface.getCursorPos();
+        if (action == .press) {
+            if (try self.beginCapturedLinkClick(pos)) return true;
+        } else if (self.mouse.captured_link_click != null) {
+            if (try self.finishCapturedLinkClick(pos)) |link| {
+                _ = try self.openLink(link);
+            }
+            return true;
+        }
+    }
+
     // This is set to true if the terminal is allowed to capture the shift
     // modifier. Note we can do this more efficiently probably with less
     // locking/unlocking but clicking isn't that frequent enough to be a
@@ -3819,7 +3831,11 @@ pub fn mouseButtonCallback(
         // Handle link clicking. We want to do this before we do mouse
         // reporting or any other mouse handling because a successfully
         // clicked link will swallow the event.
-        if (self.mouse.over_link) {
+        // A press already reported to tmux cannot become a host link click
+        // merely because Command was added before release.
+        if (self.mouse.over_link and self.mouse.left_click_count > 0) {
+            self.renderer_state.mutex.lock();
+            defer self.renderer_state.mutex.unlock();
             const pos = try self.rt_surface.getCursorPos();
             if (self.processLinks(pos)) |processed| {
                 if (processed) return true;
@@ -4251,6 +4267,13 @@ fn linkAtPos(
     self: *Surface,
     pos: apprt.CursorPos,
 ) !?Link {
+    if (!self.linkPosInside(pos)) return null;
+    if (!SurfaceMouse.linksAllowed(
+        self.isMouseReporting(),
+        self.mouse.mods,
+        self.mouseShiftCapture(false),
+    )) return null;
+
     // Convert our cursor position to a screen point.
     const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
     const mouse_pin: terminal.Pin = mouse_pin: {
@@ -4337,7 +4360,7 @@ fn linkAtPin(
 fn mouseModsWithCapture(self: *Surface, mods: input.Mods) input.Mods {
     // In any of these scenarios, whatever mods are set (even shift)
     // are preserved.
-    if (self.io.terminal.flags.mouse_event == .none) return mods;
+    if (!self.isMouseReporting()) return mods;
     if (!mods.shift) return mods;
     if (self.mouseShiftCapture(false)) return mods;
 
@@ -4354,6 +4377,11 @@ fn mouseModsWithCapture(self: *Surface, mods: input.Mods) input.Mods {
 /// Requires the renderer state mutex is held.
 fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
     const link = try self.linkAtPos(pos) orelse return false;
+    return try self.openLink(link);
+}
+
+/// Open a freshly resolved link while the renderer state mutex is held.
+fn openLink(self: *Surface, link: Link) !bool {
     switch (link.action) {
         .open => {
             const str = try self.io.terminal.screens.active.selectionString(self.alloc, .{
@@ -4379,6 +4407,54 @@ fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
     }
 
     return true;
+}
+
+fn linkPosInside(self: *const Surface, pos: apprt.CursorPos) bool {
+    return pos.x >= 0 and pos.y >= 0 and
+        pos.x < @as(f64, @floatFromInt(self.size.screen.width)) and
+        pos.y < @as(f64, @floatFromInt(self.size.screen.height));
+}
+
+fn clearCapturedLinkClick(self: *Surface) void {
+    if (self.mouse.captured_link_click) |click| self.alloc.free(click.target);
+    self.mouse.captured_link_click = null;
+}
+
+/// Read the actual destination, including OSC 8 targets whose labels differ.
+/// Requires the renderer state mutex. The caller owns the returned allocation.
+fn linkTarget(self: *Surface, link: Link) !?[:0]const u8 {
+    return switch (link.action) {
+        .open => try self.io.terminal.screens.active.selectionString(self.alloc, .{
+            .sel = link.selection,
+            .trim = false,
+        }),
+        ._open_osc8 => try self.alloc.dupeZ(u8, self.osc8URI(link.selection.start()) orelse return null),
+    };
+}
+
+/// Requires the renderer state mutex. Does not depend on a prior hover event.
+fn beginCapturedLinkClick(self: *Surface, pos: apprt.CursorPos) !bool {
+    self.clearCapturedLinkClick();
+    if (!self.isMouseReporting() or !SurfaceMouse.commandLinkOverride(self.mouse.mods)) return false;
+    const link = try self.linkAtPos(pos) orelse return false;
+    const target = try self.linkTarget(link) orelse return false;
+    self.mouse.captured_link_click = .{
+        .point = self.posToViewport(pos.x, pos.y),
+        .screen = self.io.terminal.screens.active_key,
+        .target = target,
+    };
+    return true;
+}
+
+/// Requires the renderer state mutex. Re-read at release to reject changed
+/// text, changed OSC 8 destinations, modifiers, screen switches, and drags.
+fn finishCapturedLinkClick(self: *Surface, pos: apprt.CursorPos) !?Link {
+    const click = self.mouse.captured_link_click orelse return null;
+    defer self.clearCapturedLinkClick();
+    const link = try self.linkAtPos(pos) orelse return null;
+    const target = try self.linkTarget(link) orelse return null;
+    defer self.alloc.free(target);
+    return if (click.matches(self.posToViewport(pos.x, pos.y), self.io.terminal.screens.active_key, target)) link else null;
 }
 
 fn openUrl(
@@ -4530,6 +4606,10 @@ pub fn cursorPosCallback(
     self.renderer_state.mutex.lock();
     defer self.renderer_state.mutex.unlock();
 
+    if (self.mouse.captured_link_click) |*click| {
+        click.move(pos_vp, self.io.terminal.screens.active_key, self.linkPosInside(pos));
+    }
+
     // Stop selection scrolling when inside the viewport within a 1px buffer
     // for fullscreen windows, but only when selection scrolling is active.
     if (pos.y >= 1 and self.selection_scroll_active) {
@@ -4563,20 +4643,18 @@ pub fn cursorPosCallback(
     // OR
     // 2. the cursor position has changed (either we have no previous state, or the state has
     //    changed)
-    // AND
-    // 1. mouse reporting is off
-    // OR
-    // 2. mouse reporting is on and we are not reporting shift to the terminal
-    if ((over_link or
+    // Capture policy is shared with key events in linkAtPos.
+    if (over_link or
         self.mouse.link_point == null or
-        (self.mouse.link_point != null and !self.mouse.link_point.?.eql(pos_vp))) and
-        (self.io.terminal.flags.mouse_event == .none or
-            (self.mouse.mods.shift and !self.mouseShiftCapture(false))))
+        (self.mouse.link_point != null and !self.mouse.link_point.?.eql(pos_vp)))
     {
         // If we were previously over a link, we always update. We do this so that if the text
         // changed underneath us, even if the mouse didn't move, we update the URL hints and state
         try self.mouseRefreshLinks(pos, pos_vp, over_link);
     }
+
+    // A captured link drag never becomes a tmux drag, including cancellation.
+    if (self.mouse.captured_link_click != null) return;
 
     // Do a mouse report
     if (self.isMouseReporting()) report: {
@@ -6369,6 +6447,120 @@ fn testMouseSelectionIsNull(
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Surface, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.io.getProcessInfo(info);
+}
+
+test "Surface: URL clicks with tmux mouse capture" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+
+    // Exercise the production matcher and click ownership against a real
+    // terminal grid. No app, renderer thread, PTY, tmux, or browser is started.
+    var surface: Surface = undefined;
+    surface.alloc = alloc;
+    surface.mouse = .{};
+    surface.config = try DerivedConfig.init(alloc, &config);
+    defer surface.config.deinit();
+    surface.io.terminal = try .init(alloc, .{ .cols = 40, .rows = 2 });
+    defer surface.io.terminal.deinit(alloc);
+    defer surface.clearCapturedLinkClick();
+    var mutex: std.Thread.Mutex = .{};
+    surface.renderer_state = .{ .mutex = &mutex, .terminal = &surface.io.terminal };
+    surface.size = .{
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+        .screen = .{ .width = 400, .height = 40 },
+    };
+    var stream = surface.io.terminal.vtStream();
+    defer stream.deinit();
+    const pos: apprt.CursorPos = .{ .x = 45, .y = 10 };
+    const url = "https://example.com/mn-abcdef";
+    stream.nextSlice(url);
+
+    mutex.lock();
+    defer mutex.unlock();
+
+    // Bare-surface control: default URL matching and ordinary selection
+    // modifiers are unchanged. The macOS Manna path remains separate.
+    surface.mouse.mods = .{};
+    try testing.expect(try surface.linkAtPos(pos) == null);
+    try testing.expect(!try surface.beginCapturedLinkClick(pos));
+    surface.mouse.mods = input.ctrlOrSuper(.{});
+    const bare_link = (try surface.linkAtPos(pos)).?;
+    const bare_target = (try surface.linkTarget(bare_link)).?;
+    defer alloc.free(bare_target);
+    try testing.expectEqualStrings(url, bare_target);
+    try testing.expect(!try surface.beginCapturedLinkClick(pos));
+
+    // These are the mouse modes requested by tmux, not a fabricated capture
+    // flag. Command must reach the same regex matcher despite those modes.
+    stream.nextSlice("\x1b[?1002h\x1b[?1006h");
+    try testing.expect(surface.isMouseReporting());
+    surface.mouse.mods = .{};
+    try testing.expect(try surface.linkAtPos(pos) == null);
+    try testing.expect(!try surface.beginCapturedLinkClick(pos));
+
+    // Shift continues to override capture unless explicitly captured.
+    surface.mouse.mods = input.ctrlOrSuper(.{ .shift = true });
+    try testing.expect(try surface.linkAtPos(pos) != null);
+    surface.config.mouse_shift_capture = .always;
+    try testing.expect(try surface.linkAtPos(pos) == null);
+    surface.config.mouse_shift_capture = .false;
+
+    // The user's reporting toggle must affect detection as well as reports.
+    surface.config.mouse_reporting = false;
+    surface.mouse.mods = input.ctrlOrSuper(.{});
+    try testing.expect(try surface.linkAtPos(pos) != null);
+    try testing.expect(!try surface.beginCapturedLinkClick(pos));
+    surface.config.mouse_reporting = true;
+
+    // On non-macOS platforms Control remains a terminal protocol modifier.
+    if (!builtin.target.os.tag.isDarwin()) {
+        try testing.expect(try surface.linkAtPos(pos) == null);
+        return;
+    }
+
+    // A fresh press works without a hover callback, and owns both halves of
+    // the gesture. The returned link still uses the ordinary open-url action.
+    try testing.expect(!surface.mouse.over_link);
+    try testing.expect(try surface.beginCapturedLinkClick(pos));
+    try testing.expectEqualStrings(url, surface.mouse.captured_link_click.?.target);
+    const clicked = (try surface.finishCapturedLinkClick(pos)).?;
+    try testing.expect(clicked.action == .open);
+    try testing.expect(surface.mouse.captured_link_click == null);
+
+    // Releasing Command cancels the action but does not relinquish release
+    // ownership to tmux. Changed terminal text must not open a new target.
+    try testing.expect(try surface.beginCapturedLinkClick(pos));
+    surface.mouse.mods = .{};
+    try testing.expect(try surface.finishCapturedLinkClick(pos) == null);
+    try testing.expect(surface.mouse.captured_link_click == null);
+    surface.mouse.mods = input.ctrlOrSuper(.{});
+    try testing.expect(try surface.beginCapturedLinkClick(pos));
+    stream.nextSlice("\r\x1b[2Khttps://other.example");
+    try testing.expect(try surface.finishCapturedLinkClick(pos) == null);
+
+    // A drag away and back cancels permanently. Off-surface releases also
+    // cancel instead of clamping to the last terminal cell and opening it.
+    try testing.expect(try surface.beginCapturedLinkClick(pos));
+    surface.mouse.captured_link_click.?.move(.{ .x = 5, .y = 0 }, .primary, true);
+    surface.mouse.captured_link_click.?.move(.{ .x = 4, .y = 0 }, .primary, true);
+    try testing.expect(try surface.finishCapturedLinkClick(pos) == null);
+    try testing.expect(try surface.beginCapturedLinkClick(pos));
+    try testing.expect(try surface.finishCapturedLinkClick(.{ .x = -1, .y = -1 }) == null);
+
+    // OSC 8 targets use the same capture override and release validation.
+    // Replacing a destination without changing its label cancels the click.
+    stream.nextSlice("\r\x1b[2K\x1b]8;;https://example.com\x1b\\label\x1b]8;;\x1b\\");
+    try testing.expect(try surface.beginCapturedLinkClick(pos));
+    try testing.expectEqualStrings("https://example.com", surface.mouse.captured_link_click.?.target);
+    const osc_link = (try surface.finishCapturedLinkClick(pos)).?;
+    try testing.expect(osc_link.action == ._open_osc8);
+    try testing.expect(try surface.beginCapturedLinkClick(pos));
+    stream.nextSlice("\r\x1b[2K\x1b]8;;https://other.example\x1b\\label\x1b]8;;\x1b\\");
+    try testing.expect(try surface.finishCapturedLinkClick(pos) == null);
 }
 
 test "Surface: selection logic" {

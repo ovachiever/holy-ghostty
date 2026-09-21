@@ -70,9 +70,13 @@ jobs:
           zig version
           xcodebuild -version
 
-      - name: Test renderer link styling and Manna config
+      - name: Test terminal URL clicks, renderer links, and Manna config
         run: >-
           zig build test
+          -Dtest-filter="Surface: URL"
+          -Dtest-filter="Surface: selection"
+          -Dtest-filter="Surface: rectangle selection"
+          -Dtest-filter=surface_mouse
           -Dtest-filter=renderer.link
           -Dtest-filter=holy-manna-highlight
           -Demit-macos-app=false
