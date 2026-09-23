@@ -6,7 +6,7 @@ source: null
 base_commit: d1d0c1100b9747bdf7730c6abc74da410353d52a
 scope: '[P1][BOARD][ARCHIVE] Clipboard citizenship: copy and paste work everywhere in Board and Archive — the surface stops owning the keyboard under overlays'
 inputs: []
-binding: sha256:e03b8341a5a41d9776f00c9893e1099f48c797880e3bcebf7a6d722f479e1c93
+binding: sha256:fbdfb37e5ccb233e6c8f187861936442711c416924cd7899894e32e4637c54ff
 ---
 
 # Handoff: [P1][BOARD][ARCHIVE] Clipboard citizenship: copy and paste work everywhere in Board and Archive — the surface stops owning the keyboard under overlays
@@ -37,6 +37,13 @@ Erik 2026-09-22: 'I NEED to be able to copy and paste in board/archive, anywhere
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-0b49e9`.
 4. Commit with `Manna: mn-0b49e9` and run `agent-do manna done mn-0b49e9` only after the work is verified.
+
+## Current status: 2026-09-23
+
+The coordinator's executed receipt is red. The fixture repair below compiles,
+but has not executed. Keep `mn-0b49e9` `in_progress`. Host survival, clipboard
+behavior, and the required live acceptance still need coordinator verification.
+The dated 2026-09-22 builder receipt is historical, not a passing runtime result.
 
 ## Builder receipt: 2026-09-22
 
@@ -188,3 +195,122 @@ mark `mn-0b49e9` done. Build success alone does not satisfy this work order.
 
 Lessons logged: 6 (new, including one subsequently corrected/retracted) |
 Decisions logged: 1 (new).
+
+## Fixture repair receipt: 2026-09-23
+
+### Executed findings received from the coordinator
+
+The original receipts remain intact in `.dev/mn-0b49e9-receipt.md`,
+`.dev/mn-0b49e9-executed/suites.xcresult`, `.dev/mn-0b49e9-executed.log`,
+`.dev/release-readiness/serial.xcresult`, and `.dev/rr-serial.log`.
+
+- The focused run reported 30 failures and 192 passes. All 30 clipboard cases
+  failed at the fixture's real-surface requirement before behavioral acceptance.
+- Read-only diagnostic export of that xcresult identifies the lower failure:
+  both clipboard worker logs report 15 instances each of
+  `CVDisplayLinkCreateWithCGDisplays error -6661 due to invalid display count (0)`,
+  followed by `error initializing surface err=error.OutOfMemory`. Core renderer
+  initialization creates that display link only when `window-vsync` is enabled
+  (`src/renderer/generic.zig`). This was a display-link prerequisite failure;
+  the nil wrapper assertion alone did not identify it.
+- The serial run restarted the host four times inside this suite. The old
+  teardown called `window.close()` and could invoke the host's last-window quit
+  policy. Source inspection also found a separate lifetime hazard: the fixture's
+  core app could deinitialize before `Ghostty.Surface.deinit` completed its
+  queued main-actor `ghostty_surface_free`.
+- The one Board Command-V behavior assertion reached in the serial run failed
+  with an empty editor. This remains a red receipt. The repair adds a direct
+  `paste:` control so the rerun can separate editor/binding behavior, host focus,
+  and key-equivalent routing without converting a failed shortcut into a pass.
+
+### Repair
+
+Only `macos/Tests/HolyGhostty/HolyModeClipboardTests.swift` changes executable
+code in this revision. Production behavior is unchanged.
+
+- A process-retained test host owns one reusable real `HolyWorkspaceWindow`
+  and one core app. Teardown clears content, responders, and callbacks, then
+  orders the window out. It never closes that last window. The core app outlives
+  deferred surface destruction. A new regression drains weak surface/userdata
+  references and creates the next fixture in the retained window.
+- The real surface uses supported `window-vsync = false`, removing the diagnosed
+  display-link dependency from these input tests, and `command = direct:/bin/cat`
+  with shell integration disabled. Surface initialization still must succeed;
+  no mock, skipped case, retry fallback, or production test bypass was introduced.
+- Every actual Board/Archive field first receives direct `paste:` and checks
+  its native editor and store binding against a known synthetic value. The test
+  clears that value before independently checking Command-V. A console receipt
+  preserves the direct-control outcome even if keyboard dispatch later fails.
+- Keyboard dispatch requests activation during setup and requires the actual
+  host to be active with the fixture window key and main. It retains
+  `NSApp.sendEvent` and the host's production menu. An unavailable keyboard host
+  fails explicitly; no fake menu or direct-paste fallback is installed.
+- Command-V failures include responder/menu-target diagnostics, and the surface
+  records handled key equivalents as well as keyDown calls. Expected binding
+  values are compared to the synthetic marker, avoiding an empty-editor equals
+  empty-binding false positive.
+
+### Builder validation (compiled, not executed)
+
+The nine test definitions expand to 16 cases. The canonical Debug
+build-for-testing completed with exit 0, `TEST BUILD SUCCEEDED`, zero errors,
+and 514 warnings. None reference the changed test file. The xcresult execution
+action is `notRequested`. **Executed tests in this repair lane: 0.**
+
+```sh
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath .dev/mn-0b49e9/DebugDerivedData \
+  SYMROOT=/Users/erik/Custom-Coding/holy-ghostty/.dev/mn-0b49e9/test-build \
+  -only-testing:GhosttyTests/HolyModeClipboardTests \
+  -only-testing:GhosttyTests/HolyMannaBoardTests \
+  -only-testing:GhosttyTests/HolyArchiveModeTests \
+  -parallel-testing-enabled NO \
+  -resultBundlePath .dev/mn-0b49e9/fixture-repair-build.xcresult \
+  build-for-testing
+
+swiftlint lint --strict --quiet --config macos/.swiftlint.yml \
+  macos/Tests/HolyGhostty/HolyModeClipboardTests.swift
+scripts/build-holy-ghostty-core.sh verify
+git diff --check
+```
+
+Strict SwiftLint passes with zero violations; the core verifier passes for
+ReleaseFast, Zig 0.15.2, input hash
+`df28bebb6ebfe4a473978513324c78da1f5148e4952f7f59d53e3806f7781141`.
+Whitespace validation passes. No app/test host launches, installs, screenshots,
+or live sessions occurred in this lane. No push or pull request was made.
+
+Receipts under `.dev/mn-0b49e9/`:
+`fixture-repair-receipt.json`, `fixture-repair-build.log`,
+`fixture-repair-build.xcresult`, `fixture-repair-build-summary.json`,
+`fixture-repair-build-actions.json`, `fixture-repair-swiftlint.log`,
+`fixture-repair-core-verify.log`, and `fixture-repair-learning-receipts.json`.
+Read-only exports of the existing failures are retained in
+`focused-failure-diagnostics/` and `serial-failure-diagnostics/`.
+
+### Needed next: coordinator re-execution
+
+Run the focused suites in an active GUI test host using the rebuilt test products:
+
+```sh
+xcodebuild \
+  -xctestrun .dev/mn-0b49e9/test-build/Ghostty_Ghostty_macosx26.4-arm64.xctestrun \
+  -destination 'platform=macOS,arch=arm64' \
+  -only-testing:GhosttyTests/HolyModeClipboardTests \
+  -only-testing:GhosttyTests/HolyMannaBoardTests \
+  -only-testing:GhosttyTests/HolyArchiveModeTests \
+  -parallel-testing-enabled NO \
+  -resultBundlePath .dev/mn-0b49e9/fixture-repair-executed.xcresult \
+  test-without-building
+```
+
+Verify all 16 clipboard cases, including teardown/reopen, finish without host
+restarts. For each field compare the direct-control receipt with Command-V and
+responder diagnostics. Preserve any host-precondition or behavior failure as
+red; compilation does not establish that either the host deaths or the Board
+paste failure is resolved. The coordinator's wider release gate and Erik's
+live clipboard acceptance remain pending. Keep Manna `in_progress`.
+
+Lessons logged: 3 (new: les-075da1, les-9b8315, les-e9491f) |
+Decisions logged: 1 (new: dec-eecaa9).

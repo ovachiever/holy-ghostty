@@ -12,7 +12,7 @@ struct HolyModeClipboardTests {
     @Test(arguments: HolyWorkspaceWindow.Mode.allCases)
     func presentationResignsTerminalAndRejectsLateFocus(mode: HolyWorkspaceWindow.Mode) async throws {
         let fixture = try ClipboardFixture()
-        defer { fixture.close() }
+        defer { fixture.tearDown() }
         #expect(fixture.window.makeFirstResponder(fixture.surface))
         fixture.present(mode)
         #expect(fixture.window.modeOwnsKeyboard)
@@ -47,7 +47,7 @@ struct HolyModeClipboardTests {
     @Test(arguments: ClipboardDestination.allCases)
     func commandPasteInsertsIntoActualModeField(destination: ClipboardDestination) async throws {
         let fixture = try ClipboardFixture()
-        defer { fixture.close() }
+        defer { fixture.tearDown() }
         #expect(fixture.window.makeFirstResponder(fixture.surface))
         let hosting: NSView
         if destination == .board {
@@ -68,44 +68,60 @@ struct HolyModeClipboardTests {
         #expect(fixture.window.makeFirstResponder(field))
         let editor = try #require(field.currentEditor() as? NSTextView)
         #expect(fixture.window.firstResponder === editor)
+        // Establish the field/editor/binding path independently of the host's
+        // activation and key-equivalent dispatch. A key failure must not erase
+        // this control result or get repaired by a direct-paste fallback.
+        let directText = "direct-clipboard-\(destination.rawValue)"
         editor.selectAll(nil)
+        fixture.clipboard(directText)
+        editor.paste(nil)
+        let directPasteSucceeded = editor.string == directText
+        print("Clipboard direct paste control: destination=\(destination.rawValue), succeeded=\(directPasteSucceeded), firstResponderIsEditor=\(fixture.window.firstResponder === editor)")
+        #expect(directPasteSucceeded, "Direct paste: failed for \(destination.rawValue)")
+        fixture.expectDraft(directText, at: destination)
+        editor.selectAll(nil)
+        editor.insertText("", replacementRange: editor.selectedRange())
+        #expect(editor.string.isEmpty)
+        fixture.expectDraft("", at: destination)
+
         fixture.clipboard("clipboard-\(destination.rawValue)")
         // Use AppKit's event/menu/responder dispatch, including the production
-        // window's performKeyEquivalent, rather than calling the editor's paste.
-        NSApp.sendEvent(try fixture.key("v", code: 9))
-        #expect(editor.string == "clipboard-\(destination.rawValue)")
+        // window and the host's real menu. Do not install a test-only paste menu.
+        let pasteItem = try #require(menuItem(for: #selector(NSText.paste(_:)), in: NSApp.mainMenu))
+        #expect(pasteItem.keyEquivalent == "v")
+        #expect(pasteItem.keyEquivalentModifierMask == .command)
+        try await fixture.sendKey("v", code: 9)
+        let pasteTargetsEditor = NSApp.target(forAction: #selector(NSText.paste(_:)), to: nil, from: pasteItem) as? NSTextView === editor
+        #expect(editor.string == "clipboard-\(destination.rawValue)",
+                "Command-V: directPasteSucceeded=\(directPasteSucceeded), active=\(NSApp.isActive), keyWindow=\(fixture.window.isKeyWindow), firstResponderIsEditor=\(fixture.window.firstResponder === editor), pasteTargetsEditor=\(pasteTargetsEditor)")
         #expect(fixture.window.firstResponder === editor)
         #expect(fixture.surface.keyDownCount == 0)
+        #expect(fixture.surface.handledKeyEquivalentCount == 0)
         try await Task.sleep(for: .milliseconds(100))
         #expect(!fixture.surface.cachedActiveContents.get().contains("clipboard-"))
-        switch destination {
-        case .board: #expect(fixture.board.grep == editor.string)
-        case .search: #expect(fixture.archive.query == editor.string)
-        case .tag, .note: #expect(fixture.archive.annotationDraft == editor.string)
-        case .research: #expect(fixture.archive.researchDraft == editor.string)
-        }
+        fixture.expectDraft("clipboard-\(destination.rawValue)", at: destination)
     }
 
     @Test(arguments: HolyWorkspaceWindow.Mode.allCases)
     func dismissRestoresTerminalTypingAndPaste(mode: HolyWorkspaceWindow.Mode) async throws {
         let fixture = try ClipboardFixture()
-        defer { fixture.close() }
+        defer { fixture.tearDown() }
         #expect(fixture.window.makeFirstResponder(fixture.surface))
         fixture.present(mode)
         fixture.dismiss(mode)
         try await eventually { fixture.window.firstResponder === fixture.surface }
         #expect(!fixture.window.modeOwnsKeyboard)
         #expect(fixture.surface.focused)
-        NSApp.sendEvent(try fixture.key("x", code: 7, flags: []))
+        try await fixture.sendKey("x", code: 7, flags: [])
         fixture.clipboard("restored-paste")
-        NSApp.sendEvent(try fixture.key("v", code: 9))
+        try await fixture.sendKey("v", code: 9)
         try await eventually { fixture.surface.cachedActiveContents.get().contains("xrestored-paste") }
         #expect(fixture.surface.keyDownCount > 0)
     }
 
     @Test func switchingModesNeverRestoresTerminalBetweenThem() async throws {
         let fixture = try ClipboardFixture()
-        defer { fixture.close() }
+        defer { fixture.tearDown() }
         #expect(fixture.window.makeFirstResponder(fixture.surface))
         fixture.present(.board)
         fixture.dismiss(.board)
@@ -119,10 +135,35 @@ struct HolyModeClipboardTests {
         #expect(fixture.window.modeOwnsKeyboard)
     }
 
+    @Test func fixtureTeardownDrainsSurfaceAndKeepsHostReusable() async throws {
+        weak var retiredSurface: ClipboardSurface?
+        weak var retiredUserdata: Ghostty.SurfaceUserdata?
+        let retainedWindow = try autoreleasepool {
+            let fixture = try ClipboardFixture()
+            defer { fixture.tearDown() }
+            fixture.present(.board)
+            retiredSurface = fixture.surface
+            retiredUserdata = fixture.surface.callbackUserdata
+            return fixture.window
+        }
+        // The weak userdata disappears only after the queued C-surface free.
+        // Reaching the next fixture also proves teardown did not quit the host.
+        try await eventually { retiredSurface == nil && retiredUserdata == nil }
+        #expect(!retainedWindow.isVisible)
+        #expect(!retainedWindow.modeOwnsKeyboard)
+        #expect(NSApp.windows.contains { $0 === retainedWindow })
+
+        let next = try ClipboardFixture()
+        defer { next.tearDown() }
+        #expect(next.window === retainedWindow)
+        #expect(next.window.makeFirstResponder(next.surface))
+        #expect(next.surface.surface != nil)
+    }
+
     @Test(arguments: HolyWorkspaceWindow.Mode.allCases)
     func selectedModeTextCopiesExcerptThroughPasteboard(mode: HolyWorkspaceWindow.Mode) async throws {
         let fixture = try ClipboardFixture()
-        defer { fixture.close() }
+        defer { fixture.tearDown() }
         fixture.present(mode)
         let hosting: NSView
         if mode == .archive {
@@ -141,25 +182,25 @@ struct HolyModeClipboardTests {
         let text = try selectableEditor(containing: "clipboard excerpt", in: hosting, window: fixture.window)
         text.setSelectedRange((text.string as NSString).range(of: "clipboard excerpt"))
         fixture.clipboard("unchanged sentinel")
-        NSApp.sendEvent(try fixture.key("c", code: 8))
+        try await fixture.sendKey("c", code: 8)
         #expect(NSPasteboard.general.string(forType: .string) == "clipboard excerpt")
         #expect(fixture.surface.keyDownCount == 0)
 
         let destination = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
         fixture.window.contentView?.addSubview(destination)
         #expect(fixture.window.makeFirstResponder(destination))
-        NSApp.sendEvent(try fixture.key("v", code: 9))
+        try await fixture.sendKey("v", code: 9)
         #expect(destination.string == "clipboard excerpt")
     }
 
     @Test func unhandledBoardCopyUsesSelectedIDAndTitleOnlyInBoard() async throws {
         let fixture = try ClipboardFixture()
-        defer { fixture.close() }
+        defer { fixture.tearDown() }
         fixture.present(.board)
         try await eventually { fixture.board.selectedItem != nil }
         #expect(fixture.board.selectedRowCopyText == "mn-123456 Clipboard fixture")
         #expect(fixture.window.makeFirstResponder(nil))
-        NSApp.sendEvent(try fixture.key("c", code: 8))
+        try await fixture.sendKey("c", code: 8)
         #expect(NSPasteboard.general.string(forType: .string) == fixture.board.selectedRowCopyText)
 
         let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
@@ -169,14 +210,14 @@ struct HolyModeClipboardTests {
         #expect(fixture.window.makeFirstResponder(text))
         text.setSelectedRange(NSRange(location: 0, length: 0))
         fixture.clipboard("empty selection sentinel")
-        NSApp.sendEvent(try fixture.key("c", code: 8))
+        try await fixture.sendKey("c", code: 8)
         #expect(NSPasteboard.general.string(forType: .string) == fixture.board.selectedRowCopyText)
 
         // An empty selection in an editable field must retain normal Copy
         // semantics rather than replacing the clipboard with a ledger row.
         text.isEditable = true
         fixture.clipboard("editor sentinel")
-        NSApp.sendEvent(try fixture.key("c", code: 8))
+        try await fixture.sendKey("c", code: 8)
         #expect(NSPasteboard.general.string(forType: .string) == "editor sentinel")
 
         fixture.dismiss(.board)
@@ -190,7 +231,7 @@ struct HolyModeClipboardTests {
 
     @Test func archiveEditingKeepsLettersAndCommandClipboardKeys() throws {
         let fixture = try ClipboardFixture()
-        defer { fixture.close() }
+        defer { fixture.tearDown() }
         fixture.present(.archive)
         fixture.archive.chatIsPresented = true
         #expect(!fixture.archive.handleKeyEquivalent(try fixture.key("z", code: 6, flags: []), textInputActive: true))
@@ -204,7 +245,7 @@ struct HolyModeClipboardTests {
 
     @Test func archiveTranscriptAndResumeCopyVerbsRemainAvailable() async throws {
         let fixture = try ClipboardFixture()
-        defer { fixture.close() }
+        defer { fixture.tearDown() }
         try fixture.seedArchive()
         fixture.present(.archive)
         try await eventually { fixture.archive.sessions.count == 1 }
@@ -237,9 +278,37 @@ enum ClipboardDestination: String, CaseIterable {
 }
 
 @MainActor
-private final class ClipboardFixture {
+private final class ClipboardTestHost {
+    static let shared = Result { try ClipboardTestHost() }
+
     let config: TemporaryConfig
     let ghostty: Ghostty.App
+    let window: HolyWorkspaceWindow
+
+    private init() throws {
+        // The focused-run receipt reports CVDisplayLink's zero active displays,
+        // followed by error.OutOfMemory. Clipboard tests need real terminal IO,
+        // not display-synchronized rendering. This is a supported core setting.
+        config = try TemporaryConfig("""
+        command = direct:/bin/cat
+        shell-integration = none
+        window-vsync = false
+        """)
+        ghostty = Ghostty.App(configPath: config.temporaryFile.path)
+        _ = try #require(ghostty.app)
+        window = HolyWorkspaceWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1480, height: 900),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.isRestorable = false
+        window.isExcludedFromWindowsMenu = true
+        window.tabbingMode = .disallowed
+    }
+}
+
+@MainActor
+private final class ClipboardFixture {
     let surface: ClipboardSurface
     let window: HolyWorkspaceWindow
     let board: HolyMannaBoardModeStore
@@ -253,18 +322,15 @@ private final class ClipboardFixture {
                 item.data(forType: type).map { (type, $0) }
             })
         }
-        config = try TemporaryConfig("command = /bin/cat\nshell-integration = none\n")
-        ghostty = Ghostty.App(configPath: config.temporaryFile.path)
-        surface = ClipboardSurface(try #require(ghostty.app))
-        _ = try #require(surface.surface)
-        directory = config.temporaryFile.deletingPathExtension().appendingPathExtension("clipboard-fixture")
+        let host = try ClipboardTestHost.shared.get()
+        surface = ClipboardSurface(try #require(host.ghostty.app))
+        _ = try #require(surface.surface, "Clipboard surface creation failed with window-vsync=false; inspect the core initialization error")
+        directory = host.config.temporaryFile.deletingLastPathComponent()
+            .appendingPathComponent("clipboard-fixture-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let window = HolyWorkspaceWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1480, height: 900),
-            styleMask: [.titled], backing: .buffered, defer: false
-        )
+        let window = host.window
         self.window = window
-        window.isReleasedWhenClosed = false
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 1480, height: 900))
         let client = HolyMannaBoardClient(identityStore: .init(fileURL: directory.appendingPathComponent("actor.json"))) { _, _ in
             .init(stdout: clipboardBoardJSON, stderr: "", exitCode: 0)
         }
@@ -280,7 +346,9 @@ private final class ClipboardFixture {
         window.terminalResponder = { [weak surface] in surface }
         window.boardCopyText = { [weak board] in board?.selectedRowCopyText }
         window.contentView?.addSubview(surface)
+        NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+        window.makeMain()
     }
 
     func present(_ mode: HolyWorkspaceWindow.Mode) {
@@ -310,6 +378,28 @@ private final class ClipboardFixture {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
+    func expectDraft(_ expected: String, at destination: ClipboardDestination) {
+        switch destination {
+        case .board: #expect(board.grep == expected)
+        case .search: #expect(archive.query == expected)
+        case .tag, .note: #expect(archive.annotationDraft == expected)
+        case .research: #expect(archive.researchDraft == expected)
+        }
+    }
+
+    func sendKey(_ characters: String, code: UInt16, flags: NSEvent.ModifierFlags = .command) async throws {
+        // NSApplication.sendEvent does not model keyboard input into an inactive
+        // app. Fail at that host prerequisite instead of blaming an empty field.
+        // Keep the production event/menu path once the host owns keyboard focus.
+        for _ in 0..<200 {
+            if NSApp.isActive, NSApp.keyWindow === window, NSApp.mainWindow === window { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(NSApp.isActive && NSApp.keyWindow === window && NSApp.mainWindow === window,
+                     "Clipboard keyboard host unavailable: active=\(NSApp.isActive), keyWindow=\(window.isKeyWindow), mainWindow=\(window.isMainWindow). Direct paste control is independent; execute keyboard acceptance in an active GUI host.")
+        NSApp.sendEvent(try key(characters, code: code, flags: flags))
+    }
+
     func seedArchive() throws {
         let repository = try HolyArchiveRepository(databaseURL: directory.appendingPathComponent("archive.sqlite3"))
         let date = Date(timeIntervalSince1970: 1_790_116_200)
@@ -337,12 +427,17 @@ private final class ClipboardFixture {
         ))
     }
 
-    func close() {
+    func tearDown() {
         window.terminalResponder = nil
+        window.boardCopyText = nil
         board.dismiss()
         archive.dismiss()
+        _ = window.makeFirstResponder(nil)
         window.contentView = nil
-        window.close()
+        // Reuse a retained, empty window instead of closing the test host's last
+        // window and invoking Holy's normal auto-quit policy. Keep its core app
+        // alive too: Surface.deinit queues ghostty_surface_free on the main actor.
+        window.orderOut(nil)
         NSPasteboard.general.clearContents()
         let items = savedClipboard.map { representations in
             let item = NSPasteboardItem()
@@ -356,11 +451,26 @@ private final class ClipboardFixture {
 
 private final class ClipboardSurface: Ghostty.SurfaceView {
     var keyDownCount = 0
+    var handledKeyEquivalentCount = 0
 
     override func keyDown(with event: NSEvent) {
         keyDownCount += 1
         super.keyDown(with: event)
     }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let handled = super.performKeyEquivalent(with: event)
+        if handled { handledKeyEquivalentCount += 1 }
+        return handled
+    }
+}
+
+@MainActor private func menuItem(for action: Selector, in menu: NSMenu?) -> NSMenuItem? {
+    for item in menu?.items ?? [] {
+        if item.action == action { return item }
+        if let found = menuItem(for: action, in: item.submenu) { return found }
+    }
+    return nil
 }
 
 @MainActor private func descendants(_ view: NSView) -> [NSView] {
