@@ -25,7 +25,12 @@ struct HolyMannaWorkerConvergence {
 
 @MainActor
 final class HolyMannaBoardModeStore: ObservableObject {
-    @Published private(set) var isPresented = false
+    @Published private(set) var isPresented = false {
+        didSet {
+            if isPresented != oldValue { presentationChanged(isPresented) }
+        }
+    }
+    private let presentationChanged: @MainActor (Bool) -> Void
     @Published private(set) var surface: HolyMannaBoardSurface = .board
     @Published var selectedSheet: HolyMannaBoardSheet = .board
     @Published var boardFilter: HolyMannaBoardFilter = .live
@@ -137,8 +142,10 @@ final class HolyMannaBoardModeStore: ObservableObject {
         prewarmer: (any HolyMannaBoardPrewarming)? = nil,
         usageAssessmentProvider: @escaping () -> HolyClaudeUsageAssessment = {
             .init(level: .normal, decidingBucket: nil, reason: nil)
-        }
+        },
+        presentationChanged: @escaping @MainActor (Bool) -> Void = { _ in }
     ) {
+        self.presentationChanged = presentationChanged
         self.asker = asker
         self.askTimeout = askTimeout
         self.workerLauncher = workerLauncher
@@ -160,6 +167,11 @@ final class HolyMannaBoardModeStore: ObservableObject {
 
     var selectedItem: HolyMannaBoardItem? {
         state?.item(id: selectedItemID)
+    }
+
+    var selectedRowCopyText: String? {
+        guard surface == .board, selectedPeerID == nil, let item = selectedItem else { return nil }
+        return "\(item.id) \(item.titlePlain)"
     }
 
     var selectedPeer: HolyMannaPeer? {

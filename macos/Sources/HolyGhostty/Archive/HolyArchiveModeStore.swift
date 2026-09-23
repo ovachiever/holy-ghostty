@@ -37,7 +37,12 @@ final class HolyArchiveModeStore: ObservableObject {
     static let logger = Logger(subsystem: "org.holyghostty.app", category: "HolyArchive")
     static let maximumDisplayedSessions = 500
 
-    @Published private(set) var isPresented = false
+    @Published private(set) var isPresented = false {
+        didSet {
+            if isPresented != oldValue { presentationChanged(isPresented) }
+        }
+    }
+    private let presentationChanged: @MainActor (Bool) -> Void
     @Published private(set) var sessions: [HolyArchiveSession] = []
     @Published private(set) var children: [HolyArchiveSession] = []
     @Published private(set) var annotations: [HolyArchiveAnnotation] = []
@@ -106,8 +111,10 @@ final class HolyArchiveModeStore: ObservableObject {
         databaseURL: URL = HolyDatabasePaths.archiveDatabaseURL,
         federation: HolyArchiveFederation? = nil,
         remoteHostsProvider: @escaping @MainActor () -> [HolyRemoteHostRecord] = { [] },
-        resumeHandler: @escaping @MainActor (HolyArchiveSession) -> Bool
+        resumeHandler: @escaping @MainActor (HolyArchiveSession) -> Bool,
+        presentationChanged: @escaping @MainActor (Bool) -> Void = { _ in }
     ) {
+        self.presentationChanged = presentationChanged
         self.registry = registry
         self.remoteHostsProvider = remoteHostsProvider
         self.resumeHandler = resumeHandler
@@ -1044,7 +1051,7 @@ final class HolyArchiveModeStore: ObservableObject {
             if event.keyCode == 125 { nextFindMatch(); return true }
             if event.keyCode == 126 { nextFindMatch(-1); return true }
         }
-        if key == "z", flags.isEmpty, chatIsPresented {
+        if key == "z", flags.isEmpty, chatIsPresented, !textInputActive {
             chatIsFullscreen.toggle()
             return true
         }

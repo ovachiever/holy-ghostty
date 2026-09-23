@@ -284,8 +284,15 @@ extension Ghostty {
         /// Event monitor (see individual events for why)
         private var eventMonitor: Any?
 
+        // SwiftUI detaches terminal panes while a Holy mode is presented. Keep
+        // their keyboard owner through that gap, including stale responder calls.
+        private weak var holyKeyboardWindow: HolyWorkspaceWindow?
+        var holyModeOwnsKeyboard: Bool {
+            ((window as? HolyWorkspaceWindow) ?? holyKeyboardWindow)?.modeOwnsKeyboard == true
+        }
+
         // We need to support being a first responder so that we can get input events
-        override var acceptsFirstResponder: Bool { return true }
+        override var acceptsFirstResponder: Bool { !holyModeOwnsKeyboard }
 
         init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
             self.markedText = NSMutableAttributedString()
@@ -502,6 +509,7 @@ extension Ghostty {
         }
 
         func focusDidChange(_ focused: Bool) {
+            guard !focused || !holyModeOwnsKeyboard else { return }
             guard let surface = self.surface else { return }
             guard self.focused != focused else { return }
             self.focused = focused
@@ -703,6 +711,7 @@ extension Ghostty {
         // MARK: Local Events
 
         private func localEventHandler(_ event: NSEvent) -> NSEvent? {
+            guard !holyModeOwnsKeyboard else { return event }
             return switch event.type {
             case .keyUp:
                 localEventKeyUp(event)
@@ -875,7 +884,13 @@ extension Ghostty {
 
         // MARK: - NSView
 
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { holyKeyboardWindow = window as? HolyWorkspaceWindow }
+        }
+
         override func becomeFirstResponder() -> Bool {
+            guard !holyModeOwnsKeyboard else { return false }
             let result = super.becomeFirstResponder()
             if result { focusDidChange(true) }
             return result
@@ -1264,6 +1279,7 @@ extension Ghostty {
         }
 
         override func keyDown(with event: NSEvent) {
+            guard !holyModeOwnsKeyboard else { return }
             clearMannaHover()
             if holyWorkspaceController?.handleSessionCycleKey(event) == true {
                 return
@@ -1391,6 +1407,7 @@ extension Ghostty {
         }
 
         override func keyUp(with event: NSEvent) {
+            guard !holyModeOwnsKeyboard else { return }
             _ = keyAction(GHOSTTY_ACTION_RELEASE, event: event)
         }
 
@@ -1424,6 +1441,7 @@ extension Ghostty {
 
         /// Special case handling for some control keys
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            guard !holyModeOwnsKeyboard else { return false }
             // We only care about key down events. It might not even be possible
             // to receive any other event type here.
             guard event.type == .keyDown else { return false }
@@ -1750,6 +1768,7 @@ extension Ghostty {
         }
 
         @IBAction func copy(_ sender: Any?) {
+            guard !holyModeOwnsKeyboard else { return }
             guard let surface = self.surface else { return }
             let action = "copy_to_clipboard"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
@@ -1758,6 +1777,7 @@ extension Ghostty {
         }
 
         @IBAction func paste(_ sender: Any?) {
+            guard !holyModeOwnsKeyboard else { return }
             guard let surface = self.surface else { return }
             let action = "paste_from_clipboard"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
@@ -1766,6 +1786,7 @@ extension Ghostty {
         }
 
         @IBAction func pasteAsPlainText(_ sender: Any?) {
+            guard !holyModeOwnsKeyboard else { return }
             guard let surface = self.surface else { return }
             let action = "paste_from_clipboard"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
@@ -1774,6 +1795,7 @@ extension Ghostty {
         }
 
         @IBAction func pasteSelection(_ sender: Any?) {
+            guard !holyModeOwnsKeyboard else { return }
             guard let surface = self.surface else { return }
             let action = "paste_from_selection"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
@@ -1782,6 +1804,7 @@ extension Ghostty {
         }
 
         @IBAction override func selectAll(_ sender: Any?) {
+            guard !holyModeOwnsKeyboard else { return }
             guard let surface = self.surface else { return }
             let action = "select_all"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
@@ -2288,6 +2311,7 @@ extension Ghostty.SurfaceView: NSTextInputClient {
     }
 
     func insertText(_ string: Any, replacementRange: NSRange) {
+        guard !holyModeOwnsKeyboard else { return }
         // We must have an associated event
         guard NSApp.currentEvent != nil else { return }
         guard let surfaceModel else { return }

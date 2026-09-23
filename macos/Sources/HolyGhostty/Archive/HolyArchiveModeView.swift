@@ -79,6 +79,7 @@ struct HolyArchiveModeView: View {
         .background(Palette.bg)
         .font(mono())
         .foregroundStyle(Palette.text)
+        .textSelection(.enabled)
         .onChange(of: store.searchFocusNonce) { _ in searchFocused = true }
         .onChange(of: store.researchFocusNonce) { _ in researchFocused = true }
         .onChange(of: store.annotationMode) { mode in
@@ -1284,7 +1285,7 @@ private struct HolyArchiveTranscriptFramePreferenceKey: PreferenceKey {
 
 /// widgets.py build_message_text: `[i] User` green, `Assistant` magenta,
 /// the body in a gutter; here the gutter is the cockpit's rule.
-private struct HolyArchiveTranscriptMessageView: View {
+struct HolyArchiveTranscriptMessageView: View {
     let index: Int
     let message: HolyArchiveMessage
     let find: String

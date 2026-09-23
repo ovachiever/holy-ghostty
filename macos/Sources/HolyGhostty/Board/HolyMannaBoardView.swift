@@ -54,6 +54,7 @@ struct HolyMannaBoardView: View {
         .background(Palette.bg)
         .font(mono())
         .foregroundStyle(Palette.text)
+        .textSelection(.enabled)
         .onExitCommand(perform: onDismiss)
         .confirmationDialog(
             store.pendingMutation?.confirmationTitle ?? "Confirm Manna action",
@@ -1901,14 +1902,20 @@ struct HolyMannaBoardView: View {
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard store.isPresented else { return event }
+            guard store.isPresented,
+                  let window = event.window,
+                  (window.windowController as? HolyWorkspaceWindowController)?.boardModeStore === store else {
+                return event
+            }
             let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
             let key = event.charactersIgnoringModifiers ?? ""
             if ["f", "k"].contains(key.lowercased()), flags == .command {
                 store.requestGrepFocus()
                 return nil
             }
-            if key == "/", flags.isEmpty, !store.isGrepFocused {
+            let editing = (window.firstResponder as? NSTextView)?.isEditable == true
+                || window.firstResponder is NSTextField
+            if key == "/", flags.isEmpty, !editing {
                 store.requestGrepFocus()
                 return nil
             }

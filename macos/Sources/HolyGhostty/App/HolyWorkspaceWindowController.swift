@@ -10,8 +10,73 @@ private enum HolyWorkspaceKeyCode {
 }
 
 @MainActor
-private final class HolyWorkspaceWindow: NSWindow {
+final class HolyWorkspaceWindow: NSWindow {
+    enum Mode: CaseIterable {
+        case board
+        case archive
+    }
+
     weak var holyWorkspaceController: HolyWorkspaceWindowController?
+    private var presentedModes: Set<Mode> = []
+    var terminalResponder: (() -> Ghostty.SurfaceView?)?
+    var boardCopyText: (() -> String?)?
+
+    var modeOwnsKeyboard: Bool { !presentedModes.isEmpty }
+
+    /// The stores call this synchronously, before SwiftUI removes the pane.
+    /// Reject delayed terminal focus requests before AppKit resigns an editor.
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        if modeOwnsKeyboard, responder is Ghostty.SurfaceView { return false }
+        return super.makeFirstResponder(responder)
+    }
+
+    func setMode(_ mode: Mode, presented: Bool) {
+        if presented {
+            guard presentedModes.insert(mode).inserted else { return }
+            if firstResponder is Ghostty.SurfaceView {
+                _ = makeFirstResponder(nil)
+            }
+        } else {
+            guard presentedModes.remove(mode) != nil, !modeOwnsKeyboard else { return }
+            // The selected pane must be mounted again. Recheck after the view
+            // update so a Board/Archive switch never restores terminal focus.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.modeOwnsKeyboard, self.attachedSheet == nil,
+                      let surface = self.terminalResponder?() else { return }
+                Ghostty.moveFocus(to: surface)
+            }
+        }
+    }
+
+    /// Native text responders get copy: first. Only an unhandled copy reaches
+    /// this row fallback; selection and editable field clipboard verbs stay native.
+    @IBAction func copy(_ sender: Any?) {
+        guard canCopyBoardRow, let text = boardCopyText?() else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private var canCopyBoardRow: Bool {
+        presentedModes.contains(.board) && !presentedModes.contains(.archive)
+            && attachedSheet == nil && boardCopyText?() != nil
+    }
+
+    override func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(copy(_:)) { return canCopyBoardRow }
+        return super.validateMenuItem(menuItem)
+    }
+
+    private func copyUnselectedBoardText(with event: NSEvent) -> Bool {
+        guard canCopyBoardRow, event.type == .keyDown,
+              event.charactersIgnoringModifiers?.lowercased() == "c",
+              event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command,
+              let text = firstResponder as? NSTextView, !text.isEditable,
+              text.selectedRanges.allSatisfy({ $0.rangeValue.length == 0 }) else { return false }
+        // A read-only text view still implements copy: with an empty selection,
+        // so the responder chain alone cannot reach the selected-row fallback.
+        copy(nil)
+        return true
+    }
 
     /// mn-7afa94: ⌘P "has never worked" while its handler exists and is
     /// wired. Log every ⌘-key that reaches this override so a single press
@@ -23,6 +88,7 @@ private final class HolyWorkspaceWindow: NSWindow {
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let handled = holyWorkspaceController?.handleWorkspaceKeyEquivalent(event) == true
+            || copyUnselectedBoardText(with: event)
         if handled {
             if event.modifierFlags.contains(.command) {
                 Self.keyDebugLogger.error(
@@ -74,6 +140,12 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
             seedDefaultSession: resolvedSeedDefaultSession
         )
         self.workspaceStore = workspaceStore
+        let window = HolyWorkspaceWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1580, height: 980),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
         self.boardModeStore = HolyMannaBoardModeStore(
             workerLauncher: { spec in
                 guard let session = workspaceStore.createSession(with: spec, origin: .directLaunch),
@@ -82,7 +154,8 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
                 }
                 return session.id
             },
-            usageAssessmentProvider: { workspaceStore.claudeUsageAssessment }
+            usageAssessmentProvider: { workspaceStore.claudeUsageAssessment },
+            presentationChanged: { [weak window] in window?.setMode(.board, presented: $0) }
         )
         self.archiveModeStore = HolyArchiveModeStore(
             databaseURL: archiveDatabaseURL,
@@ -90,15 +163,11 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
             resumeHandler: { session in
                 guard let spec = HolyArchiveResumeLaunchSpec.make(for: session) else { return false }
                 return workspaceStore.createSession(with: spec, origin: .directLaunch) != nil
-            }
+            },
+            presentationChanged: { [weak window] in window?.setMode(.archive, presented: $0) }
         )
-
-        let window = HolyWorkspaceWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1580, height: 980),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
+        window.terminalResponder = { [weak workspaceStore] in workspaceStore?.selectedSession?.surfaceView }
+        window.boardCopyText = { [weak boardModeStore] in boardModeStore?.selectedRowCopyText }
 
         window.minSize = NSSize(width: 920, height: 620)
         window.title = "Holy Ghostty"
@@ -334,7 +403,8 @@ final class HolyWorkspaceWindowController: NSWindowController, NSWindowDelegate 
         }
 
         if archiveModeStore.isPresented {
-            let textInputActive = window?.firstResponder is NSTextView
+            let textInputActive = (window?.firstResponder as? NSTextView)?.isEditable == true
+                || window?.firstResponder is NSTextField
             return archiveModeStore.handleKeyEquivalent(event, textInputActive: textInputActive)
         }
 
