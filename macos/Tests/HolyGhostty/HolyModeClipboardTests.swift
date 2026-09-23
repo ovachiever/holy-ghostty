@@ -85,13 +85,13 @@ struct HolyModeClipboardTests {
         fixture.expectDraft("", at: destination)
 
         fixture.clipboard("clipboard-\(destination.rawValue)")
-        // Use AppKit's event/menu/responder dispatch, including the production
-        // window and the host's real menu. Do not install a test-only paste menu.
-        let pasteItem = try #require(menuItem(for: #selector(NSText.paste(_:)), in: NSApp.mainMenu))
-        #expect(pasteItem.keyEquivalent == "v")
-        #expect(pasteItem.keyEquivalentModifierMask == .command)
-        try await fixture.sendKey("v", code: 9)
-        let pasteTargetsEditor = NSApp.target(forAction: #selector(NSText.paste(_:)), to: nil, from: pasteItem) as? NSTextView === editor
+        // Invoke the production window directly: no main-menu key equivalent
+        // gets an opportunity to turn missing mode routing into a passing test.
+        try await fixture.requireKeyboardHost()
+        let pasteTargetsEditor = NSApp.target(forAction: #selector(NSText.paste(_:)), to: nil, from: fixture.window) as? NSTextView === editor
+        #expect(pasteTargetsEditor)
+        let handled = fixture.window.performKeyEquivalent(with: try fixture.key("v", code: 9))
+        #expect(handled)
         #expect(editor.string == "clipboard-\(destination.rawValue)",
                 "Command-V: directPasteSucceeded=\(directPasteSucceeded), active=\(NSApp.isActive), keyWindow=\(fixture.window.isKeyWindow), firstResponderIsEditor=\(fixture.window.firstResponder === editor), pasteTargetsEditor=\(pasteTargetsEditor)")
         #expect(fixture.window.firstResponder === editor)
@@ -117,6 +117,70 @@ struct HolyModeClipboardTests {
         try await fixture.sendKey("v", code: 9)
         try await eventually { fixture.surface.cachedActiveContents.get().contains("xrestored-paste") }
         #expect(fixture.surface.keyDownCount > 0)
+        #expect(fixture.surface.handledKeyEquivalentCount > 0)
+    }
+
+    @Test(arguments: HolyWorkspaceWindow.Mode.allCases)
+    func modeEditingChordsUseNativeSelectionClipboardAndUndo(mode: HolyWorkspaceWindow.Mode) async throws {
+        let fixture = try ClipboardFixture()
+        defer { fixture.tearDown() }
+        fixture.present(mode)
+        let editor = ClipboardUndoTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
+        editor.isRichText = false
+        editor.allowsUndo = true
+        editor.string = "native editing"
+        fixture.window.contentView?.addSubview(editor)
+        #expect(fixture.window.makeFirstResponder(editor))
+        try await fixture.requireKeyboardHost()
+        let manager = editor.editingUndoManager
+        manager.groupsByEvent = false
+        defer { manager.removeAllActions() }
+
+        let selectedAll = fixture.window.performKeyEquivalent(with: try fixture.key("a", code: 0))
+        #expect(selectedAll)
+        #expect(editor.selectedRange() == NSRange(location: 0, length: (editor.string as NSString).length))
+        fixture.clipboard("copy sentinel")
+        let copied = fixture.window.performKeyEquivalent(with: try fixture.key("c", code: 8))
+        #expect(copied)
+        #expect(NSPasteboard.general.string(forType: .string) == "native editing")
+
+        manager.beginUndoGrouping()
+        let cut = fixture.window.performKeyEquivalent(with: try fixture.key("x", code: 7))
+        manager.endUndoGrouping()
+        #expect(cut)
+        #expect(editor.string.isEmpty)
+        #expect(NSPasteboard.general.string(forType: .string) == "native editing")
+        #expect(manager.canUndo)
+        let undone = fixture.window.performKeyEquivalent(with: try fixture.key("z", code: 6))
+        #expect(undone)
+        #expect(editor.string == "native editing")
+        #expect(manager.canRedo)
+        let redone = fixture.window.performKeyEquivalent(with: try fixture.key("z", code: 6, flags: [.command, .shift]))
+        #expect(redone)
+        #expect(editor.string.isEmpty)
+
+        fixture.clipboard("native paste")
+        manager.beginUndoGrouping()
+        let pasted = fixture.window.performKeyEquivalent(with: try fixture.key("v", code: 9))
+        manager.endUndoGrouping()
+        #expect(pasted)
+        #expect(editor.string == "native paste")
+        #expect(fixture.surface.keyDownCount == 0)
+        #expect(fixture.surface.handledKeyEquivalentCount == 0)
+    }
+
+    @Test func unhandledModeEditingFallsThrough() async throws {
+        let fixture = try ClipboardFixture()
+        defer { fixture.tearDown() }
+        fixture.present(.archive)
+        #expect(fixture.window.makeFirstResponder(nil))
+        try await fixture.requireKeyboardHost()
+        fixture.clipboard("unhandled sentinel")
+        for (key, code): (String, UInt16) in [("v", 9), ("c", 8), ("x", 7)] {
+            let handled = fixture.window.performKeyEquivalent(with: try fixture.key(key, code: code))
+            #expect(!handled, "An editing action without a native target must fall through")
+        }
+        #expect(NSPasteboard.general.string(forType: .string) == "unhandled sentinel")
     }
 
     @Test func switchingModesNeverRestoresTerminalBetweenThem() async throws {
@@ -346,6 +410,9 @@ private final class ClipboardFixture {
         window.terminalResponder = { [weak surface] in surface }
         window.boardCopyText = { [weak board] in board?.selectedRowCopyText }
         window.contentView?.addSubview(surface)
+        // Failed clipboard expectations must report synthetic text, never the
+        // user's saved clipboard. The original formats remain in memory only.
+        clipboard("clipboard fixture sentinel")
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.makeMain()
@@ -388,16 +455,19 @@ private final class ClipboardFixture {
     }
 
     func sendKey(_ characters: String, code: UInt16, flags: NSEvent.ModifierFlags = .command) async throws {
+        try await requireKeyboardHost()
+        NSApp.sendEvent(try key(characters, code: code, flags: flags))
+    }
+
+    func requireKeyboardHost() async throws {
         // NSApplication.sendEvent does not model keyboard input into an inactive
         // app. Fail at that host prerequisite instead of blaming an empty field.
-        // Keep the production event/menu path once the host owns keyboard focus.
         for _ in 0..<200 {
             if NSApp.isActive, NSApp.keyWindow === window, NSApp.mainWindow === window { break }
             try await Task.sleep(for: .milliseconds(10))
         }
         try #require(NSApp.isActive && NSApp.keyWindow === window && NSApp.mainWindow === window,
                      "Clipboard keyboard host unavailable: active=\(NSApp.isActive), keyWindow=\(window.isKeyWindow), mainWindow=\(window.isMainWindow). Direct paste control is independent; execute keyboard acceptance in an active GUI host.")
-        NSApp.sendEvent(try key(characters, code: code, flags: flags))
     }
 
     func seedArchive() throws {
@@ -465,12 +535,9 @@ private final class ClipboardSurface: Ghostty.SurfaceView {
     }
 }
 
-@MainActor private func menuItem(for action: Selector, in menu: NSMenu?) -> NSMenuItem? {
-    for item in menu?.items ?? [] {
-        if item.action == action { return item }
-        if let found = menuItem(for: action, in: item.submenu) { return found }
-    }
-    return nil
+private final class ClipboardUndoTextView: NSTextView {
+    let editingUndoManager = UndoManager()
+    override var undoManager: UndoManager? { editingUndoManager }
 }
 
 @MainActor private func descendants(_ view: NSView) -> [NSView] {

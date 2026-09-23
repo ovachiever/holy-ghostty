@@ -6,7 +6,7 @@ source: null
 base_commit: d1d0c1100b9747bdf7730c6abc74da410353d52a
 scope: '[P1][BOARD][ARCHIVE] Clipboard citizenship: copy and paste work everywhere in Board and Archive — the surface stops owning the keyboard under overlays'
 inputs: []
-binding: sha256:fbdfb37e5ccb233e6c8f187861936442711c416924cd7899894e32e4637c54ff
+binding: sha256:36dac7e35c938893374ebafa9760730ddc0a7f966f786dd4878d6fc9d6fec839
 ---
 
 # Handoff: [P1][BOARD][ARCHIVE] Clipboard citizenship: copy and paste work everywhere in Board and Archive — the surface stops owning the keyboard under overlays
@@ -40,10 +40,13 @@ Erik 2026-09-22: 'I NEED to be able to copy and paste in board/archive, anywhere
 
 ## Current status: 2026-09-23
 
-The coordinator's executed receipt is red. The fixture repair below compiles,
-but has not executed. Keep `mn-0b49e9` `in_progress`. Host survival, clipboard
-behavior, and the required live acceptance still need coordinator verification.
-The dated 2026-09-22 builder receipt is historical, not a passing runtime result.
+Erik's 09:47 live verdict and HolyKeyDebug tape confirm that the field editor
+now owns the keyboard, but editing chords still fail to dispatch. The coordinator
+executed the fixture repair; all five direct paste controls succeeded and the
+subsequent Command-V checks failed. The new native editing-routing candidate
+below has compiled in Debug and ReleaseLocal but has not executed. Keep `mn-0b49e9` `in_progress`
+for coordinator re-execution, installation, and Erik's re-check. Earlier dated
+receipts are historical, not passing acceptance for the new candidate.
 
 ## Builder receipt: 2026-09-22
 
@@ -314,3 +317,145 @@ live clipboard acceptance remain pending. Keep Manna `in_progress`.
 
 Lessons logged: 3 (new: les-075da1, les-9b8315, les-e9491f) |
 Decisions logged: 1 (new: dec-eecaa9).
+
+## Native editing routing repair: 2026-09-23
+
+### Live verdict and exact diagnosis
+
+The coordinator's drop and `.dev/mn-0b49e9-receipt.md` report six Command-V
+presses at 09:47 with `fr=SystemTextFieldFieldEditor` (runtime class
+`_SystemTextFieldFieldEditor`) and `superHandled=false`. Erik saw highlighted
+selection, no copy effect, and a beep on paste. The responder exclusion works;
+the missing step is dispatch of the editing chord after the terminal relinquishes
+the keyboard. The menu does not provide a usable Paste key equivalent.
+
+Correction to the pass-two receipt's Bin B description: the actual raw logs
+`.dev/mn-0b49e9-clip2.log` and `.dev/mn-0b49e9-serial2.log` each record successful
+direct paste controls for Board, search, tag, note, and research. Their later
+Command-V diagnostics report `directPasteSucceeded=true`, `active=true`,
+`firstResponderIsEditor=true`, and `pasteTargetsEditor=true`. The empty editor
+assertion is in the subsequent keyboard phase, not in the direct control.
+`.dev/mn-0b49e9/editing-routing-diagnosis.json` preserves these synthetic-only
+control lines without copying unrelated clipboard contents from failed logs.
+
+The default shortcut is present in the core. Its absence from the menu follows
+the checked-in source, not a missing fixture keybind:
+
+1. `src/config/Config.zig` registers a physical Paste key, then Unicode Command-V
+   with `performable = true` (and the corresponding Copy bindings).
+2. `src/input/Binding.zig` intentionally excludes performable bindings from the
+   action-to-trigger reverse map (`track_reverse = !flags.performable`). This
+   preserves core control over conditional bindings.
+3. `src/config/CApi.zig` implements `ghostty_config_trigger` via that reverse
+   map. With the defaults, Paste resolves to the earlier physical Paste trigger,
+   not the performable Command-V trigger.
+4. `macos/Sources/Ghostty/Ghostty.Input.swift` converts physical keys only when
+   present in `keyToEquivalent`; physical Paste/Copy are absent, so conversion
+   returns nil.
+5. `Ghostty.Config.keyboardShortcut(for:)` forwards that conversion, and
+   `Ghostty.MenuShortcutManager.syncMenuShortcut` clears the menu equivalent and
+   modifier mask on nil. Native modes therefore cannot depend on this menu path.
+
+### Change
+
+`HolyWorkspaceWindow.performKeyEquivalent` now tries native editing dispatch
+while Board or Archive owns the keyboard in the key window. Command-V/C/X/A
+send `paste:`, `copy:`, `cut:`, and `selectAll:` via
+`NSApp.sendAction(..., to: nil, from: self)`. Command-Z and Shift-Command-Z use
+the focused responder's undo manager only when it can undo or redo.
+
+The branch handles only the standard modifier combinations, excludes attached
+sheets and stale terminal responders, and returns true only when dispatch is
+accepted or an available undo/redo is performed. Empty read-only selections still
+reach Board's existing row-copy fallback; an unavailable row copy is not reported
+as accepted. Normal terminal routing remains outside this mode branch.
+HolyKeyDebug records `modeEditing` and the responder class for accepted chords.
+
+The Bin A menu assertions are removed. Actual-field tests call the production
+window's key-equivalent method and require both acceptance and insertion, so a
+menu cannot mask missing window routing. Direct paste remains a separate control.
+Added native NSTextView coverage checks Select All, Copy, Cut, Undo, Redo, and
+Paste in both modes, plus unhandled-action fallthrough. Terminal restoration
+asserts that the surface receives its own key equivalents again. Existing
+SwiftUI selection-copy tests retain full `NSApp.sendEvent` dispatch.
+
+Each fixture now seeds synthetic clipboard content after retaining the user's
+original formats in memory, preventing a failed assertion from printing the
+original clipboard. Teardown still restores all retained representations.
+
+### Validation and remaining acceptance
+
+The focused Debug build-for-testing passes with exit 0, zero errors, and 494
+warnings, none in either changed file. Xcode records execution as `notRequested`.
+The suite now has 11 test definitions and 19 cases. **Executed tests for this
+editing-routing candidate: 0.** Strict SwiftLint passes for both changed Swift
+files, and `git diff --check` passes.
+
+ReleaseLocal passes with exit 0, zero errors, 55 warnings (none in an owned
+file), and both x86_64 and arm64 slices. The resulting production app passes
+`codesign --verify --deep --strict`. Core verification passes for ReleaseFast,
+Zig 0.15.2, input hash
+`df28bebb6ebfe4a473978513324c78da1f5148e4952f7f59d53e3806f7781141`.
+No test/app launches, installs, screenshots, live sessions, pushes, or pull
+requests occurred in this lane.
+
+```sh
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath .dev/mn-0b49e9/DebugDerivedData \
+  SYMROOT=/Users/erik/Custom-Coding/holy-ghostty/.dev/mn-0b49e9/test-build \
+  -only-testing:GhosttyTests/HolyModeClipboardTests \
+  -only-testing:GhosttyTests/HolyMannaBoardTests \
+  -only-testing:GhosttyTests/HolyArchiveModeTests \
+  -parallel-testing-enabled NO \
+  -resultBundlePath .dev/mn-0b49e9/editing-routing-build.xcresult \
+  build-for-testing
+
+xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty \
+  -configuration ReleaseLocal \
+  -derivedDataPath .dev/mn-0b49e9/ReleaseDerivedData \
+  SYMROOT=/Users/erik/Custom-Coding/holy-ghostty/.dev/mn-0b49e9/production-build \
+  -resultBundlePath .dev/mn-0b49e9/editing-routing-release.xcresult build
+
+swiftlint lint --strict --quiet --config macos/.swiftlint.yml \
+  macos/Sources/HolyGhostty/App/HolyWorkspaceWindowController.swift \
+  macos/Tests/HolyGhostty/HolyModeClipboardTests.swift
+scripts/build-holy-ghostty-core.sh verify
+codesign --verify --deep --strict \
+  '.dev/mn-0b49e9/production-build/ReleaseLocal/Holy Ghostty.app'
+git diff --check
+```
+
+Receipts under `.dev/mn-0b49e9/`: `editing-routing-receipt.json`,
+`editing-routing-diagnosis.json`, `editing-routing-build.log`,
+`editing-routing-build.xcresult`, `editing-routing-build-summary.json`,
+`editing-routing-build-actions.json`, `editing-routing-release.log`,
+`editing-routing-release.xcresult`, `editing-routing-release-summary.json`,
+`editing-routing-swiftlint.log`, `editing-routing-core-verify.log`,
+`editing-routing-codesign.log`, and the editing-routing learning receipts.
+The candidate receipt binds both changed Swift files by SHA-256.
+
+The coordinator must re-execute the rebuilt clipboard, Board, and Archive suites,
+then install through the supported path for Erik's re-check. Confirm native
+editing in each field, selection-copy round trips, Board row fallback, and
+normal terminal input after dismissal. Inspect `modeEditing=true` and the editor
+responder in HolyKeyDebug. The prior serial run's later host exits in
+`HolyRosterInstantKillTests` remain a separate unresolved release-gate observation;
+this revision does not claim to repair that suite. Keep Manna `in_progress`.
+
+Coordinator execution command, not run by this builder:
+
+```sh
+xcodebuild \
+  -xctestrun .dev/mn-0b49e9/test-build/Ghostty_Ghostty_macosx26.4-arm64.xctestrun \
+  -destination 'platform=macOS,arch=arm64' \
+  -only-testing:GhosttyTests/HolyModeClipboardTests \
+  -only-testing:GhosttyTests/HolyMannaBoardTests \
+  -only-testing:GhosttyTests/HolyArchiveModeTests \
+  -parallel-testing-enabled NO \
+  -resultBundlePath .dev/mn-0b49e9/editing-routing-executed.xcresult \
+  test-without-building
+```
+
+Lessons logged: 3 (new: les-9f5d47, les-54d793, les-926023) |
+Decisions logged: 1 (new: dec-652295).

@@ -78,6 +78,52 @@ final class HolyWorkspaceWindow: NSWindow {
         return true
     }
 
+    private func performModeEditingKeyEquivalent(with event: NSEvent) -> Bool {
+        guard modeOwnsKeyboard, isKeyWindow, attachedSheet == nil, event.type == .keyDown,
+              !(firstResponder is Ghostty.SurfaceView),
+              let key = event.charactersIgnoringModifiers?.lowercased() else { return false }
+        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+
+        if key == "z", flags == .command || flags == [.command, .shift] {
+            guard let manager = firstResponder?.undoManager else { return false }
+            if flags.contains(.shift) {
+                guard manager.canRedo else { return false }
+                manager.redo()
+            } else {
+                guard manager.canUndo else { return false }
+                manager.undo()
+            }
+            return true
+        }
+
+        guard flags == .command else { return false }
+        let action: Selector
+        switch key {
+        case "v": action = #selector(NSText.paste(_:))
+        case "c": action = #selector(NSText.copy(_:))
+        case "x": action = #selector(NSText.cut(_:))
+        case "a": action = #selector(NSText.selectAll(_:))
+        default: return false
+        }
+
+        // Default terminal copy/paste bindings are performable, so Ghostty's
+        // reverse lookup deliberately omits them from menu key equivalents.
+        // Native mode editors must receive these actions without the surface
+        // or the main menu dispatching their shortcuts.
+        let target = NSApp.target(forAction: action, to: nil, from: self)
+        guard target != nil, !(target is Ghostty.SurfaceView) else { return false }
+        if action == #selector(NSText.copy(_:)) {
+            // A read-only editor accepts copy: even with no selection. Let the
+            // existing Board row fallback handle that case instead.
+            if canCopyBoardRow, let text = target as? NSTextView, !text.isEditable,
+               text.selectedRanges.allSatisfy({ $0.rangeValue.length == 0 }) { return false }
+            // Our window implements copy: for Board rows only. Do not claim
+            // an accepted copy when that fallback has nothing to copy.
+            if target as? HolyWorkspaceWindow === self, !canCopyBoardRow { return false }
+        }
+        return NSApp.sendAction(action, to: nil, from: self)
+    }
+
     /// mn-7afa94: ⌘P "has never worked" while its handler exists and is
     /// wired. Log every ⌘-key that reaches this override so a single press
     /// answers whether the event arrives at all and who consumed it.
@@ -87,12 +133,15 @@ final class HolyWorkspaceWindow: NSWindow {
     )
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let handled = holyWorkspaceController?.handleWorkspaceKeyEquivalent(event) == true
+        let editingHandled = performModeEditingKeyEquivalent(with: event)
+        let handled = editingHandled
+            || holyWorkspaceController?.handleWorkspaceKeyEquivalent(event) == true
             || copyUnselectedBoardText(with: event)
         if handled {
             if event.modifierFlags.contains(.command) {
+                let responder = firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
                 Self.keyDebugLogger.error(
-                    "performKeyEquivalent key=\(event.charactersIgnoringModifiers ?? "?", privacy: .public) flags=\(event.modifierFlags.rawValue) handledByWorkspace=true controllerWired=\(self.holyWorkspaceController != nil)"
+                    "performKeyEquivalent key=\(event.charactersIgnoringModifiers ?? "?", privacy: .public) flags=\(event.modifierFlags.rawValue) handledByWorkspace=true modeEditing=\(editingHandled) fr=\(responder, privacy: .public) controllerWired=\(self.holyWorkspaceController != nil)"
                 )
             }
             return true
