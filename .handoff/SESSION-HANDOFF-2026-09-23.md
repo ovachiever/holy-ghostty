@@ -34,7 +34,7 @@ engine payload df28bebb (CI artifact from `d1d0c1100`). Every claim below has a 
 | `e57ec0afa` (worker) | `HolyModeClipboardTests.swift` | Fixture keeps window+core alive; nil surfaces traced to Core Video zero displays → `window-vsync = false` |
 | `278b1a8ff` (worker) | `HolyWorkspaceWindowController.swift` | Routes cmd-V/C/X/A + undo to the focused responder directly; Ghostty marks default clipboard bindings *performable* and excludes them from menu-shortcut lookup, so Edit>Paste can never carry cmd-V |
 | `2d6ef8417`, `e6bb87b81` | `.manna/issues.jsonl`, `.handoff/*` | Board bookkeeping for mn-e9f9a9, mn-0b49e9 |
-| `~/.claude/CLAUDE.md` (global) |: | Added Starry Labs/Versova/Aldebaran context and repo-lifecycle rule (born at ovachiever → promoted; Versova gets a fork descendant) |
+| `~/.claude/CLAUDE.md` (global) | (instructions file, not repo) | Added Starry Labs/Versova/Aldebaran context and repo-lifecycle rule (born at ovachiever → promoted; Versova gets a fork descendant) |
 
 ## 6. Bugs fixed
 
