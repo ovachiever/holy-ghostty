@@ -147,17 +147,29 @@ final class HolySSHTransportManager: @unchecked Sendable {
     }
 
     private func validatedDestination(_ rawDestination: String) throws -> String {
+        guard Self.isValidDestination(rawDestination) else {
+            throw HolySSHTransportError.invalidDestination
+        }
+        return rawDestination
+    }
+
+    /// The destination grammar every caller must satisfy before a destination
+    /// is spliced into an ssh invocation: a leading ASCII alphanumeric, then
+    /// only alphanumerics and `%-.:@[]_`, at most 512 bytes, no surrounding
+    /// whitespace. Shared with the automation URL gate so a `host` query
+    /// value is refused by the same rule that would reject it here (mn-e9f9a9).
+    static func isValidDestination(_ rawDestination: String) -> Bool {
         let destination = rawDestination.trimmingCharacters(in: .whitespacesAndNewlines)
         let bytes = Array(destination.utf8)
         guard destination == rawDestination,
               !bytes.isEmpty,
               bytes.count <= 512,
               let first = bytes.first,
-              Self.isASCIIAlphanumeric(first),
-              bytes.allSatisfy(Self.isAllowedDestinationByte(_:)) else {
-            throw HolySSHTransportError.invalidDestination
+              isASCIIAlphanumeric(first),
+              bytes.allSatisfy(isAllowedDestinationByte(_:)) else {
+            return false
         }
-        return destination
+        return true
     }
 
     private static func isASCIIAlphanumeric(_ byte: UInt8) -> Bool {

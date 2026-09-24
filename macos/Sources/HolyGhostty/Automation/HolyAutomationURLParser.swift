@@ -16,6 +16,10 @@ enum HolyAutomationURLParser {
         return id
     }
 
+    /// Reads a spawn URL into a launch spec. This is a parser, not a gate:
+    /// `HolyAutomationURLGate.decide` decides whether a spec may be built at
+    /// all, and nothing may call this on a URL the gate has not admitted
+    /// (mn-e9f9a9).
     static func launchSpec(from url: URL) -> HolySessionLaunchSpec? {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.scheme?.lowercased() == scheme else {
@@ -68,7 +72,7 @@ enum HolyAutomationURLParser {
         )
     }
 
-    private static func routeName(from components: URLComponents) -> String? {
+    static func routeName(from components: URLComponents) -> String? {
         if let host = components.host?.lowercased(), !host.isEmpty {
             return host
         }
@@ -77,18 +81,40 @@ enum HolyAutomationURLParser {
         return path.isEmpty ? nil : path.lowercased()
     }
 
-    private static func queryValue(named name: String, in components: URLComponents) -> String? {
-        guard let encodedValue = components.percentEncodedQueryItems?.first(where: { $0.name == name })?.value else {
-            return nil
-        }
-
-        // Shell tools commonly produce application/x-www-form-urlencoded query strings.
-        // URLComponents preserves "+" literally, so normalize it before percent-decoding.
-        let formEncodedValue = encodedValue.replacingOccurrences(of: "+", with: " ")
-        return formEncodedValue.removingPercentEncoding ?? formEncodedValue
+    struct DecodedQueryItem: Equatable {
+        let name: String
+        let value: String?
     }
 
-    private static func runtimeValue(from input: String?) -> HolySessionRuntime? {
+    /// Query items with names and values percent-decoded, and `+` read as a
+    /// space inside values because shell tools emit form encoding. Returns
+    /// nil when any name or value is not valid percent-encoded UTF-8, so no
+    /// caller ever works from a half-decoded field. The gate and the parser
+    /// both read through here; a field cannot mean one thing to the check
+    /// and another to the spec.
+    static func decodedQueryItems(in components: URLComponents) -> [DecodedQueryItem]? {
+        guard let encodedItems = components.percentEncodedQueryItems else { return [] }
+
+        var items: [DecodedQueryItem] = []
+        for item in encodedItems {
+            guard let name = item.name.removingPercentEncoding else { return nil }
+            var value: String?
+            if let encodedValue = item.value {
+                guard let decoded = encodedValue
+                    .replacingOccurrences(of: "+", with: " ")
+                    .removingPercentEncoding else { return nil }
+                value = decoded
+            }
+            items.append(.init(name: name, value: value))
+        }
+        return items
+    }
+
+    private static func queryValue(named name: String, in components: URLComponents) -> String? {
+        decodedQueryItems(in: components)?.first { $0.name == name }?.value
+    }
+
+    static func runtimeValue(from input: String?) -> HolySessionRuntime? {
         guard let normalized = trimmed(input)?.lowercased() else { return nil }
 
         return HolySessionRuntime.allCases.first {
@@ -96,17 +122,21 @@ enum HolyAutomationURLParser {
         }
     }
 
-    private static func transportValue(from input: String?, host: String?) -> HolySessionTransportKind {
-        guard let normalized = trimmed(input)?.lowercased() else {
-            return host == nil ? .local : .ssh
-        }
+    /// The transport a value names, or nil when it names none. The launch
+    /// spec falls back from nil to a host-derived default; the gate refuses.
+    static func transportKind(from input: String?) -> HolySessionTransportKind? {
+        guard let normalized = trimmed(input)?.lowercased() else { return nil }
 
         return HolySessionTransportKind.allCases.first {
             $0.rawValue == normalized || $0.displayName.lowercased() == normalized
-        } ?? (host == nil ? .local : .ssh)
+        }
     }
 
-    private static func boolValue(from input: String?) -> Bool? {
+    private static func transportValue(from input: String?, host: String?) -> HolySessionTransportKind {
+        transportKind(from: input) ?? (host == nil ? .local : .ssh)
+    }
+
+    static func boolValue(from input: String?) -> Bool? {
         guard let normalized = trimmed(input)?.lowercased() else { return nil }
 
         switch normalized {

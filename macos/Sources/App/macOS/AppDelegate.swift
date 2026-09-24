@@ -31,6 +31,13 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuClaudeModelIndicator: NSMenuItem?
     private var menuAgentStateIndicators: NSMenuItem?
     private var menuClaudeUsageGuard: NSMenuItem?
+    private var menuAllowSpawnURL: NSMenuItem?
+    private var menuAllowSpawnURLCommands: NSMenuItem?
+
+    /// Seams for the `holy-ghostty://` route. Production leaves every field
+    /// nil; the entry-point tests fill them so both doors can be driven
+    /// without a live launch (mn-e9f9a9).
+    @MainActor var holyAutomationURLHooks = HolyAutomationURLHooks()
     @IBOutlet private var menuSecureInput: NSMenuItem?
     @IBOutlet private var menuQuit: NSMenuItem?
 
@@ -389,9 +396,14 @@ class AppDelegate: NSObject,
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
+        // The current Apple Event is only valid while this call runs, so the
+        // sender is read now and carried into the gate with the URL.
+        let origin = HolyAutomationURLOrigin.from(
+            appleEvent: NSAppleEventManager.shared().currentAppleEvent
+        )
         Task { @MainActor in
             for url in urls {
-                self.handleHolyAutomationURL(url)
+                self.handleHolyAutomationURL(url, origin: origin)
             }
         }
     }
@@ -467,8 +479,10 @@ class AppDelegate: NSObject,
         alert.runModal()
     }
 
+    /// Internal rather than private so the entry-point tests can drive the
+    /// exact path Launch Services uses for the URL scheme (mn-e9f9a9).
     @objc
-    private func handleGetURLEvent(
+    func handleGetURLEvent(
         _ event: NSAppleEventDescriptor,
         withReplyEvent replyEvent: NSAppleEventDescriptor
     ) {
@@ -477,8 +491,9 @@ class AppDelegate: NSObject,
             return
         }
 
+        let origin = HolyAutomationURLOrigin.from(appleEvent: event)
         Task { @MainActor in
-            self.handleHolyAutomationURL(url)
+            self.handleHolyAutomationURL(url, origin: origin)
         }
     }
 
@@ -1310,6 +1325,77 @@ class AppDelegate: NSObject,
         usageItem.target = self
         menu.insertItem(usageItem, at: max(0, menu.index(of: modelItem) + 1))
         menuClaudeUsageGuard = usageItem
+
+        // The holy-ghostty://spawn route ships refused; these two checkboxes
+        // are the opt-in the gate reads (mn-e9f9a9).
+        let spawnItem = NSMenuItem(
+            title: "Allow Spawn URLs",
+            action: #selector(toggleAllowSpawnURL(_:)),
+            keyEquivalent: ""
+        )
+        spawnItem.target = self
+        menu.insertItem(spawnItem, at: max(0, menu.index(of: usageItem) + 1))
+        menuAllowSpawnURL = spawnItem
+
+        let commandsItem = NSMenuItem(
+            title: "Allow Commands in Spawn URLs",
+            action: #selector(toggleAllowSpawnURLCommands(_:)),
+            keyEquivalent: ""
+        )
+        commandsItem.target = self
+        menu.insertItem(commandsItem, at: max(0, menu.index(of: spawnItem) + 1))
+        menuAllowSpawnURLCommands = commandsItem
+    }
+
+    @IBAction func toggleAllowSpawnURL(_ sender: Any?) {
+        defer { refreshHolyAutomationURLMenu() }
+        let key = HolyAutomationURLGate.Policy.DefaultsKey.allowSpawnURL
+        if UserDefaults.standard.bool(forKey: key) {
+            UserDefaults.standard.set(false, forKey: key)
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Allow spawn URLs?"
+        alert.informativeText = """
+        Any web page, mail, document, or app can open a holy-ghostty://spawn link. With this on, Holy shows each request in a confirmation sheet naming its runtime, host, directory, and command, and nothing runs until you click Create Session. Commands and initial input stay refused unless Allow Commands in Spawn URLs is also on. Every request is logged with its full URL.
+        """
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Allow")
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    @IBAction func toggleAllowSpawnURLCommands(_ sender: Any?) {
+        defer { refreshHolyAutomationURLMenu() }
+        let key = HolyAutomationURLGate.Policy.DefaultsKey.allowSpawnURLCommands
+        if UserDefaults.standard.bool(forKey: key) {
+            UserDefaults.standard.set(false, forKey: key)
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Allow commands in spawn URLs?"
+        alert.informativeText = """
+        A spawn link may then carry a command, a bootstrap command, or initial input, which Holy runs in the new session's shell once you click Create Session in the confirmation sheet. Leave this off unless your own automations need it; Allow Spawn URLs must also be on for any spawn link to be considered.
+        """
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Allow")
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    private func refreshHolyAutomationURLMenu() {
+        guard Self.isHolyGhosttyBundle else {
+            menuAllowSpawnURL?.isHidden = true
+            menuAllowSpawnURLCommands?.isHidden = true
+            return
+        }
+        let policy = HolyAutomationURLGate.Policy.fromUserDefaults()
+        menuAllowSpawnURL?.isHidden = false
+        menuAllowSpawnURL?.state = policy.allowSpawnURL ? .on : .off
+        menuAllowSpawnURLCommands?.isHidden = false
+        menuAllowSpawnURLCommands?.state = policy.allowSpawnURLCommands ? .on : .off
     }
 
     @IBAction func toggleClaudeUsageGuard(_ sender: Any?) {
@@ -1394,6 +1480,7 @@ class AppDelegate: NSObject,
     private func refreshClaudeModelIndicatorMenu() {
         refreshAgentStateIndicatorMenu()
         refreshClaudeUsageGuardMenu()
+        refreshHolyAutomationURLMenu()
         guard Self.isHolyGhosttyBundle else {
             menuClaudeModelIndicator?.isHidden = true
             return
@@ -1581,9 +1668,25 @@ class AppDelegate: NSObject,
         workspace.workspaceStore.toggleInboxPanel()
     }
 
+    /// Every `holy-ghostty://` URL lands here, from Launch Services, from the
+    /// Apple Event handler, or from a Command-click on a Manna link. The gate
+    /// decides; this method only carries out its verdict and writes the audit
+    /// line. A spawn creates nothing until the confirmation sheet's
+    /// non-default button is clicked (mn-e9f9a9).
     @MainActor
-    func handleHolyAutomationURL(_ url: URL, from source: Ghostty.SurfaceView? = nil) {
-        if let id = HolyAutomationURLParser.boardItemID(from: url) {
+    func handleHolyAutomationURL(
+        _ url: URL,
+        from source: Ghostty.SurfaceView? = nil,
+        origin: HolyAutomationURLOrigin? = nil
+    ) {
+        let hooks = holyAutomationURLHooks
+        let policy = hooks.policy?() ?? HolyAutomationURLGate.Policy.fromUserDefaults()
+        let audit: @MainActor (HolyAutomationURLAuditEntry) -> Void = hooks.audit ?? { entry in
+            HolyAutomationURLAudit.log(entry)
+        }
+
+        switch HolyAutomationURLGate.decide(url, policy: policy) {
+        case let .board(id):
             let sourceWorkspace = source?.window?.windowController as? HolyWorkspaceWindowController
             // A Board URL must never seed a default terminal session.
             let workspace = sourceWorkspace ?? preferredWorkspace(createIfNeeded: false)
@@ -1596,16 +1699,53 @@ class AppDelegate: NSObject,
             workspace.archiveModeStore.dismiss()
             workspace.boardModeStore.openItemLink(id, from: context)
             workspace.showAndActivate()
-            return
-        }
-        guard let launchSpec = HolyAutomationURLParser.launchSpec(from: url) else {
-            AppDelegate.logger.warning(
-                "Ignored unsupported automation URL: \(url.absoluteString, privacy: .public)"
-            )
-            return
-        }
 
-        _ = createAutomatedHolySession(with: launchSpec, origin: .automation)
+        case .unsupported:
+            audit(.init(verdict: .unsupported, detail: "no such route", url: url))
+
+        case let .refused(refusal):
+            audit(.init(verdict: .refused, detail: refusal.reason, url: url))
+
+        case let .confirmSpawn(request):
+            audit(.init(verdict: .prompted, detail: request.auditDetail, url: url))
+            let confirm = hooks.confirm ?? { [weak self] request, origin, completion in
+                self?.presentHolyAutomationSpawnConfirmation(request, origin: origin, completion: completion)
+            }
+            confirm(request, origin) { [weak self] accepted in
+                guard let self else { return }
+                guard accepted else {
+                    audit(.init(verdict: .cancelled, detail: request.auditDetail, url: url))
+                    return
+                }
+                audit(.init(verdict: .confirmed, detail: request.auditDetail, url: url))
+                if let launch = hooks.launch {
+                    _ = launch(request.launchSpec)
+                } else {
+                    _ = self.createAutomatedHolySession(with: request.launchSpec, origin: .automation)
+                }
+            }
+        }
+    }
+
+    /// Sheet on the workspace window when one is showing, app-modal otherwise
+    /// (a URL can arrive at cold launch before any window exists).
+    @MainActor
+    private func presentHolyAutomationSpawnConfirmation(
+        _ request: HolyAutomationSpawnRequest,
+        origin: HolyAutomationURLOrigin?,
+        completion: @escaping @MainActor @Sendable (Bool) -> Void
+    ) {
+        let alert = HolyAutomationSpawnConfirmation.makeAlert(for: request, origin: origin)
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = preferredWorkspace(createIfNeeded: false)?.window, window.isVisible {
+            alert.beginSheetModal(for: window) { response in
+                MainActor.assumeIsolated {
+                    completion(response == HolyAutomationSpawnConfirmation.createResponse)
+                }
+            }
+            return
+        }
+        completion(alert.runModal() == HolyAutomationSpawnConfirmation.createResponse)
     }
 
     /// Toggles visibility of all Ghosty Terminal windows. When hidden, activates Ghostty as the frontmost application

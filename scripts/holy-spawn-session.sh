@@ -23,6 +23,20 @@ Options:
 Examples:
   holy-spawn-session.sh --tmux-session temp --title temp
   holy-spawn-session.sh --host studio --transport ssh --tmux-session temp --title studio/temp
+
+Opt-in (the app refuses and logs every spawn URL until you allow it):
+  A holy-ghostty://spawn URL can be opened by any web page, mail, document,
+  or app, so a default install refuses the route. On a Mac you own, either
+  turn on Holy menu > Allow Spawn URLs, or run:
+    defaults write org.holyghostty.app holy.automation.allowSpawnURL -bool true
+  --bootstrap-command and --initial-input carry commands and are refused
+  until commands are also allowed (Holy menu > Allow Commands in Spawn URLs, or):
+    defaults write org.holyghostty.app holy.automation.allowSpawnURLCommands -bool true
+  Even when allowed, Holy shows a confirmation sheet naming the runtime, host,
+  directory, and command; Cancel is the default button and nothing runs until
+  you click Create Session. Refusals and acceptances are logged with the full
+  URL under subsystem org.holyghostty.app, category HolyAutomationURL:
+    log stream --predicate 'category == "HolyAutomationURL"'
 EOF
 }
 
