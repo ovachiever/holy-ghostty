@@ -25,7 +25,7 @@ loss (§6). Treat its verdicts as receipts-only; where a mechanism is unproven t
 | Engine builds only via CI | Local Zig link is broken on macOS 26; engine changes go CI ReleaseFast → `scripts/build-holy-ghostty-core.sh import <zip>` → installer; installer refuses on core-input hash mismatch. | memory tmux-scroll-throttle-regression; 09-23 handoff §11 |
 | Naming is astrology-sourced | Product = Yed Prior (δ Oph conj natal Uranus 0.0998°); parent = Aldebaran Group (Aldebaran conj natal Mercury 0.0231°); Regulus retired (regulus-labs.ai, funded defense firm); Starry Labs informal only (Reg. 5223910, Verizon, incontestable). | yed-prior README/brief; business-plan-builder track mn-7ccdce |
 | Starry Labs ↔ Versova | JT-approved resource use; Erik advisory-only on Versova policy, never in the approval chain; repos born at ovachiever, promoted later; Versova gets a fork descendant. | global `~/.claude/CLAUDE.md` section (added 09-22) |
-| Install/relaunch is routine | Erik: "I need holy installed many times." The memory rule "never install over a live fleet" was written and then removed at his direction. The failure on 09-23 was the operator's chain, not a policy gap (§6). | memory db-maintenance-ops (unchanged) |
+| Install/relaunch is routine | Erik: "I need holy installed many times." The memory rule "never install over a live fleet" was written and then removed at his direction. The 09-23 failure was launching by name, not the install (§5). | memory db-maintenance-ops (unchanged) |
 
 ## 2. Commits landed 2026-09-22..24 (holy-ghostty, main)
 
@@ -134,7 +134,7 @@ Each row is a decision Erik voiced that has no mn- id. Suggested board in the ri
 
 **Unproven:** what ended the old tmux server between 19:04:20 and 19:05:03. Candidates, none tested: the Debug bundle's cold-boot converge on a socket it did not own; the tmux server exiting when its last client detached under a different socket owner; something in the Debug build's Sep-10 codebase (pre-dates the identity resolver work). What would verify it: reproduce with a Debug bundle registered in LaunchServices, a live `-L holy` server, and `tmux -L holy server-info` + unified log with `process == "tmux"` captured across an `open -a` launch. That reproduction is item 8 of §4 and is P0.
 
-**Operator decisions that caused the chain, in order:** (1) installing and relaunching without being asked, while 20+ agents were mid-turn; (2) launching by bundle name instead of path, which handed LaunchServices the choice of binary; (3) hand-recreating tmux sessions and editing `sessions.archived_at` in SQLite instead of stopping at the rollback. Erik's ruling on (3): never again ("don't ever do workaround shit like I see in that code again").
+**Cause, per Erik's ruling 09-24:** installing and relaunching over a live fleet is routine and was not the problem; it is done constantly. The fault was (1) launching by bundle name (`open -a "Holy Ghostty"`) instead of by path, which handed LaunchServices the choice of binary and it chose a stale Debug bundle; and then (2) every decision after that: hand-recreating tmux sessions and editing `sessions.archived_at` in SQLite instead of stopping at the rollback. Erik's ruling on (2): never again ("don't ever do workaround shit like I see in that code again").
 
 **Current state (09-24):** tmux holy = 51 sessions; DB live rows = 51; rows still archived from the sweep = 0; DerivedData Debug bundles = 0; installed = 278b1a8ff.
 
@@ -183,7 +183,7 @@ cd ~/Custom-Coding/holy-ghostty/macos && xcodebuild test -scheme Ghostty -destin
 
 ## 8. Next session, first moves
 
-1. Read §5 and file §4 item 8 (P0) and item 15 before any install. Do not install or relaunch unless Erik asks for that install.
+1. Read §5 and file §4 item 8 (P0) and item 15 before any install. Install and relaunch as usual, always by path: `open /Applications/Holy\ Ghostty.app`, never `open -a` by name.
 2. File §4 items 1–3, 5–7, 11 as manna on their boards (each cites this file by path). Ask Erik only on items 4, 12, 13.
 3. Assign mn-e9f9a9 to a worker with the gate test spelled out; it is the first 1.0 blocker.
 4. Check mn-dd4384's claimant liveness from the agent-do repo before assuming the doorbell is progressing.
