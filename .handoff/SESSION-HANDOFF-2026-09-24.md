@@ -100,7 +100,7 @@ Each row is a decision Erik voiced that has no mn- id. Suggested board in the ri
 | 6 | Installer launches by path | Installer and every script use `open /Applications/Holy\ Ghostty.app`, never `open -a` by name, so LaunchServices cannot substitute another registered bundle. | holy — P1 installer hardening |
 | 7 | GhosttyUITests target crashes at bootstrap | Must be skipped (`-skip-testing:GhosttyUITests`) for any serial run to finish. | holy — P2 test infra |
 | 8 | HolyRosterInstantKillTests host death; Clear `isKeyWindow` test hygiene | 09-23 handoff §10 lists both; still unfiled. | holy — P2 |
-| 9 | 1.0 ceremony gate: certified serial green run | One `-parallel-testing-enabled NO` run on the release commit with the failing count printed by `grep -c "' failed"`, attached to the tag item. | holy — P0 process item |
+| 9 | 1.0 ceremony gate: certified serial green run | One `-parallel-testing-enabled NO` run on the release commit with the failure count read from the result bundle (`xcrun xcresulttool get test-results summary`, §6), attached to the tag item. Never a log grep: the suites are Swift Testing, and `grep -c "' failed"` printed 0 against a run with 8 failed cases (09-24). | holy — P0 process item |
 | 10 | Screenshot set for the release page | Three candidates reviewed; none finalized. | holy — P2 |
 | 11 | Windows employee rollout items | Ranked paths in yed-prior brief §1; no item exists for "Windows host behind a Mac over SSH" trial or for the trimmed company rulebook. | yed-prior — P2 |
 | 12 | Mid-claim coordination ≠ reopening | Doctrine in §1; belongs in agent-do manna docs/lint so `manna` never treats a drop on an in_progress item as a reopen. | agent-do — P3 doc |
@@ -139,9 +139,13 @@ agent-do manna state --json | python3 -c "import json,sys;d=json.load(sys.stdin)
 # key tape (never bare `log`; the shell aliases it)
 /usr/bin/log show --last 10m --predicate 'category == "HolyKeyDebug"' --style compact
 
-# serial suite (the only run whose failure count is trustworthy)
-cd ~/Custom-Coding/holy-ghostty/macos && xcodebuild test -scheme Ghostty -destination 'platform=macOS' \
-  -parallel-testing-enabled NO -skip-testing:GhosttyUITests 2>&1 | tee /tmp/serial.log | grep -c "' failed"
+# serial suite (the only trustworthy run); count from the result bundle, never by grepping the log
+# (Swift Testing output: `grep -c "' failed"` printed 0 against 8 failed cases on 09-24)
+cd ~/Custom-Coding/holy-ghostty/macos && rm -rf /tmp/serial.xcresult && xcodebuild test -scheme Ghostty -destination 'platform=macOS' \
+  -parallel-testing-enabled NO -skip-testing:GhosttyUITests -resultBundlePath /tmp/serial.xcresult > /tmp/serial.log 2>&1
+xcrun xcresulttool get test-results summary --path /tmp/serial.xcresult | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['result'],'total',d['totalTestCount'],'passed',d['passedTests'],'failed',d['failedTests'],'skipped',d['skippedTests']);[print(f['testName'],'|',f['failureText'].splitlines()[0]) for f in d.get('testFailures',[])]"
+# 09-24 on main 3b83f7de1: Failed total 1004 passed 993 failed 8 skipped 3; all 8 pre-existing and listed in the 09-23 handoff
+# (dispatchNoteSurvives… = mn-cf5f48; clear-lifecycle isKeyWindow; one clipboard key-window case; five HolyRosterInstantKillTests host deaths)
 ```
 
 ## 7. Next session, first moves

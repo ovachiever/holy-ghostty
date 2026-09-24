@@ -112,8 +112,9 @@ agent-do manna reconcile                            # expect blocker_desync for 
 # full unit suite, the only trustworthy form (serial, UI target skipped)
 /usr/bin/xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration Debug \
   -destination 'platform=macOS,arch=arm64' -derivedDataPath .dev/DerivedData \
-  -skip-testing:GhosttyUITests -parallel-testing-enabled NO test CODE_SIGNING_ALLOWED=NO > .dev/serial.log 2>&1
-grep -c "' failed" .dev/serial.log; grep -c "' passed" .dev/serial.log
+  -skip-testing:GhosttyUITests -parallel-testing-enabled NO -resultBundlePath .dev/serial.xcresult test CODE_SIGNING_ALLOWED=NO > .dev/serial.log 2>&1
+# count from the result bundle (Swift Testing suites; `grep -c "' failed"` prints 0 — corrected 09-24)
+xcrun xcresulttool get test-results summary --path .dev/serial.xcresult
 # clipboard suite alone (expect 9 pass / 2 key-window-bound failures at 278b1a8ff)
 ... -only-testing:GhosttyTests/HolyModeClipboardTests -parallel-testing-enabled NO test ...
 # keyboard tape (real binary; the shell aliases `log`)
