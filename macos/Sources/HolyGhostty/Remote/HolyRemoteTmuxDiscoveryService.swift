@@ -702,24 +702,39 @@ actor HolyRemoteTmuxDiscoveryService {
           done
         }
 
+        # A pane title or window name is screen text, not a path. It may only
+        # narrow a generic pane directory (custom-coding, projects, ...) to a
+        # child that already exists on this host; otherwise the pane's real
+        # path stands. This script runs on the host itself (locally, or over
+        # the managed SSH control lane), so `-d` is the host's own answer.
+        path_component_candidate() {
+          local value
+          value=$(project_candidate "$1") || return 1
+          # Status lines carry spinner/status glyphs and "|" separators. An
+          # ASCII allowlist rejects them in any locale, including C over SSH.
+          [[ "$value" == *[^A-Za-z0-9._+\\ -]* ]] && return 1
+          [[ "$value" == .* ]] && return 1
+          printf '%s' "$value"
+        }
+
         inferred_working_directory() {
           local working_directory directory_name candidate raw_candidate base_directory
           working_directory=$(trimmed_value "$1")
           shift
 
           directory_name="${working_directory:t}"
+          if ! generic_directory_name "$directory_name"; then
+            printf '%s' "$working_directory"
+            return
+          fi
+
+          base_directory="${working_directory%/}"
+          [[ -z "$base_directory" ]] && base_directory="$working_directory"
           for raw_candidate in "$@"; do
-            if candidate=$(project_candidate "$raw_candidate"); then
-              if [[ "$candidate" == "$directory_name" ]]; then
-                printf '%s' "$working_directory"
-                return
-              fi
-              if generic_directory_name "$directory_name"; then
-                base_directory="${working_directory%/}"
-                [[ -z "$base_directory" ]] && base_directory="$working_directory"
-                printf '%s/%s' "$base_directory" "$candidate"
-                return
-              fi
+            candidate=$(path_component_candidate "$raw_candidate") || continue
+            if [[ -d "$base_directory/$candidate" ]]; then
+              printf '%s/%s' "$base_directory" "$candidate"
+              return
             fi
           done
 
