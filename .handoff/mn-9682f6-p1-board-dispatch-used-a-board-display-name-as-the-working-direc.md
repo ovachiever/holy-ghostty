@@ -7,7 +7,7 @@ base_commit: 962f13ad23c8f022a2b5d44d29de8085c36339de
 scope: '[P1][BOARD] Dispatch used a board display name as the working directory; a worker was created into a path that does not exist'
 inputs:
 - sessions row 985BC829; restore sheet 2026-09-26
-binding: sha256:86cce5b5cc1c053a1a61195bbb941ccc166547b59866295351b773a6df74b8c1
+binding: sha256:fcb97b8ddd47331b9714a3f8ec64e7fc0aa414ad2ddb5fbd1d82c668c7731933
 ---
 
 # Handoff: [P1][BOARD] Dispatch used a board display name as the working directory; a worker was created into a path that does not exist

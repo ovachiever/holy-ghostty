@@ -7,7 +7,7 @@ base_commit: 962f13ad23c8f022a2b5d44d29de8085c36339de
 scope: '[P1][SECURITY] Spawn URL gate: allowlist tmux session and socket names and prove every non-command field is inert at both sinks'
 inputs:
 - security review 2026-09-24; 962f13ad2; .handoff/mn-e9f9a9 report
-binding: sha256:16671d93969dad8e934d6a9fe8ec1fadfefc25e74663badb84b7676ebe45afd4
+binding: sha256:475a8b06c2f5cdb7d2520e5febc9e0a953d0c6f85e1660e3548749de71d1b357
 ---
 
 # Handoff: [P1][SECURITY] Spawn URL gate: allowlist tmux session and socket names and prove every non-command field is inert at both sinks
