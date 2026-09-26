@@ -3,8 +3,49 @@ import SwiftUI
 struct HolySessionHistorySheet: View {
     @ObservedObject var store: HolyWorkspaceStore
     @State private var searchText: String = ""
+    @State private var restoreRunsExpanded = false
+    @State private var expandedRestoreRunIDs: Set<UUID> = []
 
     // MARK: - Signage (pure, testable)
+
+    /// "3 restore runs" — the disclosure label over the run history.
+    static func restoreRunsHeader(count: Int) -> String {
+        count == 1 ? "1 restore run" : "\(count) restore runs"
+    }
+
+    /// One run on one line: when, what asked for it, and the honest counts
+    /// — "Sep 26, 2026 at 11:31 AM · Restore All · 36 of 38 restored ·
+    /// 2 failed". Attached, failed, and skipped appear only when nonzero.
+    static func restoreRunTitle(_ run: HolyRestoreRunRecord) -> String {
+        var parts = [
+            run.startedAt.formatted(date: .abbreviated, time: .shortened),
+            run.trigger.displayName,
+            "\(run.restoredCount) of \(run.requestedCount) restored",
+        ]
+        if run.attachedCount > 0 {
+            parts.append("\(run.attachedCount) attached")
+        }
+        if run.failedCount > 0 {
+            parts.append("\(run.failedCount) failed")
+        }
+        if run.skippedCount > 0 {
+            parts.append("\(run.skippedCount) skipped")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// One row of one run: the session, what became of it, the conversation
+    /// it resumed when it resumed one, and the directory it ran in.
+    static func restoreRunRowLine(_ row: HolyRestoreRunRecord.RowResult) -> String {
+        var parts = [row.title, row.outcome.summary]
+        if let providerSessionID = row.providerSessionID {
+            parts.append("conversation \(String(providerSessionID.prefix(8)))…")
+        }
+        if let workingDirectory = row.workingDirectory {
+            parts.append(workingDirectory)
+        }
+        return parts.joined(separator: " · ")
+    }
 
     /// Title for the sheet-top crash-restore affordance; nil when there is
     /// nothing to restore. Counts mirror the banner's honesty: fresh batch
@@ -69,6 +110,7 @@ struct HolySessionHistorySheet: View {
                     .frame(height: 0.5)
 
                 crashRestoreCallout
+                restoreRunsSection
 
                 HSplitView {
                     historyList
@@ -151,6 +193,112 @@ struct HolySessionHistorySheet: View {
                     .fill(HolyGhosttyTheme.border)
                     .frame(height: 0.5)
             }
+        }
+    }
+
+    // MARK: - Restore runs
+
+    /// Every restore pass ever recorded, newest first, one disclosure away.
+    /// The latest run's line sits in the header so the receipt Erik was
+    /// missing on 2026-09-26 ("restored about 38, history shows nothing")
+    /// is visible without a click; opening a run lists every row with its
+    /// outcome, resumed conversation, and any error.
+    @ViewBuilder
+    private var restoreRunsSection: some View {
+        if let latest = store.restoreRuns.first {
+            VStack(alignment: .leading, spacing: 4) {
+                Button {
+                    restoreRunsExpanded.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: restoreRunsExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(HolyGhosttyTheme.textTertiary)
+
+                        Text(Self.restoreRunsHeader(count: store.restoreRuns.count))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                            .textCase(.uppercase)
+                            .tracking(0.5)
+
+                        Spacer()
+
+                        Text("Latest: \(Self.restoreRunTitle(latest))")
+                            .font(.system(size: 10))
+                            .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                            .lineLimit(1)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if restoreRunsExpanded {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 3) {
+                            ForEach(store.restoreRuns) { run in
+                                restoreRunView(run)
+                            }
+                        }
+                    }
+                    .scrollIndicators(.hidden)
+                    .frame(maxHeight: 240)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .background(HolyGhosttyTheme.bgElevated)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(HolyGhosttyTheme.border)
+                    .frame(height: 0.5)
+            }
+        }
+    }
+
+    private func restoreRunView(_ run: HolyRestoreRunRecord) -> some View {
+        let isExpanded = expandedRestoreRunIDs.contains(run.id)
+        return VStack(alignment: .leading, spacing: 2) {
+            Button {
+                if isExpanded {
+                    expandedRestoreRunIDs.remove(run.id)
+                } else {
+                    expandedRestoreRunIDs.insert(run.id)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(HolyGhosttyTheme.textTertiary)
+                    Text(Self.restoreRunTitle(run))
+                        .font(.system(size: 11))
+                        .foregroundStyle(run.failedCount > 0
+                            ? HolyGhosttyTheme.warning
+                            : HolyGhosttyTheme.textPrimary)
+                        .lineLimit(1)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                ForEach(run.rows) { row in
+                    Text(Self.restoreRunRowLine(row))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(restoreRunRowColor(row.outcome))
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                        .padding(.leading, 18)
+                }
+            }
+        }
+    }
+
+    private func restoreRunRowColor(_ outcome: HolyRestoreRunRecord.Outcome) -> Color {
+        switch outcome {
+        case .restored: return HolyGhosttyTheme.success
+        case .failed: return HolyGhosttyTheme.danger
+        case .skipped: return HolyGhosttyTheme.textTertiary
         }
     }
 

@@ -37,13 +37,13 @@ enum HolyRestorePreflight {
             // Shell rows never consult the resolver; a vanished cwd is still
             // a blocker because recreating "the same shell" elsewhere lies.
             if context.workingDirectoryExists == false {
-                return .blocked(missingDirectoryReason(context.workingDirectory))
+                return .blocked(missingDirectoryReason(context))
             }
             return .shellOnly
         }
 
         if context.workingDirectoryExists == false {
-            return .blocked(missingDirectoryReason(context.workingDirectory))
+            return .blocked(missingDirectoryReason(context))
         }
         guard context.workingDirectory?.isEmpty == false else {
             return .blocked(
@@ -83,8 +83,15 @@ enum HolyRestorePreflight {
         }
     }
 
-    private static func missingDirectoryReason(_ workingDirectory: String?) -> String {
-        if let workingDirectory, !workingDirectory.isEmpty {
+    /// Names every recorded directory and its source when the row carries a
+    /// resolution (row 985BC829 on 2026-09-26 showed a directory that never
+    /// existed with nothing saying where it came from); falls back to the
+    /// single-path message for contexts built without one.
+    private static func missingDirectoryReason(_ context: HolyRestorePreflightContext) -> String {
+        if let resolution = context.workingDirectoryResolution {
+            return resolution.missingReason
+        }
+        if let workingDirectory = context.workingDirectory, !workingDirectory.isEmpty {
             return "The working directory \(workingDirectory) no longer exists."
         }
         return "The recorded working directory no longer exists."

@@ -42,4 +42,12 @@ final class HolyWorkspaceRestoreAdapter: HolyRestoreWorkspaceAdapting {
     func deleteArchives(archiveIDs: [UUID]) {
         store?.deleteArchives(withIDs: archiveIDs)
     }
+
+    var lastShutdown: HolyRestoreShutdownEvent? {
+        store?.lastShutdown
+    }
+
+    func recordRestoreRun(_ run: HolyRestoreRunRecord) {
+        store?.recordRestoreRun(run)
+    }
 }
