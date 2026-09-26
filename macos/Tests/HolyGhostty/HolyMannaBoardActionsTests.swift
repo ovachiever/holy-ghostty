@@ -153,6 +153,86 @@ struct HolyMannaBoardActionsTests {
         store.dismiss()
     }
 
+    /// mn-9682f6: session 985BC829 was recorded in
+    /// "/Users/erik/Custom-Coding/Research Comprehensive App Security | Custom-Coding".
+    /// A board whose display name differs from its path dispatches into the path.
+    @Test @MainActor func boardDisplayNameNeverBecomesTheWorkerDirectory() async throws {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("holy-board-root-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let root = parent.appendingPathComponent("versova-supply-intelligence").path
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        let displayName = "Research Comprehensive App Security | Custom-Coding"
+        var launched: HolySessionLaunchSpec?
+        let store = makeStore(calls: ActionCalls(), directoryProbe: .live,
+                              client: fixtureClient(calls: ActionCalls(), name: displayName, root: root),
+                              launcher: { launched = $0; return UUID() })
+        store.prepare(context: .init(boardRoot: root, remoteHost: nil))
+        try await requireBoardLoaded(store)
+        #expect(store.state?.name == displayName)
+        store.requestWorker(try item())
+        store.confirmWorker()
+        try await eventually { !store.isDispatching }
+        let spec = try #require(launched)
+        #expect(spec.workingDirectory == root)
+        #expect(spec.title == "versova-supply-intelligence")
+        #expect(spec.objective == "Claim and build mn-123456")
+        #expect(spec.note == "mn-123456")
+        for field in [spec.workingDirectory, spec.title, spec.objective, spec.command] {
+            #expect(field?.contains(displayName) != true)
+        }
+        // The brief's report line carries " | " by design; the path and labels never do.
+        for field in [spec.workingDirectory, spec.title, spec.objective] {
+            #expect(field?.contains(" | ") != true)
+        }
+        #expect(store.dispatchFeedback(for: "mn-123456")?.isWaiting == true)
+        store.dismiss()
+    }
+
+    @Test @MainActor func missingBoardDirectoryRefusesWithNamedReasonBeforeSpawn() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("holy-board-absent-\(UUID())")
+            .appendingPathComponent("Research Comprehensive App Security | Custom-Coding").path
+        #expect(!FileManager.default.fileExists(atPath: root))
+        let calls = ActionCalls()
+        var spawns = 0
+        let store = makeStore(calls: calls, directoryProbe: .live,
+                              client: fixtureClient(calls: calls, root: root),
+                              launcher: { _ in spawns += 1; return UUID() })
+        store.prepare(context: .init(boardRoot: root, remoteHost: nil))
+        try await requireBoardLoaded(store)
+        store.requestWorker(try item())
+        store.confirmWorker()
+        try await eventually { !store.isDispatching && store.dispatchNotice != nil }
+        #expect(spawns == 0)
+        #expect(store.dispatchNotice == "Worker not started: "
+            + HolyMannaWorkerLaunchError.workingDirectoryMissing(path: root, host: nil).localizedDescription)
+        #expect(store.dispatchNotice?.contains("\(root) does not exist on this Mac") == true)
+        #expect(store.dispatchFeedback(for: "mn-123456") == nil)
+        #expect(store.state?.item(id: "mn-123456")?.status == "open")
+        #expect(await calls.values.allSatisfy { !$0.contains("manna claim") })
+        store.dismiss()
+    }
+
+    @Test func remoteDirectoryCheckRunsOnTheHostQuotedAndNamesTheHost() async throws {
+        let path = "/srv/it's a board; touch forbidden"
+        let invocation = try HolyMannaWorkerDirectoryProbe.remoteInvocation(path: path, remoteHost: "worker@example.com")
+        let wrapper = try #require(invocation.arguments.last)
+        #expect(wrapper.contains("worker@example.com"))
+        #expect(invocation.displayCommand == "worker@example.com: test -d \(path)")
+        #expect(throws: (any Error).self) {
+            try HolyMannaWorkerDirectoryProbe.remoteInvocation(path: path, remoteHost: "-oProxyCommand=bad")
+        }
+        let absent = HolyMannaWorkerDirectoryProbe { checked, host in
+            #expect(checked == "/srv/board" && host == "builder")
+            return false
+        }
+        await #expect(throws: HolyMannaWorkerLaunchError.workingDirectoryMissing(path: "/srv/board", host: "builder")) {
+            try await absent.requireDirectory("/srv/board", remoteHost: "builder")
+        }
+        #expect(HolyMannaWorkerLaunchError.workingDirectoryMissing(path: "/srv/board", host: "builder")
+            .localizedDescription.contains("/srv/board does not exist on builder"))
+    }
+
     @Test func relativeOrMalformedRuntimePathsCannotBecomeLaunchCommands() throws {
         let request = HolyMannaWorkerDispatch(item: try item(), context: context, profile: .init())
         for path in ["codex", "./codex", "/bin/codex\nextra", "/bin/codex\u{0}"] {
@@ -446,7 +526,7 @@ struct HolyMannaBoardActionsTests {
         let store = HolyMannaBoardModeStore(client: client, workerLauncher: { _ in
             spawns += 1
             return sessionID
-        }, workerExecutableResolver: fixtureWorkerResolver(),
+        }, workerExecutableResolver: fixtureWorkerResolver(), workerDirectoryProbe: fixtureDirectoryProbe,
             workerConvergence: .init(interval: .milliseconds(10), timeout: .seconds(1)), prewarmer: ActionPrewarmer())
         store.prepare(context: context)
         try await requireBoardLoaded(store)
@@ -479,7 +559,7 @@ struct HolyMannaBoardActionsTests {
         let calls = ActionCalls()
         let sessionID = UUID()
         let store = HolyMannaBoardModeStore(client: fixtureClient(calls: calls), workerLauncher: { _ in sessionID },
-            workerExecutableResolver: fixtureWorkerResolver(),
+            workerExecutableResolver: fixtureWorkerResolver(), workerDirectoryProbe: fixtureDirectoryProbe,
             workerConvergence: .init(interval: .milliseconds(10), timeout: .milliseconds(70)), prewarmer: ActionPrewarmer())
         store.prepare(context: context)
         try await requireBoardLoaded(store)
@@ -505,7 +585,7 @@ struct HolyMannaBoardActionsTests {
             return try stateJSON()
         }
         let store = HolyMannaBoardModeStore(client: client, workerLauncher: { _ in UUID() },
-            workerExecutableResolver: fixtureWorkerResolver(),
+            workerExecutableResolver: fixtureWorkerResolver(), workerDirectoryProbe: fixtureDirectoryProbe,
             workerConvergence: .init(interval: .milliseconds(10), timeout: .milliseconds(60)), prewarmer: ActionPrewarmer())
         store.prepare(context: context)
         try await requireBoardLoaded(store)
@@ -528,7 +608,7 @@ struct HolyMannaBoardActionsTests {
             return try stateJSON()
         }
         let store = HolyMannaBoardModeStore(client: client, workerLauncher: { _ in UUID() },
-            workerExecutableResolver: fixtureWorkerResolver(),
+            workerExecutableResolver: fixtureWorkerResolver(), workerDirectoryProbe: fixtureDirectoryProbe,
             workerConvergence: .init(interval: .milliseconds(10), timeout: .milliseconds(80)), prewarmer: ActionPrewarmer())
         store.prepare(context: context)
         try await requireBoardLoaded(store)
@@ -547,7 +627,7 @@ struct HolyMannaBoardActionsTests {
         let calls = ActionCalls()
         let sessionID = UUID()
         let store = HolyMannaBoardModeStore(client: fixtureClient(calls: calls), workerLauncher: { _ in sessionID },
-            workerExecutableResolver: fixtureWorkerResolver(),
+            workerExecutableResolver: fixtureWorkerResolver(), workerDirectoryProbe: fixtureDirectoryProbe,
             workerConvergence: .init(interval: .milliseconds(10), timeout: .milliseconds(70)), prewarmer: ActionPrewarmer())
         store.prepare(context: context)
         try await requireBoardLoaded(store)
@@ -586,7 +666,7 @@ struct HolyMannaBoardActionsTests {
         let store = HolyMannaBoardModeStore(client: client, workerLauncher: { _ in
             spawns += 1
             return UUID()
-        }, workerExecutableResolver: fixtureWorkerResolver(), prewarmer: ActionPrewarmer())
+        }, workerExecutableResolver: fixtureWorkerResolver(), workerDirectoryProbe: fixtureDirectoryProbe, prewarmer: ActionPrewarmer())
         store.prepare(context: context)
         try await requireBoardLoaded(store)
         store.requestWorker(try item())
@@ -622,14 +702,19 @@ private func item(kind: String = "item", status: String = "open", claimant: Stri
         withJSONObject: itemJSON(kind: kind, status: status, claimant: claimant)))
 }
 
+/// The synthetic board root is not on disk; store fixtures that dispatch into
+/// it answer the directory check themselves. Real-directory tests use `.live`.
+private let fixtureDirectoryProbe = HolyMannaWorkerDirectoryProbe { _, _ in true }
+
 private func fixtureWorkerResolver() -> HolyMannaWorkerExecutableResolver {
     .init { runtime, host in "/\(host ?? "synthetic")/\(runtime.rawValue)" }
 }
 
-private func stateJSON(timestamp: String = "now", title: String = "ready work", claimed: Bool = false) throws -> String {
+private func stateJSON(timestamp: String = "now", title: String = "ready work", claimed: Bool = false,
+                       name: String = "board", root: String = context.boardRoot!) throws -> String {
     let ready = itemJSON(title: title, status: claimed ? "in_progress" : "open", claimant: claimed ? "codex-owner" : nil)
     let done = itemJSON(id: "mn-abcdef", title: "finished work", status: "done")
-    let value: [String: Any] = ["success": true, "generated_at": timestamp, "name": "board", "root": context.boardRoot!,
+    let value: [String: Any] = ["success": true, "generated_at": timestamp, "name": name, "root": root,
         "total": 2, "counts": [:], "status_counts": [:], "now": claimed ? [ready] : [], "next": claimed ? [] : [ready], "waves": [],
         "dreams": [], "decisions": [], "tracks": [], "peers": [], "attention": [:], "coord": [:],
         "drift": ["present": false, "count": 0, "kinds": [:], "findings": []],
@@ -650,6 +735,7 @@ private actor ActionCalls {
 }
 
 private func fixtureClient(calls: ActionCalls, claimAfterFirstRead: Bool = false,
+                           name: String = "board", root: String = context.boardRoot!,
                            stateReply: (@Sendable (Int) async throws -> String)? = nil) -> HolyMannaBoardClient {
     let identity = HolyMannaActorIdentityStore(fileURL: FileManager.default.temporaryDirectory
         .appendingPathComponent("holy-board-actions-\(UUID()).json"))
@@ -662,7 +748,8 @@ private func fixtureClient(calls: ActionCalls, claimAfterFirstRead: Bool = false
         if let stateReply {
             return .init(stdout: try await stateReply(reads), stderr: "", exitCode: 0)
         }
-        return .init(stdout: try stateJSON(claimed: claimAfterFirstRead && reads > 1), stderr: "", exitCode: 0)
+        return .init(stdout: try stateJSON(claimed: claimAfterFirstRead && reads > 1, name: name, root: root),
+                     stderr: "", exitCode: 0)
     }
 }
 
@@ -687,10 +774,13 @@ private actor DispatchReadGate {
     asker: any HolyMannaBoardAsking = HolyMannaBoardAskService { _ in "answer" },
     timeout: Duration = .seconds(60),
     resolver: HolyMannaWorkerExecutableResolver = fixtureWorkerResolver(),
+    directoryProbe: HolyMannaWorkerDirectoryProbe = fixtureDirectoryProbe,
+    client: HolyMannaBoardClient? = nil,
     launcher: (@MainActor (HolySessionLaunchSpec) throws -> UUID)? = nil
 ) -> HolyMannaBoardModeStore {
-    HolyMannaBoardModeStore(client: fixtureClient(calls: calls), asker: asker, askTimeout: timeout,
-                           workerLauncher: launcher, workerExecutableResolver: resolver, prewarmer: ActionPrewarmer())
+    HolyMannaBoardModeStore(client: client ?? fixtureClient(calls: calls), asker: asker, askTimeout: timeout,
+                           workerLauncher: launcher, workerExecutableResolver: resolver,
+                           workerDirectoryProbe: directoryProbe, prewarmer: ActionPrewarmer())
 }
 
 private struct ActionPrewarmer: HolyMannaBoardPrewarming {

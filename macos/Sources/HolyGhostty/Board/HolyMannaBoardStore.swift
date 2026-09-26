@@ -104,6 +104,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
     private let askTimeout: Duration
     private let workerLauncher: (@MainActor (HolySessionLaunchSpec) throws -> UUID)?
     private let workerExecutableResolver: HolyMannaWorkerExecutableResolver
+    private let workerDirectoryProbe: HolyMannaWorkerDirectoryProbe
     private var askTask: Task<Void, Never>?
     private var askDeadline: Task<Void, Never>?
     private var askGeneration = UUID()
@@ -137,6 +138,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
         askTimeout: Duration = .seconds(60),
         workerLauncher: (@MainActor (HolySessionLaunchSpec) throws -> UUID)? = nil,
         workerExecutableResolver: HolyMannaWorkerExecutableResolver = .shared,
+        workerDirectoryProbe: HolyMannaWorkerDirectoryProbe = .live,
         workerConvergence: HolyMannaWorkerConvergence = .init(),
         digestService: any HolyMannaBoardDigesting = HolyMannaBoardDigestService.shared,
         prewarmer: (any HolyMannaBoardPrewarming)? = nil,
@@ -150,6 +152,7 @@ final class HolyMannaBoardModeStore: ObservableObject {
         self.askTimeout = askTimeout
         self.workerLauncher = workerLauncher
         self.workerExecutableResolver = workerExecutableResolver
+        self.workerDirectoryProbe = workerDirectoryProbe
         self.workerConvergence = workerConvergence
         self.deepModel = UserDefaults.standard.string(forKey: "holy.intelligence.deep.model") ?? "opus"
         let runtime = HolySessionRuntime(rawValue: UserDefaults.standard.string(forKey: "holy.board.worker.runtime") ?? "codex") ?? .codex
@@ -575,6 +578,12 @@ final class HolyMannaBoardModeStore: ObservableObject {
                 guard item.prompt == request.item.prompt, item.handoffDigest == request.item.handoffDigest else {
                     throw HolyMannaAskError.unavailable("The handoff changed. Refresh and confirm the new work order.")
                 }
+                // The worker opens in the root canonical state just named, and
+                // only if that directory is on the execution host (mn-9682f6).
+                try await self.workerDirectoryProbe.requireDirectory(
+                    fresh.root, remoteHost: request.context.remoteHost
+                )
+                guard self.context == request.context else { return }
                 let launch = try request.launchSpec(executablePath: executablePath)
                 let sessionID = try workerLauncher(launch)
                 self.dispatchNotice = nil
