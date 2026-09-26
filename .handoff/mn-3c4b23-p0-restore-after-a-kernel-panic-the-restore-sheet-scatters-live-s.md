@@ -7,7 +7,7 @@ base_commit: 962f13ad23c8f022a2b5d44d29de8085c36339de
 scope: '[P0][RESTORE] After a kernel panic the restore sheet scatters live sessions into older groups, hides some, and records no restore run'
 inputs:
 - Erik 2026-09-26 11:37 with screenshot; zone-watch samples; sessions table
-binding: sha256:eb264759877f223c02546db5d5e8d7594bd578c5b0958699710ee82d9703be09
+binding: sha256:5d240af3f88009f11dc80522f56b72cfb6cc91aabb27029c5421c1ff8735125a
 ---
 
 # Handoff: [P0][RESTORE] After a kernel panic the restore sheet scatters live sessions into older groups, hides some, and records no restore run
