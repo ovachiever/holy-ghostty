@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SQLite3
 
@@ -176,7 +177,10 @@ enum HolyArchiveChunker {
         ) else { return chunks }
         for message in messages {
             let range = NSRange(message.content.startIndex..<message.content.endIndex, in: message.content)
-            for match in regex.matches(in: message.content, range: range) {
+            // Keyed by the owning message and match ordinal, not by position
+            // in the chunk list, so appending messages to a transcript never
+            // renames the tool chunks that already exist.
+            for (ordinal, match) in regex.matches(in: message.content, range: range).enumerated() {
                 guard match.numberOfRanges > 1,
                       let toolRange = Range(match.range(at: 1), in: message.content) else { continue }
                 let tool = String(message.content[toolRange])
@@ -198,7 +202,7 @@ enum HolyArchiveChunker {
                 let upper = message.content.index(message.content.startIndex, offsetBy: upperDistance)
                 let context = String(message.content[lower..<upper])
                 chunks.append(.init(
-                    id: "\(session.id):tool:\(chunks.count)",
+                    id: "\(session.id):tool:\(message.sequence):\(ordinal)",
                     sessionID: session.id,
                     messageID: message.id,
                     index: chunks.count,
@@ -350,17 +354,39 @@ actor HolyArchiveIndexer {
         self.pacer = pacer
     }
 
+    /// One session file to ingest, with the row the archive already holds for
+    /// it (nil for a session the archive has never seen, or when the caller
+    /// wants the staged whole-session rewrite regardless).
+    struct IndexWork: Sendable {
+        let provider: any HolyArchiveProviding
+        let path: URL
+        let existing: HolyArchiveIndexRow?
+    }
+
+    enum ProjectStatsScope: Sendable {
+        /// Recompute every project's row (a full rebuild).
+        case all
+        /// Recompute only the projects whose sessions this pass wrote.
+        case touched
+    }
+
+    private struct PersistOutcome {
+        var rowsWritten = 0
+        var messagesWritten = 0
+        var chunksWritten = 0
+    }
+
     func fullReindex(
         metadataOnly: Bool = false,
         progress: (@Sendable (HolyArchiveIndexProgress) async -> Void)? = nil
     ) async -> HolyArchiveIndexReceipt {
         let started = Date()
         var receipt = HolyArchiveIndexReceipt()
-        var work: [(any HolyArchiveProviding, URL)] = []
+        var work: [IndexWork] = []
         await progress?(.init(phase: .discovering, completed: 0, total: registry.availableProviders.count, detail: "Finding provider archives"))
         for provider in registry.availableProviders {
             do {
-                work += try provider.discoverSessionFiles().map { (provider, $0) }
+                work += try provider.discoverSessionFiles().map { IndexWork(provider: provider, path: $0, existing: nil) }
             } catch {
                 receipt.failures.append("\(provider.harness.displayName) discovery: \(error.localizedDescription)")
             }
@@ -368,6 +394,7 @@ actor HolyArchiveIndexer {
         return await index(
             work: work,
             metadataOnly: metadataOnly,
+            projectStats: .all,
             started: started,
             receipt: receipt,
             progress: progress
@@ -380,7 +407,7 @@ actor HolyArchiveIndexer {
     ) async -> HolyArchiveIndexReceipt {
         let started = Date()
         var receipt = HolyArchiveIndexReceipt()
-        var work: [(any HolyArchiveProviding, URL)] = []
+        var work: [IndexWork] = []
         let cutoff = maxAgeHours.map { Date.now.addingTimeInterval(TimeInterval(-$0 * 3600)) }
         for provider in registry.availableProviders {
             if cutoff != nil, !provider.harness.supportsFastDiscovery { continue }
@@ -398,7 +425,7 @@ actor HolyArchiveIndexer {
                     if let cutoff, !hasBacklog, mtime < cutoff { continue }
                     let known = byPath[file.path] ?? byID[file.deletingPathExtension().lastPathComponent]
                     if let known, mtime <= known.indexedAt { continue }
-                    work.append((provider, file))
+                    work.append(.init(provider: provider, path: file, existing: known))
                 }
             } catch {
                 receipt.failures.append("\(provider.harness.displayName) update: \(error.localizedDescription)")
@@ -407,30 +434,48 @@ actor HolyArchiveIndexer {
         return await index(
             work: work,
             metadataOnly: false,
+            projectStats: .touched,
             started: started,
             receipt: receipt,
             progress: progress
         )
     }
 
+    /// Refreshes exactly `paths`. Files whose modification time still matches
+    /// the archive row are skipped without being read; the row lookup is by
+    /// path, so this never loads a provider's whole row set (71,761 rows for
+    /// OpenCode in the live archive).
     func indexPaths(
         provider: any HolyArchiveProviding,
         paths: [URL],
         progress: (@Sendable (HolyArchiveIndexProgress) async -> Void)? = nil
     ) async -> HolyArchiveIndexReceipt {
-        let indexed = (try? repository.indexRows(harness: provider.harness)) ?? []
-        let byPath = Dictionary(
-            indexed.map { ($0.rawPath, $0) },
-            uniquingKeysWith: { _, latest in latest }
-        )
-        var work: [(any HolyArchiveProviding, URL)] = []
         var receipt = HolyArchiveIndexReceipt()
+        // Rows are matched by canonical path: the archive may hold a spelling
+        // of the file that differs from the one the caller enumerated.
+        var byCanonicalPath: [String: HolyArchiveIndexRow] = [:]
+        do {
+            var lookups = Set<String>()
+            for path in paths {
+                lookups.insert(path.path)
+                lookups.insert(HolyArchiveFilePath.canonical(path))
+            }
+            byCanonicalPath = Dictionary(
+                try repository.indexRows(rawPaths: lookups.sorted()).map {
+                    (HolyArchiveFilePath.canonical(URL(fileURLWithPath: $0.rawPath)), $0)
+                },
+                uniquingKeysWith: { _, latest in latest }
+            )
+        } catch {
+            receipt.failures.append("\(provider.harness.displayName) index rows: \(error.localizedDescription)")
+        }
+        var work: [IndexWork] = []
         for path in paths {
             do {
                 let mtime = try provider.modificationDate(for: path)
-                if let existing = byPath[path.path],
-                   HolyArchiveFileTime.matches(mtime, existing.fileMTime) { continue }
-                work.append((provider, path))
+                let existing = byCanonicalPath[HolyArchiveFilePath.canonical(path)]
+                if let existing, HolyArchiveFileTime.matches(mtime, existing.fileMTime) { continue }
+                work.append(.init(provider: provider, path: path, existing: existing))
             } catch {
                 receipt.failures.append("\(path.path): \(error.localizedDescription)")
             }
@@ -438,6 +483,7 @@ actor HolyArchiveIndexer {
         return await index(
             work: work,
             metadataOnly: false,
+            projectStats: .touched,
             started: .now,
             receipt: receipt,
             progress: progress
@@ -445,14 +491,16 @@ actor HolyArchiveIndexer {
     }
 
     private func index(
-        work: [(any HolyArchiveProviding, URL)],
+        work: [IndexWork],
         metadataOnly: Bool,
+        projectStats: ProjectStatsScope,
         started: Date,
         receipt initialReceipt: HolyArchiveIndexReceipt,
         progress: (@Sendable (HolyArchiveIndexProgress) async -> Void)?
     ) async -> HolyArchiveIndexReceipt {
         var receipt = initialReceipt
         var parentLinks: [(String, String)] = []
+        var touchedProjectPaths = Set<String>()
         var rowsSinceCheckpoint = 0
         var completedAllWork = true
         let initialProgress = HolyArchiveIndexProgress(
@@ -463,13 +511,23 @@ actor HolyArchiveIndexer {
         )
         try? repository.saveIndexProgress(initialProgress)
         await progress?(initialProgress)
+        if !work.isEmpty {
+            // Built here, on this actor's executor, never on whichever
+            // thread opened the repository. Idempotent once it exists.
+            do {
+                try repository.ensureDeletionIndexes()
+            } catch {
+                receipt.failures.append("Archive deletion index: \(error.localizedDescription)")
+            }
+        }
         for (position, item) in work.enumerated() {
             if Task.isCancelled {
                 completedAllWork = false
                 receipt.failures.append("Archive ingest paused after \(position) of \(work.count) sessions.")
                 break
             }
-            let (provider, path) = item
+            let provider = item.provider
+            let path = item.path
             await progress?(.init(
                 phase: .indexing,
                 completed: position,
@@ -489,17 +547,20 @@ actor HolyArchiveIndexer {
                 session.resumeCommand = provider.resumeCommand(for: session)
                 session.indexedAt = .now
                 let chunks = metadataOnly ? [] : HolyArchiveChunker.chunks(session: session, messages: messages)
-                let writtenRows = try await persist(
+                let outcome = try await persist(
                     session: session,
                     messages: messages,
                     chunks: chunks,
+                    existing: item.existing,
                     metadataOnly: metadataOnly
                 )
-                rowsSinceCheckpoint += writtenRows
+                rowsSinceCheckpoint += outcome.rowsWritten
+                if let projectPath = session.projectPath { touchedProjectPaths.insert(projectPath) }
+                if let previousProject = item.existing?.projectPath { touchedProjectPaths.insert(previousProject) }
                 if let parentID = session.parentID { parentLinks.append((session.id, parentID)) }
                 receipt.sessionsIndexed += 1
-                receipt.messagesIndexed += metadataOnly ? 0 : messages.count
-                receipt.chunksCreated += chunks.count
+                receipt.messagesIndexed += outcome.messagesWritten
+                receipt.chunksCreated += outcome.chunksWritten
                 let storedProgress = HolyArchiveIndexProgress(
                     phase: .indexing,
                     completed: position + 1,
@@ -520,7 +581,14 @@ actor HolyArchiveIndexer {
                 try repository.applyParentLinks(batch.map { (childID: $0.0, parentID: $0.1) })
                 await pacer.yield(afterWritingRows: batch.count)
             }
-            receipt.projectsUpdated = try repository.replaceProjectStats()
+            switch projectStats {
+            case .all:
+                receipt.projectsUpdated = try repository.replaceProjectStats()
+            case .touched:
+                receipt.projectsUpdated = touchedProjectPaths.isEmpty
+                    ? 0
+                    : try repository.replaceProjectStats(projectPaths: touchedProjectPaths)
+            }
         } catch {
             receipt.failures.append("Archive finishing: \(error.localizedDescription)")
         }
@@ -535,14 +603,99 @@ actor HolyArchiveIndexer {
         session: HolyArchiveSession,
         messages: [HolyArchiveMessage],
         chunks: [HolyArchiveChunk],
+        existing: HolyArchiveIndexRow?,
         metadataOnly: Bool
-    ) async throws -> Int {
+    ) async throws -> PersistOutcome {
         if metadataOnly {
             try repository.replaceMetadata(session: session)
             await pacer.yield(afterWritingRows: 1)
-            return 1
+            return .init(rowsWritten: 1)
         }
 
+        let digest = Self.ingestDigest(of: messages)
+        if let existing {
+            // The same transcript as last time: the only write is the
+            // bookkeeping that stops the row from reading as stale.
+            if existing.ingestDigest == digest, existing.contentHash == session.contentHash {
+                try repository.touchSession(id: session.id, fileMTime: session.fileMTime, indexedAt: session.indexedAt)
+                await pacer.yield(afterWritingRows: 1)
+                return .init(rowsWritten: 1)
+            }
+            if let outcome = try await appendIncrementally(
+                session: session, messages: messages, chunks: chunks, digest: digest
+            ) {
+                return outcome
+            }
+        }
+        return try await replaceThroughStaging(
+            session: session, messages: messages, chunks: chunks, digest: digest
+        )
+    }
+
+    /// A live transcript grows by appending. When the stored messages are a
+    /// prefix of the parsed ones, only the new messages are inserted and only
+    /// the chunks that changed are rewritten; every unchanged chunk keeps its
+    /// row and its embedding. Returns nil when the file changed somewhere
+    /// other than its tail, which needs the staged whole-session replacement.
+    private func appendIncrementally(
+        session: HolyArchiveSession,
+        messages: [HolyArchiveMessage],
+        chunks: [HolyArchiveChunk],
+        digest: String
+    ) async throws -> PersistOutcome? {
+        let stored = try repository.messages(sessionID: session.id)
+        guard stored.count <= messages.count else { return nil }
+        for (index, previous) in stored.enumerated() {
+            let current = messages[index]
+            guard previous.id == current.id,
+                  previous.role == current.role,
+                  previous.content == current.content else { return nil }
+        }
+
+        var outcome = PersistOutcome()
+        let appended = Array(messages[stored.count...])
+        for batch in Self.batches(appended, maximumCount: pacer.budget.rowsPerTransaction) {
+            try repository.appendMessages(batch)
+            outcome.rowsWritten += batch.count
+            outcome.messagesWritten += batch.count
+            await pacer.yield(afterWritingRows: batch.count)
+        }
+
+        let plan = Self.chunkReconciliation(
+            existing: try repository.chunkFingerprints(sessionID: session.id),
+            desired: chunks
+        )
+        for batch in Self.batches(plan.deletions, maximumCount: pacer.budget.rowsPerTransaction) {
+            try repository.reconcileChunks(sessionID: session.id, delete: batch, insert: [], reindex: [])
+            outcome.rowsWritten += batch.count
+            await pacer.yield(afterWritingRows: batch.count)
+        }
+        for batch in Self.batches(plan.insertions, maximumCount: pacer.budget.rowsPerTransaction) {
+            try repository.reconcileChunks(sessionID: session.id, delete: [], insert: batch, reindex: [])
+            outcome.rowsWritten += batch.count
+            outcome.chunksWritten += batch.count
+            await pacer.yield(afterWritingRows: batch.count)
+        }
+        for batch in Self.batches(plan.reindexes, maximumCount: pacer.budget.rowsPerTransaction) {
+            try repository.reconcileChunks(sessionID: session.id, delete: [], insert: [], reindex: batch)
+            outcome.rowsWritten += batch.count
+            await pacer.yield(afterWritingRows: batch.count)
+        }
+
+        // Last, so a crash before this line leaves the old mtime and digest
+        // in place and the next pass appends the remainder idempotently.
+        try repository.replaceMetadata(session: session, ingestDigest: digest)
+        outcome.rowsWritten += 1
+        await pacer.yield(afterWritingRows: 1)
+        return outcome
+    }
+
+    private func replaceThroughStaging(
+        session: HolyArchiveSession,
+        messages: [HolyArchiveMessage],
+        chunks: [HolyArchiveChunk],
+        digest: String
+    ) async throws -> PersistOutcome {
         let token = try repository.beginReplacement(
             sessionID: session.id,
             expectedMessageCount: messages.count,
@@ -557,13 +710,74 @@ actor HolyArchiveIndexer {
                 try repository.stage(chunks: batch, for: token)
                 await pacer.yield(afterWritingRows: batch.count)
             }
-            try repository.finishReplacement(session: session, token: token)
+            try repository.finishReplacement(session: session, token: token, ingestDigest: digest)
             await pacer.yield(afterWritingRows: 1 + messages.count + chunks.count)
-            return 1 + messages.count + chunks.count
+            return .init(
+                rowsWritten: 1 + messages.count + chunks.count,
+                messagesWritten: messages.count,
+                chunksWritten: chunks.count
+            )
         } catch {
             try? repository.discardReplacement(token)
             throw error
         }
+    }
+
+    struct ChunkReconciliation: Equatable {
+        var deletions: [String] = []
+        var insertions: [HolyArchiveChunk] = []
+        var reindexes: [(id: String, index: Int)] = []
+
+        static func == (lhs: ChunkReconciliation, rhs: ChunkReconciliation) -> Bool {
+            lhs.deletions == rhs.deletions
+                && lhs.insertions == rhs.insertions
+                && lhs.reindexes.map(\.id) == rhs.reindexes.map(\.id)
+                && lhs.reindexes.map(\.index) == rhs.reindexes.map(\.index)
+        }
+    }
+
+    /// Chunks are keyed by ids that stay stable as a transcript grows (see
+    /// HolyArchiveChunker), so the diff is: gone ids are deleted, new ids are
+    /// inserted, changed content is deleted and re-inserted (its embedding no
+    /// longer describes it), and a chunk that merely moved keeps its row.
+    static func chunkReconciliation(
+        existing: [HolyArchiveChunkFingerprint],
+        desired: [HolyArchiveChunk]
+    ) -> ChunkReconciliation {
+        var plan = ChunkReconciliation()
+        let existingByID = Dictionary(existing.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        let desiredIDs = Set(desired.map(\.id))
+        plan.deletions = existing.filter { !desiredIDs.contains($0.id) }.map(\.id)
+        for chunk in desired {
+            guard let prior = existingByID[chunk.id] else {
+                plan.insertions.append(chunk)
+                continue
+            }
+            if prior.content != chunk.content || prior.metadata != chunk.metadata {
+                plan.deletions.append(chunk.id)
+                plan.insertions.append(chunk)
+            } else if prior.index != chunk.index {
+                plan.reindexes.append((id: chunk.id, index: chunk.index))
+            }
+        }
+        return plan
+    }
+
+    /// SHA-256 over the storage messages (id, role, content) in order. Two
+    /// parses of the same transcript bytes produce the same digest, while the
+    /// provider content hash (first prompt + last response) cannot tell an
+    /// appended message from none.
+    static func ingestDigest(of messages: [HolyArchiveMessage]) -> String {
+        var hasher = SHA256()
+        for message in messages {
+            hasher.update(data: Data(message.id.utf8))
+            hasher.update(data: Data([0]))
+            hasher.update(data: Data(message.role.rawValue.utf8))
+            hasher.update(data: Data([0]))
+            hasher.update(data: Data(message.content.utf8))
+            hasher.update(data: Data([1]))
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private func synthesizedMessages(

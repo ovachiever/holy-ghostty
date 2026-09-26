@@ -18,8 +18,24 @@ struct HolyArchiveEmbeddingRow: Equatable, Sendable {
 struct HolyArchiveIndexRow: Equatable, Sendable {
     let sessionID: String
     let rawPath: String
+    let projectPath: String?
     let fileMTime: Date
     let indexedAt: Date
+    /// Provider hash over the first prompt and last response.
+    let contentHash: String
+    /// `HolyArchiveIndexer.ingestDigest(of:)` over the stored messages; nil
+    /// for rows written before schema version 3.
+    let ingestDigest: String?
+    let messageCount: Int
+}
+
+/// What an incremental refresh compares a stored chunk against without
+/// reading its embedding.
+struct HolyArchiveChunkFingerprint: Equatable, Sendable {
+    let id: String
+    let index: Int
+    let content: String
+    let metadata: [String: String]
 }
 
 struct HolyArchiveTagCount: Equatable, Sendable {
@@ -45,9 +61,16 @@ struct HolyArchiveEmbeddingWrite: Equatable, Sendable {
 /// cannot acquire the workspace database's single WAL-writer slot.
 struct HolyArchiveRepository: Sendable {
     let databaseURL: URL
+    /// Every write statement reports its table, verb, and changed row count
+    /// here; see HolyArchiveWriteAccounting for the defaults key.
+    let accounting: HolyArchiveWriteAccounting
 
-    init(databaseURL: URL = HolyDatabasePaths.archiveDatabaseURL) throws {
+    init(
+        databaseURL: URL = HolyDatabasePaths.archiveDatabaseURL,
+        accounting: HolyArchiveWriteAccounting = .shared
+    ) throws {
         self.databaseURL = databaseURL
+        self.accounting = accounting
         let database = try HolyDatabase.open(at: databaseURL)
         try HolyArchiveDatabaseMigrator.migrate(database)
     }
@@ -82,9 +105,123 @@ struct HolyArchiveRepository: Sendable {
         }
     }
 
-    func replaceMetadata(session: HolyArchiveSession) throws {
+    func replaceMetadata(session: HolyArchiveSession, ingestDigest: String? = nil) throws {
         let database = try open()
-        try database.withTransaction { try upsert(session: session, in: database) }
+        try database.withTransaction {
+            try upsert(session: session, ingestDigest: ingestDigest, in: database)
+        }
+    }
+
+    /// Records that the file behind a session was re-read and found to hold
+    /// the same messages: only `file_mtime` and `indexed_at` move, so the row
+    /// stops reading as stale without touching messages, chunks, or FTS.
+    func touchSession(id: String, fileMTime: Date, indexedAt: Date) throws {
+        let database = try open()
+        try write(
+            "UPDATE archive_sessions SET file_mtime = ?, indexed_at = ? WHERE id = ?;",
+            bindings: [.double(fileMTime.timeIntervalSince1970), .double(indexedAt.timeIntervalSince1970), .text(id)],
+            table: "archive_sessions", verb: .update, in: database
+        )
+    }
+
+    /// Inserts messages that are new to the session, in one transaction. The
+    /// caller has already established that the stored messages are a prefix
+    /// of the parsed transcript, so there is nothing to delete or stage.
+    func appendMessages(_ messages: [HolyArchiveMessage]) throws {
+        guard !messages.isEmpty else { return }
+        let database = try open()
+        try database.withTransaction {
+            for message in messages {
+                try write(
+                    """
+                    INSERT INTO archive_messages(
+                        id, session_id, role, content, timestamp, sequence, has_code, tool_mentions_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    bindings: [
+                        .text(message.id), .text(message.sessionID), .text(message.role.rawValue),
+                        .text(message.content), Self.dateBinding(message.timestamp),
+                        .int64(Int64(message.sequence)), .bool(message.hasCode),
+                        .text(Self.json(message.toolMentions)),
+                    ],
+                    table: "archive_messages", verb: .insert, in: database
+                )
+            }
+        }
+    }
+
+    func chunkFingerprints(sessionID: String) throws -> [HolyArchiveChunkFingerprint] {
+        let database = try open(readOnly: true)
+        var rows: [HolyArchiveChunkFingerprint] = []
+        try database.query(
+            "SELECT id, chunk_index, content, metadata_json FROM archive_chunks WHERE session_id = ? ORDER BY chunk_index, id;",
+            bindings: [.text(sessionID)]
+        ) { statement in
+            rows.append(.init(
+                id: text(statement, 0),
+                index: Int(sqlite3_column_int64(statement, 1)),
+                content: text(statement, 2),
+                metadata: Self.dictionary(text(statement, 3))
+            ))
+        }
+        return rows
+    }
+
+    /// Applies one batch of an incremental chunk reconciliation in a single
+    /// transaction: deletions by primary key, inserts of new or changed
+    /// chunks, and index moves for chunks whose content did not change (they
+    /// keep their embedding).
+    func reconcileChunks(
+        sessionID: String,
+        delete deletions: [String],
+        insert insertions: [HolyArchiveChunk],
+        reindex reindexes: [(id: String, index: Int)]
+    ) throws {
+        guard !deletions.isEmpty || !insertions.isEmpty || !reindexes.isEmpty else { return }
+        let database = try open()
+        try database.withTransaction {
+            for id in deletions {
+                try write(
+                    "DELETE FROM archive_chunks WHERE id = ? AND session_id = ?;",
+                    bindings: [.text(id), .text(sessionID)],
+                    table: "archive_chunks", verb: .delete, in: database
+                )
+            }
+            for chunk in insertions {
+                try write(
+                    """
+                    INSERT INTO archive_chunks(
+                        id, session_id, message_id, chunk_index, chunk_type, content,
+                        metadata_json, embedding, embedding_model, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    bindings: [
+                        .text(chunk.id), .text(chunk.sessionID),
+                        chunk.messageID.map(HolyDatabaseBinding.text) ?? .null,
+                        .int64(Int64(chunk.index)), .text(chunk.type.rawValue), .text(chunk.content),
+                        .text(Self.json(chunk.metadata)),
+                        chunk.embedding.map { .blob(Self.embeddingData($0)) } ?? .null,
+                        chunk.embeddingModel.map(HolyDatabaseBinding.text) ?? .null,
+                        .double(chunk.createdAt.timeIntervalSince1970),
+                    ],
+                    table: "archive_chunks", verb: .insert, in: database
+                )
+            }
+            for move in reindexes {
+                try write(
+                    "UPDATE archive_chunks SET chunk_index = ? WHERE id = ? AND session_id = ?;",
+                    bindings: [.int64(Int64(move.index)), .text(move.id), .text(sessionID)],
+                    table: "archive_chunks", verb: .update, in: database
+                )
+            }
+        }
+    }
+
+    /// Idempotent: a sqlite_master lookup once the index exists. See
+    /// HolyArchiveDatabaseSchema.chunkMessageIndexSQL for the measurement.
+    func ensureDeletionIndexes() throws {
+        let database = try open()
+        try database.execute(HolyArchiveDatabaseSchema.chunkMessageIndexSQL)
     }
 
     func beginReplacement(
@@ -94,13 +231,15 @@ struct HolyArchiveRepository: Sendable {
     ) throws -> HolyArchiveReplacementToken {
         let database = try open()
         try database.withTransaction {
-            try database.execute(
+            try write(
                 "DELETE FROM archive_staged_messages WHERE session_id = ?;",
-                bindings: [.text(sessionID)]
+                bindings: [.text(sessionID)],
+                table: "archive_staged_messages", verb: .delete, in: database
             )
-            try database.execute(
+            try write(
                 "DELETE FROM archive_staged_chunks WHERE session_id = ?;",
-                bindings: [.text(sessionID)]
+                bindings: [.text(sessionID)],
+                table: "archive_staged_chunks", verb: .delete, in: database
             )
         }
         return .init(
@@ -133,9 +272,15 @@ struct HolyArchiveRepository: Sendable {
 
     func finishReplacement(
         session: HolyArchiveSession,
-        token: HolyArchiveReplacementToken
+        token: HolyArchiveReplacementToken,
+        ingestDigest: String? = nil
     ) throws {
         let database = try open()
+        // The message DELETE below runs the chunk foreign key's SET NULL
+        // action once per deleted row; without the index that is a full
+        // scan of archive_chunks per message (39.78 s for 207 messages on a
+        // copy of the live archive).
+        try database.execute(HolyArchiveDatabaseSchema.chunkMessageIndexSQL)
         let stagedMessages = try database.scalarInt64(
             "SELECT COUNT(*) FROM archive_staged_messages WHERE ingest_id = '\(Self.sqlLiteral(token.ingestID))';"
         )
@@ -153,16 +298,18 @@ struct HolyArchiveRepository: Sendable {
         }
 
         try database.withTransaction {
-            try upsert(session: session, in: database)
-            try database.execute(
+            try upsert(session: session, ingestDigest: ingestDigest, in: database)
+            try write(
                 "DELETE FROM archive_messages WHERE session_id = ?;",
-                bindings: [.text(session.id)]
+                bindings: [.text(session.id)],
+                table: "archive_messages", verb: .delete, in: database
             )
-            try database.execute(
+            try write(
                 "DELETE FROM archive_chunks WHERE session_id = ?;",
-                bindings: [.text(session.id)]
+                bindings: [.text(session.id)],
+                table: "archive_chunks", verb: .delete, in: database
             )
-            try database.execute(
+            try write(
                 """
                 INSERT INTO archive_messages(
                     id, session_id, role, content, timestamp, sequence, has_code, tool_mentions_json
@@ -170,9 +317,10 @@ struct HolyArchiveRepository: Sendable {
                 SELECT id, session_id, role, content, timestamp, sequence, has_code, tool_mentions_json
                 FROM archive_staged_messages WHERE ingest_id = ? ORDER BY sequence;
                 """,
-                bindings: [.text(token.ingestID)]
+                bindings: [.text(token.ingestID)],
+                table: "archive_messages", verb: .insert, in: database
             )
-            try database.execute(
+            try write(
                 """
                 INSERT INTO archive_chunks(
                     id, session_id, message_id, chunk_index, chunk_type, content,
@@ -182,7 +330,8 @@ struct HolyArchiveRepository: Sendable {
                        metadata_json, embedding, embedding_model, created_at
                 FROM archive_staged_chunks WHERE ingest_id = ? ORDER BY chunk_index;
                 """,
-                bindings: [.text(token.ingestID)]
+                bindings: [.text(token.ingestID)],
+                table: "archive_chunks", verb: .insert, in: database
             )
             try deleteStaging(token, in: database)
         }
@@ -198,18 +347,22 @@ struct HolyArchiveRepository: Sendable {
         let database = try open()
         try database.withTransaction {
             for link in links {
-                try database.execute(
+                try write(
                     """
                     UPDATE archive_sessions
                     SET parent_id = ?
                     WHERE id = ?
                       AND EXISTS (SELECT 1 FROM archive_sessions WHERE id = ?);
                     """,
-                    bindings: [.text(link.parentID), .text(link.childID), .text(link.parentID)]
+                    bindings: [.text(link.parentID), .text(link.childID), .text(link.parentID)],
+                    table: "archive_sessions", verb: .update, in: database
                 )
             }
         }
     }
+
+    private static let indexRowColumns =
+        "id, raw_path, project_path, file_mtime, indexed_at, content_hash, ingest_digest, message_count"
 
     func indexRows(harness: HolyArchiveHarness? = nil) throws -> [HolyArchiveIndexRow] {
         let database = try open(readOnly: true)
@@ -217,17 +370,43 @@ struct HolyArchiveRepository: Sendable {
         let bindings: [HolyDatabaseBinding] = harness.map { [.text($0.rawValue)] } ?? []
         var rows: [HolyArchiveIndexRow] = []
         try database.query(
-            "SELECT id, raw_path, file_mtime, indexed_at FROM archive_sessions\(clause);",
+            "SELECT \(Self.indexRowColumns) FROM archive_sessions\(clause);",
             bindings: bindings
         ) { statement in
-            rows.append(.init(
-                sessionID: text(statement, 0),
-                rawPath: text(statement, 1),
-                fileMTime: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
-                indexedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
-            ))
+            rows.append(Self.indexRow(from: statement))
         }
         return rows
+    }
+
+    /// The rows behind specific files only (archive_sessions_file_idx), so a
+    /// scoped refresh never loads a whole provider's rows.
+    func indexRows(rawPaths: [String]) throws -> [HolyArchiveIndexRow] {
+        guard !rawPaths.isEmpty else { return [] }
+        let database = try open(readOnly: true)
+        var rows: [HolyArchiveIndexRow] = []
+        for batch in rawPaths.chunked(maxCount: 500) {
+            let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+            try database.query(
+                "SELECT \(Self.indexRowColumns) FROM archive_sessions WHERE raw_path IN (\(placeholders));",
+                bindings: batch.map(HolyDatabaseBinding.text)
+            ) { statement in
+                rows.append(Self.indexRow(from: statement))
+            }
+        }
+        return rows
+    }
+
+    private static func indexRow(from statement: OpaquePointer) -> HolyArchiveIndexRow {
+        .init(
+            sessionID: text(statement, 0),
+            rawPath: text(statement, 1),
+            projectPath: optionalText(statement, 2),
+            fileMTime: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
+            indexedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4)),
+            contentHash: text(statement, 5),
+            ingestDigest: optionalText(statement, 6),
+            messageCount: Int(sqlite3_column_int64(statement, 7))
+        )
     }
 
     func sessions(
@@ -514,14 +693,15 @@ struct HolyArchiveRepository: Sendable {
         guard !writes.isEmpty else { return }
         let database = try open()
         try database.withTransaction {
-            for write in writes {
-                try database.execute(
+            for embedding in writes {
+                try write(
                     "UPDATE archive_chunks SET embedding = ?, embedding_model = ? WHERE id = ?;",
                     bindings: [
-                        .blob(Self.embeddingData(write.embedding)),
-                        .text(write.model),
-                        .text(write.chunkID),
-                    ]
+                        .blob(Self.embeddingData(embedding.embedding)),
+                        .text(embedding.model),
+                        .text(embedding.chunkID),
+                    ],
+                    table: "archive_chunks", verb: .update, in: database
                 )
             }
         }
@@ -667,7 +847,7 @@ struct HolyArchiveRepository: Sendable {
             throw HolyArchiveRepositoryError.emptyAnnotation
         }
         let database = try open()
-        try database.execute(
+        try write(
             """
             INSERT INTO archive_annotations(session_id, timestamp, type, value, source)
             VALUES (?, ?, ?, ?, ?);
@@ -675,7 +855,8 @@ struct HolyArchiveRepository: Sendable {
             bindings: [
                 .text(sessionID), .double(timestamp.timeIntervalSince1970),
                 .text(kind.rawValue), .text(normalized), .text(source),
-            ]
+            ],
+            table: "archive_annotations", verb: .insert, in: database
         )
         return .init(
             id: database.lastInsertedRowID,
@@ -689,7 +870,10 @@ struct HolyArchiveRepository: Sendable {
 
     func deleteAnnotation(id: Int64) throws {
         let database = try open()
-        try database.execute("DELETE FROM archive_annotations WHERE id = ?;", bindings: [.int64(id)])
+        try write(
+            "DELETE FROM archive_annotations WHERE id = ?;", bindings: [.int64(id)],
+            table: "archive_annotations", verb: .delete, in: database
+        )
     }
 
     func tagCounts(prefix: String? = nil) throws -> [HolyArchiveTagCount] {
@@ -714,7 +898,7 @@ struct HolyArchiveRepository: Sendable {
 
     func recordSearch(query: String, results: [HolyArchiveSearchResult], elapsedMilliseconds: Double) throws {
         let database = try open()
-        try database.execute(
+        try write(
             """
             INSERT INTO archive_search_history(
                 query, result_count, top_session_ids_json, search_time_ms, timestamp
@@ -724,7 +908,8 @@ struct HolyArchiveRepository: Sendable {
                 .text(query), .int64(Int64(results.count)),
                 .text(Self.json(Array(results.prefix(10).map(\.session.id)))),
                 .double(elapsedMilliseconds), .double(Date.now.timeIntervalSince1970),
-            ]
+            ],
+            table: "archive_search_history", verb: .insert, in: database
         )
     }
 
@@ -751,13 +936,37 @@ struct HolyArchiveRepository: Sendable {
     }
 
     func replaceProjectStats() throws -> Int {
+        try replaceProjectStats(projectPaths: nil)
+    }
+
+    /// Rewrites the stats rows of `projectPaths` only, or of every project
+    /// when nil. A scoped refresh of one session must not read all 73,869
+    /// session rows and rewrite every project's row.
+    func replaceProjectStats(projectPaths: Set<String>?) throws -> Int {
         let database = try open()
-        let sessions = try sessions()
+        let sessions: [HolyArchiveSession]
+        if let projectPaths {
+            guard !projectPaths.isEmpty else { return 0 }
+            sessions = try self.sessions(projectPaths: Array(projectPaths))
+        } else {
+            sessions = try self.sessions()
+        }
         let groups = Dictionary(grouping: sessions.compactMap { session -> (String, HolyArchiveSession)? in
             session.projectPath.map { ($0, session) }
         }, by: \.0)
         try database.withTransaction {
-            try database.execute("DELETE FROM archive_project_stats;")
+            if let projectPaths {
+                for batch in Array(projectPaths).sorted().chunked(maxCount: 500) {
+                    let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+                    try write(
+                        "DELETE FROM archive_project_stats WHERE project_path IN (\(placeholders));",
+                        bindings: batch.map(HolyDatabaseBinding.text),
+                        table: "archive_project_stats", verb: .delete, in: database
+                    )
+                }
+            } else {
+                try write("DELETE FROM archive_project_stats;", table: "archive_project_stats", verb: .delete, in: database)
+            }
             for (path, pairs) in groups {
                 let rows = pairs.map(\.1)
                 let tagFrequencies = rows.flatMap(\.autoTags).reduce(into: [String: Int]()) { $0[$1, default: 0] += 1 }
@@ -765,7 +974,7 @@ struct HolyArchiveRepository: Sendable {
                     $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value
                 }.prefix(10).map(\.key)
                 let harnessCounts = rows.reduce(into: [String: Int]()) { $0[$1.harness.rawValue, default: 0] += 1 }
-                try database.execute(
+                try write(
                     """
                     INSERT INTO archive_project_stats(
                         project_path, project_name, total_sessions, parent_sessions, child_sessions,
@@ -782,11 +991,28 @@ struct HolyArchiveRepository: Sendable {
                         .text(Self.json(harnessCounts)),
                         .int64(Int64(rows.reduce(0) { $0 + $1.messageCount })),
                         .text(Self.json(commonTags)), .double(Date.now.timeIntervalSince1970),
-                    ]
+                    ],
+                    table: "archive_project_stats", verb: .insert, in: database
                 )
             }
         }
         return groups.count
+    }
+
+    func sessions(projectPaths: [String]) throws -> [HolyArchiveSession] {
+        guard !projectPaths.isEmpty else { return [] }
+        let database = try open(readOnly: true)
+        var rows: [HolyArchiveSession] = []
+        for batch in projectPaths.chunked(maxCount: 500) {
+            let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+            try database.query(
+                "SELECT \(Self.sessionColumns("s")) FROM archive_sessions s WHERE s.project_path IN (\(placeholders));",
+                bindings: batch.map(HolyDatabaseBinding.text)
+            ) { statement in
+                rows.append(Self.session(from: statement))
+            }
+        }
+        return rows
     }
 
     func projects(
@@ -825,7 +1051,7 @@ struct HolyArchiveRepository: Sendable {
     func acquireReindexClaim(key: String, now: Date = .now, interval: TimeInterval = 120) throws -> Bool {
         let database = try open()
         let threshold = now.timeIntervalSince1970 - interval
-        try database.execute(
+        let changed = try write(
             """
             INSERT INTO archive_index_meta(key, value, updated_at)
             VALUES (?, ?, ?)
@@ -835,15 +1061,16 @@ struct HolyArchiveRepository: Sendable {
             bindings: [
                 .text(key), .text(String(now.timeIntervalSince1970)),
                 .double(now.timeIntervalSince1970), .double(threshold),
-            ]
+            ],
+            table: "archive_index_meta", verb: .update, in: database
         )
-        return database.changedRowCount == 1
+        return changed == 1
     }
 
     func saveSummary(sessionID: String, summary: String, model: String, contentHash: String) throws {
         let database = try open()
         try database.withTransaction {
-            try database.execute(
+            try write(
                 """
                 INSERT INTO archive_summaries(session_id, summary, model, content_hash, created_at)
                 VALUES (?, ?, ?, ?, ?)
@@ -854,11 +1081,13 @@ struct HolyArchiveRepository: Sendable {
                 bindings: [
                     .text(sessionID), .text(summary), .text(model), .text(contentHash),
                     .double(Date.now.timeIntervalSince1970),
-                ]
+                ],
+                table: "archive_summaries", verb: .update, in: database
             )
-            try database.execute(
+            try write(
                 "UPDATE archive_sessions SET summary = ? WHERE id = ?;",
-                bindings: [.text(summary), .text(sessionID)]
+                bindings: [.text(summary), .text(sessionID)],
+                table: "archive_sessions", verb: .update, in: database
             )
         }
     }
@@ -869,7 +1098,7 @@ struct HolyArchiveRepository: Sendable {
         var imported = 0
         try database.withTransaction {
             for entry in entries {
-                try database.execute(
+                try write(
                     """
                     INSERT OR IGNORE INTO archive_summaries(
                         session_id, summary, model, content_hash, created_at
@@ -883,17 +1112,18 @@ struct HolyArchiveRepository: Sendable {
                     bindings: [
                         .text(entry.sessionID), .text(entry.summary), .text(entry.contentHash),
                         .double(Date.now.timeIntervalSince1970), .text(entry.sessionID),
-                    ]
+                    ],
+                    table: "archive_summaries", verb: .insert, in: database
                 )
-                try database.execute(
+                imported += try write(
                     """
                     UPDATE archive_sessions
                     SET summary = ?
                     WHERE id = ? AND (summary IS NULL OR TRIM(summary) = '');
                     """,
-                    bindings: [.text(entry.summary), .text(entry.sessionID)]
+                    bindings: [.text(entry.summary), .text(entry.sessionID)],
+                    table: "archive_sessions", verb: .update, in: database
                 )
-                imported += Int(database.changedRowCount)
             }
         }
         return imported
@@ -927,7 +1157,7 @@ struct HolyArchiveRepository: Sendable {
 
     func saveChat(_ chat: HolyArchiveResearchChat) throws {
         let database = try open()
-        try database.execute(
+        try write(
             """
             INSERT INTO archive_research_chats(
                 id, title, created_at, updated_at, backend, model, state_json, metadata_json
@@ -941,7 +1171,8 @@ struct HolyArchiveRepository: Sendable {
                 .text(chat.id), .text(chat.title), .double(chat.createdAt.timeIntervalSince1970),
                 .double(chat.updatedAt.timeIntervalSince1970), .text(chat.backend), .text(chat.model),
                 .text(chat.stateJSON), .text(chat.metadataJSON),
-            ]
+            ],
+            table: "archive_research_chats", verb: .update, in: database
         )
     }
 
@@ -958,7 +1189,7 @@ struct HolyArchiveRepository: Sendable {
             "SELECT COALESCE(MAX(sequence), -1) + 1 FROM archive_research_messages WHERE chat_id = '\(Self.sqlLiteral(chatID))';"
         ))
         let createdAt = Date.now
-        try database.execute(
+        try write(
             """
             INSERT INTO archive_research_messages(
                 chat_id, sequence, role, content, tool_call_json,
@@ -970,7 +1201,8 @@ struct HolyArchiveRepository: Sendable {
                 toolCallJSON.map(HolyDatabaseBinding.text) ?? .null,
                 toolOutputJSON.map(HolyDatabaseBinding.text) ?? .null,
                 .text(Self.json(citedSessionIDs)), .double(createdAt.timeIntervalSince1970),
-            ]
+            ],
+            table: "archive_research_messages", verb: .insert, in: database
         )
         return .init(
             id: database.lastInsertedRowID,
@@ -1010,7 +1242,10 @@ struct HolyArchiveRepository: Sendable {
 
     func deleteChat(id: String) throws {
         let database = try open()
-        try database.execute("DELETE FROM archive_research_chats WHERE id = ?;", bindings: [.text(id)])
+        try write(
+            "DELETE FROM archive_research_chats WHERE id = ?;", bindings: [.text(id)],
+            table: "archive_research_chats", verb: .delete, in: database
+        )
     }
 
     func storedIndexProgress() throws -> HolyArchiveIndexProgress? {
@@ -1027,23 +1262,27 @@ struct HolyArchiveRepository: Sendable {
         let data = try JSONEncoder().encode(progress)
         guard let value = String(data: data, encoding: .utf8) else { return }
         let database = try open()
-        try database.execute(
+        try write(
             """
             INSERT INTO archive_index_meta(key, value, updated_at) VALUES ('ingest.progress', ?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;
             """,
-            bindings: [.text(value), .double(Date.now.timeIntervalSince1970)]
+            bindings: [.text(value), .double(Date.now.timeIntervalSince1970)],
+            table: "archive_index_meta", verb: .update, in: database
         )
     }
 
     func clearIndexProgress() throws {
         let database = try open()
-        try database.execute("DELETE FROM archive_index_meta WHERE key = 'ingest.progress';")
+        try write(
+            "DELETE FROM archive_index_meta WHERE key = 'ingest.progress';",
+            table: "archive_index_meta", verb: .delete, in: database
+        )
     }
 
     func checkpointWAL() throws {
         let database = try open()
-        try database.execute("PRAGMA wal_checkpoint(PASSIVE);")
+        try write("PRAGMA wal_checkpoint(PASSIVE);", table: "wal", verb: .checkpoint, in: database)
     }
 
     private func open(readOnly: Bool = false) throws -> HolyDatabase {
@@ -1052,8 +1291,32 @@ struct HolyArchiveRepository: Sendable {
         return database
     }
 
-    private func upsert(session: HolyArchiveSession, in database: HolyDatabase) throws {
-        try database.execute(
+    /// The single funnel for write statements: executes, then reports the
+    /// changed row count to the accounting sink under `table` and `verb`.
+    @discardableResult
+    private func write(
+        _ sql: String,
+        bindings: [HolyDatabaseBinding] = [],
+        table: String,
+        verb: HolyArchiveWriteAccounting.Verb,
+        in database: HolyDatabase
+    ) throws -> Int {
+        if bindings.isEmpty {
+            try database.execute(sql)
+        } else {
+            try database.execute(sql, bindings: bindings)
+        }
+        let rows = Int(database.changedRowCount)
+        accounting.record(table: table, verb: verb, rows: rows)
+        return rows
+    }
+
+    private func upsert(
+        session: HolyArchiveSession,
+        ingestDigest: String?,
+        in database: HolyDatabase
+    ) throws {
+        try write(
             """
             INSERT INTO archive_sessions(
                 id, harness, raw_path, project_path, project_name, title,
@@ -1061,11 +1324,11 @@ struct HolyArchiveRepository: Sendable {
                 timestamp, timestamp_end, is_child, child_type, parent_id, model,
                 tool_calls_json, tokens_used, summary, content_hash, extra_json,
                 resume_command, message_count, turn_count, file_mtime, indexed_at,
-                auto_tags_json
+                auto_tags_json, ingest_digest
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 CASE WHEN EXISTS (SELECT 1 FROM archive_sessions WHERE id = ?) THEN ? ELSE NULL END,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(id) DO UPDATE SET
                 harness = excluded.harness, raw_path = excluded.raw_path,
@@ -1081,7 +1344,8 @@ struct HolyArchiveRepository: Sendable {
                 content_hash = excluded.content_hash, extra_json = excluded.extra_json,
                 resume_command = excluded.resume_command, message_count = excluded.message_count,
                 turn_count = excluded.turn_count, file_mtime = excluded.file_mtime,
-                indexed_at = excluded.indexed_at, auto_tags_json = excluded.auto_tags_json;
+                indexed_at = excluded.indexed_at, auto_tags_json = excluded.auto_tags_json,
+                ingest_digest = excluded.ingest_digest;
             """,
             bindings: [
                 .text(session.id), .text(session.harness.rawValue), .text(session.rawPath),
@@ -1102,7 +1366,9 @@ struct HolyArchiveRepository: Sendable {
                 .int64(Int64(session.messageCount)), .int64(Int64(session.turnCount)),
                 .double(session.fileMTime.timeIntervalSince1970),
                 .double(session.indexedAt.timeIntervalSince1970), .text(Self.json(session.autoTags)),
-            ]
+                ingestDigest.map(HolyDatabaseBinding.text) ?? .null,
+            ],
+            table: "archive_sessions", verb: .update, in: database
         )
     }
 
@@ -1111,7 +1377,7 @@ struct HolyArchiveRepository: Sendable {
         ingestID: String,
         in database: HolyDatabase
     ) throws {
-        try database.execute(
+        try write(
             """
             INSERT INTO archive_staged_messages(
                 ingest_id, id, session_id, role, content, timestamp, sequence, has_code,
@@ -1122,7 +1388,8 @@ struct HolyArchiveRepository: Sendable {
                 .text(ingestID), .text(message.id), .text(message.sessionID), .text(message.role.rawValue),
                 .text(message.content), Self.dateBinding(message.timestamp), .int64(Int64(message.sequence)),
                 .bool(message.hasCode), .text(Self.json(message.toolMentions)),
-            ]
+            ],
+            table: "archive_staged_messages", verb: .insert, in: database
         )
     }
 
@@ -1131,7 +1398,7 @@ struct HolyArchiveRepository: Sendable {
         ingestID: String,
         in database: HolyDatabase
     ) throws {
-        try database.execute(
+        try write(
             """
             INSERT INTO archive_staged_chunks(
                 ingest_id, id, session_id, message_id, chunk_index, chunk_type, content,
@@ -1146,7 +1413,8 @@ struct HolyArchiveRepository: Sendable {
                 chunk.embedding.map { .blob(Self.embeddingData($0)) } ?? .null,
                 chunk.embeddingModel.map(HolyDatabaseBinding.text) ?? .null,
                 .double(chunk.createdAt.timeIntervalSince1970),
-            ]
+            ],
+            table: "archive_staged_chunks", verb: .insert, in: database
         )
     }
 
@@ -1154,13 +1422,15 @@ struct HolyArchiveRepository: Sendable {
         _ token: HolyArchiveReplacementToken,
         in database: HolyDatabase
     ) throws {
-        try database.execute(
+        try write(
             "DELETE FROM archive_staged_messages WHERE ingest_id = ?;",
-            bindings: [.text(token.ingestID)]
+            bindings: [.text(token.ingestID)],
+            table: "archive_staged_messages", verb: .delete, in: database
         )
-        try database.execute(
+        try write(
             "DELETE FROM archive_staged_chunks WHERE ingest_id = ?;",
-            bindings: [.text(token.ingestID)]
+            bindings: [.text(token.ingestID)],
+            table: "archive_staged_chunks", verb: .delete, in: database
         )
     }
 

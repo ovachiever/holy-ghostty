@@ -3,10 +3,23 @@ import SQLite3
 
 enum HolyArchiveDatabaseSchema {
     static let filename = "holy-archive.sqlite3"
-    static let currentUserVersion: Int32 = 2
+    static let currentUserVersion: Int32 = 3
     static let busyTimeoutMilliseconds: Int32 = 2_000
     static let walAutoCheckpointPages: Int64 = 4_096
     static let journalSizeLimitBytes: Int64 = 64 * 1_024 * 1_024
+
+    /// `archive_chunks.message_id` references `archive_messages(id)` with
+    /// ON DELETE SET NULL. SQLite runs that action as a lookup on the child
+    /// column for every deleted parent row, and without an index the lookup
+    /// is a full scan of archive_chunks per message (EXPLAIN QUERY PLAN shows
+    /// "SCAN archive_chunks"). On a copy of the live archive (1.2 GB, 231,683
+    /// messages, 223,389 chunks) deleting one 207-message session took
+    /// 39.78 s without this index and 0.006 s with it; the index itself
+    /// built in 0.22 s and occupies 12.7 MB. A fresh archive creates it with
+    /// the schema; an existing one builds it through
+    /// `HolyArchiveRepository.ensureDeletionIndexes()` on the indexer actor.
+    static let chunkMessageIndexSQL =
+        "CREATE INDEX IF NOT EXISTS archive_chunks_message_idx ON archive_chunks(message_id);"
 }
 
 enum HolyArchiveDatabaseError: LocalizedError {
@@ -51,8 +64,59 @@ enum HolyArchiveDatabaseMigrator {
             }
         }
 
+        if currentVersion < 3 {
+            try database.withTransaction {
+                // The ingest digest is a hash over the stored messages, so a
+                // re-parse of unchanged transcript bytes is recognized without
+                // reading the rows back. The provider content hash (first
+                // prompt + last response) cannot tell an appended message
+                // from none.
+                if try !columnExists("ingest_digest", table: "archive_sessions", in: database) {
+                    try database.execute("ALTER TABLE archive_sessions ADD COLUMN ingest_digest TEXT;")
+                }
+                // The sessions FTS mirrors three columns. Bookkeeping updates
+                // (message_count, file_mtime, indexed_at) must not delete and
+                // re-insert the FTS row, so the trigger is scoped to them.
+                try database.execute("DROP TRIGGER IF EXISTS archive_sessions_au;")
+                try database.execute(sessionUpdateTriggerSQL)
+                // Every statement above is O(1); the deletion index is only
+                // O(1) while the chunk table is empty. An existing archive
+                // builds it on the indexer actor, never on the thread that
+                // happened to open the repository.
+                if try database.scalarInt64("SELECT EXISTS(SELECT 1 FROM archive_chunks);") == 0 {
+                    try database.execute(HolyArchiveDatabaseSchema.chunkMessageIndexSQL)
+                }
+                try database.setUserVersion(3)
+            }
+        }
+
         try configureWriter(database)
     }
+
+    static func columnExists(_ column: String, table: String, in database: HolyDatabase) throws -> Bool {
+        try columns(of: table, schema: nil, in: database).contains(column)
+    }
+
+    /// Column names in declaration order, for `schema`.`table` (main when nil).
+    static func columns(of table: String, schema: String?, in database: HolyDatabase) throws -> [String] {
+        let qualified = schema.map { "\($0)." } ?? ""
+        var names: [String] = []
+        try database.query("PRAGMA \(qualified)table_info(\(table));") { statement in
+            if let value = sqlite3_column_text(statement, 1) { names.append(String(cString: value)) }
+        }
+        return names
+    }
+
+    static let sessionUpdateTriggerSQL = """
+    CREATE TRIGGER IF NOT EXISTS archive_sessions_au
+    AFTER UPDATE OF first_prompt_preview, project_name, auto_tags_json ON archive_sessions BEGIN
+        INSERT INTO archive_sessions_fts(
+            archive_sessions_fts, rowid, first_prompt_preview, project_name, auto_tags_json
+        ) VALUES ('delete', old.rowid, old.first_prompt_preview, old.project_name, old.auto_tags_json);
+        INSERT INTO archive_sessions_fts(rowid, first_prompt_preview, project_name, auto_tags_json)
+        VALUES (new.rowid, new.first_prompt_preview, new.project_name, new.auto_tags_json);
+    END;
+    """
 
     static func configureWriter(_ database: HolyDatabase) throws {
         try database.execute("PRAGMA busy_timeout = \(HolyArchiveDatabaseSchema.busyTimeoutMilliseconds);")
@@ -249,6 +313,15 @@ actor HolyArchiveLegacyDatabaseMigrator {
         for table in availableTables {
             var cursor = Int64(try Self.metaValue(Self.cursorKey(table.name), in: destination) ?? "0") ?? 0
             completedRows += try Self.countRows(through: cursor, table: table.name, in: destination)
+            // Named columns, never SELECT *: the destination schema can carry
+            // columns the legacy table never had (ingest_digest since v3).
+            let destinationColumns = Set(try HolyArchiveDatabaseMigrator.columns(
+                of: table.name, schema: nil, in: destination
+            ))
+            let copiedColumns = try HolyArchiveDatabaseMigrator.columns(
+                of: table.name, schema: "legacy_archive", in: destination
+            ).filter { destinationColumns.contains($0) }
+            let columnList = copiedColumns.joined(separator: ", ")
 
             while true {
                 if let maximumBatches, batches >= maximumBatches {
@@ -269,7 +342,7 @@ actor HolyArchiveLegacyDatabaseMigrator {
                 )
                 try destination.withTransaction {
                     try destination.execute(
-                        "INSERT OR IGNORE INTO \(table.name) SELECT * FROM legacy_archive.\(table.name) WHERE rowid > ? AND rowid <= ? ORDER BY rowid;",
+                        "INSERT OR IGNORE INTO \(table.name)(\(columnList)) SELECT \(columnList) FROM legacy_archive.\(table.name) WHERE rowid > ? AND rowid <= ? ORDER BY rowid;",
                         bindings: [.int64(cursor), .int64(upper)]
                     )
                     try Self.setMeta(Self.cursorKey(table.name), value: String(upper), in: destination)
