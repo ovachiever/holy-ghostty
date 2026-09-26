@@ -28,8 +28,161 @@ enum HolyDatabaseError: LocalizedError {
     }
 }
 
+/// One row of `PRAGMA wal_checkpoint(<mode>)`: whether a reader kept the
+/// checkpoint from finishing, how many frames the WAL held, and how many of
+/// them were copied into the main file.
+struct HolyDatabaseCheckpointReceipt: Equatable {
+    let busy: Bool
+    let walFrames: Int
+    let checkpointedFrames: Int
+
+    /// Every frame is in the main file and nothing blocked; the next write
+    /// transaction restarts the WAL from its beginning.
+    var isComplete: Bool {
+        !busy && walFrames == checkpointedFrames
+    }
+}
+
+enum HolyDatabaseCheckpointMode: String {
+    case passive = "PASSIVE"
+    case full = "FULL"
+    case restart = "RESTART"
+    case truncate = "TRUNCATE"
+}
+
+/// Checkpoint schedule for a long-lived writer connection.
+///
+/// A connection that closes after every transaction checkpoints on every
+/// close (`sqlite3WalClose`): the whole WAL is copied into the main file
+/// and both are F_FULLFSYNC'd, on the committing thread, for every flush.
+/// A connection that stays open checkpoints instead on SQLite's own
+/// automatic schedule: once the WAL holds `walFrameThreshold` frames after
+/// a commit. This policy keeps that schedule (the threshold is read from
+/// the linked library's `PRAGMA wal_autocheckpoint`, whose default is
+/// `SQLITE_DEFAULT_WAL_AUTOCHECKPOINT`; it is never a literal here) but
+/// runs the PASSIVE checkpoint on a utility queue through its own
+/// connection, so the committing thread never copies pages. PASSIVE never
+/// blocks the writer or any reader.
+final class HolyDatabaseCheckpointPolicy: @unchecked Sendable {
+    let databaseURL: URL
+    let walFrameThreshold: Int32
+
+    private let queue = DispatchQueue(
+        label: "com.mitchellh.ghostty.holy-database-checkpoint",
+        qos: .utility
+    )
+    private let lock = NSLock()
+    private var isScheduled = false
+    private var isShutDown = false
+    private var connection: HolyDatabase?
+    private var completedCheckpoints = 0
+    private var receipts: [HolyDatabaseCheckpointReceipt] = []
+    private var observers: [(HolyDatabaseCheckpointReceipt, Bool) -> Void] = []
+
+    init(databaseURL: URL, walFrameThreshold: Int32) {
+        self.databaseURL = databaseURL
+        self.walFrameThreshold = walFrameThreshold
+    }
+
+    /// Number of PASSIVE checkpoints this policy has run (complete or not).
+    var completedCheckpointCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return completedCheckpoints
+    }
+
+    var checkpointReceipts: [HolyDatabaseCheckpointReceipt] {
+        lock.lock()
+        defer { lock.unlock() }
+        return receipts
+    }
+
+    /// Observe every checkpoint the policy runs: the receipt and whether it
+    /// ran off the main thread. Observers are called on the checkpoint queue.
+    func addObserver(_ observer: @escaping (HolyDatabaseCheckpointReceipt, Bool) -> Void) {
+        lock.lock()
+        observers.append(observer)
+        lock.unlock()
+    }
+
+    /// The WAL hook: called by SQLite on the committing thread after every
+    /// committed write transaction with the number of frames the WAL holds.
+    func walDidCommit(frames: Int32) {
+        guard frames >= walFrameThreshold else { return }
+
+        lock.lock()
+        guard !isScheduled, !isShutDown else {
+            lock.unlock()
+            return
+        }
+        isScheduled = true
+        lock.unlock()
+
+        queue.async { [self] in
+            runCheckpoint()
+        }
+    }
+
+    /// Closes the policy's connection and refuses further work. Runs the
+    /// close on the checkpoint queue and waits for it, so it must not be
+    /// called from that queue.
+    func shutdown() {
+        lock.lock()
+        isShutDown = true
+        lock.unlock()
+
+        queue.sync {
+            connection?.close()
+            connection = nil
+        }
+    }
+
+    private func runCheckpoint() {
+        defer {
+            lock.lock()
+            isScheduled = false
+            lock.unlock()
+        }
+
+        lock.lock()
+        let shutDown = isShutDown
+        lock.unlock()
+        guard !shutDown else { return }
+
+        do {
+            let database = try openConnectionIfNeeded()
+            let receipt = try database.checkpoint(.passive)
+            let offMainThread = !Thread.isMainThread
+
+            lock.lock()
+            completedCheckpoints += 1
+            receipts.append(receipt)
+            let currentObservers = observers
+            lock.unlock()
+
+            for observer in currentObservers {
+                observer(receipt, offMainThread)
+            }
+        } catch {
+            HolyDatabase.logger.warning(
+                "Holy database WAL checkpoint failed: \(error.localizedDescription, privacy: .public)"
+            )
+            connection = nil
+        }
+    }
+
+    private func openConnectionIfNeeded() throws -> HolyDatabase {
+        if let connection {
+            return connection
+        }
+        let opened = try HolyDatabase.open(at: databaseURL)
+        connection = opened
+        return opened
+    }
+}
+
 final class HolyDatabase {
-    private static let logger = Logger(
+    fileprivate static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.mitchellh.ghostty",
         category: "HolyDatabase"
     )
@@ -38,6 +191,9 @@ final class HolyDatabase {
 
     let url: URL
     private let handle: OpaquePointer
+    private var isClosed = false
+    /// Present only on a connection opened with `openDurableWriter(at:)`.
+    private(set) var checkpointPolicy: HolyDatabaseCheckpointPolicy?
 
     private init(url: URL, handle: OpaquePointer) {
         self.url = url
@@ -45,7 +201,46 @@ final class HolyDatabase {
     }
 
     deinit {
+        close()
+    }
+
+    /// Closes the connection. On a durable writer the WAL hook is removed
+    /// and the checkpoint policy's own connection is closed first. Safe to
+    /// call more than once; `deinit` calls it.
+    func close() {
+        guard !isClosed else { return }
+        isClosed = true
+
+        if checkpointPolicy != nil {
+            sqlite3_wal_hook(handle, nil, nil)
+        }
+        checkpointPolicy?.shutdown()
+        checkpointPolicy = nil
         sqlite3_close_v2(handle)
+    }
+
+    /// Opens the connection that owns the workspace save loop for the life
+    /// of the process.
+    ///
+    /// Durability parity with the per-flush close this replaces: a close
+    /// checkpoint syncs the WAL and the main file with the checkpoint sync
+    /// flags, which on the linked library are F_FULLFSYNC
+    /// (`PRAGMA checkpoint_fullfsync` defaults to 1: the library is built
+    /// with `SQLITE_DEFAULT_CKPTFULLFSYNC`, read from
+    /// `PRAGMA compile_options` on this machine, SQLite 3.51.0). So today
+    /// every flush reaches the platter before the next one. A connection
+    /// that stays open commits into the WAL and never closes, so the
+    /// commit itself must carry that guarantee: `synchronous = FULL` syncs
+    /// the WAL on every commit that wrote a frame, and `fullfsync = ON`
+    /// makes that sync F_FULLFSYNC. A commit that dirtied no page writes
+    /// no frame and performs no sync at all.
+    ///
+    /// Checkpoints move to `HolyDatabaseCheckpointPolicy`: the library's
+    /// own automatic threshold, run off the committing thread.
+    static func openDurableWriter(at url: URL) throws -> HolyDatabase {
+        let database = try open(at: url, readOnly: false)
+        try database.configureDurableWriter()
+        return database
     }
 
     static func bootstrapIfNeeded() {
@@ -214,6 +409,76 @@ final class HolyDatabase {
             try? execute("ROLLBACK;")
             throw error
         }
+    }
+
+    /// Runs `PRAGMA wal_checkpoint(<mode>)` on this connection and returns
+    /// its row. PASSIVE never blocks; the other modes wait on the busy
+    /// timeout for readers and writers.
+    func checkpoint(_ mode: HolyDatabaseCheckpointMode) throws -> HolyDatabaseCheckpointReceipt {
+        let sql = "PRAGMA wal_checkpoint(\(mode.rawValue));"
+        var receipt: HolyDatabaseCheckpointReceipt?
+        try query(sql) { statement in
+            receipt = .init(
+                busy: sqlite3_column_int(statement, 0) != 0,
+                walFrames: Int(sqlite3_column_int(statement, 1)),
+                checkpointedFrames: Int(sqlite3_column_int(statement, 2))
+            )
+        }
+
+        guard let receipt else {
+            throw HolyDatabaseError.missingScalar(sql: sql)
+        }
+        return receipt
+    }
+
+    /// Rows inserted, updated, or deleted through this connection since it
+    /// was opened (`sqlite3_total_changes64`). The difference across a
+    /// transaction is what that transaction wrote.
+    var totalChangedRowCount: Int64 {
+        sqlite3_total_changes64(handle)
+    }
+
+    #if DEBUG
+    /// The raw connection, for tests that install SQLite hooks
+    /// (`sqlite3_update_hook`, `sqlite3_commit_hook`) to observe or veto
+    /// what the production save path does. Never used by the app.
+    var rawHandleForTesting: OpaquePointer {
+        handle
+    }
+    #endif
+
+    private func configureDurableWriter() throws {
+        try execute("PRAGMA synchronous = FULL;")
+        try execute("PRAGMA fullfsync = ON;")
+
+        // Read the library's automatic schedule before replacing its hook:
+        // installing a WAL hook disables sqlite3_wal_autocheckpoint on this
+        // connection (its default hook is what runs the automatic
+        // checkpoint), so the threshold must be carried over explicitly.
+        let walFrameThreshold = try scalarInt32("PRAGMA wal_autocheckpoint;")
+        let policy = HolyDatabaseCheckpointPolicy(
+            databaseURL: url,
+            walFrameThreshold: walFrameThreshold
+        )
+        checkpointPolicy = policy
+
+        let context = Unmanaged.passUnretained(policy).toOpaque()
+        sqlite3_wal_hook(
+            handle,
+            { context, _, _, frames -> Int32 in
+                guard let context else { return SQLITE_OK }
+                Unmanaged<HolyDatabaseCheckpointPolicy>
+                    .fromOpaque(context)
+                    .takeUnretainedValue()
+                    .walDidCommit(frames: frames)
+                return SQLITE_OK
+            },
+            context
+        )
+
+        Self.logger.notice(
+            "Holy database durable writer open at \(self.url.path, privacy: .public): synchronous=FULL fullfsync=ON, WAL checkpoint off-thread at \(walFrameThreshold, privacy: .public) frames"
+        )
     }
 
     private func configure(readOnly: Bool) throws {
