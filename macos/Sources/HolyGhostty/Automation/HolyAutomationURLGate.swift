@@ -12,7 +12,9 @@ import OSLog
 /// opted in, refused again when the URL carries a command and commands were
 /// not separately allowed, refused when any value is shaped like an
 /// injection, and even then it only ever asks: a session exists only after
-/// the confirmation sheet's non-default button is clicked (mn-e9f9a9).
+/// the confirmation sheet's non-default button is clicked (mn-e9f9a9). tmux
+/// session and socket names are held to a strict allowlist on top of that,
+/// as defense in depth behind the builder's quoting (mn-e6e3d0).
 enum HolyAutomationURLGate {
     struct Policy: Equatable, Sendable {
         var allowSpawnURL: Bool
@@ -206,16 +208,55 @@ enum HolyAutomationURLGate {
             return "unrecognized createIfMissing \(printable(createIfMissing))"
         }
 
-        if let workingDirectory = value("workingDirectory"),
-           !(workingDirectory.hasPrefix("/") || workingDirectory.hasPrefix("~")) {
-            return "workingDirectory is not an absolute or home-relative path"
+        if let workingDirectory = value("workingDirectory") {
+            guard workingDirectory.hasPrefix("/") || workingDirectory.hasPrefix("~") else {
+                return "workingDirectory is not an absolute or home-relative path"
+            }
+            // tmux splits its argv into commands at any argument ending in an
+            // unescaped `;`, and `-c <dir>` is followed by the pane command.
+            if workingDirectory.hasSuffix(";") {
+                return "workingDirectory ends with ;, which tmux reads as a command separator"
+            }
         }
 
-        if let socket = value("tmuxSocket"), socket.contains("/") {
-            return "tmuxSocket contains a path separator"
+        if let session = value("tmuxSession"), !isAllowedTmuxSessionName(session) {
+            return "tmuxSession \(printable(session)) is not [A-Za-z0-9_-]+"
+        }
+
+        if let socket = value("tmuxSocket"), !isAllowedTmuxSocketName(socket) {
+            return "tmuxSocket \(printable(socket)) is not [A-Za-z0-9._-]+ or is only dots"
         }
 
         return nil
+    }
+
+    // MARK: - tmux names (mn-e6e3d0)
+
+    /// ASCII letters, digits, `_`, and `-`. A session name becomes a tmux
+    /// target (`-t name`), where `:` separates session from window and `.`
+    /// window from pane, `$ @ %` select by id, `= ~ ^` and glob characters
+    /// change how the name is matched, and a trailing `;` splits tmux's argv
+    /// into a second command. None of those can reach a target from a link.
+    static func isAllowedTmuxSessionName(_ name: String) -> Bool {
+        !name.isEmpty && name.unicodeScalars.allSatisfy { isTmuxNameScalar($0) }
+    }
+
+    /// ASCII letters, digits, `.`, `_`, and `-`, and not only dots. A socket
+    /// name is a file name under tmux's socket directory (`-L name`), so `/`
+    /// would escape it and `.` or `..` would name the directory itself.
+    static func isAllowedTmuxSocketName(_ name: String) -> Bool {
+        !name.isEmpty
+            && name.unicodeScalars.allSatisfy { isTmuxNameScalar($0) || $0 == "." }
+            && !name.unicodeScalars.allSatisfy { $0 == "." }
+    }
+
+    private static func isTmuxNameScalar(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar {
+        case "A" ... "Z", "a" ... "z", "0" ... "9", "_", "-":
+            return true
+        default:
+            return false
+        }
     }
 
     /// Unicode bidirectional controls can reorder how a value renders, so a
