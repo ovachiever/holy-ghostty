@@ -169,6 +169,10 @@ final class HolySession: ObservableObject, Identifiable {
     /// Screen-derived telemetry never writes this value.
     @Published private(set) var agentStateEnvelope: HolyAgentStateEnvelope?
     @Published private(set) var agentStateObservedAt: Date?
+    /// Last working directory tmux discovery reported for this pane that
+    /// exists on its host. Observed state only: the launch spec keeps the
+    /// directory Holy recorded at creation.
+    @Published private(set) var observedWorkingDirectory: String?
     /// Shared identity used by roster, board/coord joins, archive, and restore.
     var harnessSessionID: String? { record.effectiveHarnessSessionID }
     /// Live count of Claude Code background shells, read from the input-box
@@ -633,6 +637,41 @@ final class HolySession: ObservableObject, Identifiable {
         return true
     }
 
+    /// How a discovery-reported working directory lands on a session.
+    ///
+    /// - The launch spec directory is creation state. Discovery fills it only
+    ///   when it is blank (an adopted session learning where it lives) and
+    ///   never overwrites a directory Holy already recorded.
+    /// - Any reported directory that exists becomes observed state, which
+    ///   archive snapshots carry as `lastKnownWorkingDirectory`.
+    /// - A reported directory that does not exist is dropped entirely.
+    ///
+    /// Existence is checked with the local file system for local sessions.
+    /// For remote sessions the discovery script already ran on the host: the
+    /// directory is the pane's own `pane_current_path`, or a child of it that
+    /// passed `-d` there, so the host's answer is the existence receipt.
+    static func resolvedDiscoveredWorkingDirectory(
+        recorded: String?,
+        discovered: String?,
+        transport: HolySessionTransportSpec,
+        directoryExists: (String) -> Bool = HolySession.localDirectoryExists
+    ) -> (launchSpec: String?, observed: String?) {
+        guard let discovered = normalizedMetadataString(discovered) else {
+            return (nil, nil)
+        }
+        guard transport.isRemote || directoryExists(discovered) else {
+            return (nil, nil)
+        }
+        let launchSpec = normalizedMetadataString(recorded) == nil ? discovered : nil
+        return (launchSpec, discovered)
+    }
+
+    static func localDirectoryExists(_ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
+    }
+
     @discardableResult
     func applyDiscoveredLaunchMetadata(
         from launchSpec: HolySessionLaunchSpec,
@@ -650,10 +689,18 @@ final class HolySession: ObservableObject, Identifiable {
             changed = true
         }
 
-        if let workingDirectory = Self.normalizedMetadataString(discoveredLaunchSpec.workingDirectory),
-           Self.normalizedMetadataString(record.launchSpec.workingDirectory) != workingDirectory {
-            record.launchSpec.workingDirectory = workingDirectory
+        let workingDirectoryResolution = Self.resolvedDiscoveredWorkingDirectory(
+            recorded: record.launchSpec.workingDirectory,
+            discovered: discoveredLaunchSpec.workingDirectory,
+            transport: record.launchSpec.transport
+        )
+        if let launchSpecWorkingDirectory = workingDirectoryResolution.launchSpec {
+            record.launchSpec.workingDirectory = launchSpecWorkingDirectory
             changed = true
+        }
+        if let observed = workingDirectoryResolution.observed,
+           observedWorkingDirectory != observed {
+            observedWorkingDirectory = observed
         }
 
         if let title = Self.normalizedMetadataString(discoveredLaunchSpec.title),
@@ -797,7 +844,7 @@ final class HolySession: ObservableObject, Identifiable {
             budgetTelemetry: budgetTelemetry,
             runtimeTelemetry: runtimeTelemetry,
             gitSnapshot: gitSnapshot,
-            lastKnownWorkingDirectory: workingDirectory,
+            lastKnownWorkingDirectory: observedWorkingDirectory ?? workingDirectory,
             lastActivityAt: activityAt,
             archivedAt: archivedAt
         )
