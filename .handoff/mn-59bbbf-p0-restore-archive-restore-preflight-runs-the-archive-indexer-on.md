@@ -7,7 +7,7 @@ base_commit: 962f13ad23c8f022a2b5d44d29de8085c36339de
 scope: '[P0][RESTORE][ARCHIVE] Restore preflight runs the archive indexer on the main thread: 26 s hang, and the same path rewrites the archive DB'
 inputs:
 - hang report 2026-09-26 11:25; diags 09-24 18:50, 09-25 03:44; memory resolve-reindex-cost-asymmetry
-binding: sha256:7092adde134aa16d20fc9b5eff924f12aaf1aec382271e372add2037bf4d4cb7
+binding: sha256:d75e27ec718e7aed6bbc6350a3886784aaf7bc690c88441544aefe182a2c20a3
 ---
 
 # Handoff: [P0][RESTORE][ARCHIVE] Restore preflight runs the archive indexer on the main thread: 26 s hang, and the same path rewrites the archive DB
