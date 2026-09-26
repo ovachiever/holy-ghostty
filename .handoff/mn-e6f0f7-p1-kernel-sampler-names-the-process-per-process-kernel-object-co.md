@@ -7,7 +7,7 @@ base_commit: 35cdf9de61e364aebdbdcfa5abe8724d57c9e506
 scope: '[P1][KERNEL] Sampler names the process: per-process kernel-object counts (IOKit user clients, mach ports, sockets, files, ptys) every 5 minutes'
 inputs:
 - usersample 2026-09-26 20:04Z jump; lane mn-579814 report; today's audio and log-query experiments
-binding: sha256:f5bdf37ee7d264019a741247dce8076308ef93100929e8eb62a597abae82846f
+binding: sha256:57d2a6886e78dd342031176abb526e08911d58b4bdc8957df4328d7b84082140
 ---
 
 # Handoff: [P1][KERNEL] Sampler names the process: per-process kernel-object counts (IOKit user clients, mach ports, sockets, files, ptys) every 5 minutes
