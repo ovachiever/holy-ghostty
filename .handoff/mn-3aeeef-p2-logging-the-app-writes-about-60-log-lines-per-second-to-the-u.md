@@ -7,7 +7,7 @@ base_commit: 962f13ad23c8f022a2b5d44d29de8085c36339de
 scope: '[P2][LOGGING] The app writes about 60 log lines per second to the unified log, four per session per second'
 inputs:
 - log show 2026-09-25 22:30 window
-binding: sha256:0fcf2bd7b56acd9327bbf35468dcd5405cd44e5f8732b4be772ae27382c64593
+binding: sha256:8d8254508e0a4ab380d08387b5685571fbed89a593c9722adf31d1921812ae78
 ---
 
 # Handoff: [P2][LOGGING] The app writes about 60 log lines per second to the unified log, four per session per second
