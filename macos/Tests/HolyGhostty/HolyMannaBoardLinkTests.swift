@@ -278,7 +278,8 @@ private func linkJSON(_ value: [String: Any]) throws -> String {
     launcher: (@MainActor (HolySessionLaunchSpec) throws -> UUID)? = nil
 ) -> HolyMannaBoardModeStore {
     HolyMannaBoardModeStore(client: client, workerLauncher: launcher,
-                           workerExecutableResolver: .init { _, _ in "/synthetic/codex" }, prewarmer: LinkPrewarmer())
+                           workerExecutableResolver: .init { _, _ in "/synthetic/codex" },
+                           workerDirectoryProbe: .init { _, _ in true }, prewarmer: LinkPrewarmer())
 }
 
 @MainActor private func linkSettled(_ store: HolyMannaBoardModeStore) async throws {

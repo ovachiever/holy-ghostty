@@ -39,12 +39,70 @@ struct HolyMannaWorkerProfile: Equatable {
 
 enum HolyMannaWorkerLaunchError: LocalizedError, Equatable {
     case runtimeMissing(HolySessionRuntime, host: String?)
+    case workingDirectoryMissing(path: String, host: String?)
 
     var errorDescription: String? {
         switch self {
         case let .runtimeMissing(runtime, host):
             return "The \(runtime.rawValue) executable was not found on \(host ?? "this Mac"). "
                 + "Checked the login-shell PATH and known tool directories. No worker was opened."
+        case let .workingDirectoryMissing(path, host):
+            return "The board's repository directory \(path) does not exist on \(host ?? "this Mac"). "
+                + "No worker was opened."
+        }
+    }
+}
+
+/// Asked on the execution host immediately before a worker is opened
+/// (mn-9682f6): a worker is never created into a directory that is not
+/// there. tmux silently falls back to another directory for a missing
+/// `-c` path, so the spawn itself cannot be trusted to refuse.
+struct HolyMannaWorkerDirectoryProbe: Sendable {
+    typealias Check = @Sendable (_ path: String, _ remoteHost: String?) async throws -> Bool
+    static let live = HolyMannaWorkerDirectoryProbe(check: HolyMannaWorkerDirectoryProbe.exists)
+
+    let check: Check
+
+    func requireDirectory(_ path: String, remoteHost: String?) async throws {
+        guard try await check(path, remoteHost) else {
+            throw HolyMannaWorkerLaunchError.workingDirectoryMissing(path: path, host: remoteHost)
+        }
+    }
+
+    static func remoteInvocation(path: String, remoteHost: String) throws -> HolyMannaProcessInvocation {
+        // Keep the board's destination validation and managed SSH routing.
+        _ = try HolyMannaBoardClient.remoteInvocation(
+            arguments: [], context: .init(boardRoot: path, remoteHost: remoteHost), needsBoardRoot: true, identity: nil
+        )
+        let quoted = "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let transport = try HolySSHTransportManager.shared.command(
+            destination: remoteHost, purpose: .control,
+            options: HolyMannaWorkerExecutableResolver.sshProbeOptions,
+            remoteCommand: ["test -d \(quoted)"]
+        )
+        return .init(executablePath: transport.executablePath, arguments: transport.arguments,
+                     currentDirectoryPath: nil, environment: [:], stdin: nil,
+                     displayCommand: "\(remoteHost): test -d \(path)")
+    }
+
+    private static func exists(path: String, remoteHost: String?) async throws -> Bool {
+        guard let host = remoteHost else {
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
+        let invocation = try remoteInvocation(path: path, remoteHost: host)
+        let output = try await HolySSHAdmissionController.shared.withControlPermit(for: host, operation: .metadata) {
+            try await HolyMannaProcessRunner.run(invocation, HolyMannaWorkerExecutableResolver.probeTimeout)
+        }
+        // test(1): 0 = a directory, 1 = not one. Anything else (ssh's 255)
+        // is a transport failure, never proof that the directory is absent.
+        switch output.exitCode {
+        case 0: return true
+        case 1: return false
+        default:
+            throw HolyMannaBoardClientError.commandFailed(
+                command: invocation.displayCommand, code: output.exitCode, detail: String(output.stderr.suffix(400))
+            )
         }
     }
 }
@@ -54,6 +112,10 @@ enum HolyMannaWorkerLaunchError: LocalizedError, Equatable {
 actor HolyMannaWorkerExecutableResolver {
     typealias Probe = @Sendable (HolySessionRuntime, String?) async throws -> String?
     static let shared = HolyMannaWorkerExecutableResolver()
+    /// The bounded ceiling this lookup has always used for one host probe.
+    static let probeTimeout: TimeInterval = 15
+    /// Non-interactive SSH with the lookup's existing connect ceiling.
+    static let sshProbeOptions = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
 
     private struct Key: Hashable {
         let runtime: HolySessionRuntime
@@ -130,7 +192,7 @@ actor HolyMannaWorkerExecutableResolver {
             )
             let transport = try HolySSHTransportManager.shared.command(
                 destination: host, purpose: .control,
-                options: ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"],
+                options: sshProbeOptions,
                 remoteCommand: ["/bin/zsh -lc " + "'" + script.replacingOccurrences(of: "'", with: "'\\''") + "'"]
             )
             return .init(executablePath: transport.executablePath, arguments: transport.arguments,
@@ -147,10 +209,10 @@ actor HolyMannaWorkerExecutableResolver {
         let output: HolyMannaProcessOutput
         if let host = remoteHost {
             output = try await HolySSHAdmissionController.shared.withControlPermit(for: host, operation: .metadata) {
-                try await HolyMannaProcessRunner.run(invocation, 15)
+                try await HolyMannaProcessRunner.run(invocation, probeTimeout)
             }
         } else {
-            output = try await HolyMannaProcessRunner.run(invocation, 15)
+            output = try await HolyMannaProcessRunner.run(invocation, probeTimeout)
         }
         if output.exitCode == 1 { return nil }
         guard output.exitCode == 0 else {
@@ -234,6 +296,8 @@ struct HolyMannaWorkerDispatch: Equatable {
                 arguments: ["manna", "state", "--json"], context: context, needsBoardRoot: true, identity: nil
             )
         }
+        // Title = the repository folder (roster ruling 2026-08-22); the item id
+        // rides in the objective and note. Never the board's display name.
         var spec = HolySessionLaunchSpec.interactiveTmuxShell(
             title: URL(fileURLWithPath: context.boardRoot!).lastPathComponent
         )
