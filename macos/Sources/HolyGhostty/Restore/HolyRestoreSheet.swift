@@ -250,6 +250,14 @@ struct HolyRestoreSheet: View {
         date.formatted(.relative(presentation: .named))
     }
 
+    /// "Interrupted by the last shutdown · rebooted Sep 26, 2026 at 6:16 AM".
+    /// The shutdown is named from the kernel and the app's own ledger, so a
+    /// panic, a clean quit, and an unclean relaunch each read differently.
+    static func freshSectionTitle(shutdown: HolyRestoreShutdownEvent?) -> String {
+        guard let shutdown else { return "Interrupted by the last shutdown" }
+        return "Interrupted by the last shutdown · \(shutdown.summary)"
+    }
+
     /// Helper shells, grouped one click away. Grouped, never hidden: the
     /// count is always visible and every row inside stays fully restorable.
     @ViewBuilder
@@ -323,7 +331,7 @@ struct HolyRestoreSheet: View {
                 )
                 .frame(width: 6, height: 6)
 
-            Text("Interrupted by the last shutdown")
+            Text(Self.freshSectionTitle(shutdown: engine.lastShutdown))
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(HolyGhosttyTheme.textTertiary)
                 .textCase(.uppercase)
@@ -533,11 +541,22 @@ private struct RestoreRowView: View {
                     }
                 }
 
-                Text(row.archived.workingDirectoryDisplay)
+                // The directory restore will actually use. When the first
+                // recorded path is gone the line says which source won and
+                // which one no longer exists, in the warning hue, so a row
+                // restoring somewhere other than its label is never silent.
+                Text(row.workingDirectoryDisplay)
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(HolyGhosttyTheme.textTertiary)
-                    .lineLimit(1)
+                    .foregroundStyle(
+                        row.workingDirectoryResolution.usedFallback
+                            || (row.workingDirectoryResolution.hasRecordedDirectory
+                                && row.workingDirectoryResolution.path == nil)
+                            ? HolyGhosttyTheme.warning
+                            : HolyGhosttyTheme.textTertiary
+                    )
+                    .lineLimit(row.workingDirectoryResolution.usedFallback ? 2 : 1)
                     .truncationMode(.head)
+                    .help(row.workingDirectoryDisplay)
 
                 // The note sits with the identity lines, not the status
                 // line: it answers "which one is this?", not "what will

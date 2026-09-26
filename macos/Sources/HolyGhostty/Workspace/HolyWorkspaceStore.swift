@@ -247,10 +247,12 @@ final class HolyWorkspaceStore: ObservableObject {
         sessionSupervisor: HolySessionSupervisor,
         tmuxSessionKiller: @escaping (HolyTmuxLiveIdentity) async -> Result<HolyTmuxKillOutcome, HolyTmuxLifecycleFailure> = {
             await HolyTmuxLifecycleService.killVerified($0)
-        }
+        },
+        restoreStateDirectory: URL = HolyDatabasePaths.containerDirectory
     ) {
         self.sessionSupervisor = sessionSupervisor
         self.tmuxSessionKiller = tmuxSessionKiller
+        self.restoreStateDirectory = restoreStateDirectory
     }
 
     convenience init(ghostty: Ghostty.App, seedDefaultSession: Bool = true) {
@@ -647,8 +649,13 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func restore() {
+        let launchStartedAt = Date()
         let restoration = sessionSupervisor.restoreWorkspace()
         applySessionStoreState(restoration.state)
+        // Freshness keyed on reality (mn-3c4b23): what the previous run last
+        // saw live, against the kernel's boot identity, corrects whatever
+        // the sweep could not see. Persisted by the launch persist below.
+        reconcileRestoreFreshnessAtLaunch(launchStartedAt: launchStartedAt)
         loadTasks()
         loadRemoteHosts()
         loadLaunchProfiles()
@@ -1839,8 +1846,188 @@ final class HolyWorkspaceStore: ObservableObject {
         return .init(fresh: fresh, older: older)
     }
 
+    /// When the last shutdown is known, fresh is exactly its batch — possibly
+    /// empty once everything in it was restored — and never an older group
+    /// promoted by recency. Without a ledger (first launch of this build)
+    /// the newest-batch law above still governs.
+    nonisolated static func crashRestoreBatch(
+        from archivedSessions: [HolyArchivedSession],
+        freshBatchID: UUID?
+    ) -> HolyCrashRestoreBatch {
+        guard let freshBatchID else { return crashRestoreBatch(from: archivedSessions) }
+        let candidates = archivedSessions
+            .filter(isCrashRestoreCandidate)
+            .sorted { $0.archivedAt > $1.archivedAt }
+        return .init(
+            fresh: candidates.filter { $0.recoveryBootBatchID == freshBatchID },
+            older: candidates.filter { $0.recoveryBootBatchID != freshBatchID }
+        )
+    }
+
     var crashRestoreBatch: HolyCrashRestoreBatch {
-        Self.crashRestoreBatch(from: archivedSessions)
+        Self.crashRestoreBatch(from: archivedSessions, freshBatchID: lastShutdown?.interruptionBatchID)
+    }
+
+    // MARK: - Crash restore: freshness keyed on reality (mn-3c4b23)
+
+    /// The last shutdown as reconciled at launch. Nil until a previous run
+    /// of this build left a liveness ledger behind.
+    @Published private(set) var lastShutdown: HolyRestoreShutdownEvent?
+    /// Every restore pass ever recorded, newest first. Session History
+    /// renders it; the engine appends to it through the adapter.
+    @Published private(set) var restoreRuns: [HolyRestoreRunRecord] = []
+
+    /// Where restore keeps its own files (the liveness ledger and the run
+    /// log). The app's data container by default; tests pass a temp dir.
+    private let restoreStateDirectory: URL
+    /// The kernel's identity for THIS boot, read once.
+    private let currentBoot = HolyBootIdentity.current()
+    /// The previous run's ledger, read once at launch and kept: a later
+    /// re-reconcile must never mistake this run's own ledger for it.
+    private var restoreLedgerAtLaunch: HolyRestoreLivenessLedger?
+    private var restoreLaunchStartedAt: Date?
+    /// Every session seen in the roster during this run. A session that was
+    /// live at any point since launch was not interrupted by the last
+    /// shutdown, whatever happens to it later.
+    private var sessionsObservedLiveThisRun: Set<UUID> = []
+    /// The live set the ledger on disk currently names, to skip rewrites
+    /// (each write is an F_FULLFSYNC) when membership did not change.
+    private var restoreLedgerWrittenLiveIDs: Set<UUID>?
+
+    static let restoreFreshnessLogger = Logger(
+        subsystem: "org.holyghostty.app",
+        category: "HolyRestoreFreshness"
+    )
+
+    private var restoreLivenessLedgerURL: URL {
+        HolyRestoreLivenessLedgerStore.url(in: restoreStateDirectory)
+    }
+
+    private var restoreRunLogURL: URL {
+        HolyRestoreRunLogStore.url(in: restoreStateDirectory)
+    }
+
+    /// Launch-time reconciliation: reads the previous run's ledger once,
+    /// renews the interruption record of every session it saw live that is
+    /// archived now, loads the run history, writes this boot's ledger, and
+    /// keeps the ledger current from then on. The caller persists.
+    func reconcileRestoreFreshnessAtLaunch(launchStartedAt: Date, now: Date = .now) {
+        restoreLaunchStartedAt = launchStartedAt
+        restoreLedgerAtLaunch = HolyRestoreLivenessLedgerStore.load(from: restoreLivenessLedgerURL)
+        sessionsObservedLiveThisRun = Set(sessions.map(\.id))
+        reconcileRestoreFreshness(now: now)
+        restoreRuns = HolyRestoreRunLogStore.load(from: restoreRunLogURL)
+        writeRestoreLivenessLedger(sessions: sessions)
+        installRestoreLivenessObservers()
+    }
+
+    /// Idempotent: safe to run again whenever the sheet opens, so an archive
+    /// that appeared after launch for a session the ledger saw live (and
+    /// that was never live in this run) still joins the fresh batch.
+    /// Returns whether any archive changed; the caller persists.
+    @discardableResult
+    func reconcileRestoreFreshness(now: Date = .now) -> Bool {
+        guard let launchStartedAt = restoreLaunchStartedAt else { return false }
+        sessionsObservedLiveThisRun.formUnion(sessions.map(\.id))
+
+        let reconciliation = HolyRestoreFreshness.reconcile(
+            archivedSessions: archivedSessions,
+            liveSessionIDs: sessionsObservedLiveThisRun,
+            ledger: restoreLedgerAtLaunch,
+            currentBoot: currentBoot,
+            launchStartedAt: launchStartedAt,
+            preferredBatchID: lastShutdown?.interruptionBatchID,
+            now: now
+        )
+        lastShutdown = reconciliation.shutdown
+        if let shutdown = reconciliation.shutdown {
+            Self.restoreFreshnessLogger.error(
+                "reconcile: kind=\(shutdown.kind.rawValue, privacy: .public) liveAtExit=\(shutdown.liveAtExitCount) interrupted=\(shutdown.interruptedSourceSessionIDs.count) renewed=\(shutdown.renewedArchiveIDs.count) batch=\(shutdown.interruptionBatchID?.uuidString ?? "none", privacy: .public) boot=\(self.currentBoot.sessionUUID ?? "unknown", privacy: .public)"
+            )
+        } else {
+            Self.restoreFreshnessLogger.error("reconcile: no previous ledger; the sweep's batch law stands")
+        }
+
+        guard reconciliation.didChange else { return false }
+        archivedSessions = reconciliation.archivedSessions
+        return true
+    }
+
+    /// The store's own record of what is live right now, under this boot.
+    /// Built from the sessions handed in (the `@Published` stream delivers
+    /// the NEW value before the property changes, so the property itself
+    /// must not be read there).
+    private func writeRestoreLivenessLedger(sessions liveSessions: [HolySession], cleanExitAt: Date? = nil) {
+        let entries = liveSessions.map { session -> HolyRestoreLivenessLedger.LiveSession in
+            let spec = session.record.launchSpec
+            return .init(
+                sourceSessionID: session.id,
+                title: session.title,
+                isLocal: spec.transport.kind == .local,
+                tmuxSocketName: spec.tmux?.normalized.socketName,
+                tmuxSessionName: spec.tmux?.normalized.sessionName
+            )
+        }
+        let ledger = HolyRestoreLivenessLedger(
+            boot: currentBoot,
+            recordedAt: .now,
+            liveSessions: entries,
+            cleanExitAt: cleanExitAt,
+            lastInterruptionBatchID: lastShutdown?.interruptionBatchID
+        )
+        do {
+            try HolyRestoreLivenessLedgerStore.save(ledger, to: restoreLivenessLedgerURL)
+            restoreLedgerWrittenLiveIDs = Set(entries.map(\.sourceSessionID))
+        } catch {
+            Self.restoreFreshnessLogger.error(
+                "ledger: write failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    private func installRestoreLivenessObservers() {
+        $sessions
+            .removeDuplicates { Set($0.map(\.id)) == Set($1.map(\.id)) }
+            .dropFirst()
+            .sink { [weak self] liveSessions in
+                guard let self else { return }
+                let ids = Set(liveSessions.map(\.id))
+                self.sessionsObservedLiveThisRun.formUnion(ids)
+                guard self.restoreLedgerWrittenLiveIDs != ids else { return }
+                self.writeRestoreLivenessLedger(sessions: liveSessions)
+            }
+            .store(in: &cancellables)
+
+        // An orderly quit is the one exit the app can vouch for. An
+        // installer kill (SIGTERM) or a crash never reaches this, which is
+        // exactly how the next launch tells the two apart.
+        NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.writeRestoreLivenessLedger(sessions: self.sessions, cleanExitAt: .now)
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Appends one restore pass to the durable run log and publishes it.
+    func recordRestoreRun(_ run: HolyRestoreRunRecord) {
+        restoreRuns.insert(run, at: 0)
+        do {
+            try HolyRestoreRunLogStore.save(restoreRuns, to: restoreRunLogURL)
+        } catch {
+            Self.restoreFreshnessLogger.error(
+                "run log: write failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+        HolyGitHubInboxSource.logger.error(
+            "lifecycle: restore run \(run.trigger.rawValue, privacy: .public) requested=\(run.requestedCount) restored=\(run.restoredCount) failed=\(run.failedCount) skipped=\(run.skippedCount)"
+        )
+    }
+
+    /// Seeds roster and archive state without touching any repository, so a
+    /// test can exercise freshness reconciliation against fixtures.
+    func applySessionStoreStateForTesting(_ state: HolySessionStoreState) {
+        applySessionStoreState(state)
     }
 
     /// The banner speaks only for the freshest boot batch, parents only:
@@ -1889,6 +2076,11 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func presentRestore() {
+        // Archives that appeared after launch for sessions the ledger saw
+        // live join the fresh batch before the plan is built from it.
+        if reconcileRestoreFreshness() {
+            persist()
+        }
         restoreEngine.buildPlan()
         restorePresented = true
         Task { [weak self] in

@@ -93,6 +93,29 @@ enum HolyRestoreRowState: Equatable, Sendable {
             return false
         }
     }
+
+    /// Why a restore pass left this row alone, for the run record. Every
+    /// verdict names itself; a skipped row is never an unexplained gap.
+    var skipSummary: String {
+        switch self {
+        case .exactResume:
+            return "exact resume was ready but the pass did not reach it"
+        case let .ambiguous(candidates):
+            return "\(candidates.count) conversations matched and none was picked"
+        case .shellOnly:
+            return "shell-only recreate was ready but the pass did not reach it"
+        case .missingHistory:
+            return "no conversation history was found"
+        case .wrongHost:
+            return "remote session — restore is local-only"
+        case .alreadyRestored:
+            return "already live"
+        case let .conflict(reason):
+            return reason
+        case let .blocked(reason):
+            return reason
+        }
+    }
 }
 
 /// Where a row is in its restore lifecycle. Orthogonal to the row state:
@@ -128,4 +151,8 @@ struct HolyRestorePreflightContext: Equatable, Sendable {
     var liveness: HolyTmuxLiveness?
     /// A roster session or a sibling restore row already owns this identity.
     var conflictReason: String?
+    /// Every recorded directory the row could restore into, with the one
+    /// chosen and the sources of the ones that no longer exist. Nil only in
+    /// contexts built before resolution ran (legacy callers and tests).
+    var workingDirectoryResolution: HolyRestoreWorkingDirectoryResolution?
 }

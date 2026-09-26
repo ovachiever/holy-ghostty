@@ -46,6 +46,17 @@ protocol HolyRestoreWorkspaceAdapting: AnyObject {
     /// Deletes archived records outright, through the same removal path
     /// Session History uses. Restore never invents a second way to delete.
     func deleteArchives(archiveIDs: [UUID])
+    /// The last shutdown as the store reconciled it at launch (kind, boot,
+    /// what was live). Nil until a liveness ledger from a previous run exists.
+    var lastShutdown: HolyRestoreShutdownEvent? { get }
+    /// Appends one restore pass to the durable run history that Session
+    /// History shows. Called once per pass, after every row settled.
+    func recordRestoreRun(_ run: HolyRestoreRunRecord)
+}
+
+extension HolyRestoreWorkspaceAdapting {
+    var lastShutdown: HolyRestoreShutdownEvent? { nil }
+    func recordRestoreRun(_ run: HolyRestoreRunRecord) {}
 }
 
 struct HolyRestoreRow: Identifiable, Equatable {
@@ -63,6 +74,15 @@ struct HolyRestoreRow: Identifiable, Equatable {
     /// rows render collapsed, are never preselected, and are excluded from
     /// Restore All and the interrupted count.
     let isFresh: Bool
+    /// Where restore will run and where that answer came from, refreshed by
+    /// every preflight pass so a directory recreated between retries counts.
+    var workingDirectoryResolution: HolyRestoreWorkingDirectoryResolution
+
+    /// The directory line the row shows: the path restore will use, naming
+    /// its source whenever the first recorded directory no longer exists.
+    var workingDirectoryDisplay: String {
+        workingDirectoryResolution.displayLine
+    }
 
     /// True when the archived title carries Holy's machine-generated
     /// adoption suffix — almost always a sub-agent's helper shell rather
@@ -143,6 +163,11 @@ final class HolyRestoreEngine: ObservableObject {
     var freshRows: [HolyRestoreRow] { rows.filter(\.isFresh) }
 
     var olderRows: [HolyRestoreRow] { rows.filter { !$0.isFresh } }
+
+    /// The last shutdown the fresh section speaks for, when the store knows
+    /// it: the header names a reboot, a clean quit, or an unclean relaunch
+    /// instead of leaving "the last shutdown" to the reader's imagination.
+    var lastShutdown: HolyRestoreShutdownEvent? { adapter.lastShutdown }
 
     /// Fresh rows split by provenance. Parents render first; helpers group
     /// under their own disclosure so a swarm's scaffolding never buries the
@@ -381,7 +406,12 @@ final class HolyRestoreEngine: ObservableObject {
             state: .blocked("Preflight has not run yet."),
             phase: .pending,
             isSelected: isSelected,
-            isFresh: isFresh
+            isFresh: isFresh,
+            workingDirectoryResolution: Self.workingDirectoryResolution(
+                archived: archived,
+                plannedLaunchSpec: planned,
+                directoryExists: environment.directoryExists
+            )
         )
     }
 
@@ -544,16 +574,21 @@ final class HolyRestoreEngine: ObservableObject {
 
         let spec = row.plannedLaunchSpec
         let runtime = spec.runtime
-        let workingDirectory = resolvedWorkingDirectory(for: row)
+        // Re-resolved every pass, not read off the plan: a directory the
+        // user recreated between retries must count the moment it exists.
+        let resolution = workingDirectoryResolution(for: row)
+        updateRow(rowID) { $0.workingDirectoryResolution = resolution }
+        let workingDirectory = resolution.path
 
         var context = HolyRestorePreflightContext(
             hostSupported: !spec.transport.normalized.isRemote,
-            workingDirectoryExists: workingDirectory.map(environment.directoryExists),
+            workingDirectoryExists: resolution.hasRecordedDirectory ? (workingDirectory != nil) : nil,
             workingDirectory: workingDirectory,
             executable: nil,
             resolveOutcome: nil,
             liveness: nil,
-            conflictReason: conflictReasons[rowID]
+            conflictReason: conflictReasons[rowID],
+            workingDirectoryResolution: resolution
         )
 
         if context.hostSupported, let identity = HolyTmuxLiveIdentity(exactLaunchSpec: spec) {
@@ -783,7 +818,7 @@ final class HolyRestoreEngine: ObservableObject {
         Self.logger.error(
             "restoreAll: parents=\(self.freshParentRows.count) preflighting=\(self.isPreflighting) restoring=\(self.isRestoring)"
         )
-        await restore(rowIDs: freshParentRows.map(\.id), attach: false)
+        await restore(rowIDs: freshParentRows.map(\.id), attach: false, trigger: .restoreAll)
     }
 
     /// Restores the selected rows and attaches each one as it verifies.
@@ -791,7 +826,7 @@ final class HolyRestoreEngine: ObservableObject {
         Self.logger.error(
             "restoreSelected: selected=\(self.rows.filter(\.isSelected).count) preflighting=\(self.isPreflighting) restoring=\(self.isRestoring)"
         )
-        await restore(rowIDs: rows.filter(\.isSelected).map(\.id), attach: true)
+        await restore(rowIDs: rows.filter(\.isSelected).map(\.id), attach: true, trigger: .restoreSelected)
     }
 
     /// The older crash group currently mid-restore, so its header can show
@@ -809,17 +844,17 @@ final class HolyRestoreEngine: ObservableObject {
         }
         restoringCrashGroupKey = key
         defer { restoringCrashGroupKey = nil }
-        await restore(rowIDs: section.parentRows.map(\.id), attach: false)
+        await restore(rowIDs: section.parentRows.map(\.id), attach: false, trigger: .restoreShutdownGroup)
     }
 
     func retry(rowID: UUID) async {
-        await restore(rowIDs: [rowID], attach: false)
+        await restore(rowIDs: [rowID], attach: false, trigger: .retry)
     }
 
     /// Restores (or adopts, when already live/restored) one row and attaches
     /// its surface. The lazy-attach path for headless rows.
     func attach(rowID: UUID) async {
-        await restore(rowIDs: [rowID], attach: true)
+        await restore(rowIDs: [rowID], attach: true, trigger: .attach)
     }
 
     func setSelected(_ selected: Bool, rowID: UUID) {
@@ -879,7 +914,11 @@ final class HolyRestoreEngine: ObservableObject {
     /// sheet full of blocked rows makes the restore buttons silent no-ops.
     @Published private(set) var lastRestoreSkippedCount = 0
 
-    private func restore(rowIDs: [UUID], attach: Bool) async {
+    private func restore(
+        rowIDs: [UUID],
+        attach: Bool,
+        trigger: HolyRestoreRunRecord.Trigger
+    ) async {
         guard !isRestoring else {
             Self.logger.error("restore: REJECTED — a previous restore pass is still running")
             return
@@ -892,9 +931,60 @@ final class HolyRestoreEngine: ObservableObject {
             if !row.state.isActionable { count += 1 }
         }
 
+        let startedAt = Date()
         await runBounded(rowIDs: rowIDs) { [weak self] rowID in
             await self?.restoreOne(rowID: rowID, attach: attach)
         }
+        recordRun(startedAt: startedAt, trigger: trigger, attach: attach, rowIDs: rowIDs)
+    }
+
+    /// One durable receipt per pass: every requested row with its outcome,
+    /// handed to the store the moment the pass settles. Erik restored about
+    /// 38 sessions on 2026-09-26 and nothing recorded it.
+    private func recordRun(
+        startedAt: Date,
+        trigger: HolyRestoreRunRecord.Trigger,
+        attach: Bool,
+        rowIDs: [UUID]
+    ) {
+        let results: [HolyRestoreRunRecord.RowResult] = rowIDs.compactMap { rowID in
+            guard let row = rows.first(where: { $0.id == rowID }) else { return nil }
+            let outcome: HolyRestoreRunRecord.Outcome
+            switch row.phase {
+            case let .restored(attached):
+                outcome = .restored(attached: attached)
+            case let .failed(reason):
+                outcome = .failed(reason)
+            case .pending, .preflighting, .ready, .restoring:
+                outcome = .skipped(row.state.skipSummary)
+            }
+            var providerSessionID: String?
+            if case let .exactResume(id) = row.state {
+                providerSessionID = id
+            }
+            return .init(
+                archiveID: row.id,
+                sourceSessionID: row.archived.sourceSessionID,
+                title: row.archived.title,
+                runtime: row.plannedLaunchSpec.runtime.rawValue,
+                workingDirectory: row.workingDirectoryResolution.path,
+                providerSessionID: providerSessionID,
+                outcome: outcome
+            )
+        }
+        guard !results.isEmpty else { return }
+
+        let record = HolyRestoreRunRecord(
+            startedAt: startedAt,
+            finishedAt: Date(),
+            trigger: trigger,
+            attach: attach,
+            rows: results
+        )
+        Self.logger.error(
+            "restore: run \(trigger.rawValue, privacy: .public) requested=\(record.requestedCount) restored=\(record.restoredCount) failed=\(record.failedCount) skipped=\(record.skippedCount)"
+        )
+        adapter.recordRestoreRun(record)
     }
 
     private func restoreOne(rowID: UUID, attach: Bool) async {
@@ -955,7 +1045,7 @@ final class HolyRestoreEngine: ObservableObject {
         // id even if this pane never publishes another envelope.
         spec.providerSessionID = providerSessionID
         spec.initialInput = nil
-        if let workingDirectory = resolvedWorkingDirectory(for: row) {
+        if let workingDirectory = workingDirectoryResolution(for: row).path {
             spec.workingDirectory = workingDirectory
         }
 
@@ -984,7 +1074,7 @@ final class HolyRestoreEngine: ObservableObject {
             spec.providerSessionID = nil
         }
         spec.initialInput = nil
-        if let workingDirectory = resolvedWorkingDirectory(for: row) {
+        if let workingDirectory = workingDirectoryResolution(for: row).path {
             spec.workingDirectory = workingDirectory
         }
 
@@ -1066,14 +1156,33 @@ final class HolyRestoreEngine: ObservableObject {
 
     // MARK: - Helpers
 
-    private func resolvedWorkingDirectory(for row: HolyRestoreRow) -> String? {
-        let candidate = row.archived.lastKnownWorkingDirectory
-            ?? row.plannedLaunchSpec.workingDirectory
-        guard let candidate = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !candidate.isEmpty else {
-            return nil
-        }
-        return candidate
+    /// Every directory the row recorded, evidence order, existence checked
+    /// against the live filesystem: the pane's last observed directory, the
+    /// launch directory, the git worktree, the repository root, and — only
+    /// when all of those are gone — the parent of a recorded path. Restore
+    /// runs in the first that exists; the row names the source.
+    static func workingDirectoryResolution(
+        archived: HolyArchivedSession,
+        plannedLaunchSpec: HolySessionLaunchSpec,
+        directoryExists: (String) -> Bool
+    ) -> HolyRestoreWorkingDirectoryResolution {
+        HolyRestoreWorkingDirectoryResolution.resolve(
+            lastKnownWorkingDirectory: archived.lastKnownWorkingDirectory,
+            launchWorkingDirectory: plannedLaunchSpec.workingDirectory
+                ?? archived.record.launchSpec.workingDirectory,
+            gitWorktreePath: archived.gitSnapshot?.worktreePath,
+            repositoryRoot: plannedLaunchSpec.workspace?.repositoryRoot
+                ?? archived.gitSnapshot?.repositoryRoot,
+            directoryExists: directoryExists
+        )
+    }
+
+    private func workingDirectoryResolution(for row: HolyRestoreRow) -> HolyRestoreWorkingDirectoryResolution {
+        Self.workingDirectoryResolution(
+            archived: row.archived,
+            plannedLaunchSpec: row.plannedLaunchSpec,
+            directoryExists: environment.directoryExists
+        )
     }
 
     private func updateRow(_ rowID: UUID, _ mutate: (inout HolyRestoreRow) -> Void) {
