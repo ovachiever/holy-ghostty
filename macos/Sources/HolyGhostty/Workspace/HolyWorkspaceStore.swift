@@ -238,6 +238,9 @@ final class HolyWorkspaceStore: ObservableObject {
     private var agentNotificationRetryAttempts: [UUID: Int] = [:]
     private var agentNotificationRetryNotBefore: [UUID: Date] = [:]
     private var agentNotificationRetryTasks: [UUID: Task<Void, Never>] = [:]
+    /// mn-3aeeef: agent-alert retractions reach Notification Center only for
+    /// identifiers this ledger knows may be pending or delivered.
+    let agentNotificationLedger: HolyAgentNotificationLedger
     private var suppressAutomaticSelectionPersistence = false
     private static let keepAwakeDefaultsKey = "HolyKeepAwakeWhileRemoteAttached"
 
@@ -248,11 +251,13 @@ final class HolyWorkspaceStore: ObservableObject {
         tmuxSessionKiller: @escaping (HolyTmuxLiveIdentity) async -> Result<HolyTmuxKillOutcome, HolyTmuxLifecycleFailure> = {
             await HolyTmuxLifecycleService.killVerified($0)
         },
-        restoreStateDirectory: URL = HolyDatabasePaths.containerDirectory
+        restoreStateDirectory: URL = HolyDatabasePaths.containerDirectory,
+        agentNotificationLedger: HolyAgentNotificationLedger? = nil
     ) {
         self.sessionSupervisor = sessionSupervisor
         self.tmuxSessionKiller = tmuxSessionKiller
         self.restoreStateDirectory = restoreStateDirectory
+        self.agentNotificationLedger = agentNotificationLedger ?? HolyAgentNotificationLedger()
     }
 
     convenience init(ghostty: Ghostty.App, seedDefaultSession: Bool = true) {
@@ -260,6 +265,10 @@ final class HolyWorkspaceStore: ObservableObject {
             ghostty: ghostty,
             seedDefaultSession: seedDefaultSession
         ))
+        // Agent alerts survive relaunch; learn which ones once, so focusing a
+        // session can still retract a banner the previous run posted.
+        let ledger = agentNotificationLedger
+        Task { @MainActor in await ledger.seedFromCenter() }
         restore()
         let coordinator = HolySessionRefreshCoordinator { [weak self] in
             self?.sessions ?? []
@@ -2788,11 +2797,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 eventID: event.eventID
             )
         }
-        if !notificationIdentifiers.isEmpty {
-            let center = UNUserNotificationCenter.current()
-            center.removePendingNotificationRequests(withIdentifiers: notificationIdentifiers)
-            center.removeDeliveredNotifications(withIdentifiers: notificationIdentifiers)
-        }
+        agentNotificationLedger.retract(notificationIdentifiers)
         notificationIssuesBySessionID.removeValue(forKey: sessionID)
         pendingAgentNotificationEventIDs.removeValue(forKey: sessionID)
         clearAgentNotificationRetryState(for: sessionID)
@@ -4468,9 +4473,7 @@ final class HolyWorkspaceStore: ObservableObject {
                 sessionID: sessionID,
                 eventID: eventID
             )
-            let center = UNUserNotificationCenter.current()
-            center.removePendingNotificationRequests(withIdentifiers: [identifier])
-            center.removeDeliveredNotifications(withIdentifiers: [identifier])
+            agentNotificationLedger.retract([identifier])
             if didAcknowledge {
                 persist()
             }
@@ -4550,6 +4553,9 @@ final class HolyWorkspaceStore: ObservableObject {
             NSApp.requestUserAttention(.criticalRequest)
         }
         pendingAgentNotificationEventIDs[sessionID] = eventID
+        agentNotificationLedger.notePosting(
+            HolyAgentNotificationPolicy.requestIdentifier(sessionID: sessionID, envelope: envelope)
+        )
         session.surfaceView.showUserNotification(
             title: "\(title): \(session.title)",
             body: [session.displayTitle, envelope.reasonCode]
@@ -4580,17 +4586,23 @@ final class HolyWorkspaceStore: ObservableObject {
         if pendingAgentNotificationEventIDs[sessionID] == envelope.eventIdentity {
             pendingAgentNotificationEventIDs.removeValue(forKey: sessionID)
         }
+        let identifier = HolyAgentNotificationPolicy.requestIdentifier(
+            sessionID: sessionID,
+            envelope: envelope
+        )
+        switch result {
+        case .success:
+            // The center accepted it, even if a focus retraction already
+            // dropped the identifier while `add` was in flight.
+            agentNotificationLedger.notePosting(identifier)
+        case .failure:
+            agentNotificationLedger.noteNotPosted(identifier)
+        }
         guard agentNotificationRetryEventIDs[sessionID] == envelope.eventIdentity else {
             if case .success = result {
                 // Focus can acknowledge and remove a request while the system
                 // is still accepting it. Remove it again after that late add.
-                let identifier = HolyAgentNotificationPolicy.requestIdentifier(
-                    sessionID: sessionID,
-                    envelope: envelope
-                )
-                let center = UNUserNotificationCenter.current()
-                center.removePendingNotificationRequests(withIdentifiers: [identifier])
-                center.removeDeliveredNotifications(withIdentifiers: [identifier])
+                agentNotificationLedger.retract([identifier])
             }
             return
         }
