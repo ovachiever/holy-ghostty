@@ -55,6 +55,13 @@ The workspace brings live terminals, project boards, and conversation archives o
 - Holding Command over the roster turns each session indicator into an
   immediate kill control; Command-Delete kills the selected session. Kills
   route through the transport-aware path and report failures inline.
+- The `holy-ghostty://spawn` URL route is gated. A default install refuses
+  spawn URLs and writes one audit line with the full URL; the Holy menu's
+  Allow Spawn URLs and Allow Commands in Spawn URLs opt in per machine, and an
+  accepted URL still presents a confirmation sheet, Cancel by default, naming
+  the runtime, host, working directory, command, and requester. Malformed,
+  duplicate, control-character, and command-bearing values are refused before
+  a launch spec exists. `board` URLs are unchanged.
 
 ### Changed
 
@@ -105,6 +112,21 @@ The workspace brings live terminals, project boards, and conversation archives o
 - Modifier key releases skip panes outside the window's content area.
 - Dispatched workers exec the runtime as the pane process, so discovery,
   grouping, and kill targeting see the agent rather than a wrapper shell.
+- Command-click opens URLs while tmux owns the mouse. The terminal passes the
+  link through during mouse capture instead of dropping the click.
+- Board and Archive own the keyboard under their overlays. Copy, paste, cut,
+  select-all, and undo route to the native responder in text fields; Board rows
+  copy their id and title when nothing else handles the chord.
+
+### Known issues
+
+- Paste and injected input are not proven byte-exact on the local path
+  (mn-c3b48a). Large or binary pastes may be truncated or altered; the
+  byte-level first-divergence repro is the open work.
+- `session_events` has no retention and grows without bound, about 11 MB a day
+  at fleet size (mn-ca1805).
+- The `GhosttyUITests` target crashes at bootstrap; serial test runs pass
+  `-skip-testing:GhosttyUITests` (mn-3a4538).
 
 ## 0.50 (2026-08-22)
 
