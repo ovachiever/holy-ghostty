@@ -1,6 +1,188 @@
+import AppKit
+import Combine
 import Foundation
 import OSLog
 import SQLite3
+
+/// What one flush actually wrote to the workspace database. Every count is
+/// zero when the durable state was already on disk: the transaction then
+/// dirtied no page, SQLite appended no WAL frame, and no sync ran.
+struct HolyWorkspaceSaveReceipt: Equatable {
+    /// `sqlite3_total_changes` delta across the transaction: rows inserted,
+    /// updated, or deleted, including cascades.
+    var rowsChanged: Int64 = 0
+    var sessionRowsWritten = 0
+    var gitSnapshotsInserted = 0
+    var templatesRewritten = false
+    var appStateRowsWritten = 0
+    var eventsAppended = 0
+
+    var wroteAnything: Bool {
+        rowsChanged > 0
+    }
+}
+
+/// The live, per-poll fields a session row projects: preview text, phase,
+/// telemetry, git state, and the working tree the pane sits in. A value,
+/// read off `HolySession` on the main actor, so the save path and its tests
+/// never need a terminal surface to feed runtime updates.
+struct HolyWorkspaceLiveSessionState: Equatable {
+    let sessionID: UUID
+    var phase: HolySessionPhase
+    var preview: String
+    var signals: [HolySessionSignal]
+    var commandTelemetry: HolySessionCommandTelemetry
+    var budgetTelemetry: HolySessionBudgetTelemetry
+    var runtimeTelemetry: HolySessionRuntimeTelemetry
+    var gitSnapshot: HolyGitSnapshot?
+    var workingDirectory: String?
+    var repositoryRoot: String?
+    var worktreePath: String?
+    var branchName: String?
+
+    init(
+        sessionID: UUID,
+        phase: HolySessionPhase = .active,
+        preview: String = "",
+        signals: [HolySessionSignal] = [],
+        commandTelemetry: HolySessionCommandTelemetry = .empty,
+        budgetTelemetry: HolySessionBudgetTelemetry = .empty,
+        runtimeTelemetry: HolySessionRuntimeTelemetry = .empty,
+        gitSnapshot: HolyGitSnapshot? = nil,
+        workingDirectory: String? = nil,
+        repositoryRoot: String? = nil,
+        worktreePath: String? = nil,
+        branchName: String? = nil
+    ) {
+        self.sessionID = sessionID
+        self.phase = phase
+        self.preview = preview
+        self.signals = signals
+        self.commandTelemetry = commandTelemetry
+        self.budgetTelemetry = budgetTelemetry
+        self.runtimeTelemetry = runtimeTelemetry
+        self.gitSnapshot = gitSnapshot
+        self.workingDirectory = workingDirectory
+        self.repositoryRoot = repositoryRoot
+        self.worktreePath = worktreePath
+        self.branchName = branchName
+    }
+
+    @MainActor
+    init(session: HolySession) {
+        let ownership = session.ownership
+        self.init(
+            sessionID: session.id,
+            phase: session.phase,
+            preview: session.preview,
+            signals: session.signals,
+            commandTelemetry: session.commandTelemetry,
+            budgetTelemetry: session.budgetTelemetry,
+            runtimeTelemetry: session.runtimeTelemetry,
+            gitSnapshot: session.gitSnapshot,
+            workingDirectory: session.workingDirectory,
+            repositoryRoot: ownership.repositoryRoot,
+            worktreePath: ownership.worktreePath,
+            branchName: ownership.branchName
+        )
+    }
+}
+
+/// Everything one flush carries into the database.
+struct HolyWorkspaceSaveInput {
+    var snapshot: HolyWorkspaceSnapshot
+    var liveSessionStates: [HolyWorkspaceLiveSessionState] = []
+    /// Live sessions for the budget ledger, which reads the budget and its
+    /// status straight off the session. Empty in tests that feed live state
+    /// as values.
+    var budgetSampleSessions: [HolySession] = []
+    var attentionBySessionID: [UUID: HolySessionAttention] = [:]
+    var pendingEvents: [HolySessionEventDraft] = []
+}
+
+/// The one connection the workspace save loop writes through, kept open
+/// across flushes.
+///
+/// Before this class every flush opened the app database, wrote, and let
+/// the connection deinit; that close ran a WAL checkpoint with F_FULLFSYNC
+/// into a 1.6 GB main file on the main thread, 83 times in 120 s on the
+/// live fleet (lane mn-59bbbf, 2026-09-26). The connection now opens on
+/// the first flush with `HolyDatabase.openDurableWriter(at:)` and stays
+/// open; every commit that wrote a frame is F_FULLFSYNC'd by SQLite itself
+/// (`synchronous = FULL`, `fullfsync = ON`), so a flush is on the platter
+/// when `save` returns, exactly as promptly as the close checkpoint made
+/// it. Checkpoints run on the library's own frame threshold, off-thread.
+///
+/// A failed flush drops the connection so the next flush reopens it: the
+/// recovery the per-flush open used to give for free.
+@MainActor
+final class HolyWorkspaceDatabaseWriter {
+    static let shared = HolyWorkspaceDatabaseWriter(databaseURL: HolyDatabasePaths.databaseURL)
+
+    let databaseURL: URL
+    private var connection: HolyDatabase?
+    private(set) var connectionOpenCount = 0
+    private(set) var flushCount = 0
+    private(set) var lastReceipt: HolyWorkspaceSaveReceipt?
+
+    init(databaseURL: URL) {
+        self.databaseURL = databaseURL
+    }
+
+    var isConnected: Bool {
+        connection != nil
+    }
+
+    /// The open writer connection, opened on first use.
+    func openConnection() throws -> HolyDatabase {
+        if let connection {
+            return connection
+        }
+
+        try FileManager.default.createDirectory(
+            at: databaseURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let opened = try HolyDatabase.openDurableWriter(at: databaseURL)
+        connection = opened
+        connectionOpenCount += 1
+        return opened
+    }
+
+    @discardableResult
+    func save(_ input: HolyWorkspaceSaveInput) throws -> HolyWorkspaceSaveReceipt {
+        let database = try openConnection()
+        do {
+            let receipt = try HolyWorkspaceDatabasePersistence.save(input, in: database)
+            flushCount += 1
+            lastReceipt = receipt
+            return receipt
+        } catch {
+            // The transaction rolled back. Drop the connection so the next
+            // flush reopens a fresh one, as the per-flush open used to.
+            closeConnection()
+            throw error
+        }
+    }
+
+    /// Closes the connection without a checkpoint. The next flush reopens.
+    func closeConnection() {
+        connection?.close()
+        connection = nil
+    }
+
+    /// Folds the WAL into the main file as far as readers allow and closes.
+    /// Called at an orderly quit so the database is left the way the
+    /// per-flush close used to leave it; a crash never reaches this and
+    /// needs nothing from it, every commit is already synced.
+    @discardableResult
+    func checkpointAndClose() -> HolyDatabaseCheckpointReceipt? {
+        guard let connection else { return nil }
+        let receipt = try? connection.checkpoint(.passive)
+        closeConnection()
+        return receipt
+    }
+}
 
 enum HolyWorkspaceDatabasePersistence {
     private static let logger = Logger(
@@ -13,6 +195,8 @@ enum HolyWorkspaceDatabasePersistence {
     )
     private static let retentionScheduleLock = NSLock()
     private static var isRetentionScheduled = false
+    @MainActor private static var hasRunRetentionSinceLaunch = false
+    @MainActor private static var terminationObserver: AnyCancellable?
     // Release the writer lock after every 1,000-row transaction, then yield
     // briefly. This keeps foreground saves responsive while draining a
     // 31.5M-row legacy table in hours rather than days.
@@ -70,20 +254,45 @@ enum HolyWorkspaceDatabasePersistence {
         attentionBySessionID: [UUID: HolySessionAttention] = [:],
         pendingEvents: [HolySessionEventDraft] = []
     ) {
+        installTerminationHandlerIfNeeded()
+
         do {
-            let database = try HolyDatabase.openAppDatabase()
-            try save(
-                snapshot,
-                activeSessions: activeSessions,
-                attentionBySessionID: attentionBySessionID,
-                pendingEvents: pendingEvents,
-                in: database
+            let receipt = try HolyWorkspaceDatabaseWriter.shared.save(
+                .init(
+                    snapshot: snapshot,
+                    liveSessionStates: activeSessions.map(HolyWorkspaceLiveSessionState.init(session:)),
+                    budgetSampleSessions: activeSessions,
+                    attentionBySessionID: attentionBySessionID,
+                    pendingEvents: pendingEvents
+                )
             )
 
-            scheduleRetentionMaintenance()
+            // Retention drains what saves tombstone (purge_pending sessions,
+            // superseded git snapshots). A flush that wrote nothing tombstoned
+            // nothing; the first flush after launch runs it once regardless
+            // so a backlog left by an earlier run still drains.
+            if receipt.wroteAnything || !hasRunRetentionSinceLaunch {
+                hasRunRetentionSinceLaunch = true
+                scheduleRetentionMaintenance()
+            }
         } catch {
             logger.error("Failed to save Holy workspace state to database: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// At an orderly quit: write the legacy snapshot exactly as last handed
+    /// over (its activity clocks included), fold the WAL into the main
+    /// file, and close the writer. Registered on the first save; the
+    /// notification is posted on the main thread.
+    @MainActor
+    private static func installTerminationHandlerIfNeeded() {
+        guard terminationObserver == nil else { return }
+        terminationObserver = NotificationCenter.default
+            .publisher(for: NSApplication.willTerminateNotification)
+            .sink { _ in
+                HolyWorkspacePersistence.flushForTermination()
+                HolyWorkspaceDatabaseWriter.shared.checkpointAndClose()
+            }
     }
 
     static func hasInitializedWorkspace() throws -> Bool {
@@ -175,14 +384,43 @@ enum HolyWorkspaceDatabasePersistence {
     }
 
     @MainActor
+    @discardableResult
     static func save(
         _ snapshot: HolyWorkspaceSnapshot,
         activeSessions: [HolySession],
         attentionBySessionID: [UUID: HolySessionAttention],
         pendingEvents: [HolySessionEventDraft],
         in database: HolyDatabase
-    ) throws {
-        let activeSessionIndex = Dictionary(uniqueKeysWithValues: activeSessions.map { ($0.id, $0) })
+    ) throws -> HolyWorkspaceSaveReceipt {
+        try save(
+            .init(
+                snapshot: snapshot,
+                liveSessionStates: activeSessions.map(HolyWorkspaceLiveSessionState.init(session:)),
+                budgetSampleSessions: activeSessions,
+                attentionBySessionID: attentionBySessionID,
+                pendingEvents: pendingEvents
+            ),
+            in: database
+        )
+    }
+
+    /// One flush, one transaction. Every statement is conditional on the row
+    /// differing from what the table already holds (an UPSERT whose
+    /// `DO UPDATE ... WHERE` compares each column, an UPDATE that names the
+    /// value it would set, a template rewrite only when the set differs), so
+    /// an unchanged row is never written and an unchanged workspace commits
+    /// nothing: no dirty page, no WAL frame, no sync.
+    @MainActor
+    @discardableResult
+    static func save(
+        _ input: HolyWorkspaceSaveInput,
+        in database: HolyDatabase
+    ) throws -> HolyWorkspaceSaveReceipt {
+        let snapshot = input.snapshot
+        let liveStateIndex = Dictionary(
+            input.liveSessionStates.map { ($0.sessionID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         let activeSessionIDs = Set(snapshot.sessions.map(\.id))
         // An active record is the live source of truth if stale persisted input
         // happens to contain an archive for the same source session.
@@ -191,42 +429,71 @@ enum HolyWorkspaceDatabasePersistence {
         }
         let desiredSessionIDs = activeSessionIDs.union(archivedSessions.map(\.sourceSessionID))
 
+        var receipt = HolyWorkspaceSaveReceipt()
+        let changesBefore = database.totalChangedRowCount
+
         try database.withTransaction {
             for record in snapshot.sessions {
-                let liveSession = activeSessionIndex[record.id]
                 try upsertActiveSession(
                     record: record,
-                    liveSession: liveSession,
-                    attention: attentionBySessionID[record.id],
-                    in: database
+                    liveState: liveStateIndex[record.id],
+                    attention: input.attentionBySessionID[record.id],
+                    in: database,
+                    receipt: &receipt
                 )
             }
 
             for archivedSession in archivedSessions {
-                try upsertArchivedSession(archivedSession, in: database)
+                try upsertArchivedSession(archivedSession, in: database, receipt: &receipt)
             }
 
             try markMissingSessionsForPruning(keeping: desiredSessionIDs, in: database)
 
-            try database.execute("DELETE FROM templates;")
-            for template in snapshot.templates {
-                try insertTemplate(template, in: database)
-            }
+            receipt.templatesRewritten = try replaceTemplatesIfChanged(snapshot.templates, in: database)
 
-            try upsertAppStateValue(true, forKey: workspaceInitializedKey, in: database)
-            try upsertOptionalAppStateValue(snapshot.selectedSessionID, forKey: selectedSessionIDKey, in: database)
-            try upsertAppStateValue(snapshot.paneLayout, forKey: paneLayoutKey, in: database)
-            try upsertAppStateValue(snapshot.sessions.map(\.id), forKey: activeSessionOrderKey, in: database)
-            try upsertAppStateValue(archivedSessions.map(\.id), forKey: archivedSessionOrderKey, in: database)
-            try upsertAppStateValue(snapshot.templates.map(\.id), forKey: templateOrderKey, in: database)
-            try upsertAppStateValue(snapshot.attentionMetadata, forKey: attentionMetadataKey, in: database)
+            try upsertAppStateValue(true, forKey: workspaceInitializedKey, in: database, receipt: &receipt)
+            try upsertOptionalAppStateValue(
+                snapshot.selectedSessionID,
+                forKey: selectedSessionIDKey,
+                in: database,
+                receipt: &receipt
+            )
+            try upsertAppStateValue(snapshot.paneLayout, forKey: paneLayoutKey, in: database, receipt: &receipt)
+            try upsertAppStateValue(
+                snapshot.sessions.map(\.id),
+                forKey: activeSessionOrderKey,
+                in: database,
+                receipt: &receipt
+            )
+            try upsertAppStateValue(
+                archivedSessions.map(\.id),
+                forKey: archivedSessionOrderKey,
+                in: database,
+                receipt: &receipt
+            )
+            try upsertAppStateValue(
+                snapshot.templates.map(\.id),
+                forKey: templateOrderKey,
+                in: database,
+                receipt: &receipt
+            )
+            try upsertAppStateValue(
+                snapshot.attentionMetadata,
+                forKey: attentionMetadataKey,
+                in: database,
+                receipt: &receipt
+            )
             try HolyBudgetIntelligenceRepository.appendSamples(
-                activeSessions: activeSessions,
+                activeSessions: input.budgetSampleSessions,
                 archivedSessions: archivedSessions,
                 in: database
             )
-            try HolySessionEventRepository.append(pendingEvents, in: database)
+            try HolySessionEventRepository.append(input.pendingEvents, in: database)
+            receipt.eventsAppended = input.pendingEvents.count
         }
+
+        receipt.rowsChanged = database.totalChangedRowCount - changesBefore
+        return receipt
     }
 
     private static func isWorkspaceInitialized(in database: HolyDatabase) throws -> Bool {
@@ -394,19 +661,19 @@ enum HolyWorkspaceDatabasePersistence {
         return rows
     }
 
-    @MainActor
     private static func upsertActiveSession(
         record: HolySessionRecord,
-        liveSession: HolySession?,
+        liveState: HolyWorkspaceLiveSessionState?,
         attention: HolySessionAttention?,
-        in database: HolyDatabase
+        in database: HolyDatabase,
+        receipt: inout HolyWorkspaceSaveReceipt
     ) throws {
-        let livePreview = liveSession?.preview
-        let livePhase = liveSession?.phase.rawValue
-        let liveSignalsJSON = try encodeOptionalJSON(liveSession?.signals)
-        let liveTelemetryJSON = try encodeOptionalJSON(liveSession?.commandTelemetry)
-        let liveBudgetJSON = try encodeOptionalJSON(liveSession?.budgetTelemetry)
-        let liveRuntimeTelemetryJSON = try encodeOptionalJSON(liveSession?.runtimeTelemetry)
+        let livePreview = liveState?.preview
+        let livePhase = liveState?.phase.rawValue
+        let liveSignalsJSON = try encodeOptionalJSON(liveState?.signals)
+        let liveTelemetryJSON = try encodeOptionalJSON(liveState?.commandTelemetry)
+        let liveBudgetJSON = try encodeOptionalJSON(liveState?.budgetTelemetry)
+        let liveRuntimeTelemetryJSON = try encodeOptionalJSON(liveState?.runtimeTelemetry)
         let resumeMetadataJSON = try encodeOptionalJSON(
             HolyResumeMetadata.active(
                 sourceSessionID: record.id,
@@ -427,10 +694,10 @@ enum HolyWorkspaceDatabasePersistence {
                 archivedAt: nil,
                 launchSpec: record.launchSpec,
                 ownershipJSON: nil,
-                workingDirectory: liveSession?.workingDirectory ?? record.launchSpec.workingDirectory,
-                repositoryRoot: liveSession?.ownership.repositoryRoot ?? record.launchSpec.workspace?.repositoryRoot,
-                worktreePath: liveSession?.ownership.worktreePath,
-                branchName: liveSession?.ownership.branchName ?? record.launchSpec.workspace?.branchName,
+                workingDirectory: liveState?.workingDirectory ?? record.launchSpec.workingDirectory,
+                repositoryRoot: liveState?.repositoryRoot ?? record.launchSpec.workspace?.repositoryRoot,
+                worktreePath: liveState?.worktreePath,
+                branchName: liveState?.branchName ?? record.launchSpec.workspace?.branchName,
                 latestPreviewText: livePreview,
                 resumeMetadataJSON: resumeMetadataJSON,
                 preferredCommand: record.launchSpec.command,
@@ -443,18 +710,20 @@ enum HolyWorkspaceDatabasePersistence {
             ),
             in: database
         )
+        receipt.sessionRowsWritten += Int(database.changedRowCount)
 
-        if let gitSnapshot = liveSession?.gitSnapshot {
-            let gitSnapshotID = try storeLatestGitSnapshot(gitSnapshot, sessionID: record.id, in: database)
-            try updateLatestGitSnapshotID(gitSnapshotID, sessionID: record.id, in: database)
-        } else {
-            try updateLatestGitSnapshotID(nil, sessionID: record.id, in: database)
-        }
+        try storeGitSnapshotReference(
+            liveState?.gitSnapshot,
+            sessionID: record.id,
+            in: database,
+            receipt: &receipt
+        )
     }
 
     private static func upsertArchivedSession(
         _ archivedSession: HolyArchivedSession,
-        in database: HolyDatabase
+        in database: HolyDatabase,
+        receipt: inout HolyWorkspaceSaveReceipt
     ) throws {
         let signalsJSON = try encodeOptionalJSON(archivedSession.signals)
         let telemetryJSON = try encodeOptionalJSON(archivedSession.commandTelemetry)
@@ -492,34 +761,98 @@ enum HolyWorkspaceDatabasePersistence {
             ),
             in: database
         )
+        receipt.sessionRowsWritten += Int(database.changedRowCount)
 
-        if let gitSnapshot = archivedSession.gitSnapshot {
-            let gitSnapshotID = try storeLatestGitSnapshot(
-                gitSnapshot,
-                sessionID: archivedSession.sourceSessionID,
-                in: database
-            )
-            try updateLatestGitSnapshotID(gitSnapshotID, sessionID: archivedSession.sourceSessionID, in: database)
-        } else {
-            try updateLatestGitSnapshotID(nil, sessionID: archivedSession.sourceSessionID, in: database)
-        }
+        try storeGitSnapshotReference(
+            archivedSession.gitSnapshot,
+            sessionID: archivedSession.sourceSessionID,
+            in: database,
+            receipt: &receipt
+        )
     }
 
-    private static func insertTemplate(_ template: HolySessionTemplate, in database: HolyDatabase) throws {
+    /// Points the session at its latest git snapshot: a row is inserted only
+    /// when the snapshot differs from the one already referenced, and the
+    /// reference is rewritten only when it would change.
+    private static func storeGitSnapshotReference(
+        _ gitSnapshot: HolyGitSnapshot?,
+        sessionID: UUID,
+        in database: HolyDatabase,
+        receipt: inout HolyWorkspaceSaveReceipt
+    ) throws {
+        var gitSnapshotID: Int64?
+        if let gitSnapshot {
+            let stored = try storeLatestGitSnapshot(gitSnapshot, sessionID: sessionID, in: database)
+            gitSnapshotID = stored.id
+            if stored.inserted {
+                receipt.gitSnapshotsInserted += 1
+            }
+        }
+        try updateLatestGitSnapshotID(gitSnapshotID, sessionID: sessionID, in: database)
+    }
+
+    private struct TemplateRow: Equatable {
+        let id: String
+        let name: String
+        let summary: String
+        let launchSpecJSON: String
+        let createdAt: String
+        let updatedAt: String
+    }
+
+    /// Rewrites the templates table only when the persisted set differs from
+    /// the snapshot's. Returns whether it rewrote.
+    private static func replaceTemplatesIfChanged(
+        _ templates: [HolySessionTemplate],
+        in database: HolyDatabase
+    ) throws -> Bool {
+        let desired = try templates.map { template in
+            TemplateRow(
+                id: template.id.uuidString,
+                name: template.name,
+                summary: template.summary,
+                launchSpecJSON: try HolyPersistenceCoders.encodeJSON(template.launchSpec),
+                createdAt: HolyPersistenceCoders.string(from: template.createdAt),
+                updatedAt: HolyPersistenceCoders.string(from: template.updatedAt)
+            )
+        }
+        .sorted { $0.id < $1.id }
+
+        var existing: [TemplateRow] = []
+        try database.query(
+            "SELECT id, name, summary, launch_spec_json, created_at, updated_at FROM templates ORDER BY id;"
+        ) { statement in
+            existing.append(
+                TemplateRow(
+                    id: try requiredTextColumn(statement, index: 0),
+                    name: try requiredTextColumn(statement, index: 1),
+                    summary: textColumn(statement, index: 2) ?? "",
+                    launchSpecJSON: try requiredTextColumn(statement, index: 3),
+                    createdAt: try requiredTextColumn(statement, index: 4),
+                    updatedAt: try requiredTextColumn(statement, index: 5)
+                )
+            )
+        }
+
+        guard existing != desired else { return false }
+
+        try database.execute("DELETE FROM templates;")
         let sql = """
         INSERT INTO templates (
             id, name, summary, launch_spec_json, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?);
         """
-
-        try database.execute(sql, bindings: [
-            .text(template.id.uuidString),
-            .text(template.name),
-            .text(template.summary),
-            .text(try HolyPersistenceCoders.encodeJSON(template.launchSpec)),
-            .text(HolyPersistenceCoders.string(from: template.createdAt)),
-            .text(HolyPersistenceCoders.string(from: template.updatedAt)),
-        ])
+        for row in desired {
+            try database.execute(sql, bindings: [
+                .text(row.id),
+                .text(row.name),
+                .text(row.summary),
+                .text(row.launchSpecJSON),
+                .text(row.createdAt),
+                .text(row.updatedAt),
+            ])
+        }
+        return true
     }
 
     private static func upsertSessionRow(
@@ -557,7 +890,30 @@ enum HolyWorkspaceDatabasePersistence {
             latest_budget_json = excluded.latest_budget_json,
             latest_command_telemetry_json = excluded.latest_command_telemetry_json,
             latest_runtime_telemetry_json = excluded.latest_runtime_telemetry_json,
-            purge_pending_at = NULL;
+            purge_pending_at = NULL
+        WHERE sessions.purge_pending_at IS NOT NULL
+           OR sessions.harness_session_id IS NOT excluded.harness_session_id
+           OR sessions.title IS NOT excluded.title
+           OR sessions.runtime IS NOT excluded.runtime
+           OR sessions.mission IS NOT excluded.mission
+           OR sessions.created_at IS NOT excluded.created_at
+           OR sessions.updated_at IS NOT excluded.updated_at
+           OR sessions.archived_at IS NOT excluded.archived_at
+           OR sessions.launch_spec_json IS NOT excluded.launch_spec_json
+           OR sessions.ownership_json IS NOT excluded.ownership_json
+           OR sessions.working_directory IS NOT excluded.working_directory
+           OR sessions.repository_root IS NOT excluded.repository_root
+           OR sessions.worktree_path IS NOT excluded.worktree_path
+           OR sessions.branch_name IS NOT excluded.branch_name
+           OR sessions.latest_preview_text IS NOT excluded.latest_preview_text
+           OR sessions.resume_metadata_json IS NOT excluded.resume_metadata_json
+           OR sessions.preferred_command IS NOT excluded.preferred_command
+           OR sessions.latest_phase IS NOT excluded.latest_phase
+           OR sessions.latest_attention IS NOT excluded.latest_attention
+           OR sessions.latest_signal_json IS NOT excluded.latest_signal_json
+           OR sessions.latest_budget_json IS NOT excluded.latest_budget_json
+           OR sessions.latest_command_telemetry_json IS NOT excluded.latest_command_telemetry_json
+           OR sessions.latest_runtime_telemetry_json IS NOT excluded.latest_runtime_telemetry_json;
         """
 
         try database.execute(sql, bindings: [
@@ -592,13 +948,13 @@ enum HolyWorkspaceDatabasePersistence {
         _ snapshot: HolyGitSnapshot,
         sessionID: UUID,
         in database: HolyDatabase
-    ) throws -> Int64 {
+    ) throws -> (id: Int64, inserted: Bool) {
         if let latest = try latestGitSnapshot(sessionID: sessionID, in: database),
            latest.snapshot == snapshot {
-            return latest.id
+            return (latest.id, false)
         }
 
-        return try insertGitSnapshot(snapshot, sessionID: sessionID, in: database)
+        return (try insertGitSnapshot(snapshot, sessionID: sessionID, in: database), true)
     }
 
     private static func latestGitSnapshot(
@@ -674,15 +1030,20 @@ enum HolyWorkspaceDatabasePersistence {
         sessionID: UUID,
         in database: HolyDatabase
     ) throws {
+        // `IS NOT` is null-safe: an UPDATE whose WHERE excludes the row that
+        // already holds the value dirties nothing.
         let sql = """
         UPDATE sessions
         SET latest_git_snapshot_id = ?
-        WHERE id = ?;
+        WHERE id = ?
+          AND latest_git_snapshot_id IS NOT ?;
         """
+        let binding = gitSnapshotID.map(HolyDatabaseBinding.int64) ?? .null
 
         try database.execute(sql, bindings: [
-            gitSnapshotID.map(HolyDatabaseBinding.int64) ?? .null,
+            binding,
             .text(sessionID.uuidString),
+            binding,
         ])
     }
 
@@ -690,10 +1051,12 @@ enum HolyWorkspaceDatabasePersistence {
         keeping sessionIDs: Set<UUID>,
         in database: HolyDatabase
     ) throws {
+        // Only rows not yet tombstoned are touched; COALESCE kept the value
+        // but still rewrote every already-marked row on every flush.
         let markedAt = HolyPersistenceCoders.string(from: .now)
         guard !sessionIDs.isEmpty else {
             try database.execute(
-                "UPDATE sessions SET purge_pending_at = COALESCE(purge_pending_at, ?);",
+                "UPDATE sessions SET purge_pending_at = ? WHERE purge_pending_at IS NULL;",
                 bindings: [.text(markedAt)]
             )
             return
@@ -702,8 +1065,9 @@ enum HolyWorkspaceDatabasePersistence {
         let placeholders = Array(repeating: "?", count: sessionIDs.count).joined(separator: ", ")
         let sql = """
         UPDATE sessions
-        SET purge_pending_at = COALESCE(purge_pending_at, ?)
-        WHERE id NOT IN (\(placeholders));
+        SET purge_pending_at = ?
+        WHERE purge_pending_at IS NULL
+          AND id NOT IN (\(placeholders));
         """
         let bindings = [.text(markedAt)] + sessionIDs
             .sorted { $0.uuidString < $1.uuidString }
@@ -716,12 +1080,15 @@ enum HolyWorkspaceDatabasePersistence {
         forKey key: String,
         in database: HolyDatabase
     ) throws {
+        // The row is rewritten, and its updated_at advanced, only when the
+        // value differs from what is stored.
         let sql = """
         INSERT INTO app_state (key, value_json, updated_at)
         VALUES (?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
             value_json = excluded.value_json,
-            updated_at = excluded.updated_at;
+            updated_at = excluded.updated_at
+        WHERE app_state.value_json IS NOT excluded.value_json;
         """
 
         try database.execute(sql, bindings: [
@@ -731,13 +1098,24 @@ enum HolyWorkspaceDatabasePersistence {
         ])
     }
 
+    private static func upsertAppStateValue<T: Encodable>(
+        _ value: T,
+        forKey key: String,
+        in database: HolyDatabase,
+        receipt: inout HolyWorkspaceSaveReceipt
+    ) throws {
+        try upsertAppStateValue(value, forKey: key, in: database)
+        receipt.appStateRowsWritten += Int(database.changedRowCount)
+    }
+
     private static func upsertOptionalAppStateValue<T: Encodable>(
         _ value: T?,
         forKey key: String,
-        in database: HolyDatabase
+        in database: HolyDatabase,
+        receipt: inout HolyWorkspaceSaveReceipt
     ) throws {
         if let value {
-            try upsertAppStateValue(value, forKey: key, in: database)
+            try upsertAppStateValue(value, forKey: key, in: database, receipt: &receipt)
             return
         }
 
@@ -745,6 +1123,7 @@ enum HolyWorkspaceDatabasePersistence {
             "DELETE FROM app_state WHERE key = ?;",
             bindings: [.text(key)]
         )
+        receipt.appStateRowsWritten += Int(database.changedRowCount)
     }
 
     private static func appStateValue<T: Decodable>(
