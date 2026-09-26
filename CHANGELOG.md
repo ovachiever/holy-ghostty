@@ -117,6 +117,37 @@ The workspace brings live terminals, project boards, and conversation archives o
 - Board and Archive own the keyboard under their overlays. Copy, paste, cut,
   select-all, and undo route to the native responder in text fields; Board rows
   copy their id and title when nothing else handles the chord.
+- The restore sheet decides "interrupted by the last shutdown" from the
+  kernel's per-boot identity and a durable ledger of the sessions the app last
+  saw alive, so a panic puts every live session in one fresh group, and a
+  clean quit or an installer relaunch strands nothing. Every restore run is
+  recorded and listed in Session History. A row whose directory is gone names
+  where the path came from and restores into the last directory that exists.
+- Opening the restore sheet no longer stalls for tens of seconds: the archive
+  delete that resolved rows scanned every chunk row per deleted message because
+  a foreign-key column had no index; the index is created, the resolver runs
+  on its own actor, refreshes only the rows it is resolving, and appends what
+  grew instead of rewriting whole transcripts.
+- Workspace persistence writes only rows that changed, keeps one durable
+  database writer open across flushes with every writing flush synced before
+  it returns, checkpoints off the main thread, and rewrites the workspace JSON
+  only when durable state changed or at quit, instead of a 1.3 MB rewrite and
+  a whole-database checkpoint every third of a second.
+- tmux discovery never turns a pane title into a path component and never
+  overwrites a session's recorded working directory with an inferred one; an
+  observed directory is kept separately and only when it exists.
+- Launch scripts target tmux sessions exactly (`=name` for session commands,
+  `=name:` for option and pane commands), so a session named `lane` can no
+  longer attach to an existing `lane-2`.
+- Board dispatch refuses to open a worker when the board's repository
+  directory does not exist on the target host, and names the directory.
+- Agent alerts are removed from Notification Center only when one was posted,
+  once, instead of about four removal requests per session per second.
+- The spawn URL gate allowlists tmux session and socket names and proves every
+  non-command field inert at both launch sinks.
+- Optional user-domain kernel-zone sampler (`scripts/holy-kernel-zone-usersample.sh`)
+  records `data.kalloc.*` every five minutes with a process census and reports
+  what changed at each growth onset.
 
 ### Known issues
 
