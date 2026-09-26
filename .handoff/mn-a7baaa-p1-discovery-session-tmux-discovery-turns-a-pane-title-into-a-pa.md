@@ -7,7 +7,7 @@ base_commit: 86874c4c760c01889ef349a037ecded06d9bcd53
 scope: '[P1][DISCOVERY][SESSION] tmux discovery turns a pane title into a path component and overwrites the session''s recorded working directory'
 inputs:
 - session_events 985BC829 seq 166-167; lane mn-9682f6 report
-binding: sha256:a1915f9d6fdd7cc5a28e9245bdc7b4b82f6d5529920e70258b1e25c87abe02e7
+binding: sha256:87c71586b5fddc437b59fd2fd270f1d16c521ca1230a5c7076f3729dd88069c9
 ---
 
 # Handoff: [P1][DISCOVERY][SESSION] tmux discovery turns a pane title into a path component and overwrites the session's recorded working directory
