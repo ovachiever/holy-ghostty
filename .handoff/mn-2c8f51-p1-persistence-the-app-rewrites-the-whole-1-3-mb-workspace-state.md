@@ -7,7 +7,7 @@ base_commit: 5149da47279fa060aaa9357f218a18069a1827b1
 scope: '[P1][PERSISTENCE] The app rewrites the whole 1.3 MB workspace-state.json and closes the database on every 350 ms flush: 926 KB/s of writes while sessions are active'
 inputs:
 - lane mn-59bbbf report; diags 09-24 18:50 and 09-25 03:44; live cadence 12:08-12:10
-binding: sha256:bc9a1f4687329fed83394f148daede224df30be366513de7dcecb7078d8677ed
+binding: sha256:6ea3def5b53d945dc2dd6606b8646d05d06897763ca7c3dce5e326db9c0cff7c
 ---
 
 # Handoff: [P1][PERSISTENCE] The app rewrites the whole 1.3 MB workspace-state.json and closes the database on every 350 ms flush: 926 KB/s of writes while sessions are active
