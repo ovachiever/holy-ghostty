@@ -306,6 +306,16 @@ enum HolyArchiveFileTime {
     }
 }
 
+enum HolyArchiveFilePath {
+    /// One spelling per file. `contentsOfDirectory(at:)` returns
+    /// `/private/var/...` for a directory given as `/var/...`, so a path the
+    /// archive stored and the same path a provider just enumerated can differ
+    /// textually while naming one file; keying by this string keeps them one.
+    static func canonical(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+}
+
 extension HolyArchiveProviding {
     var isAvailable: Bool {
         FileManager.default.fileExists(atPath: sessionsDirectory.path)

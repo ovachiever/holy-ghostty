@@ -847,9 +847,33 @@ struct HolyOpenCodeArchiveProvider: HolyArchiveProviding {
         return ids.sorted().map { virtualDirectory.appendingPathComponent("\($0).opencode") }
     }
 
+    /// The live database narrows by the session's working directory. The
+    /// legacy file tree cannot be narrowed without reading every file, so
+    /// without the database this provider reports that it cannot narrow.
+    func discoverSessionFiles(forProjectPath projectPath: String) throws -> [URL]? {
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else { return nil }
+        let ids: [String]
+        do {
+            ids = try HolyArchiveForeignSQLite.withReadOnlyDatabase(at: databaseURL) { database in
+                var result: [String] = []
+                try HolyArchiveForeignSQLite.query(
+                    database,
+                    sql: "SELECT id FROM session WHERE directory = ?;",
+                    text: projectPath
+                ) { statement in
+                    if let id = HolyArchiveForeignSQLite.text(statement, 0) { result.append(id) }
+                }
+                return result
+            }
+        } catch {
+            return nil
+        }
+        return ids.sorted().map { virtualDirectory.appendingPathComponent("\($0).opencode") }
+    }
+
     func modificationDate(for url: URL) throws -> Date {
         let id = url.deletingPathExtension().lastPathComponent
-        if let milliseconds = try databaseSessionTimes()[id] {
+        if let milliseconds = databaseSessionTime(id: id) {
             return Date(timeIntervalSince1970: milliseconds / 1_000)
         }
         let directory = messageDirectory.appendingPathComponent(id, isDirectory: true)
@@ -860,10 +884,34 @@ struct HolyOpenCodeArchiveProvider: HolyArchiveProviding {
 
     func parseSession(at url: URL) throws -> (HolyArchiveSession, [HolyArchiveMessage])? {
         let id = url.deletingPathExtension().lastPathComponent
-        if try databaseSessionTimes()[id] != nil {
+        if databaseSessionTime(id: id) != nil {
             return try parseDatabaseSession(id: id, virtualURL: url)
         }
         return try parseLegacySession(id: id, virtualURL: url)
+    }
+
+    /// One row by primary key. `databaseSessionTimes()` reads the whole
+    /// session table (71,761 rows in the live store) and belongs to whole-
+    /// provider discovery only.
+    private func databaseSessionTime(id: String) -> Double? {
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else { return nil }
+        do {
+            return try HolyArchiveForeignSQLite.withReadOnlyDatabase(at: databaseURL) { database in
+                var result: Double?
+                try HolyArchiveForeignSQLite.query(
+                    database,
+                    sql: "SELECT time_updated FROM session WHERE id = ?;",
+                    text: id
+                ) { statement in
+                    result = sqlite3_column_double(statement, 0)
+                }
+                return result
+            }
+        } catch {
+            // The legacy file tree remains useful while the live database is
+            // briefly locked or mid-migration.
+            return nil
+        }
     }
 
     func resumeCommand(for session: HolyArchiveSession) -> String? {
