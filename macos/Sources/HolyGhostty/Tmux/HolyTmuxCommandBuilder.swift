@@ -103,6 +103,28 @@ enum HolyTmuxCommandBuilder {
         return shellCommand(["zsh", "-lc", localScript])
     }
 
+    /// tmux resolves a bare `-t name` by exact match, then by prefix, then by
+    /// pattern: with only `lane-2` alive, `has-session -t lane` succeeds and
+    /// `attach -t lane` joins lane-2. Measured on tmux 3.7c with a throwaway
+    /// socket (lane mn-8905ec): the leading `=` forces an exact session match,
+    /// but only commands that resolve a *session* target honor it bare.
+    /// `has-session` and `attach-session` take a session target, so `=name`
+    /// is exact there.
+    static func exactSessionTarget(_ sessionName: String) -> String {
+        "=\(sessionName)"
+    }
+
+    /// `set-option` resolves a pane target and `list-panes -s` a window
+    /// target; given `=name` with no colon they either fail ("no such
+    /// session: =name", which `set-option -q` swallows with exit 0) or fall
+    /// back to prefix matching (`list-panes -s -t =lane` listed lane-2).
+    /// Measured on tmux 3.7c: `=name:` resolves exactly the session `name`,
+    /// its current window and active pane, and session-scoped options set
+    /// through it land on that session. Same form as the model-label writer.
+    static func exactSessionPaneTarget(_ sessionName: String) -> String {
+        "=\(sessionName):"
+    }
+
     private static func localLaunchScript(
         for launchSpec: HolySessionLaunchSpec,
         attach: Bool
@@ -111,6 +133,8 @@ enum HolyTmuxCommandBuilder {
               let sessionName = tmux.sessionName?.holyTrimmed.nilIfEmpty else {
             return nil
         }
+        let sessionTarget = exactSessionTarget(sessionName)
+        let paneTarget = exactSessionPaneTarget(sessionName)
 
         let usesManagedServer = tmux.createIfMissing && tmux.socketName == HolySessionTmuxSpec.defaultSocketName
         let tmuxPrefix = tmuxPrefixArguments(for: tmux, useCleanConfig: usesManagedServer)
@@ -119,10 +143,14 @@ enum HolyTmuxCommandBuilder {
             for: launchSpec,
             tmuxPrefix: tmuxPrefix,
             tmux: tmux,
-            sessionName: sessionName
+            sessionName: sessionName,
+            target: paneTarget
         )
+        // The bridge validates the bare name (its allowlist has no `=`), then
+        // the stamp is retargeted to the exact form.
         let ownershipStampCommand = HolyAgentStateBridge
             .tmuxOwnershipStampArguments(forTarget: sessionName)
+            .map { retargeted($0, from: sessionName, to: paneTarget) }
             .map { shellCommand(tmuxPrefix + $0) }
 
         var lines: [String] = []
@@ -137,9 +165,9 @@ enum HolyTmuxCommandBuilder {
             }
             createArguments.append(bootstrapCommand)
 
-            let hasSessionArguments = tmuxPrefix + ["has-session", "-t", sessionName]
+            let hasSessionArguments = tmuxPrefix + ["has-session", "-t", sessionTarget]
             let createCommands = [shellCommand(createArguments)] + initialNoteCommands(
-                for: launchSpec, tmuxPrefix: tmuxPrefix, sessionName: sessionName
+                for: launchSpec, tmuxPrefix: tmuxPrefix, target: paneTarget
             )
             let ensureSessionCommand = "\(shellCommand(hasSessionArguments)) 2>/dev/null || { "
                 + createCommands.joined(separator: " && ") + "; }"
@@ -152,7 +180,7 @@ enum HolyTmuxCommandBuilder {
                 lines.append("if \(ensureSessionCommand); then \(metadataScript); else exit 1; fi")
             }
         } else {
-            lines.append("\(shellCommand(tmuxPrefix + ["has-session", "-t", sessionName])) >/dev/null")
+            lines.append("\(shellCommand(tmuxPrefix + ["has-session", "-t", sessionTarget])) >/dev/null")
             if let ownershipStampCommand {
                 lines.append(ownershipStampCommand)
             }
@@ -161,16 +189,29 @@ enum HolyTmuxCommandBuilder {
         let databasePath = launchSpec.transport.isRemote ? "" : HolyDatabasePaths.databaseURL.path
         if !databasePath.isEmpty {
             lines.append(shellCommand(tmuxPrefix + [
-                "set-option", "-q", "-t", sessionName, "@holy_host_state_db_v1", databasePath,
+                "set-option", "-q", "-t", paneTarget, "@holy_host_state_db_v1", databasePath,
             ]))
         }
         lines.append(HolyHostStateMirror.command(
-            tmuxPrefix: tmuxPrefix, target: sessionName, databasePath: databasePath
+            tmuxPrefix: tmuxPrefix, target: paneTarget, databasePath: databasePath
         ) + " || exit 1")
         if attach {
-            lines.append("exec \(shellCommand(tmuxPrefix + ["attach", "-t", sessionName]))")
+            lines.append("exec \(shellCommand(tmuxPrefix + ["attach", "-t", sessionTarget]))")
         }
         return lines.joined(separator: "; ")
+    }
+
+    private static func retargeted(
+        _ arguments: [String],
+        from bareTarget: String,
+        to exactTarget: String
+    ) -> [String] {
+        var arguments = arguments
+        for index in arguments.indices.dropLast()
+        where arguments[index] == "-t" && arguments[index + 1] == bareTarget {
+            arguments[index + 1] = exactTarget
+        }
+        return arguments
     }
 
     private static func bootstrapCommand(for launchSpec: HolySessionLaunchSpec) -> String {
@@ -383,7 +424,8 @@ enum HolyTmuxCommandBuilder {
         for launchSpec: HolySessionLaunchSpec,
         tmuxPrefix: [String],
         tmux: HolySessionTmuxSpec,
-        sessionName: String
+        sessionName: String,
+        target: String
     ) -> [String] {
         guard tmux.createIfMissing else { return [] }
 
@@ -401,12 +443,12 @@ enum HolyTmuxCommandBuilder {
         ]
 
         return metadata.map { key, value in
-            shellCommand(tmuxPrefix + ["set-option", "-q", "-t", sessionName, key, value])
+            shellCommand(tmuxPrefix + ["set-option", "-q", "-t", target, key, value])
         }
     }
 
     private static func initialNoteCommands(
-        for launchSpec: HolySessionLaunchSpec, tmuxPrefix: [String], sessionName: String
+        for launchSpec: HolySessionLaunchSpec, tmuxPrefix: [String], target: String
     ) -> [String] {
         // Stamp only after creation, never on attach to an existing session:
         // a persisted launch spec must not overwrite a newer human note.
@@ -414,7 +456,7 @@ enum HolyTmuxCommandBuilder {
               let encodedNote = payload.encodedNote,
               let timestamp = payload.noteUpdatedAtMilliseconds else { return [] }
         return [("@holy_note_v1", encodedNote), ("@holy_note_updated_at_v1", String(timestamp))].map { key, value in
-            shellCommand(tmuxPrefix + ["set-option", "-q", "-t", sessionName, key, value])
+            shellCommand(tmuxPrefix + ["set-option", "-q", "-t", target, key, value])
         }
     }
 
@@ -503,7 +545,7 @@ struct HolyTmuxModelLabelUpdateCommand: Sendable, Equatable {
         // `set-option -p` expects a pane target. The leading `=` disables
         // tmux's dangerous prefix matching; the trailing `:` resolves the
         // active pane only within that exact session.
-        let exactPaneTarget = "=\(sessionName):"
+        let exactPaneTarget = HolyTmuxCommandBuilder.exactSessionPaneTarget(sessionName)
 
         var commandScripts: [String] = []
         if socketName == HolySessionTmuxSpec.defaultSocketName {
