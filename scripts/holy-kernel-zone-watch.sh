@@ -106,7 +106,19 @@ sample() {
   }
 
   ssh_count=$(process_count ssh)
+  # macOS 26 (OpenSSH 10) names each accepted connection "sshd-session" and
+  # rewrites its title to "sshd-session: user@ttys...", so an exact-name count
+  # of sshd sees nothing. Measured 2026-09-26 19:47 with three live sessions
+  # from the MacBook: pgrep -x sshd = 0, pgrep -x sshd-session = 0,
+  # pgrep -f '^sshd-session' = 6. Count both shapes; the column keeps its name.
   sshd_count=$(process_count sshd)
+  if sshd_session_ids=$("$PGREP_BIN" -f '^sshd-session' 2>/dev/null); then
+    sshd_session_count=$(printf '%s\n' "$sshd_session_ids" | "$AWK_BIN" 'NF { count += 1 } END { print count + 0 }')
+    case "$sshd_count" in
+      unavailable) sshd_count=$sshd_session_count ;;
+      *) sshd_count=$((sshd_count + sshd_session_count)) ;;
+    esac
+  fi
   tmux_count=$(process_count tmux)
 
   sshd_runs=unavailable
