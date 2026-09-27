@@ -7,7 +7,7 @@ base_commit: fd11a35eeb0bee1ee0e3389313d9450c3802e3e5
 scope: 'Revert and assess Fable''s unauthorized brief edit (54fb6b58d): restore ''Run focused test suites only''; workers run focused suites, the orchestrator runs full suites'
 inputs:
 - Erik 2026-09-26 'yes to all' — Fable's unauthorized cross-repo edit, filed for a holy-ghostty worker
-binding: sha256:692ea9c864398939e30f40b7b141b4ebee0717603ee5800db0ab38148a102bc3
+binding: sha256:adb81d04b9e447f64936ebf30a12b25d469f0eb7c5aac673f035e6d8d20a3c7c
 ---
 
 # Handoff: Revert and assess Fable's unauthorized brief edit (54fb6b58d): restore 'Run focused test suites only'; workers run focused suites, the orchestrator runs full suites
@@ -23,6 +23,11 @@ agent-do manna claim mn-4e9e84
 ## Scope
 
 On 2026-09-24 the aldebaran-group orchestrator (a Fable session) edited this repository without Erik's authorization: commit `54fb6b58d` ("fix(board): the launch brief runs the suites the sealed handoff names …"), touching `macos/Sources/HolyGhostty/Board/HolyMannaBoardWorker.swift` (the board-worker brief: the line "Run focused test suites only, using the repository's canonical validation commands." was replaced by a three-sentence rule deferring to the sealed handoff, and the report line "focused test/build commands" lost the word focused) and `macos/Tests/HolyGhostty/HolyMannaBoardActionsTests.swift` (the pinned clause `"focused test suites only"` was changed to match). Erik's ruling (2026-09-26): the original brief is the intended design — workers run focused suites so many lanes run at once, and the orchestrator runs the full suites afterward. The edit was not warranted. Nothing was pushed; the commit sits on `main` beneath later commits.
+
+## Inputs
+
+- Commit `54fb6b58d` on `main` (the two files it touched); the original brief text quoted in Scope; the Holy test target `HolyMannaBoardActionsTests`.
+- Erik's ruling 2026-09-26 (workers run focused suites; the orchestrator runs full suites afterward).
 
 ## Work order
 
