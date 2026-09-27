@@ -470,7 +470,7 @@ struct HolyMannaBoardActionsTests {
                                             profile: .init(runtime: .codex, model: "model'$(touch forbidden)"))
         let spec = try request.launchSpec(executablePath: "/synthetic/codex")
         for clause in ["First run: agent-do manna claim mn-123456", "sealed handoff at .handoff/work.md",
-                       "agent-do coord focus", "path claims", "test suites the sealed handoff names",
+                       "agent-do coord focus", "path claims", "focused test suites only",
                        "keep the tree buildable", "No app launches, installs, screenshots",
                        "App-hosted tests may be built", "Coordinate the live/visual acceptance",
                        "Manna: mn-123456", "Never push", "Lessons logged: N (new) | Decisions logged: N (new)"] {

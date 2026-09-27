@@ -271,14 +271,14 @@ struct HolyMannaWorkerDispatch: Equatable {
         Read the nearest AGENTS.md and obey the repository's work order.
         Establish agent-do coord focus and path claims before editing. Preserve other workers' changes.
         Implement the handoff's acceptance requirements and keep the tree buildable.
-        Run the test suites the sealed handoff names, using the repository's canonical validation commands; where it names the full suite, run the full suite. Run focused suites only when the handoff names none. The sealed handoff governs over this brief.
+        Run focused test suites only, using the repository's canonical validation commands.
         No app launches, installs, screenshots, or live session spawning mid-lane.
         App-hosted tests may be built, but must not launch the app. Coordinate the live/visual acceptance pass at close.
         Commit the verified change with a Conventional Commit and this exact trailer:
         Manna: \(item.id)
         Never push or create a pull request.
         Update and seal the handoff with verification receipts. Mark done only after required acceptance is verified.
-        Standard report: outcome; changes; test/build commands and actual results; commit;
+        Standard report: outcome; changes; focused test/build commands and actual results; commit;
         remaining acceptance or blockers. Distinguish compiled tests from executed tests.
         Include Lessons logged: N (new) | Decisions logged: N (new).
         End the report with TL;DR (12th grade): a plain-language summary.
