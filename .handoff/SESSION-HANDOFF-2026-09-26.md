@@ -46,7 +46,7 @@ Filed: mn-59bbbf, mn-3c4b23, mn-9682f6, mn-579814, mn-e6e3d0, mn-3aeeef, mn-a7ba
 
 ## 5. Not done, and why
 
-- mn-e9f9a9 board ceremony: the classifier denied this session moving its shadow dispatch note (now archived under `~/.holy-dispatch/2026-09-24-mn-e9f9a9/`) and claiming; Erik runs `agent-do manna claim mn-e9f9a9 && agent-do manna done mn-e9f9a9`.
+- mn-e9f9a9 board ceremony: the classifier denied this session moving its shadow dispatch note, twice, so it is STILL at `.dev/dispatch/spawn-url-gate-dispatch.md` and `manna lint` reports `workflow_sprawl` for mn-e9f9a9. Erik removes that directory (`rm -r .dev/dispatch`, it holds only the 09-24 dispatch note and a session-name file), then runs `agent-do manna claim mn-e9f9a9 && agent-do manna done mn-e9f9a9`. The engineering is verified twice (40/40 on 09-24 and 09-26).
 - Apple Feedback packet is assembled at `.dev/apple-feedback/kalloc-1024/` (component 1027414); filing it is outward-facing and Erik's call, now or after the sampler names a process.
 - mn-b09383's side task (recopy the report-only 30-minute safety guard whose admin dialog was canceled) needs an admin dialog.
 - The restore sheet re-lays out its LazyVStack continuously while preflight publishes (11/11 main-thread samples in the hang); with the FK index the preflight is sub-second so the window closes, but the republish itself is unfiled.
