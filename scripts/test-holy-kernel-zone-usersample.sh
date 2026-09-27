@@ -310,9 +310,9 @@ NETSTAT_IB_HEADER='Name       Mtu   Network       Address            Ipkts Ierrs
     'lo0        16384 127           localhost          36536     -  133081914    36536     -  133081914     -' \
     'en0*       1500  <Link#10>   1c:1d:d3:dd:60:f3        0     0          0        0     0          0     0' \
     'utun0      1280  <Link#33>                         6172     0     425032      178     0      20601     0' \
-    'utun0      1280  100.81.86.69/ eriks-mac-studi     6172     -     425032      178     -      20601     -' \
+    'utun0      1280  100.64.0.2/ example-studio     6172     -     425032      178     -      20601     -' \
     'utun6      1280  <Link#39>                       267543     0   24680991   714431     0  790539309     0' \
-    'utun6      1280  eriks-mac-s fe80:27::1e1d:d3f   267543     -   24680991   714431     -  790539309     -'
+    'utun6      1280  example-stu fe80:27::1e1d:d3f   267543     -   24680991   714431     -  790539309     -'
 } > "$FIXTURES/netstat-ib-before.txt"
 {
   printf '%s\n' "$NETSTAT_IB_HEADER"
