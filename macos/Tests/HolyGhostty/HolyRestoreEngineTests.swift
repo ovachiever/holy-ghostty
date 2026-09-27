@@ -470,7 +470,7 @@ struct HolyRestoreEngineTests {
         await engine.restoreAll()
 
         #expect(tmux.createdSpecs.compactMap(\.command)
-            == ["'\(codexPath)' 'resume' 'ccc-333'"])
+            == ["'\(codexPath)' '--config' 'check_for_update_on_startup=false' 'resume' 'ccc-333'"])
     }
 
     @Test func onlyATotalMissBlocksTheRowAndItNamesWhatWasSearched() async throws {
@@ -676,7 +676,7 @@ struct HolyRestoreEngineTests {
         #expect(resolver.calls == [[.init(cwd: "/tmp/lane-a", harness: "codex", near: Self.lastActivity)]])
         #expect((try #require(engine.rows.first)).state == .exactResume(providerSessionID: "codex-archived-thread"))
         await engine.restoreSelected()
-        #expect(tmux.createdSpecs.compactMap(\.command) == ["'codex' 'resume' 'codex-archived-thread'"])
+        #expect(tmux.createdSpecs.compactMap(\.command) == ["'codex' '--config' 'check_for_update_on_startup=false' 'resume' 'codex-archived-thread'"])
         #expect(adapter.attachedArchiveIDs == [lane.id])
     }
 
@@ -714,7 +714,7 @@ struct HolyRestoreEngineTests {
         #expect(resolver.calls.isEmpty)
         #expect((try #require(engine.rows.first)).state == .exactResume(providerSessionID: "known-codex-thread"))
         await engine.restoreAll()
-        #expect(tmux.createdSpecs.compactMap(\.command) == ["'codex' 'resume' 'known-codex-thread'"])
+        #expect(tmux.createdSpecs.compactMap(\.command) == ["'codex' '--config' 'check_for_update_on_startup=false' 'resume' 'known-codex-thread'"])
     }
 
     // MARK: - Identity-keyed restore (field failure 2026-08-31)

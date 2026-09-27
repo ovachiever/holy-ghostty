@@ -26,6 +26,22 @@ enum HolyRestoreCommandBuilder {
     /// replaces argv[0] with a resolved absolute path: the command executes
     /// under a login-shell PATH that misses .zshrc-initialized managers
     /// (nvm, ~/.opencode/bin), so a bare name may not resolve in the pane.
+    /// Overrides every Holy-driven Codex launch carries, because nobody is at
+    /// the pane to answer a prompt. Codex checks for updates on startup and
+    /// shows "Update available · 0.156.1 → 0.157.0 … enter continue · esc skip",
+    /// which waits for a keypress; on 2026-09-26 every crash-restored Codex
+    /// session sat on it and none resumed. The key is Codex's top-level
+    /// `check_for_update_on_startup` (config_toml.rs: "Defaults to `true`");
+    /// the TUI's `get_upgrade_version_for_popup` returns nothing when it is
+    /// false (tui/src/updates.rs). Verified on Codex 0.157.1: `codex -c
+    /// check_for_update_on_startup=false doctor` reports "startup update check
+    /// false", and without the override "true" (same with `--config`). The long
+    /// form is used because `-c` is Claude's `--continue` and the builder's
+    /// forbidden-flag rule keeps `-c` out of every resume command; `--config`
+    /// is a global option and precedes the subcommand. User-started sessions (templates, the New
+    /// Session sheet) keep Codex's default so Erik still sees updates.
+    static let codexUnattendedLaunchOverrides: [String] = ["--config", "check_for_update_on_startup=false"]
+
     static func resumeArguments(
         runtime: HolySessionRuntime,
         providerSessionID: String,
@@ -39,7 +55,7 @@ enum HolyRestoreCommandBuilder {
         case .claude:
             return [executablePath ?? "claude", "--resume", providerSessionID]
         case .codex:
-            return [executablePath ?? "codex", "resume", providerSessionID]
+            return [executablePath ?? "codex"] + codexUnattendedLaunchOverrides + ["resume", providerSessionID]
         case .opencode:
             return [executablePath ?? "opencode", "--session", providerSessionID]
         }

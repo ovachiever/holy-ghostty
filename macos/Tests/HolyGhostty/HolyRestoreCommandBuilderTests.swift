@@ -22,7 +22,20 @@ struct HolyRestoreCommandBuilderTests {
         #expect(HolyRestoreCommandBuilder.resumeArguments(
             runtime: .codex,
             providerSessionID: "0198c5c1-a2b3"
-        ) == ["codex", "resume", "0198c5c1-a2b3"])
+        ) == ["codex", "--config", "check_for_update_on_startup=false", "resume", "0198c5c1-a2b3"])
+    }
+
+    @Test func codexUnattendedLaunchesSuppressTheStartupUpdatePrompt() throws {
+        // Receipt 2026-09-26: every crash-restored Codex pane sat on
+        // "Update available · 0.156.1 → 0.157.0 … enter continue · esc skip".
+        // Codex 0.157.1 `codex -c check_for_update_on_startup=false doctor`
+        // reports "startup update check false"; the override is a global
+        // option and must precede the subcommand.
+        let arguments = try #require(HolyRestoreCommandBuilder.resumeArguments(runtime: .codex, providerSessionID: "0198c5c1-a2b3"))
+        #expect(HolyRestoreCommandBuilder.codexUnattendedLaunchOverrides == ["--config", "check_for_update_on_startup=false"])
+        #expect(Array(arguments[1...2]) == HolyRestoreCommandBuilder.codexUnattendedLaunchOverrides)
+        #expect(arguments.firstIndex(of: "resume")! > arguments.firstIndex(of: "--config")!)
+        #expect(HolyRestoreCommandBuilder.resumeArguments(runtime: .claude, providerSessionID: "0198c5c1-a2b3")?.contains("--config") == false)
     }
 
     @Test func opencodeResumesWithExactSessionFlag() {
@@ -90,7 +103,7 @@ struct HolyRestoreCommandBuilderTests {
             runtime: .codex,
             providerSessionID: "0198c5c1-a2b3",
             executablePath: "/Users/u/.nvm/versions/node/v22.16.0/bin/codex"
-        ) == ["/Users/u/.nvm/versions/node/v22.16.0/bin/codex", "resume", "0198c5c1-a2b3"])
+        ) == ["/Users/u/.nvm/versions/node/v22.16.0/bin/codex", "--config", "check_for_update_on_startup=false", "resume", "0198c5c1-a2b3"])
         #expect(HolyRestoreCommandBuilder.resumeArguments(
             runtime: .opencode,
             providerSessionID: "ses_4f2",

@@ -28,7 +28,10 @@ struct HolyMannaWorkerProfile: Equatable {
     var launchArguments: [String] {
         switch runtime {
         case .codex:
+            // Dispatched workers are unattended: the update prompt would block
+            // the claim (see HolyRestoreCommandBuilder.codexUnattendedLaunchOverrides).
             return ["--model", resolvedModel, "-c", "model_reasoning_effort=\"\(level.effort)\""]
+                + HolyRestoreCommandBuilder.codexUnattendedLaunchOverrides
         case .claude:
             return ["--model", resolvedModel, "--effort", level.effort]
         default:

@@ -40,7 +40,7 @@ struct HolyRestoreExecutableDiscoveryTests {
             providerSessionID: "0198c5c1-a2b3",
             executablePath: discovery.pinnedArgvPath
         )
-        #expect(rendered == [codexPath, "resume", "0198c5c1-a2b3"])
+        #expect(rendered == [codexPath, "--config", "check_for_update_on_startup=false", "resume", "0198c5c1-a2b3"])
     }
 
     @Test func loginShellHitIsAlsoPinnedBecauseTheAppPathIsNotThePanePath() {

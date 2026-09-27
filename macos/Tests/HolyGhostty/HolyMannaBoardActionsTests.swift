@@ -20,7 +20,7 @@ struct HolyMannaBoardActionsTests {
         let (level, effort) = mapping
         let profile = HolyMannaWorkerProfile(runtime: runtime, level: level)
         let expectedModel = runtime == .codex ? "gpt-6-astra" : "fable"
-        let expectedEffort = runtime == .codex ? ["-c", "model_reasoning_effort=\"\(effort)\""] : ["--effort", effort]
+        let expectedEffort = runtime == .codex ? ["-c", "model_reasoning_effort=\"\(effort)\"", "--config", "check_for_update_on_startup=false"] : ["--effort", effort]
         #expect(profile.resolvedModel == expectedModel)
         #expect(profile.launchArguments == ["--model", expectedModel] + expectedEffort)
         #expect(HolyMannaWorkerProfile(runtime: runtime, model: " \n\t", level: level).launchArguments == profile.launchArguments)
@@ -293,7 +293,7 @@ struct HolyMannaBoardActionsTests {
         let spec = try request.launchSpec(executablePath: executable.path)
         let launched = try await actionShell(try #require(spec.command), environment: ["PATH": "/usr/bin:/bin"])
         #expect(launched.exitCode == 0)
-        let effortArguments = runtime == .codex ? "-c\nmodel_reasoning_effort=\"\(level.effort)\"" : "--effort\n\(level.effort)"
+        let effortArguments = runtime == .codex ? "-c\nmodel_reasoning_effort=\"\(level.effort)\"\n--config\ncheck_for_update_on_startup=false" : "--effort\n\(level.effort)"
         #expect(launched.stdout == "\(executable.path)\n--model\nmodel'$(touch forbidden)\n\(effortArguments)\n--\n\(request.brief)\n")
         #expect(launched.stderr.isEmpty)
     }
@@ -480,7 +480,7 @@ struct HolyMannaBoardActionsTests {
         #expect(spec.workingDirectory == context.boardRoot)
         #expect(spec.runtime == .codex)
         #expect(spec.title == "board")
-        #expect(spec.command?.contains("'/synthetic/codex' '--model' 'model'\\''$(touch forbidden)' '-c' 'model_reasoning_effort=\"max\"' '--' '") == true)
+        #expect(spec.command?.contains("'/synthetic/codex' '--model' 'model'\\''$(touch forbidden)' '-c' 'model_reasoning_effort=\"max\"' '--config' 'check_for_update_on_startup=false' '--' '") == true)
         #expect(spec.command?.contains("First run: agent-do manna claim") == true)
         #expect(spec.tmux?.sessionName != (try request.launchSpec(executablePath: "/synthetic/codex")).tmux?.sessionName)
         let remote = HolyMannaWorkerDispatch(item: try item(),

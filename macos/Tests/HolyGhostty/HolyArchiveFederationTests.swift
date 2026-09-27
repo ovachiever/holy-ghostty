@@ -198,7 +198,7 @@ struct HolyArchiveFederationTests {
         #expect(spec.runtime == .codex)
         #expect(spec.workingDirectory == "/project/holy-ghostty")
         #expect(spec.providerSessionID == "provider-session-42")
-        #expect(spec.command == "'codex' 'resume' 'provider-session-42'")
+        #expect(spec.command == "'codex' '--config' 'check_for_update_on_startup=false' 'resume' 'provider-session-42'")
         #expect(spec.transport.kind == .ssh)
         #expect(spec.transport.hostLabel == "Studio")
         #expect(spec.transport.sshDestination == "studio.tailnet")
