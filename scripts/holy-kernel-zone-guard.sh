@@ -26,24 +26,7 @@ RESTART_FLAG=${HOLY_KERNEL_ZONE_GUARD_RESTART_FLAG:-"$HOME/.holy-kernel-zone-gua
 ZPRINT=${HOLY_KERNEL_ZONE_ZPRINT_BIN:-/usr/bin/zprint}
 mkdir -p "$LOG_DIR"
 now() { date '+%Y-%m-%dT%H:%M:%S%z'; }
-# The desktop notification lands on the Studio's console; when Erik works from
-# the MacBook that console is locked (2026-09-26), so the same text also goes
-# through agent-do notify to the "me" alias (email + local pipe). NOTIFY_BIN is
-# resolved from PATH first, then the checkout, because launchd's PATH lacks it.
-NOTIFY_BIN=${HOLY_KERNEL_ZONE_GUARD_NOTIFY_BIN:-$(command -v agent-do 2>/dev/null || echo /Users/erik/Custom-Coding/agent-do/agent-do)}
-NOTIFY_DRY=${HOLY_KERNEL_ZONE_GUARD_NOTIFY_DRY_RUN:-}
-notify() {
-  /usr/bin/osascript -e "display notification \"$2\" with title \"$1\" sound name \"Basso\"" >/dev/null 2>&1 || true
-  if [ -x "$NOTIFY_BIN" ]; then
-    if [ -n "$NOTIFY_DRY" ]; then
-      "$NOTIFY_BIN" notify send me "$2" --subject "$1" --via email,pipe --all --dry-run >> "$LOG" 2>&1 || true
-    else
-      "$NOTIFY_BIN" notify send me "$2" --subject "$1" --via email,pipe --all >> "$LOG" 2>&1 || printf '%s\tNOTIFY send failed\n' "$(now)" >> "$LOG"
-    fi
-  else
-    printf '%s\tNOTIFY agent-do not found at %s\n' "$(now)" "$NOTIFY_BIN" >> "$LOG"
-  fi
-}
+notify() { /usr/bin/osascript -e "display notification \"$2\" with title \"$1\" sound name \"Basso\"" >/dev/null 2>&1 || true; }
 boot=$(/usr/sbin/sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+).*/\1/')
 inuse=${HOLY_KERNEL_ZONE_GUARD_TEST_INUSE:-$("$ZPRINT" "$ZONE" 2>/dev/null | awk -v z="$ZONE" '$1==z {print $7}')}
 [ -n "$inuse" ] || { printf '%s\tERROR\tzprint gave no inuse for %s\n' "$(now)" "$ZONE" >> "$LOG"; exit 1; }
