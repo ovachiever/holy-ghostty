@@ -532,6 +532,7 @@ actor HolyRemoteTmuxDiscoveryService {
                     taskSource: fields[9].holyTrimmed.nilIfEmpty,
                     gitSummary: Self.makeGitSummary(from: fields),
                     synchronizedMetadata: Self.makeSynchronizedMetadata(from: fields),
+                    hasHolySessionOptions: fields.count > 23 && fields[23] == "1",
                     attachedClientCount: Int(fields[1]) ?? 0,
                     windowCount: Int(fields[2]) ?? 0,
                     discoveredAt: discoveredAt
@@ -932,12 +933,15 @@ actor HolyRemoteTmuxDiscoveryService {
           title=$(option_value "$session_name" @holy_title)
           runtime=$(option_value "$session_name" @holy_runtime)
           objective=$(option_value "$session_name" @holy_objective)
+          holy_session_options=0
+          [[ -n "$title$runtime$objective" ]] && holy_session_options=1
           pane_title=$(pane_value "$session_name" '#{pane_title}')
           window_name=$(pane_value "$session_name" '#{window_name}')
           pane_command=$(pane_value "$session_name" '#{pane_current_command}')
           pane_pid=$(pane_value "$session_name" '#{pane_pid}')
           process_context=$(process_tree_commands "$pane_pid" | tr '\n' ' ')
           metadata_working_directory=$(option_value "$session_name" @holy_working_directory)
+          [[ -n "$metadata_working_directory" ]] && holy_session_options=1
           working_directory=$(pane_value "$session_name" '#{pane_current_path}')
           if [[ -n "$working_directory" ]]; then
             working_directory=$(inferred_working_directory "$working_directory" "$pane_title" "$window_name" "$session_name")
@@ -959,6 +963,7 @@ actor HolyRemoteTmuxDiscoveryService {
           note_updated_at_v1=$(option_value "$session_name" @holy_note_updated_at_v1)
           today_pin_v1=$(option_value "$session_name" @holy_today_pin_v1)
           today_pin_updated_at_v1=$(option_value "$session_name" @holy_today_pin_updated_at_v1)
+          [[ -n "$command$task_title$task_source$note_v1$note_updated_at_v1$today_pin_v1$today_pin_updated_at_v1" ]] && holy_session_options=1
           git_fields=$(git_metadata "$working_directory")
 
           printf '%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s' \
@@ -973,11 +978,12 @@ actor HolyRemoteTmuxDiscoveryService {
             "$(sanitize "$task_title")" "$sep" \
             "$(sanitize "$task_source")" "$sep" \
             "$git_fields"
-          printf '%s%s%s%s%s%s%s%s\\n' \
+          printf '%s%s%s%s%s%s%s%s%s%s\\n' \
             "$sep" "$(sanitize "$note_v1")" \
             "$sep" "$(sanitize "$note_updated_at_v1")" \
             "$sep" "$(sanitize "$today_pin_v1")" \
-            "$sep" "$(sanitize "$today_pin_updated_at_v1")"
+            "$sep" "$(sanitize "$today_pin_updated_at_v1")" \
+            "$sep" "$holy_session_options"
         done <<<"$inventory"
         """
     }

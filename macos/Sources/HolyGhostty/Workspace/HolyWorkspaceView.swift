@@ -424,6 +424,24 @@ struct HolyWorkspaceRootView: View {
     }
 
     private var bottomSessionStatusRail: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let report = store.lastConvergeReport {
+                Text(report.summary)
+                    .font(.caption)
+                    .foregroundStyle(HolyGhosttyTheme.textSecondary)
+                    .lineLimit(1)
+                    .help(report.details)
+                    .accessibilityLabel(report.details)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            sessionStatusRail
+        }
+        .background(HolyGhosttyTheme.bgElevated)
+    }
+
+    private var sessionStatusRail: some View {
         HStack(spacing: 7) {
             if let session = store.selectedSession {
                 let state = statusRailState(for: session)

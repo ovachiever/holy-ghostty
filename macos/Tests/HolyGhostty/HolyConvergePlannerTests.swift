@@ -38,6 +38,67 @@ struct HolyConvergePlannerTests {
         #expect(actions == [.adoptArchived(matchKey: key)])
     }
 
+    @Test func provenNewHolySessionIsAdoptedWithoutLocalHistory() {
+        let key = "\(host)|holy-new"
+        #expect(HolyConvergePlanner.plan(
+            roster: [], discovered: [found(key)], reachableHostKeys: [host],
+            discoveredAdoptionMatchKeys: [key]
+        ) == [.adoptDiscovered(matchKey: key)])
+    }
+
+    @Test func archivedIdentityWinsOverNewAdoptionAndRepeatedSyncDoesNothing() {
+        let key = "\(host)|holy-new"
+        #expect(HolyConvergePlanner.plan(
+            roster: [], discovered: [found(key)], reachableHostKeys: [host],
+            adoptableMatchKeys: [key], discoveredAdoptionMatchKeys: [key]
+        ) == [.adoptArchived(matchKey: key)])
+        #expect(HolyConvergePlanner.plan(
+            roster: [roster(UUID(), key: key)], discovered: [found(key)], reachableHostKeys: [host],
+            discoveredAdoptionMatchKeys: [key]
+        ).isEmpty)
+    }
+
+    @Test func inferredMetadataDoesNotProveHolyOriginAndAmbiguousIdentityBlocksAdoption() {
+        let ordinary = discovered("research")
+        #expect(ordinary.isHolyManaged)
+        #expect(!HolyConvergePlanner.canAdoptDiscovered(ordinary, knownLaunchSpecs: []))
+        let holy = discovered("holy-research")
+        #expect(HolyConvergePlanner.canAdoptDiscovered(holy, knownLaunchSpecs: []))
+        var known = HolySessionLaunchSpec.interactiveTmuxShell(title: "Research")
+        known.transport = .init(kind: .ssh, hostLabel: "Studio", sshDestination: "erik@studio")
+        known.tmux = .init(socketName: "holy", sessionName: nil, createIfMissing: false)
+        #expect(!HolyConvergePlanner.canAdoptDiscovered(holy, knownLaunchSpecs: [known]))
+        known.tmux?.sessionName = "different"
+        #expect(HolyConvergePlanner.canAdoptDiscovered(holy, knownLaunchSpecs: [known]))
+    }
+
+    @Test func reportAccountsForEveryDiscoveredIdentityAndNamesSkippedReasons() {
+        var report = HolyConvergeReport(unreachableHosts: ["MacBook: timed out"])
+        report.entries = [
+            "a": .init(host: "Studio", session: "known", outcome: .attached),
+            "b": .init(host: "Studio", session: "new", outcome: .adopted),
+            "c": .init(host: "Studio", session: "repair", outcome: .repaired),
+            "d": .init(host: "Studio", session: "healthy", outcome: .unchanged),
+            "e": .init(host: "Studio", session: "ordinary", outcome: .skipped("not Holy-born")),
+            "f": .init(host: "Studio", session: "ambiguous", outcome: .skipped("ambiguous saved identity")),
+        ]
+        #expect(report.entries.count == 6)
+        #expect(report.summary == "Sync: attached 1, adopted 1, repaired 1, unchanged 1, skipped 2; 1 hosts unreachable")
+        #expect(report.details.contains("Studio / new: adopted"))
+        #expect(report.details.contains("ordinary: skipped: not Holy-born"))
+        #expect(report.details.contains("ambiguous: skipped: ambiguous saved identity"))
+        #expect(report.details.contains("Host unreachable: MacBook: timed out"))
+    }
+
+    private func discovered(_ name: String) -> HolyDiscoveredTmuxSession {
+        .init(
+            hostID: UUID(), hostLabel: "Studio", hostDestination: "erik@studio", tmuxSocketName: "holy",
+            sessionName: name, title: "Research", runtimeRawValue: "codex", objective: nil,
+            workingDirectory: "/work/research", bootstrapCommand: nil, taskTitle: nil, taskSource: nil,
+            gitSummary: nil, attachedClientCount: 1, windowCount: 1, discoveredAt: .now
+        )
+    }
+
     @Test func duplicateDiscoveriesAttachOnce() {
         let actions = HolyConvergePlanner.plan(
             roster: [],

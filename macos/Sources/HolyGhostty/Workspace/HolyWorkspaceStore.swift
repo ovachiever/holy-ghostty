@@ -81,9 +81,11 @@ final class HolyWorkspaceStore: ObservableObject {
         category: "HolyAttentionDebug"
     )
     @Published private(set) var isConverging = false
+    @Published private(set) var lastConvergeReport: HolyConvergeReport?
     private var lastConvergeStartedAt: Date?
-    /// Per-host wall-clock cap on the converge discovery sweep (spec's 5s/host).
-    /// Hosts uses a separate deadline that also includes SSH admission.
+    /// Existing inspection deadline: remote rich discovery uses it per socket;
+    /// local discovery uses it per census/session, so fleet size is not a cap.
+    /// Hosts has a separate deadline that also includes SSH admission.
     private static let convergeDiscoveryTimeoutSeconds: TimeInterval = 5
     /// Kill preflight uses a constant-time identity inventory rather than rich
     /// discovery. Keep it bounded independently from converge so a wedged local
@@ -779,29 +781,29 @@ final class HolyWorkspaceStore: ObservableObject {
     }
 
     func reattach(_ session: HolySession) {
-        guard canReattachSession(session) else {
-            return
-        }
-
-        let sessionID = session.id
-        let detachCommand = HolyTmuxClientDetachCommand.command(for: session.record.launchSpec)
-
         Task {
-            if let detachCommand {
-                _ = await Task.detached(priority: .utility) {
-                    detachCommand.run()
-                }.value
-            }
-
-            guard let currentSession = sessions.first(where: { $0.id == sessionID }),
-                  let result = sessionSupervisor.reattach(currentSession, in: currentSessionStoreState) else {
-                return
-            }
-
-            applySessionStoreState(result.state)
-            persist(pendingEvents: result.pendingEvents)
-            refreshActiveRemoteTmuxSessionMetadata()
+            _ = await repairAttachment(sessionID: session.id)
         }
+    }
+
+    private func repairAttachment(sessionID: UUID) async -> Bool {
+        guard let session = sessions.first(where: { $0.id == sessionID }),
+              canReattachSession(session) else { return false }
+        let detachCommand = HolyTmuxClientDetachCommand.command(for: session.record.launchSpec)
+        if let detachCommand {
+            _ = await Task.detached(priority: .utility) {
+                detachCommand.run()
+            }.value
+        }
+        guard let currentSession = sessions.first(where: { $0.id == sessionID }),
+              let result = sessionSupervisor.reattach(currentSession, in: currentSessionStoreState),
+              result.state.sessions.first(where: { $0.id == sessionID })?.surfaceView.surface != nil else {
+            return false
+        }
+        applySessionStoreState(result.state)
+        persist(pendingEvents: result.pendingEvents)
+        refreshActiveRemoteTmuxSessionMetadata()
+        return true
     }
 
     func reattachAllSessions() {
@@ -903,16 +905,12 @@ final class HolyWorkspaceStore: ObservableObject {
             var discoveredByMatchKey: [String: (session: HolyDiscoveredTmuxSession, host: HolyRemoteHostRecord?)] = [:]
             var successfulRemoteHostIDs: Set<UUID> = []
             var localDiscoverySucceeded = false
+            var unreachableHosts: [String] = []
 
-            await withTaskGroup(of: (HolyRemoteHostRecord?, [HolyDiscoveredTmuxSession])?.self) { group in
-                // Every child (remote and local) runs under the per-host
-                // wall-clock cap. Discovery is now genuinely async (no blocking
-                // waitUntilExit), so the actor services all children
-                // concurrently: sweep wall-clock is max(per-host), not the sum.
-                // A host that exceeds the cap is treated exactly like an
-                // unreachable one - the child yields nil and its records are left
-                // untouched - so isConverging always returns to false in bounded
-                // time no matter what any discovery process does.
+            await withTaskGroup(of: (HolyRemoteHostRecord?, [HolyDiscoveredTmuxSession]?, String?).self) { group in
+                // Every process is bounded. Local inspections are incremental;
+                // a healthy fleet may take longer than one process deadline.
+                // A failed sweep preserves its roster and is named in the report.
                 let timeout = Self.convergeDiscoveryTimeoutSeconds
                 for host in remoteSweep.values {
                     group.addTask {
@@ -922,9 +920,9 @@ final class HolyWorkspaceStore: ObservableObject {
                                 timeout: timeout,
                                 includeHiddenSessions: true
                             )
-                            return (host, sessions)
+                            return (host, sessions, nil)
                         } catch {
-                            return nil // unreachable: leave its records untouched
+                            return (host, nil, error.localizedDescription)
                         }
                     }
                 }
@@ -936,14 +934,17 @@ final class HolyWorkspaceStore: ObservableObject {
                             timeout: timeout,
                             includeHiddenSessions: true
                         )
-                        return (nil, sessions)
+                        return (nil, sessions, nil)
                     } catch {
-                        return nil
+                        return (nil, nil, error.localizedDescription)
                     }
                 }
 
-                for await result in group {
-                    guard let (host, sessions) = result else { continue }
+                for await (host, result, error) in group {
+                    guard let sessions = result else {
+                        unreachableHosts.append("\(host?.displayTitle ?? "This Mac"): \(error ?? "Discovery unavailable")")
+                        continue
+                    }
                     if let host {
                         successfulRemoteHostIDs.insert(host.id)
                     } else {
@@ -1080,15 +1081,19 @@ final class HolyWorkspaceStore: ObservableObject {
                     : archived.id
             })
 
+            let knownLaunchSpecs = rosterSnapshots.map(\.launchSpec) + archivedSnapshots.map { $0.record.launchSpec }
+            let discoveredAdoptionMatchKeys = Set(discoveredByMatchKey.compactMap { key, found in
+                HolyConvergePlanner.canAdoptDiscovered(found.session, knownLaunchSpecs: knownLaunchSpecs) ? key : nil
+            })
             let actions = HolyConvergePlanner.plan(
                 roster: rosterEntries,
                 discovered: discoveredEntries,
                 reachableHostKeys: reachable,
-                adoptableMatchKeys: Set(archivedSessionIDByMatchKey.keys)
+                adoptableMatchKeys: Set(archivedSessionIDByMatchKey.keys),
+                discoveredAdoptionMatchKeys: discoveredAdoptionMatchKeys
             )
 
-            await MainActor.run {
-                guard let self else { return }
+            if let self {
                 self.publishConvergeDiscoveries(
                     discoveredByMatchKey,
                     localDiscoverySucceeded: localDiscoverySucceeded,
@@ -1114,10 +1119,14 @@ final class HolyWorkspaceStore: ObservableObject {
                         ) || identityChanged
                     }
                 }
-                self.applyConvergeActions(
+                let report = await self.applyConvergeActions(
                     actions,
                     discoveredByMatchKey: discoveredByMatchKey,
-                    archivedSessionIDByMatchKey: archivedSessionIDByMatchKey
+                    archivedSessionIDByMatchKey: archivedSessionIDByMatchKey,
+                    rosterMatchKeys: Dictionary(uniqueKeysWithValues: rosterEntries.compactMap { entry in
+                        entry.matchKey.map { (entry.sessionID, $0) }
+                    }),
+                    unreachableHosts: unreachableHosts
                 )
                 let retentionChanged = self.applyArchiveRetention(
                     protectedArchiveIDs: protectedArchiveIDs.union(uncoveredArchiveIDs)
@@ -1125,6 +1134,8 @@ final class HolyWorkspaceStore: ObservableObject {
                 if identityChanged || retentionChanged {
                     self.persist()
                 }
+                self.lastConvergeReport = report
+                AppDelegate.logger.notice("\(report.details, privacy: .public)")
                 self.isConverging = false
             }
         }
@@ -1133,14 +1144,25 @@ final class HolyWorkspaceStore: ObservableObject {
     private func applyConvergeActions(
         _ actions: [HolyConvergeAction],
         discoveredByMatchKey: [String: (session: HolyDiscoveredTmuxSession, host: HolyRemoteHostRecord?)],
-        archivedSessionIDByMatchKey: [String: UUID]
-    ) {
+        archivedSessionIDByMatchKey: [String: UUID],
+        rosterMatchKeys: [UUID: String],
+        unreachableHosts: [String]
+    ) async -> HolyConvergeReport {
+        var report = HolyConvergeReport(unreachableHosts: unreachableHosts)
+        for (key, found) in discoveredByMatchKey {
+            report.entries[key] = .init(
+                host: found.host?.displayTitle ?? "This Mac",
+                session: found.session.sessionName,
+                outcome: .unchanged
+            )
+        }
         for action in actions {
             switch action {
             case let .adoptArchived(matchKey):
                 guard let found = discoveredByMatchKey[matchKey],
                       let archivedSessionID = archivedSessionIDByMatchKey[matchKey],
                       let archivedSession = archivedSessions.first(where: { $0.id == archivedSessionID }) else {
+                    report.entries[matchKey]?.outcome = .skipped("history changed during Sync")
                     break
                 }
 
@@ -1153,7 +1175,7 @@ final class HolyWorkspaceStore: ObservableObject {
                     archivedSession,
                     with: launchSpec,
                     in: currentSessionStoreState
-                ) {
+                ), result.state.sessions.first(where: { $0.id == result.sessionID })?.surfaceView.surface != nil {
                     applySessionStoreState(result.state)
                     sessions.first(where: { $0.id == result.sessionID })?
                         .applyDiscoveredLaunchMetadata(
@@ -1162,27 +1184,54 @@ final class HolyWorkspaceStore: ObservableObject {
                             refreshGitSnapshot: false
                         )
                     persist(pendingEvents: result.pendingEvents)
+                    report.entries[matchKey]?.outcome = .attached
+                } else {
+                    report.entries[matchKey]?.outcome = .skipped("terminal surface unavailable")
                 }
-            case .surfaceOrphan:
-                // Unknown live sessions remain discovery-only. Hosts now shows
-                // them with its existing explicit Attach and confirmed Kill
-                // controls; converge never creates a pane or reaps them itself.
-                break
+            case let .adoptDiscovered(matchKey):
+                guard let found = discoveredByMatchKey[matchKey] else { break }
+                // Recheck after any awaited repair: a user may have attached
+                // the same identity while this sweep was in progress.
+                let currentSpecs = sessions.map { $0.record.launchSpec } + archivedSessions.map { $0.record.launchSpec }
+                guard HolyConvergePlanner.canAdoptDiscovered(found.session, knownLaunchSpecs: currentSpecs) else {
+                    report.entries[matchKey]?.outcome = .skipped("identity changed or became ambiguous during Sync")
+                    break
+                }
+                let spec = if let host = found.host {
+                    remoteTmuxLaunchSpec(for: found.session, on: host)
+                } else {
+                    localTmuxLaunchSpec(for: found.session)
+                }
+                guard spec.tmux?.createIfMissing == false,
+                      let result = sessionSupervisor.createSession(
+                        with: spec, in: currentSessionStoreState, origin: .workspaceRestore
+                      ), result.state.sessions.first(where: { $0.id == result.sessionID })?.surfaceView.surface != nil else {
+                    report.entries[matchKey]?.outcome = .skipped("terminal surface unavailable")
+                    break
+                }
+                var state = result.state
+                state.selectedSessionID = selectedSessionID
+                applySessionStoreState(state)
+                persist(pendingEvents: result.pendingEvents)
+                report.entries[matchKey]?.outcome = .adopted
+            case let .surfaceOrphan(matchKey):
+                let isHoly = discoveredByMatchKey[matchKey]?.session.hasHolyProvenance == true
+                report.entries[matchKey]?.outcome = .skipped(isHoly ? "ambiguous saved identity" : "not Holy-born")
             case let .repair(sessionID):
-                if let session = sessions.first(where: { $0.id == sessionID }),
-                   canReattachSession(session) {
-                    // Discovery confirmed that the backing tmux session is live.
-                    // Recreate the local Ghostty surface for both local and remote
-                    // transports, mirroring the working app-restore path.
-                    reattach(session)
+                // Await the actual repair before reporting it as completed.
+                let repaired = await repairAttachment(sessionID: sessionID)
+                if let matchKey = rosterMatchKeys[sessionID] {
+                    report.entries[matchKey]?.outcome = repaired ? .repaired : .skipped("attachment repair failed")
                 }
             case let .archive(sessionID):
                 if let session = sessions.first(where: { $0.id == sessionID }) {
                     archive(session)
+                    report.archivedCount += 1
                 }
             }
         }
         updatePowerAssertion()
+        return report
     }
 
     private func publishConvergeDiscoveries(

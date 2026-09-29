@@ -34,6 +34,23 @@ struct HolyHostsDiscoveryTests {
         return (workers + placeholders + adopted + agents).joined(separator: "\n")
     }
 
+    @Test func onlySessionNamingOrRawHolyOptionsProvesAutomaticAdoptionEligibility() async throws {
+        let ordinary = row("ordinary", runtime: "codex", cwd: "/work/inferred")
+        let named = row("holy-worker", runtime: "codex")
+        let marked = (row("custom-name").components(separatedBy: "\u{1F}")
+            + Array(repeating: "", count: 13) + ["1"]).joined(separator: "\u{1F}")
+        let output = [ordinary, named, marked].joined(separator: "\n")
+        let sessions = try await HolyRemoteTmuxDiscoveryService.hostsDiscoveryForTesting(
+            host: .init(sshDestination: "studio", tmuxSocketName: "fixture"),
+            inventory: ["fixture": .output(output)], details: ["fixture": .output(output)],
+            onProgress: { _, _ in }
+        )
+        #expect(sessions.count == 3)
+        #expect(sessions.first(where: { $0.sessionName == "ordinary" })?.hasHolyProvenance == false)
+        #expect(sessions.first(where: { $0.sessionName == "holy-worker" })?.hasHolyProvenance == true)
+        #expect(sessions.first(where: { $0.sessionName == "custom-name" })?.hasHolyProvenance == true)
+    }
+
     @Test func all43SessionsRenderIncludingSixUnclassifiedVSIWorkers() async throws {
         let fixture: [String: Reply] = ["holy": .output(studioInventory)]
         let sessions = try await HolyRemoteTmuxDiscoveryService.hostsDiscoveryForTesting(

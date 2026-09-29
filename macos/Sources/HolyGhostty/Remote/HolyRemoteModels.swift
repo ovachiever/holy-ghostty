@@ -125,6 +125,8 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
     let taskSource: String?
     let gitSummary: HolyRemoteGitSummary?
     var synchronizedMetadata: HolyTmuxSessionMetadataSnapshot = .empty
+    /// Read from tmux user options before any title/runtime/path inference.
+    var hasHolySessionOptions: Bool = false
     let attachedClientCount: Int
     let windowCount: Int
     let discoveredAt: Date
@@ -164,6 +166,11 @@ struct HolyDiscoveredTmuxSession: Equatable, Identifiable {
             taskSource,
         ]
         .contains { ($0?.holyTrimmed.nilIfEmpty) != nil }
+    }
+
+    /// Inferred presentation metadata is not proof of Holy ancestry.
+    var hasHolyProvenance: Bool {
+        sessionName.hasPrefix("holy-") || hasHolySessionOptions
     }
 
     var shouldHideFromDiscovery: Bool {
