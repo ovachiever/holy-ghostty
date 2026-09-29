@@ -184,6 +184,26 @@ struct HolyArchiveFederationTests {
         #expect(childRows.first?.archiveSource.hostLabel == "Studio")
     }
 
+    @Test func archiveResumeNeverExecutesTheStoredResumeCommand() throws {
+        // mn-7681f4: the stored resume string comes from provider metadata, a
+        // `.resume-cmd` file inside a Claude profile directory, or another
+        // host's index, all writable by something other than Erik at the
+        // keyboard. It is shown and copied, never run: the launch spec is
+        // rendered from the runtime and the provider id alone. Crash restore
+        // has the matching proof in HolyRestoreEngineTests
+        // (providerResumeCommandIsEvidenceNeverExecutableShellSource).
+        var session = ArchiveFixtures.session(id: "local-hostile", projectName: "holy-ghostty")
+        session.resumeCommand = "codex resume local-hostile; touch /tmp/archive-resume-command-ran"
+        let spec = try #require(HolyArchiveResumeLaunchSpec.make(for: session))
+        let rendered = try #require(HolyRestoreCommandBuilder.renderedResumeCommand(
+            runtime: .codex,
+            providerSessionID: session.archiveSource.providerSessionID
+        ))
+        #expect(spec.command == rendered)
+        #expect(spec.command?.contains("touch") == false)
+        #expect(spec.command?.contains(";") == false)
+    }
+
     @Test func remoteResumeUsesRawProviderIDRuntimeCwdAndOwningHost() throws {
         var session = ArchiveFixtures.session(id: "namespaced", projectName: "holy-ghostty")
         let hostID = UUID()
