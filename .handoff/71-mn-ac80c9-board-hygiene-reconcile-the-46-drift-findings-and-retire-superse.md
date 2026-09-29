@@ -1,13 +1,13 @@
 ---
 workflow: 2
 manna: mn-ac80c9
-track: mn-9a97cc
+track: mn-5db142
 source: Erik ratified inline 2026-08-31 (One Ledger Two Faces); see track mn-9a97cc
 base_commit: 0c6ba8bc635e3fcd76909c5e163e48fa53fa6e85
 scope: 'Board hygiene: reconcile the 46 drift findings and retire superseded panel items'
 inputs:
 - Erik ratified inline 2026-08-31 (One Ledger Two Faces); see track mn-9a97cc
-binding: sha256:de3dca310a82144faedeb3ca7e3f37878062a9bae59f9e26c3b44bb9cafe408a
+binding: sha256:ddc568ab72636a6543efa783d8c67c4e96e950d7c072cdb9324bb9a357ae7983
 ---
 
 # Handoff: Board hygiene: reconcile the 46 drift findings and retire superseded panel items

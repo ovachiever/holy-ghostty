@@ -1,12 +1,12 @@
 ---
 workflow: 2
 manna: mn-ca1805
-track: mn-eb7a80
+track: mn-5db142
 source: null
 base_commit: bda6d543abafdbfe0f663fc6605de4d83bc5fbce
 scope: '[P1][DB] session_events retention: unbounded growth (409 of 443 MB, ~11 MB/day); snapshot dedup verified fixed'
 inputs: []
-binding: sha256:bf4acfd0d911cadbb022a266a81ff6384c26a6e5c1551495655e574f2b207fad
+binding: sha256:6592184c8b1a420b5df2c8a6c30d1eda613486a3be658894a0d45f8e76574091
 ---
 
 # Handoff: [P1][DB] session_events retention: unbounded growth (409 of 443 MB, ~11 MB/day); snapshot dedup verified fixed

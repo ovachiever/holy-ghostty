@@ -1,13 +1,13 @@
 ---
 workflow: 2
 manna: mn-3bb820
-track: mn-eb7a80
+track: mn-5db142
 source: .handoff/SESSION-HANDOFF-2026-09-24.md §4 item 9, §5 gate 2
 base_commit: 74e8e8b0daa88cf1681b19ce560068c684fac4a5
 scope: '[P0][RELEASE] 1.0 ceremony gate: certified serial green run on the release commit'
 inputs:
 - .handoff/SESSION-HANDOFF-2026-09-24.md §4 item 9, §5 gate 2
-binding: sha256:c1a1ca2dd74d8f29d253c9663a0b20b4ade8e44135cb9999d7780522ff810711
+binding: sha256:0ab72087375b39b227a4d2b86786499120b739059ef8d4c370037dcd3f9b6d7d
 ---
 
 # Handoff: [P0][RELEASE] 1.0 ceremony gate: certified serial green run on the release commit
