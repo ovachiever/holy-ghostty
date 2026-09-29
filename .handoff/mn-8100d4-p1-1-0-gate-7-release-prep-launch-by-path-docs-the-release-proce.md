@@ -7,7 +7,7 @@ base_commit: b1e6cbfcbda5cd18b2871a955d1ae8857ec2b625
 scope: '[P1][1.0 GATE 7] Release prep: launch-by-path docs, the release procedure, and the 1.0 changelog section'
 inputs:
 - orchestrator 2026-09-29; 09-24 handoff section 5 gate 7
-binding: sha256:3bcd71bec1bd5cb606261bb3e365fea99a3fb9f2aaf447b1b2c874597b581da4
+binding: sha256:7b56bd0a51b95cbd0ed3c42d68a05c92505797af23b78b429f397d7211f7915d
 ---
 
 # Handoff: [P1][1.0 GATE 7] Release prep: launch-by-path docs, the release procedure, and the 1.0 changelog section
@@ -38,3 +38,79 @@ Goal: everything for the tag except the certified run, the screenshots, and the 
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-8100d4`.
 4. Commit with `Manna: mn-8100d4` and run `agent-do manna done mn-8100d4` only after the work is verified.
+
+## Report
+
+2026-09-29, worker `codex-01a0ef08b72e75d0`.
+
+### Outcome and ownership
+
+Release preparation is complete and ready-to-install when the remaining
+release gates and Erik's live acceptance window permit it. This gate does not
+certify or publish the release.
+
+- The initial gate claim succeeded without stealing ownership. Before editing,
+  the handoff's recalculated content binding, frontmatter, canonical Manna
+  record, and requested digest all matched
+  `sha256:3bcd71bec1bd5cb606261bb3e365fea99a3fb9f2aaf447b1b2c874597b581da4`.
+- Read the child work order, verified its original seal, and claimed it before
+  editing. Established coord focus and exact path claims. Other workers own the
+  concurrent source and board changes; their changes are preserved.
+
+### Delivered changes and commits
+
+| Item | Implementation commit | Acceptance |
+| --- | --- | --- |
+| `mn-f4546f` | `3a61d4f5e` | README and engineering spec launch the installed bundle by path; installer already ends without launching. Child report sealed and Manna status done. |
+| `mn-8100d4`, tasks 2 and 3 | `51e06330d` | CI core import, verified install, serial certification, documented UI-test skip, tag procedure, and commented 1.0.0 changelog draft. |
+
+Both implementation commits use Conventional Commit messages and their exact
+item trailers. README also follows the same CI-only core import procedure, so
+its onboarding commands agree with the release runbook. Import, verification,
+installation, and launch examples stop when the preceding command fails.
+
+The certified-run example retains each attempt under `.dev/release/`, records
+the release commit, uses `-parallel-testing-enabled NO` and
+`-skip-testing:GhosttyUITests`, and writes a `.xcresult` bundle. It reads actual
+counts through `xcrun xcresulttool get test-results summary`, rejects failed or
+empty runs, and checks that the clean release commit did not change. It does
+not delete an earlier result bundle. The UI-test bootstrap failure and skip
+cite `mn-3a4538`; certification belongs to `mn-3bb820`.
+
+`CHANGELOG.md` has a `1.0.0 (YYYY-MM-DD)` header and one-paragraph summary inside
+an HTML comment immediately above `Unreleased`. All pre-existing changelog
+bytes are preserved. No version setting, active release heading, or tag changed.
+
+### Verification receipts
+
+| Command or check | Actual result |
+| --- | --- |
+| `rg -n -- 'open -a' scripts docs/holy-ghostty README.md` | No matches, exit 1 as required for the negative search. |
+| `rg -n -F 'open /Applications/Holy\ Ghostty.app' README.md docs/holy-ghostty/engineering-spec.md` | Both documents matched, exit 0. |
+| `sh -n scripts/install-holy-ghostty.sh` | Passed, exit 0; script inspected through its final no-launch statement. |
+| `sh -n scripts/build-holy-ghostty-core.sh` | Passed, exit 0. |
+| `/bin/bash -n` on every Bash fence in the changed documents | All 6 snippets passed: 3 in README and 3 in the engineering spec. Syntax only; snippets were not executed. |
+| Python AST parse of the embedded result-summary reader | Passed. No certification run was simulated. |
+| `xcrun xcresulttool get test-results summary --help` and `--schema` | Installed tool supports `--path`; required result/count fields and the `Passed` enum verified from the actual `schemas` envelope. |
+| Changelog preservation check against the pre-edit committed content | Passed: remove the new comment and all original bytes remain; one summary paragraph, correct placeholder, correct placement. |
+| README release-procedure link and target heading | Both exist. |
+| `git diff --check` on owned paths and `git diff --cached --check` | Passed, exit 0. |
+
+No Xcode suite is named by the child work order. App-hosted tests compiled: 0;
+executed: 0. No Xcode build, shell installer fixture suite, core build/import,
+real installer, app launch, screenshot, or live session was run in this lane.
+No runtime build or test pass is claimed. Source behavior and installer code
+are unchanged, so this lane's required acceptance is document and command
+verification. No push, PR, tag, or live application-data mutation occurred.
+
+### Remaining release acceptance
+
+Coord publication `mn-8100d4-release-preparation` records the close boundary:
+after the other release gates are accepted, Erik coordinates the installed
+path launch, Board/fleet/Archive/Hosts visual acceptance and screenshots, final
+release commit, full serial green run under `mn-3bb820`, and explicitly
+authorized tag and publication. No live pass is scheduled or claimed here.
+
+Lessons logged: 3 (new) | Decisions logged: 0 (new).
+Lessons: `les-95adc5` (path launch and prerequisite failures), `les-3b3b38`
+(xcresult schema envelope), `les-4c0007` (live repository path discovery).
