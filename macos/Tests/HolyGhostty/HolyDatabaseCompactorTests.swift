@@ -121,6 +121,54 @@ struct HolyDatabaseCompactorTests {
 
     // MARK: - Helpers
 
+    @Test func unknownDiskCapacityRefusesTheRewrite() throws {
+        try withTemporaryDatabase { database in
+            let before = try HolyDatabaseCompactor.assess(database)
+            let decision = try HolyDatabaseCompactor.maintain(database, force: true, availableCapacity: { nil })
+            #expect(decision == .skippedUnknownDisk(before))
+            #expect(try HolyDatabaseCompactor.assess(database) == before)
+        }
+    }
+
+    @Test func inPlaceCompactionRejectsInvalidForeignKeysBeforeVacuum() throws {
+        try withTemporaryDatabase { database in
+            try database.execute("PRAGMA foreign_keys = OFF;")
+            try database.execute("INSERT INTO session_events (session_id, sequence, occurred_at, event_type) VALUES ('missing', 1, '2026-01-01', 'test');")
+            try database.execute("PRAGMA foreign_keys = ON;")
+            let before = try HolyDatabaseCompactor.assess(database)
+            #expect(throws: HolyDatabaseMaintenanceError.self) {
+                try HolyDatabaseCompactor.maintain(database, force: true, availableCapacity: { Int64.max })
+            }
+            #expect(try HolyDatabaseCompactor.assess(database) == before)
+            #expect(try database.scalarInt64("SELECT COUNT(*) FROM session_events;") == 1)
+            #expect(try database.scalarInt64("PRAGMA busy_timeout;") == Int64(HolyDatabaseSchema.busyTimeoutMilliseconds))
+        }
+    }
+
+    @Test func preservationCheckRejectsChangedBusinessRows() throws {
+        try withTemporaryDatabase { database in
+            let before = try HolyDatabaseMaintenance.validatedSnapshot(in: database)
+            try database.execute("INSERT INTO app_state(key, value_json, updated_at) VALUES ('validation-test', '{}', '2026-01-01');")
+            #expect(throws: HolyDatabaseMaintenanceError.self) {
+                try HolyDatabaseMaintenance.validateUnchanged(in: database, from: before)
+            }
+        }
+    }
+
+    @Test func inPlaceCompactionYieldsToAnotherWriter() throws {
+        try withTemporaryDatabase { database in
+            let writer = try HolyDatabase.open(at: database.url)
+            try writer.execute("BEGIN IMMEDIATE;")
+            defer { try? writer.execute("ROLLBACK;") }
+            let started = Date()
+            #expect(throws: (any Error).self) {
+                try HolyDatabaseCompactor.maintain(database, force: true, availableCapacity: { Int64.max })
+            }
+            #expect(Date().timeIntervalSince(started) < 1)
+            #expect(try database.scalarInt64("PRAGMA busy_timeout;") == Int64(HolyDatabaseSchema.busyTimeoutMilliseconds))
+        }
+    }
+
     private func withTemporaryDatabase<T>(_ body: (HolyDatabase) throws -> T) throws -> T {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("holy-compactor-tests-\(UUID().uuidString)", isDirectory: true)

@@ -227,11 +227,9 @@ class AppDelegate: NSObject,
         }
         HolyDatabase.bootstrapIfNeeded()
         HolyMigrationService.importLegacyWorkspaceIfNeeded()
-        // Reclaim on-disk footprint at the one moment the database is provably
-        // quiesced: after bootstrap/migration, before any window opens the
-        // workspace store. Gated — a no-op unless the file carries real dead
-        // weight and the volume can hold the transient rewrite.
-        HolyDatabaseCompactor.maintainAppDatabaseIfNeeded()
+        // Bounded cleanup runs on its own utility timer. A whole-file VACUUM
+        // is an explicit menu action, never work on the launch/main thread.
+        HolyWorkspaceDatabasePersistence.startRetentionMaintenance()
         // Generated helpers are versioned with the app: refresh Holy-owned
         // bridges the user already enabled so an app update never leaves a
         // stale helper running. A fresh install still goes through the menu.
@@ -362,8 +360,7 @@ class AppDelegate: NSObject,
         // Setup our menu
         setupMenuImages()
 
-        // Holy: offer an on-demand database compaction command alongside the
-        // gated automatic pass that runs at launch.
+        // Holy: whole-file compaction is deliberate, never automatic at launch.
         if Self.isHolyGhosttyBundle {
             installHolyDatabaseMaintenanceMenuItem()
         }
@@ -409,9 +406,8 @@ class AppDelegate: NSObject,
     }
 
     /// Adds a "Compact Database Now" command to the application menu. This is the
-    /// manual counterpart to the gated automatic compaction that runs at launch;
-    /// it lets the user reclaim disk space on demand without waiting for the
-    /// next relaunch.
+    /// explicit whole-file rewrite; routine retention reuses free pages without
+    /// rewriting the database or delaying launch.
     private func installHolyDatabaseMaintenanceMenuItem() {
         guard let appMenu = NSApp.mainMenu?.item(at: 0)?.submenu else { return }
 
@@ -471,9 +467,12 @@ class AppDelegate: NSObject,
             let available = ByteCountFormatter.string(fromByteCount: availableBytes, countStyle: .file)
             alert.messageText = "Not Enough Free Disk"
             alert.informativeText = "Compaction needs about \(needed) of temporary free space; only \(available) is available."
+        case .skippedUnknownDisk:
+            alert.messageText = "Couldn’t Check Free Disk Space"
+            alert.informativeText = "Compaction did not run because available disk space could not be verified."
         case nil:
             alert.messageText = "Couldn’t Compact the Database"
-            alert.informativeText = "The database may be busy. Try again in a moment."
+            alert.informativeText = "The database is busy or its preservation checks failed. Try again when sessions are quiet."
         }
 
         alert.runModal()

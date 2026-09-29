@@ -5,6 +5,167 @@ import Testing
 
 struct HolyWorkspacePersistenceRetentionTests {
     @MainActor
+    @Test func eventAgeRetentionKeepsTheTimelineTailAndNextSequence() throws {
+        try withTemporaryDatabase { database, _ in
+            let now = Date(timeIntervalSince1970: 2_000_000_000)
+            let sessionID = UUID()
+            let record = HolySessionRecord(id: sessionID, launchSpec: .interactiveTmuxShell(title: "Events"))
+            let workspace = HolyWorkspaceSnapshot(sessions: [record], selectedSessionID: sessionID)
+            try persist(workspace, in: database)
+            try insertEvents(count: 20, sessionID: sessionID, at: now.addingTimeInterval(-31 * 86400), in: database)
+            try insertEvents(count: 5, sessionID: sessionID, at: now, in: database)
+
+            let result = try HolyWorkspaceRetentionMaintenance.prune(in: database, now: now)
+            #expect(result.deletedSessionEvents == 13)
+            #expect(try database.scalarInt64("SELECT COUNT(*) FROM session_events;") == 12)
+            #expect(try database.scalarInt64("SELECT MIN(sequence) FROM session_events;") == 14)
+
+            try HolyWorkspaceDatabasePersistence.save(.init(snapshot: workspace, pendingEvents: [
+                .init(sessionID: sessionID, occurredAt: now, eventType: .selected,
+                      phase: nil, attention: nil, payload: nil),
+            ]), in: database)
+            #expect(try database.scalarInt64("SELECT MAX(sequence) FROM session_events;") == 26)
+            #expect(try HolyWorkspaceDatabasePersistence.load(from: database)?.sessions.first?.id == sessionID)
+        }
+    }
+
+    @MainActor
+    @Test func eventCapIsPerSessionAndDeletesOnlyOneBoundedBatch() throws {
+        try withTemporaryDatabase { database, _ in
+            let noisy = UUID()
+            let quiet = UUID()
+            let records = [noisy, quiet].map {
+                HolySessionRecord(id: $0, launchSpec: .interactiveTmuxShell(title: "Bounded"))
+            }
+            try persist(.init(sessions: records, selectedSessionID: noisy), in: database)
+            try insertEvents(count: 25_000, sessionID: noisy, at: .now, in: database)
+            try insertEvents(count: 20, sessionID: quiet, at: .now, in: database)
+            let result = try HolyWorkspaceRetentionMaintenance.prune(in: database)
+            #expect(result.deletedSessionEvents == 256)
+            #expect(try database.scalarInt64("SELECT COUNT(*) FROM session_events;") == 24_764)
+            #expect(try database.scalarInt64("SELECT COUNT(*) FROM session_events WHERE session_id = '\(quiet)';") == 20)
+            #expect(try database.scalarInt64("SELECT MAX(sequence) FROM session_events WHERE session_id = '\(noisy)';") == 25_000)
+        }
+    }
+
+    @MainActor
+    @Test func retiredSessionDrainsEventsBeforeItsParentCanCascade() throws {
+        try withTemporaryDatabase { database, _ in
+            let sessionID = UUID()
+            try persist(.init(sessions: [], selectedSessionID: nil, archivedSessions: [
+                archivedSession(sourceSessionID: sessionID, gitSnapshot: nil),
+            ]), in: database)
+            try insertEvents(count: 600, sessionID: sessionID, at: .now, in: database)
+            try persist(.empty, in: database)
+
+            for expectedRemaining in [344, 88] {
+                let result = try HolyWorkspaceRetentionMaintenance.prune(in: database)
+                #expect(result.deletedSessionEvents == 256)
+                #expect(result.deletedSessions == 0)
+                #expect(try database.scalarInt64("SELECT COUNT(*) FROM session_events;") == Int64(expectedRemaining))
+            }
+            let final = try HolyWorkspaceRetentionMaintenance.prune(in: database)
+            #expect(final.deletedSessionEvents == 88)
+            #expect(final.deletedSessions == 1)
+            #expect(try database.scalarInt64("SELECT COUNT(*) FROM session_events;") == 0)
+            #expect(try foreignKeyViolationCount(in: database) == 0)
+        }
+    }
+
+    @MainActor
+    @Test func recoveryOwnedArchivesSurviveAgeCapEventDrainAndCompaction() throws {
+        try withTemporaryDatabase { database, _ in
+            let now = Date(timeIntervalSince1970: 2_000_000_000)
+            let bootID = UUID()
+            var recovery = archivedSession(sourceSessionID: UUID(), archivedAt: now.addingTimeInterval(-365 * 86400), gitSnapshot: nil)
+            recovery.recoveryReason = "Missing after reboot"
+            recovery.recoveryBootBatchID = bootID
+            var reasonOnly = archivedSession(sourceSessionID: UUID(), archivedAt: recovery.archivedAt, gitSnapshot: nil)
+            reasonOnly.recoveryReason = recovery.recoveryReason
+            var batchOnly = archivedSession(sourceSessionID: UUID(), archivedAt: recovery.archivedAt, gitSnapshot: nil)
+            batchOnly.recoveryBootBatchID = bootID
+            let recent = (0..<300).map { _ in
+                archivedSession(sourceSessionID: UUID(), archivedAt: now, gitSnapshot: nil)
+            }
+            let retained = HolyWorkspaceRetentionPolicy.retainedArchivedSessions(
+                recent + [recovery, reasonOnly, batchOnly], now: now
+            )
+            #expect(Set(retained.map(\.id)).isSuperset(of: [recovery.id, reasonOnly.id, batchOnly.id]))
+            try persist(.init(sessions: [], selectedSessionID: nil, archivedSessions: retained), in: database)
+            try insertEvents(count: 600, sessionID: recovery.sourceSessionID, at: recovery.archivedAt, in: database)
+            while try HolyWorkspaceRetentionMaintenance.prune(in: database, now: now).didDeleteRows {}
+            _ = try HolyDatabaseCompactor.maintain(database, force: true, availableCapacity: { Int64.max })
+
+            let loaded = try #require(try HolyWorkspaceDatabasePersistence.load(from: database))
+            let restored = try #require(loaded.archivedSessions.first { $0.id == recovery.id })
+            #expect(restored.recoveryReason == recovery.recoveryReason)
+            #expect(restored.recoveryBootBatchID == bootID)
+            #expect(try database.scalarInt64("SELECT COUNT(*) FROM session_events;") == 12)
+            #expect(loaded.archivedSessions.contains { $0.id == reasonOnly.id && $0.recoveryReason != nil })
+            #expect(loaded.archivedSessions.contains { $0.id == batchOnly.id && $0.recoveryBootBatchID == bootID })
+        }
+    }
+
+    @MainActor
+    @Test func retentionGrowthPlateausThroughProductionSavePath() throws {
+        try withTemporaryDatabase { database, _ in
+            let records = (0..<8).map { _ in
+                HolySessionRecord(id: UUID(), launchSpec: .interactiveTmuxShell(title: "Soak"))
+            }
+            let workspace = HolyWorkspaceSnapshot(sessions: records, selectedSessionID: records[0].id)
+            var settledPageCounts: [Int64] = []
+            for wave in 0..<40 {
+                let events = records.flatMap { record in
+                    (0..<64).map { _ in
+                        HolySessionEventDraft(sessionID: record.id, occurredAt: .now, eventType: .runtimeUpdated,
+                                              phase: .active, attention: nil,
+                                              payload: .init(preview: String(repeating: "x", count: 3_200)))
+                    }
+                }
+                try HolyWorkspaceDatabasePersistence.save(.init(snapshot: workspace, pendingEvents: events), in: database)
+                while try HolyWorkspaceRetentionMaintenance.prune(in: database).didDeleteRows {}
+                if wave >= 12 {
+                    #expect(try database.scalarInt64("SELECT COUNT(*) FROM session_events;") == 8 * 512)
+                    settledPageCounts.append(try database.scalarInt64("PRAGMA page_count;"))
+                }
+            }
+            let low = try #require(settledPageCounts.min())
+            let high = try #require(settledPageCounts.max())
+            // Reused free pages bound the file too; allow B-tree page splits,
+            // not another payload-sized growth cycle after the cap settles.
+            #expect(high - low < low / 10)
+            #expect(try database.scalarText("PRAGMA integrity_check;") == "ok")
+            #expect(try foreignKeyViolationCount(in: database) == 0)
+        }
+    }
+
+    @MainActor
+    @Test func quietWorkspaceTimerRetriesBusyPassAndDrainsWithoutASave() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("holy-retention-timer-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try HolyDatabase.open(at: directory.appendingPathComponent("timer.sqlite3"))
+        defer { database.close() }
+        try HolyDatabaseMigrator.migrate(database)
+        let record = HolySessionRecord(id: UUID(), launchSpec: .interactiveTmuxShell(title: "Quiet"))
+        try persist(.init(sessions: [record], selectedSessionID: record.id), in: database)
+        try insertEvents(count: 1_100, sessionID: record.id, at: .now, in: database)
+
+        try database.execute("BEGIN IMMEDIATE;")
+        let worker = HolyWorkspaceRetentionWorker(databaseURL: database.url, interval: 0.05)
+        worker.start()
+        defer { worker.stop() }
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(try database.scalarInt64("SELECT COUNT(*) FROM session_events;") == 1_100)
+        try database.execute("COMMIT;")
+        let deadline = Date().addingTimeInterval(5)
+        while try database.scalarInt64("SELECT COUNT(*) FROM session_events;") > 512, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(try database.scalarInt64("SELECT COUNT(*) FROM session_events;") == 512)
+    }
+
+    @MainActor
     @Test func harnessSessionIdentityPersistsForRosterAndArchiveRows() throws {
         try withTemporaryDatabase { database, _ in
             let activeID = UUID()
@@ -589,6 +750,21 @@ struct HolyWorkspacePersistenceRetentionTests {
             attentionBySessionID: [:],
             pendingEvents: [],
             in: database
+        )
+    }
+
+    private func insertEvents(count: Int, sessionID: UUID, at date: Date, in database: HolyDatabase) throws {
+        let firstSequence = try database.scalarInt64("SELECT COALESCE(MAX(sequence), 0) FROM session_events WHERE session_id = '\(sessionID)';")
+        try database.execute(
+            """
+            WITH RECURSIVE counter(value) AS (
+                VALUES(1) UNION ALL SELECT value + 1 FROM counter WHERE value < ?
+            )
+            INSERT INTO session_events (session_id, sequence, occurred_at, event_type, payload_json)
+            SELECT ?, ? + value, ?, 'session_runtime_updated', '{}' FROM counter;
+            """,
+            bindings: [.int64(Int64(count)), .text(sessionID.uuidString), .int64(firstSequence),
+                       .text(HolyPersistenceCoders.string(from: date))]
         )
     }
 

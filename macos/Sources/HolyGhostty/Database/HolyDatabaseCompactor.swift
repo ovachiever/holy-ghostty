@@ -3,11 +3,9 @@ import OSLog
 
 /// In-place reclamation of the app database's on-disk footprint.
 ///
-/// This is distinct from `HolyDatabaseMaintenance`, which exports a validated
-/// *copy* for an operator to swap by hand and never touches the live file. The
-/// compactor instead checkpoints the WAL and runs `VACUUM` directly on the
-/// primary database, so it is only safe at a quiesced moment: at launch, before
-/// the workspace store opens its save loop, or from an explicit user action.
+/// Uses HolyDatabaseMaintenance's integrity, foreign-key, schema and row-count
+/// checks around the rewrite. Runs only from the explicit menu action, off the
+/// main thread. A concurrent writer invalidates the preservation receipt.
 ///
 /// Reclamation is gated. A `VACUUM` rewrites the whole file and holds an
 /// exclusive lock, so running it unconditionally on every launch would tax a
@@ -52,13 +50,14 @@ enum HolyDatabaseCompactor {
     enum Decision: Equatable {
         case skippedNotBloated(Assessment)
         case skippedInsufficientDisk(Assessment, availableBytes: Int64)
+        case skippedUnknownDisk(Assessment)
         case compacted(before: Assessment, after: Assessment)
 
         var reclaimedBytes: Int64 {
             switch self {
             case let .compacted(before, after):
                 return max(0, before.totalBytes - after.totalBytes)
-            case .skippedNotBloated, .skippedInsufficientDisk:
+            case .skippedNotBloated, .skippedInsufficientDisk, .skippedUnknownDisk:
                 return 0
             }
         }
@@ -72,15 +71,19 @@ enum HolyDatabaseCompactor {
         )
     }
 
-    /// In-place reclaim. The caller MUST guarantee no other connection has the
-    /// database open, or `VACUUM` will fail on the exclusive-lock contention.
+    /// In-place reclaim. Compaction refuses lock contention instead of waiting
+    /// behind a foreground writer. Call only through the validating entry point.
     /// The bracketing checkpoints fold the WAL back so the rewrite starts from a
     /// single file and the `-wal` sidecar does not immediately re-inflate the
     /// footprint afterward.
-    static func compactInPlace(_ database: HolyDatabase) throws {
-        try database.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    private static func compactInPlace(_ database: HolyDatabase) throws {
+        guard try database.checkpoint(.truncate).isComplete else {
+            throw HolyDatabaseMaintenanceError.concurrentWrite
+        }
         try database.execute("VACUUM;")
-        try database.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        guard try database.checkpoint(.truncate).isComplete else {
+            throw HolyDatabaseMaintenanceError.concurrentWrite
+        }
     }
 
     /// Assess and, if warranted, compact the live app database.
@@ -114,6 +117,8 @@ enum HolyDatabaseCompactor {
                 logger.warning(
                     "Holy database compaction skipped: needs \(assessment.totalBytes, privacy: .public) free bytes, only \(availableBytes, privacy: .public) available"
                 )
+            case .skippedUnknownDisk:
+                logger.warning("Holy database compaction skipped: free disk capacity is unknown")
             case .skippedNotBloated:
                 break
             }
@@ -139,11 +144,24 @@ enum HolyDatabaseCompactor {
 
         // An in-place VACUUM builds a transient rebuilt copy on the same volume.
         // Refuse rather than fail mid-rewrite when the volume cannot hold it.
-        if let available = availableCapacity(), available < assessment.totalBytes {
+        guard let available = availableCapacity() else {
+            return .skippedUnknownDisk(assessment)
+        }
+        if available < assessment.totalBytes {
             return .skippedInsufficientDisk(assessment, availableBytes: available)
         }
 
+        let originalTimeout = try database.scalarInt64("PRAGMA busy_timeout;")
+        try database.execute("PRAGMA busy_timeout = 0;")
+        defer { try? database.execute("PRAGMA busy_timeout = \(originalTimeout);") }
+
+        let dataVersion = try database.scalarInt64("PRAGMA data_version;")
+        let source = try HolyDatabaseMaintenance.validatedSnapshot(in: database)
         try compactInPlace(database)
+        try HolyDatabaseMaintenance.validateUnchanged(in: database, from: source)
+        guard try database.scalarInt64("PRAGMA data_version;") == dataVersion else {
+            throw HolyDatabaseMaintenanceError.concurrentWrite
+        }
         return .compacted(before: assessment, after: try assess(database))
     }
 

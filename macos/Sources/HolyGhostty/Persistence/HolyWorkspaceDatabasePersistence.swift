@@ -189,18 +189,8 @@ enum HolyWorkspaceDatabasePersistence {
         subsystem: Bundle.main.bundleIdentifier ?? "com.mitchellh.ghostty",
         category: "HolyWorkspaceDatabasePersistence"
     )
-    private static let retentionQueue = DispatchQueue(
-        label: "com.mitchellh.ghostty.holy-retention",
-        qos: .utility
-    )
-    private static let retentionScheduleLock = NSLock()
-    private static var isRetentionScheduled = false
-    @MainActor private static var hasRunRetentionSinceLaunch = false
+    private static let retentionWorker = HolyWorkspaceRetentionWorker(databaseURL: HolyDatabasePaths.databaseURL)
     @MainActor private static var terminationObserver: AnyCancellable?
-    // Release the writer lock after every 1,000-row transaction, then yield
-    // briefly. This keeps foreground saves responsive while draining a
-    // 31.5M-row legacy table in hours rather than days.
-    private static let retentionContinuationDelay: TimeInterval = 0.25
 
     private static let workspaceInitializedKey = "workspace_initialized"
     private static let selectedSessionIDKey = "selected_session_id"
@@ -254,7 +244,7 @@ enum HolyWorkspaceDatabasePersistence {
         attentionBySessionID: [UUID: HolySessionAttention] = [:],
         pendingEvents: [HolySessionEventDraft] = []
     ) {
-        installTerminationHandlerIfNeeded()
+        startRetentionMaintenance()
 
         do {
             let receipt = try HolyWorkspaceDatabaseWriter.shared.save(
@@ -267,17 +257,20 @@ enum HolyWorkspaceDatabasePersistence {
                 )
             )
 
-            // Retention drains what saves tombstone (purge_pending sessions,
-            // superseded git snapshots). A flush that wrote nothing tombstoned
-            // nothing; the first flush after launch runs it once regardless
-            // so a backlog left by an earlier run still drains.
-            if receipt.wroteAnything || !hasRunRetentionSinceLaunch {
-                hasRunRetentionSinceLaunch = true
-                scheduleRetentionMaintenance()
+            if receipt.wroteAnything {
+                retentionWorker.requestPass()
             }
         } catch {
             logger.error("Failed to save Holy workspace state to database: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Called at launch after migration, before the first save. Expiry and
+    /// backlog draining must continue even in a completely quiet workspace.
+    @MainActor
+    static func startRetentionMaintenance() {
+        installTerminationHandlerIfNeeded()
+        retentionWorker.start()
     }
 
     /// At an orderly quit: write the legacy snapshot exactly as last handed
@@ -291,6 +284,7 @@ enum HolyWorkspaceDatabasePersistence {
             .publisher(for: NSApplication.willTerminateNotification)
             .sink { _ in
                 HolyWorkspacePersistence.flushForTermination()
+                retentionWorker.stop()
                 HolyWorkspaceDatabaseWriter.shared.checkpointAndClose()
             }
     }
@@ -308,48 +302,6 @@ enum HolyWorkspaceDatabasePersistence {
             }
         } catch {
             logger.error("Failed to record Holy legacy import marker: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    private static func scheduleRetentionMaintenance() {
-        retentionScheduleLock.lock()
-        guard !isRetentionScheduled else {
-            retentionScheduleLock.unlock()
-            return
-        }
-        isRetentionScheduled = true
-        retentionScheduleLock.unlock()
-
-        retentionQueue.async {
-            var shouldContinueDraining = false
-
-            do {
-                let database = try HolyDatabase.openAppDatabase()
-                let result = try HolyWorkspaceRetentionMaintenance.prune(in: database)
-                shouldContinueDraining = result.deletedGitSnapshots
-                    == HolyWorkspaceRetentionMaintenance.defaultGitSnapshotBatchSize
-                    || result.deletedSessions
-                    == HolyWorkspaceRetentionMaintenance.defaultSessionBatchSize
-                if result.didDeleteRows {
-                    logger.notice(
-                        "Holy database retention removed \(result.deletedGitSnapshots, privacy: .public) stale git snapshots and \(result.deletedSessions, privacy: .public) retired sessions"
-                    )
-                }
-            } catch {
-                // The workspace transaction already committed. Retention is
-                // deliberately best-effort and will retry on the next save.
-                logger.warning("Holy database retention pass failed: \(error.localizedDescription, privacy: .public)")
-            }
-
-            retentionScheduleLock.lock()
-            isRetentionScheduled = false
-            retentionScheduleLock.unlock()
-
-            if shouldContinueDraining {
-                retentionQueue.asyncAfter(deadline: .now() + retentionContinuationDelay) {
-                    scheduleRetentionMaintenance()
-                }
-            }
         }
     }
 

@@ -9,6 +9,7 @@ enum HolyDatabaseMaintenanceError: LocalizedError {
     case foreignKeyCheckFailed(destination: URL, violationCount: Int)
     case schemaVersionMismatch(source: Int32, destination: Int32)
     case rowCountMismatch(table: HolyDatabaseTable, source: Int64, destination: Int64)
+    case concurrentWrite
 
     var errorDescription: String? {
         switch self {
@@ -28,6 +29,8 @@ enum HolyDatabaseMaintenanceError: LocalizedError {
             return "Compacted database schema changed from version \(source) to \(destination)."
         case let .rowCountMismatch(table, source, destination):
             return "Compacted \(table.rawValue) row count changed from \(source) to \(destination)."
+        case .concurrentWrite:
+            return "Database writes overlapped compaction; preservation could not be verified."
         }
     }
 }
@@ -40,10 +43,13 @@ struct HolyDatabaseCompactionReport: Equatable {
     let rowCounts: [HolyDatabaseTable: Int64]
 }
 
-/// Explicit, copy-only space reclamation. This is intentionally never called
-/// from bootstrap or routine persistence: a large VACUUM needs deliberate
-/// operator timing and roughly the source footprint in transient free space.
-/// The caller must quiesce app writes and perform any later swap separately.
+struct HolyDatabaseValidationSnapshot: Equatable {
+    let schemaVersion: Int32
+    let rowCounts: [HolyDatabaseTable: Int64]
+}
+
+/// Shared preservation checks for explicit in-place compaction and copy export.
+/// Neither operation belongs in bootstrap or routine persistence.
 enum HolyDatabaseMaintenance {
     static func createCompactedAppDatabaseCopy(
         at destinationURL: URL
@@ -86,8 +92,7 @@ enum HolyDatabaseMaintenance {
             }
         }
 
-        let sourceVersion = try database.userVersion()
-        let sourceRowCounts = try rowCounts(in: database)
+        let source = try validatedSnapshot(in: database)
         let temporaryURL = destinationDirectory.appendingPathComponent(
             ".\(destinationURL.lastPathComponent).building-\(UUID().uuidString)",
             isDirectory: false
@@ -109,8 +114,7 @@ enum HolyDatabaseMaintenance {
 
         let validation = try validateCompactedCopy(
             at: temporaryURL,
-            sourceVersion: sourceVersion,
-            sourceRowCounts: sourceRowCounts
+            source: source
         )
         try FileManager.default.moveItem(at: temporaryURL, to: destinationURL)
         installedCopy = true
@@ -126,18 +130,40 @@ enum HolyDatabaseMaintenance {
 
     private static func validateCompactedCopy(
         at url: URL,
-        sourceVersion: Int32,
-        sourceRowCounts: [HolyDatabaseTable: Int64]
+        source: HolyDatabaseValidationSnapshot
     ) throws -> (
         bytes: Int64,
         schemaVersion: Int32,
         rowCounts: [HolyDatabaseTable: Int64]
     ) {
         let database = try HolyDatabase.open(at: url, readOnly: true)
+        let destination = try validateUnchanged(in: database, from: source)
+        return (
+            bytes: try fileSize(at: url),
+            schemaVersion: destination.schemaVersion,
+            rowCounts: destination.rowCounts
+        )
+    }
+
+    /// A WAL read transaction gives every integrity/count query the same
+    /// snapshot without taking the foreground writer lock.
+    static func validatedSnapshot(in database: HolyDatabase) throws -> HolyDatabaseValidationSnapshot {
+        try database.execute("BEGIN DEFERRED TRANSACTION;")
+        do {
+            let snapshot = try readValidatedSnapshot(in: database)
+            try database.execute("COMMIT;")
+            return snapshot
+        } catch {
+            try? database.execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    private static func readValidatedSnapshot(in database: HolyDatabase) throws -> HolyDatabaseValidationSnapshot {
         let integrityResult = try database.scalarText("PRAGMA integrity_check;")
         guard integrityResult.lowercased() == "ok" else {
             throw HolyDatabaseMaintenanceError.integrityCheckFailed(
-                destination: url,
+                destination: database.url,
                 result: integrityResult
             )
         }
@@ -148,23 +174,30 @@ enum HolyDatabaseMaintenance {
         }
         guard foreignKeyViolationCount == 0 else {
             throw HolyDatabaseMaintenanceError.foreignKeyCheckFailed(
-                destination: url,
+                destination: database.url,
                 violationCount: foreignKeyViolationCount
             )
         }
 
-        let destinationVersion = try database.userVersion()
-        guard destinationVersion == sourceVersion else {
+        return .init(schemaVersion: try database.userVersion(), rowCounts: try rowCounts(in: database))
+    }
+
+    @discardableResult
+    static func validateUnchanged(
+        in database: HolyDatabase,
+        from source: HolyDatabaseValidationSnapshot
+    ) throws -> HolyDatabaseValidationSnapshot {
+        let destination = try validatedSnapshot(in: database)
+        guard destination.schemaVersion == source.schemaVersion else {
             throw HolyDatabaseMaintenanceError.schemaVersionMismatch(
-                source: sourceVersion,
-                destination: destinationVersion
+                source: source.schemaVersion,
+                destination: destination.schemaVersion
             )
         }
 
-        let destinationRowCounts = try rowCounts(in: database)
         for table in HolyDatabaseTable.allCases {
-            let sourceCount = sourceRowCounts[table] ?? 0
-            let destinationCount = destinationRowCounts[table] ?? 0
+            let sourceCount = source.rowCounts[table] ?? 0
+            let destinationCount = destination.rowCounts[table] ?? 0
             guard sourceCount == destinationCount else {
                 throw HolyDatabaseMaintenanceError.rowCountMismatch(
                     table: table,
@@ -174,11 +207,7 @@ enum HolyDatabaseMaintenance {
             }
         }
 
-        return (
-            bytes: try fileSize(at: url),
-            schemaVersion: destinationVersion,
-            rowCounts: destinationRowCounts
-        )
+        return destination
     }
 
     private static func rowCounts(
