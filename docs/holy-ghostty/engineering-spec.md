@@ -496,7 +496,10 @@ tests. Compile-only test builds are not executed-test receipts.
 
    GhosttyUITests exits before connecting to the test runner (early unexpected
    exit, signal kill), tracked by `mn-3a4538`; cite that bootstrap failure and
-   skip in the ceremony receipt. Record every other skip and its accepted reason. A
+   skip in the ceremony receipt. The [preserved September 23 failure receipt](../../.handoff/mn-3a4538-p2-tests-ghosttyuitests-target-crashes-at-bootstrap-every-serial.md#report-2026-09-29-documented-exclusion)
+   identifies `.dev/release-readiness/full.xcresult`, the exact failure log line,
+   and the log's SHA-256. This exclusion does not claim the UI target is repaired
+   or that its tests passed. Record every other skip and its accepted reason. A
    missing result bundle, a failed command, any failed test, an empty test run,
    or a changed release commit blocks certification. Never infer failure counts
    by searching the log. Attach the recorded commit, command, summary counts,
