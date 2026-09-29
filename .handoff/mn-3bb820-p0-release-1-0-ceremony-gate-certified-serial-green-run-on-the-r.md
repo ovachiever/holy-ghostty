@@ -7,7 +7,7 @@ base_commit: 74e8e8b0daa88cf1681b19ce560068c684fac4a5
 scope: '[P0][RELEASE] 1.0 ceremony gate: certified serial green run on the release commit'
 inputs:
 - .handoff/SESSION-HANDOFF-2026-09-24.md §4 item 9, §5 gate 2
-binding: sha256:0ab72087375b39b227a4d2b86786499120b739059ef8d4c370037dcd3f9b6d7d
+binding: sha256:9509faecd294c642bd432e51a86b71aaaf6b0bfc90a72a8dcc13f3cd645498f6
 ---
 
 # Handoff: [P0][RELEASE] 1.0 ceremony gate: certified serial green run on the release commit
@@ -38,3 +38,11 @@ One xcodebuild test run with -parallel-testing-enabled NO -skip-testing:GhosttyU
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-3bb820`.
 4. Commit with `Manna: mn-3bb820` and run `agent-do manna done mn-3bb820` only after the work is verified.
+
+## UI-target exclusion receipt: mn-3a4538
+
+The release command excludes `GhosttyUITests` because its runner failed before establishing a test connection. The preserved 2026-09-23 receipt is `.dev/release-readiness/full.xcresult` and `.dev/release-readiness-full.log:1356`; the log's SHA-256 is `e24828b6745f3003116644402a49135e696943d4dcbd917f5d8c831ae6be297e`.
+
+The exact failure reads: `GhosttyUITests-Runner (79405) encountered an error (Early unexpected exit, operation never finished bootstrapping - no restart will be attempted. (Underlying Error: Test crashed with signal kill before establishing connection.))`.
+
+The [mn-3a4538 report](mn-3a4538-p2-tests-ghosttyuitests-target-crashes-at-bootstrap-every-serial.md#report-2026-09-29-documented-exclusion) preserves the source and verification boundary. `docs/holy-ghostty/engineering-spec.md` Build and Validation links the same report. This documents the authorized exclusion alternative only: the UI target is not repaired, and the ceremony item remains open and unclaimed until its exact-release-commit execution. No certified run was performed by the Gate 2 build lane.
