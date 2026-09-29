@@ -45,7 +45,7 @@ enum HolyHostStateMirror {
         requested_db = os.environ.get("HOLY_HOST_STATE_DATABASE") or requested_db
         prefix = json.loads(prefix_json)
         def tmux(*args):
-            return subprocess.check_output(prefix + list(args), text=True, stderr=subprocess.DEVNULL).rstrip("\n")
+            return subprocess.check_output(prefix + list(args), text=True, stderr=subprocess.PIPE).rstrip("\n")
         fields = ["socket_path", "session_name", "session_id", "pane_id", "window_index", "pane_index",
                   "@holy_runtime", "@holy_agent_state_owner_v1", "@holy_host_state_db_v1"] + OPTIONS + [
                   "pane_dead", "pane_current_command", "window_activity", "@holy_watcher_v1"]
@@ -110,6 +110,10 @@ enum HolyHostStateMirror {
 
     try:
         main()
+    except subprocess.CalledProcessError as error:
+        print("Holy host state mirror failed: tmux command " + json.dumps(error.cmd)
+              + " exited " + str(error.returncode) + ": " + error.stderr.strip(), file=sys.stderr)
+        raise SystemExit(1)
     except Exception as error:
         print("Holy host state mirror failed: " + type(error).__name__, file=sys.stderr)
         raise SystemExit(1)

@@ -299,27 +299,37 @@ struct HolyMannaBoardActionsTests {
     }
 
     @Test func dispatchNoteSurvivesTmuxDetachDiscoveryAndReadoption() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("holy-worker-test-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root.appendingPathComponent("worker")
+        // Dispatch execs the worker. /usr/bin/true immediately destroys the
+        // only pane and its server before the mirror or discovery can read it.
+        // Keep this synthetic worker alive on its PTY until fixture cleanup.
+        try "#!/bin/sh\nexec /bin/cat\n".write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let environment = ["HOLY_HOST_STATE_DATABASE": root.appendingPathComponent("host.sqlite3").path]
         let request = HolyMannaWorkerDispatch(item: try item(), context: context, profile: .init())
-        var spec = try request.launchSpec(executablePath: "/usr/bin/true")
+        var spec = try request.launchSpec(executablePath: executable.path)
         let socket = "holy-worker-test-\(UUID().uuidString.lowercased())"
         let name = try #require(spec.tmux?.sessionName)
         spec.tmux?.socketName = socket
-        spec.workingDirectory = FileManager.default.temporaryDirectory.path
+        spec.workingDirectory = root.path
         let command = try #require(HolyTmuxCommandBuilder.detachedCreateCommand(for: spec))
-        let created = try await HolyMannaProcessRunner.run(.init(
-            executablePath: command.executablePath, arguments: command.arguments,
-            currentDirectoryPath: nil, environment: [:], stdin: nil, displayCommand: "create isolated note test"
-        ), 10)
         defer {
             let cleanup = Process()
             cleanup.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            cleanup.arguments = ["-lc", "tmux -L '\(socket)' kill-server"]
+            cleanup.arguments = ["-lc", "unset TMUX TMUX_PANE TMUX_TMPDIR; tmux -L '\(socket)' kill-server; "
+                + "rm -f -- /tmp/tmux-$(id -u)/'\(socket)'"]
             cleanup.standardOutput = FileHandle.nullDevice
             cleanup.standardError = FileHandle.nullDevice
-            try? cleanup.run()
-            cleanup.waitUntilExit()
+            if (try? cleanup.run()) != nil { cleanup.waitUntilExit() }
         }
-        #expect(created.exitCode == 0, Comment(rawValue: created.stderr))
+        let created = try await HolyMannaProcessRunner.run(.init(
+            executablePath: command.executablePath, arguments: command.arguments,
+            currentDirectoryPath: nil, environment: environment, stdin: nil, displayCommand: "create isolated note test"
+        ), 10)
+        try #require(created.exitCode == 0, Comment(rawValue: created.stderr))
         // No viewer is attached. Discovery must still recover the initial note
         // from the server, before any later local note edit or sync poll.
         let discovered = try await HolyRemoteTmuxDiscoveryService.shared.discoverLocalSessionsThrowing(
@@ -355,13 +365,26 @@ struct HolyMannaBoardActionsTests {
         // a later user edit with the initial ticket-only note.
         let repeated = try await HolyMannaProcessRunner.run(.init(
             executablePath: command.executablePath, arguments: command.arguments,
-            currentDirectoryPath: nil, environment: [:], stdin: nil, displayCommand: "reopen isolated note test"
+            currentDirectoryPath: nil, environment: environment, stdin: nil, displayCommand: "reopen isolated note test"
         ), 10)
         #expect(repeated.exitCode == 0)
         let notes = try await actionShell("tmux -L '\(socket)' show-options -qv -t '\(name)' @holy_note_v1",
                                           shell: "/bin/zsh", flags: ["-lc"])
         #expect(HolyTmuxSessionMetadataCodec.decodeNote(notes.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
                 == .value(edited.note))
+    }
+
+    @Test func hostMirrorFailureNamesTheFailedTmuxCommand() async throws {
+        let target = "=missing-fixture:"
+        let command = HolyHostStateMirror.command(tmuxPrefix: ["/usr/bin/false"], target: target)
+        let result = try await actionShell(command)
+        #expect(result.exitCode == 1)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderr.contains("Holy host state mirror failed: tmux command"))
+        #expect(result.stderr.contains("/usr/bin/false"))
+        #expect(result.stderr.contains("list-panes"))
+        #expect(result.stderr.contains(target))
+        #expect(result.stderr.contains("exited 1"))
     }
 
     @Test func concurrentBinaryLookupWaitsForTheSameSuccessfulProbe() async {
