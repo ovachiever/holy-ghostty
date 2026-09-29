@@ -408,6 +408,13 @@ Swift app and validates optimization settings, executable provenance, signing,
 and registration before completing replacement. The prior app remains available
 for rollback through final verification.
 
+The installer does not launch the app. Open the installed bundle by its full
+path so LaunchServices cannot select another registered copy:
+
+```bash
+open /Applications/Holy\ Ghostty.app
+```
+
 The **Build Holy macOS core** workflow produces an importable verified archive.
 `scripts/build-holy-ghostty-core.sh import <archive>` checks the current core
 inputs and all packaged payload hashes.

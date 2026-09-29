@@ -126,7 +126,7 @@ the installed bundle:
 
 ```bash
 scripts/install-holy-ghostty.sh
-open -a "Holy Ghostty"
+open /Applications/Holy\ Ghostty.app
 ```
 
 It builds the core with `ReleaseFast` and the Swift app with `ReleaseLocal`.
