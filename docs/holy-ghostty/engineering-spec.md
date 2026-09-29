@@ -394,35 +394,120 @@ Manual wrap-up expires after one lead window or an account change.
 ## Build and Validation
 
 The core build requires Zig 0.15.2. The macOS app requires Xcode 26 or newer and
-the Metal Toolchain component. The supported commands are:
+the Metal Toolchain component. On the current macOS 26 SDK, build the engine
+core only in CI through the **Build Holy macOS core** workflow
+(`.github/workflows/build-holy-macos.yml`). The pinned local Zig toolchain cannot
+link that SDK. CI uses `scripts/build-holy-ghostty-core.sh build` to produce a
+verified ReleaseFast framework and generated resources in the commit-addressed
+`HolyGhostty-Core-ReleaseFast-<sha>` artifact.
+
+Download an artifact whose core inputs match the checkout and import its
+contained zip. Run each command only after the preceding command succeeds:
 
 ```bash
-scripts/build-holy-ghostty-core.sh build
+scripts/build-holy-ghostty-core.sh import /path/to/HolyGhostty-Core-ReleaseFast.zip && \
+scripts/build-holy-ghostty-core.sh verify && \
 xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal SYMROOT=build build
-scripts/test-holy-ghostty-build-contract.sh
 ```
 
-The core wrapper verifies source and payload fingerprints for a ReleaseFast
-framework and generated resources. The installer uses ReleaseLocal for the
-Swift app and validates optimization settings, executable provenance, signing,
-and registration before completing replacement. The prior app remains available
-for rollback through final verification.
-
-The installer does not launch the app. Open the installed bundle by its full
-path so LaunchServices cannot select another registered copy:
-
-```bash
-open /Applications/Holy\ Ghostty.app
-```
-
-The **Build Holy macOS core** workflow produces an importable verified archive.
-`scripts/build-holy-ghostty-core.sh import <archive>` checks the current core
-inputs and all packaged payload hashes.
+The importer checks current core inputs and all packaged payload hashes. A
+mismatch blocks the release path: obtain a matching CI artifact before
+continuing. Do not fall back to a local engine build for this release.
+`scripts/test-holy-ghostty-build-contract.sh` is the focused shell contract suite
+used by `.github/workflows/holy-build-contract.yml`; its installer checks use
+isolated fixtures.
 
 `macos/Ghostty.xcodeproj` contains the Ghostty scheme, GhosttyTests, and
 GhosttyUITests. Tests are app-hosted. Xcode test execution launches a test app;
 build-for-testing only compiles it. Test builds require a separate output root
 from the installer's `macos/build`. SwiftLint rules are in `macos/.swiftlint.yml`.
+
+### Release procedure
+
+Release preparation leaves the `1.0.0` changelog header, date placeholder, and
+summary in an HTML comment immediately above `Unreleased`. The certified test
+run, installed visual acceptance, screenshots, and tag belong to Erik's
+coordinated release ceremony, after the other release gates are accepted.
+No preparation lane launches, installs, captures screenshots, or runs app-hosted
+tests. Compile-only test builds are not executed-test receipts.
+
+1. Agree on a live acceptance window after all workers have stopped editing.
+   Import and verify the matching CI ReleaseFast core as above. A failed import
+   or verification stops the procedure.
+2. From the repository root, install and launch the verified app by path:
+
+   ```bash
+   scripts/install-holy-ghostty.sh && \
+   open /Applications/Holy\ Ghostty.app
+   ```
+
+   Run the launch command only after installation succeeds. The installer
+   reuses the verified core, builds the Swift app with ReleaseLocal, and checks
+   optimization settings, executable provenance, signing, and registration.
+   It keeps the prior bundle for rollback through final verification and ends
+   without launching. The explicit bundle path prevents LaunchServices from
+   selecting another registered copy.
+3. Complete the installed visual acceptance and capture the agreed Board,
+   fleet, Archive, and Hosts screenshots under `docs/holy-ghostty/assets/`.
+   At this ceremony, promote the commented `1.0.0` header and summary, replace
+   the date placeholder, and move the existing Unreleased entries under that
+   release header without duplicating the summary. Set the Holy app's marketing
+   version in `macos/Ghostty.xcodeproj/project.pbxproj`, commit the release
+   candidate, and reinstall if the app inputs changed. Preparation does not
+   make these version or heading changes.
+4. On that clean, final release commit, run the complete GhosttyTests suite
+   serially. Start at the repository root. The following command retains each
+   attempt in a new directory under `.dev/release/`, separate from the installer
+   output, and reads counts from the result bundle even when the test run fails:
+
+   ```bash
+   (
+     set -eu
+     test -z "$(git status --porcelain --untracked-files=normal)"
+     cd macos
+     release_commit=$(git rev-parse HEAD)
+     mkdir -p ../.dev/release
+     acceptance_dir=$(mktemp -d "../.dev/release/${release_commit}.XXXXXX")
+     printf '%s\n' "$release_commit" > "$acceptance_dir/commit.txt"
+     xcode_status=0
+     xcodebuild test -scheme Ghostty -destination 'platform=macOS' \
+       -parallel-testing-enabled NO -skip-testing:GhosttyUITests \
+       -derivedDataPath "$acceptance_dir/DerivedData" \
+       -resultBundlePath "$acceptance_dir/serial.xcresult" \
+       > "$acceptance_dir/serial.log" 2>&1 || xcode_status=$?
+     xcrun xcresulttool get test-results summary \
+       --path "$acceptance_dir/serial.xcresult" > "$acceptance_dir/summary.json"
+     python3 - "$acceptance_dir/summary.json" <<'PY'
+   import json
+   import sys
+
+   with open(sys.argv[1]) as receipt:
+       summary = json.load(receipt)
+   for field in ("result", "totalTestCount", "passedTests", "failedTests", "skippedTests"):
+       print(f"{field}: {summary[field]}")
+   if summary["result"] != "Passed" or summary["failedTests"] != 0 or summary["totalTestCount"] == 0:
+       raise SystemExit("Release certification failed; inspect the retained result bundle.")
+   PY
+     test "$xcode_status" -eq 0
+     test "$(git rev-parse HEAD)" = "$release_commit"
+     test -z "$(git status --porcelain --untracked-files=normal)"
+   )
+   ```
+
+   GhosttyUITests exits before connecting to the test runner (early unexpected
+   exit, signal kill), tracked by `mn-3a4538`; cite that bootstrap failure and
+   skip in the ceremony receipt. Record every other skip and its accepted reason. A
+   missing result bundle, a failed command, any failed test, an empty test run,
+   or a changed release commit blocks certification. Never infer failure counts
+   by searching the log. Attach the recorded commit, command, summary counts,
+   log, and `.xcresult` bundle to the ceremony item `mn-3bb820`, and copy the
+   receipts to iCloud Transfer. Focused runs and build-for-testing do not replace
+   this full serial run.
+5. Once the recorded commit has its certified green run and visual acceptance,
+   create the annotated `v1.0.0` tag at that exact commit only on Erik's explicit
+   instruction. Any later release change requires a new commit and certified
+   run. Pushing the commit or tag and publishing the release require separate
+   explicit instructions; preparation ends ready-to-install.
 
 ## Host Administration
 

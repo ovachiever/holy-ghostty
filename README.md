@@ -121,37 +121,36 @@ xcodebuild -downloadComponent MetalToolchain
 
 ## Build and Install
 
-The supported installer builds and verifies the core and app before replacing
-the installed bundle:
+Build the engine core through the **Build Holy macOS core** CI workflow. The
+current macOS 26 SDK cannot be linked by the pinned local Zig 0.15.2 toolchain.
+Download the workflow's core artifact whose inputs match this checkout, then
+import its contained zip before running the installer:
 
 ```bash
-scripts/install-holy-ghostty.sh
+scripts/build-holy-ghostty-core.sh import /path/to/HolyGhostty-Core-ReleaseFast.zip && \
+scripts/build-holy-ghostty-core.sh verify && \
+scripts/install-holy-ghostty.sh && \
 open /Applications/Holy\ Ghostty.app
 ```
 
-It builds the core with `ReleaseFast` and the Swift app with `ReleaseLocal`.
-Source and payload fingerprints bind the framework and generated resources to
-the executable. Installation retains the previous app for rollback until
-signing, registration, and final verification pass.
+CI builds the core with `ReleaseFast`; the installer reuses the verified import
+and builds the Swift app with `ReleaseLocal`. Source and payload fingerprints
+bind the framework and generated resources to the executable. A failed import
+or verification blocks installation. Installation retains the previous app for
+rollback until signing, registration, and final verification pass. The installer
+does not launch the app; the final command opens the installed bundle by path.
 
-For a build without installation:
+For a Swift app build without installation, import and verify the core first:
 
 ```bash
-scripts/build-holy-ghostty-core.sh build
 xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal SYMROOT=build build
-```
-
-The **Build Holy macOS core** workflow produces a verified core archive when the
-local Zig toolchain cannot link the installed SDK. Import its contained zip:
-
-```bash
-scripts/build-holy-ghostty-core.sh import /path/to/HolyGhostty-Core-ReleaseFast.zip
-scripts/install-holy-ghostty.sh
 ```
 
 The importer checks current core inputs and all payload hashes. A bare
 `zig build -Demit-xcframework` does not produce the supported release payload.
-The installed bundle is `/Applications/Holy Ghostty.app`.
+The installed bundle is `/Applications/Holy Ghostty.app`. The
+[release procedure](docs/holy-ghostty/engineering-spec.md#release-procedure)
+covers the coordinated acceptance run and tag.
 
 ## Data and Automation
 

@@ -2,6 +2,12 @@
 
 All notable Holy Ghostty changes are recorded in this file.
 
+<!--
+## 1.0.0 (YYYY-MM-DD)
+
+Holy Ghostty brings live terminals, project boards, and searchable conversation archives onto one native surface. Shared session identity connects local and SSH sessions to native crash restore, while host-owned attention keeps status consistent across viewers. Confirmed worker dispatch, bounded SSH transport, and Claude and Codex usage readings support a workspace for managing many concurrent agents.
+-->
+
 ## Unreleased
 
 The workspace brings live terminals, project boards, and conversation archives onto one native surface, with shared session identity and host-owned attention state.
