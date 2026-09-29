@@ -48,6 +48,8 @@ actor HolyRemoteTmuxDiscoveryService {
         }
     }
 
+    /// Census once per socket, then inspect one session per bounded process.
+    /// `timeout` bounds a single inspection, not the total size of the fleet.
     func discoverLocalSessionsThrowing(
         hostID: UUID,
         hostLabel: String,
@@ -62,13 +64,52 @@ actor HolyRemoteTmuxDiscoveryService {
             tmuxSocketName: tmuxSocketName
         )
 
-        return try await discoverSessionsThrowing(
+        return try await discoverLocalSessionsIncrementally(
             for: localHost,
-            includeHiddenSessions: includeHiddenSessions,
-            usesSSH: false
-        ) { _, socketName in
-            await runLocalDiscovery(socketName: socketName, timeout: timeout)
+            includeHiddenSessions: includeHiddenSessions
+        ) { socketName, sessionName in
+            let script = sessionName.map {
+                self.remoteDiscoveryScript(socketName: socketName, includeGitMetadata: false, sessionName: $0)
+            } ?? self.identityDiscoveryScript(socketName: socketName)
+            return await self.runLocalDiscovery(script: script, timeout: timeout)
         }
+    }
+
+    private func discoverLocalSessionsIncrementally(
+        for host: HolyRemoteHostRecord,
+        includeHiddenSessions: Bool,
+        using runDiscovery: (String?, String?) async -> HolyProcessRunOutcome
+    ) async throws -> [HolyDiscoveredTmuxSession] {
+        var discovered: [HolyDiscoveredTmuxSession] = []
+        for target in probeTargets(for: host) {
+            try Task.checkCancellation()
+            let census = try commandResult(from: await runDiscovery(target.socketName, nil))
+            guard census.exitCode == 0 else {
+                throw friendlyDiscoveryError(for: host, result: census, usesSSH: false)
+            }
+            let inventory = try parseHostsSessions(output: census.stdout, host: host, socketName: target.socketName)
+            for expected in inventory {
+                try Task.checkCancellation()
+                let detail = try commandResult(from: await runDiscovery(target.socketName, expected.sessionName))
+                guard detail.exitCode == 0 else {
+                    throw friendlyDiscoveryError(for: host, result: detail, usesSSH: false)
+                }
+                let sessions = try parseHostsSessions(output: detail.stdout, host: host, socketName: target.socketName)
+                guard sessions.count == 1, let session = sessions.first, session.id == expected.id else {
+                    // Converge uses a successful result as authority to archive
+                    // absent rows. A vanished or misidentified detail is an
+                    // incomplete sweep, never evidence that the socket is empty.
+                    throw HolyTmuxDiscoveryExecutionError.incomplete(
+                        "Session \(expected.sessionName) changed during inspection. Sync again to reconcile the inventory."
+                    )
+                }
+                if includeHiddenSessions || !session.shouldHideFromDiscovery {
+                    discovered.append(session)
+                }
+            }
+        }
+        try Task.checkCancellation()
+        return sortedSessions(discovered)
     }
 
     /// Hosts inventories every session before attempting expensive runtime and
@@ -330,16 +371,6 @@ actor HolyRemoteTmuxDiscoveryService {
     }
 
     private func runLocalDiscovery(
-        socketName: String?,
-        timeout: TimeInterval?
-    ) async -> HolyProcessRunOutcome {
-        await runLocalDiscovery(
-            script: remoteDiscoveryScript(socketName: socketName, includeGitMetadata: false),
-            timeout: timeout
-        )
-    }
-
-    private func runLocalDiscovery(
         script: String,
         timeout: TimeInterval?
     ) async -> HolyProcessRunOutcome {
@@ -396,18 +427,13 @@ actor HolyRemoteTmuxDiscoveryService {
         process.standardError = stderr
 
         let resumeBox = HolyProcessRunResumeBox()
+        let capture = HolyDiscoveryProcessCapture(resumeBox: resumeBox)
 
         return await withCheckedContinuation { (continuation: CheckedContinuation<HolyProcessRunOutcome, Never>) in
             resumeBox.store(continuation)
 
             process.terminationHandler = { finishedProcess in
-                let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
-                resumeBox.resume(returning: .completed(HolyRemoteCommandResult(
-                    stdout: String(bytes: stdoutData, encoding: .utf8) ?? "",
-                    stderr: String(bytes: stderrData, encoding: .utf8) ?? "",
-                    exitCode: finishedProcess.terminationStatus
-                )))
+                capture.exited(finishedProcess.terminationStatus)
             }
 
             do {
@@ -424,6 +450,17 @@ actor HolyRemoteTmuxDiscoveryService {
                     description: detail
                 ))
                 return
+            }
+
+            // Drain both pipes while the child runs. Waiting for termination
+            // before reading can deadlock a fleet census (or one large note)
+            // against pipe capacity, incorrectly reporting a healthy tmux
+            // server as timed out. EOF and exit must all arrive before success.
+            DispatchQueue.global(qos: .userInitiated).async {
+                capture.read(stdout.fileHandleForReading.readDataToEndOfFile(), isStdout: true)
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
+                capture.read(stderr.fileHandleForReading.readDataToEndOfFile(), isStdout: false)
             }
 
             guard let timeout else { return }
@@ -540,14 +577,20 @@ actor HolyRemoteTmuxDiscoveryService {
         }
     }
 
-    private func remoteDiscoveryScript(socketName: String?, includeGitMetadata: Bool) -> String {
+    private func remoteDiscoveryScript(
+        socketName: String?,
+        includeGitMetadata: Bool,
+        sessionName: String? = nil
+    ) -> String {
         let socketBinding = socketName?.holyTrimmed.nilIfEmpty.map(posixQuote) ?? "''"
         let includeGitMetadataFlag = includeGitMetadata ? "1" : "0"
+        let sessionBinding = sessionName.map(posixQuote) ?? "''"
 
         return """
         setopt pipefail
         unset TMUX TMUX_PANE
         socket_name=\(socketBinding)
+        requested_session=\(sessionBinding)
         include_git_metadata=\(includeGitMetadataFlag)
         sep=$'\\x1f'
         tmux_cmd=(tmux)
@@ -885,6 +928,7 @@ actor HolyRemoteTmuxDiscoveryService {
 
         while IFS=$'\\t' read -r session_name attached windows; do
           [[ -z "$session_name" ]] && continue
+          [[ -n "$requested_session" && "$session_name" != "$requested_session" ]] && continue
           title=$(option_value "$session_name" @holy_title)
           runtime=$(option_value "$session_name" @holy_runtime)
           objective=$(option_value "$session_name" @holy_objective)
@@ -1150,6 +1194,43 @@ private final class HolyProcessRunResumeBox: @unchecked Sendable {
     }
 }
 
+/// Each pipe has one reader. Exit and the two EOFs can arrive in any order;
+/// joining them here avoids blocking Process's termination callback on a pipe.
+private final class HolyDiscoveryProcessCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private let resumeBox: HolyProcessRunResumeBox
+    private var stdout: Data?
+    private var stderr: Data?
+    private var exitCode: Int32?
+
+    init(resumeBox: HolyProcessRunResumeBox) {
+        self.resumeBox = resumeBox
+    }
+
+    func read(_ data: Data, isStdout: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        if isStdout { stdout = data } else { stderr = data }
+        completeIfReady()
+    }
+
+    func exited(_ status: Int32) {
+        lock.lock()
+        defer { lock.unlock() }
+        exitCode = status
+        completeIfReady()
+    }
+
+    private func completeIfReady() {
+        guard let stdout, let stderr, let exitCode else { return }
+        resumeBox.resume(returning: .completed(.init(
+            stdout: String(bytes: stdout, encoding: .utf8) ?? "",
+            stderr: String(bytes: stderr, encoding: .utf8) ?? "",
+            exitCode: exitCode
+        )))
+    }
+}
+
 private struct HolyRemoteProbeTarget {
     let socketName: String?
     let isExplicit: Bool
@@ -1167,10 +1248,45 @@ private extension String {
 
 #if DEBUG
 extension HolyRemoteTmuxDiscoveryService {
-    enum HostsTestReply {
+    enum HostsTestReply: Sendable {
         case output(String)
         case failure(Int32, String)
         case timeout
+    }
+
+    static func localDiscoveryForTesting(
+        host: HolyRemoteHostRecord,
+        includeHiddenSessions: Bool = true,
+        using reply: @escaping @Sendable (String?, String?) async -> HostsTestReply
+    ) async throws -> [HolyDiscoveredTmuxSession] {
+        try await shared.discoverLocalSessionsIncrementally(
+            for: host,
+            includeHiddenSessions: includeHiddenSessions
+        ) { socket, session in
+            switch await reply(socket, session) {
+            case let .output(output):
+                return .completed(.init(stdout: output, stderr: "", exitCode: 0))
+            case let .failure(code, error):
+                return .completed(.init(stdout: "", stderr: error, exitCode: code))
+            case .timeout:
+                return .timedOut(context: host.displayTitle, seconds: 5)
+            }
+        }
+    }
+
+    static func runLargeOutputForTesting(
+        byteCount: Int,
+        timeoutSeconds: TimeInterval
+    ) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "head -c \(byteCount) /dev/zero; head -c \(byteCount) /dev/zero >&2"]
+        let result = try await shared.commandResult(from: shared.runOnce(
+            process: process,
+            context: "large-output-test",
+            timeout: timeoutSeconds
+        ))
+        return (result.stdout, result.stderr, result.exitCode)
     }
 
     static func hostsDiscoveryForTesting(
