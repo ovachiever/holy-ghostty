@@ -45,16 +45,20 @@ struct HolyRosterInstantKillTests {
     }
 
     @Test func staleXAfterCommandReleaseAndDisabledXNeverKill() throws {
-        let window = NSWindow()
-        defer { window.close() }
+        // This handler reads only the event's flags and the button's enabled
+        // state. An unrelated NSWindow.close can terminate the app-hosted test
+        // runner; no window lifecycle belongs in this control-state test.
         let button = HolyRosterKillButtonView()
         var kills = 0
         button.onKill = { kills += 1 }
-        button.mouseDown(with: try mouseEvent(in: window, flags: []))
+        button.mouseDown(with: try mouseEvent(flags: []))
         #expect(kills == 0)
         button.isEnabled = false
-        button.mouseDown(with: try mouseEvent(in: window, flags: .command))
+        button.mouseDown(with: try mouseEvent(flags: .command))
         #expect(kills == 0)
+        button.isEnabled = true
+        button.mouseDown(with: try mouseEvent(flags: .command))
+        #expect(kills == 1, "The same event path must still accept an enabled Command-click")
     }
 
     @Test(arguments: HolyRosterLayout.allCases)
@@ -185,6 +189,26 @@ struct HolyRosterInstantKillTests {
         #expect(!fixture.store.rosterCommandHeld)
     }
 
+    @Test func fixtureTeardownDrainsSurfacesBeforeTheNextFixture() async throws {
+        weak var retiredUserdata: Ghostty.SurfaceUserdata?
+        let host = try RosterTestHost.shared.get()
+        try autoreleasepool {
+            let fixture = try Fixture()
+            defer { fixture.close() }
+            let session = try fixture.add("Retiring fixture")
+            retiredUserdata = session.surfaceView.callbackUserdata
+        }
+        for _ in 0..<100 where retiredUserdata != nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(retiredUserdata == nil)
+        let next = try Fixture()
+        defer { next.close() }
+        #expect(next.ghostty === host.ghostty)
+        let session = try next.add("Next fixture")
+        #expect(session.surfaceView.surface != nil)
+    }
+
     private func indicator(command: Bool, hover: Bool) -> HolyRosterIndicator {
         HolyRosterIndicator(
             attention: .init(kind: .inactive, symbolName: "circle.fill", title: "Inactive", detail: nil,
@@ -199,10 +223,10 @@ struct HolyRosterInstantKillTests {
         return view.subviews.flatMap { killButtons(in: $0) }
     }
 
-    private func mouseEvent(in window: NSWindow, flags: NSEvent.ModifierFlags) throws -> NSEvent {
+    private func mouseEvent(in window: NSWindow? = nil, flags: NSEvent.ModifierFlags) throws -> NSEvent {
         try #require(NSEvent.mouseEvent(
             with: .leftMouseDown, location: .zero, modifierFlags: flags, timestamp: 1,
-            windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1
+            windowNumber: window?.windowNumber ?? 0, context: nil, eventNumber: 1, clickCount: 1, pressure: 1
         ))
     }
 
@@ -225,6 +249,19 @@ struct HolyRosterInstantKillTests {
 }
 
 @MainActor
+private final class RosterTestHost {
+    static let shared = Result { try RosterTestHost() }
+    let config: TemporaryConfig
+    let ghostty: Ghostty.App
+
+    private init() throws {
+        config = try TemporaryConfig("command = /bin/sleep 60\nshell-integration = none\nwindow-vsync = false\n")
+        ghostty = Ghostty.App(configPath: config.temporaryFile.path)
+        _ = try #require(ghostty.app)
+    }
+}
+
+@MainActor
 private final class Fixture {
     let config: TemporaryConfig
     let ghostty: Ghostty.App
@@ -238,12 +275,15 @@ private final class Fixture {
             .success(.killed)
         }
     ) throws {
-        config = try TemporaryConfig("command = /bin/sleep 60\nshell-integration = none\n")
-        ghostty = Ghostty.App(configPath: config.temporaryFile.path)
-        _ = try #require(ghostty.app)
+        // Surface.deinit queues ghostty_surface_free on the main actor. Keep
+        // its owning core alive after synchronous fixture teardown returns.
+        let host = try RosterTestHost.shared.get()
+        config = host.config
+        ghostty = host.ghostty
         let supervisor = HolySessionSupervisor(ghostty: ghostty, seedDefaultSession: false, saveWorkspace: { _, _, _, _ in })
         store = HolyWorkspaceStore(sessionSupervisor: supervisor, tmuxSessionKiller: killer)
-        archiveURL = config.temporaryFile.deletingPathExtension().appendingPathExtension("sqlite3")
+        archiveURL = config.temporaryFile.deletingLastPathComponent()
+            .appendingPathComponent("roster-fixture-\(UUID()).sqlite3")
         controller = HolyWorkspaceWindowController(
             ghostty: ghostty, seedDefaultSession: false, workspaceStore: store, archiveDatabaseURL: archiveURL
         )
