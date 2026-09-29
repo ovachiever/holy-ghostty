@@ -7,7 +7,7 @@ base_commit: b1e6cbfcbda5cd18b2871a955d1ae8857ec2b625
 scope: '[P0][1.0 GATE 3] Restore and roster truth at fleet size'
 inputs:
 - orchestrator 2026-09-29; 09-24 handoff section 3
-binding: sha256:daf14001d6e637b5bbd1d2a99a039a6df66382936fb62cf3bbcc3ddb72ef4094
+binding: sha256:f66e1aca3c82a2d6654cc0e19167ba763baafdfaef043b8abcc0143126850dde
 ---
 
 # Handoff: [P0][1.0 GATE 3] Restore and roster truth at fleet size
@@ -38,3 +38,58 @@ Goal: the roster and restore tell the truth with 40 to 60 sessions across hosts.
 2. Update this handoff only when continuation context changed.
 3. Seal changes with `agent-do manna handoff seal mn-f92871`.
 4. Commit with `Manna: mn-f92871` and run `agent-do manna done mn-f92871` only after the work is verified.
+
+## Report: 2026-09-29, partial implementation and metadata scope boundary
+
+**Outcome: incomplete, not ready to install, and not done.** The gate claim succeeded first for `codex-01a0ef08871d7243`; the original normalized binding matched both this handoff and canonical Manna state at `sha256:daf14001d6e637b5bbd1d2a99a039a6df66382936fb62cf3bbcc3ddb72ef4094`. Each claimed child was verified against its canonical seal before work. Parent and claimed children remain `in_progress`; no acceptance status has been inferred from compilation.
+
+The user's current no-launch instruction supersedes this handoff's older `xcodebuild test` recipe. Only `build-for-testing` ran, serially, with the named suite filters. The repository's `GhosttyTests` target is app-hosted. No app launch, install, screenshot, live session spawning, live app-data access, or access to the `holy` tmux socket occurred. No push or pull request occurred.
+
+### Child outcomes, in work-order sequence
+
+| Child | Delivered evidence | Product commit | Required acceptance or blocker |
+| --- | --- | --- | --- |
+| `mn-27d9fd` | Incremental local socket census and per-session inspection; concurrent stdout/stderr drain; fail-closed detail parsing; regression tests compiled | `5fdc8040a16840f6d66443a9a69a9e4ab238c12e` | Execute focused suites and the 55-session scratch-socket regression in the coordinated pass; live fleet timing remains unmeasured |
+| `mn-569b91` | Reviewed existing known-session reconciliation, archive lineage, ambiguity guards, exact orphan kill/absence verification, and retention protection; focused targets compiled | No product change was needed for the source review | Execute reconcile/reap tests, validate local/SSH known and orphan cases, and accept combined retention integration |
+| `mn-12801a` | Proven-Holy fresh adoption, ambiguity refusal, archive precedence, awaited repairs, and per-discovery footer/log report; regression tests compiled | `2d98378b79d45d5d6d7ae229d734fd1527df73a8` | Execute focused suites; empty-history MacBook must mirror Studio with correct identity/title/seen-state and complete visible accounting |
+| `mn-56f896` | Inspected metadata and lifecycle invariants; sealed a concrete two-contract continuation proposal | No source changes | Scope extension required for `Domain/HolyModels.swift` and `Tmux/HolyTmuxSessionMetadata.swift`; local/SSH transition matrix and installed two-host acceptance remain open |
+| `mn-a0406e` | Not claimed or implemented | None | Continue after the metadata child, in the prescribed order |
+| `mn-cf5fb6` | Not claimed or implemented | None | Continue after the focus child |
+| `mn-ede22a` | Not claimed or implemented | None | Continue after the lease-expiry child |
+
+### Focused build receipts
+
+Source work and compilation used the isolated worktree `.dev/worktrees/mn-f92871-codex-01a0ef08`, based on `38643dcf483c9338fc15d00469e2cc696dfeed56`. Exact owned source patches were then integrated and committed in the primary checkout. These receipts do not claim a fresh build of other workers' subsequent combined-tree changes. Canonical Manna and Coord operations stayed in the primary checkout. Other workers' source, board records, and handoffs were preserved.
+
+From the isolated worktree's `macos/`, each selection used this command, with `child` and `attempt` set to the row below:
+
+```bash
+only_testing=()
+for suite in "${suites[@]}"; do only_testing+=("-only-testing:GhosttyTests/$suite"); done
+xcodebuild build-for-testing -scheme Ghostty -destination 'platform=macOS' \
+  -parallel-testing-enabled NO -skip-testing:GhosttyUITests "${only_testing[@]}" \
+  -derivedDataPath ../.dev/DerivedData-mn-f92871 \
+  -resultBundlePath "../.dev/verification/$child/build-$attempt.xcresult"
+xcrun xcresulttool get build-results --path "../.dev/verification/$child/build-$attempt.xcresult"
+xcrun xcresulttool get test-results summary --path "../.dev/verification/$child/build-$attempt.xcresult"
+```
+
+| Child / final attempt | `suites=(...)` | Build result | Executed tests |
+| --- | --- | --- | --- |
+| `mn-27d9fd` / 5 | `HolyRemoteTmuxDiscoveryTimeoutTests HolyHostsDiscoveryTests HolyDiscoveredWorkingDirectoryTests` | Succeeded, exit 0, 0 errors, 498 build-wide warnings | 0 total, 0 passed, 0 failed, 0 skipped; `unknown` |
+| `mn-569b91` / 1 | `HolyConvergePlannerTests HolyConvergeKeyTests HolyTmuxLifecycleIdentityTests HolyTmuxLifecycleServiceTests HolyArchiveRetentionCoverageTests` | Succeeded, exit 0, 0 errors, 22 build-wide warnings | 0 total, 0 passed, 0 failed, 0 skipped; `unknown` |
+| `mn-12801a` / 1 | `HolyConvergePlannerTests HolyConvergeKeyTests HolyConvergeGateTests HolyHostsDiscoveryTests HolyRemoteTmuxDiscoveryTimeoutTests HolyTmuxLifecycleIdentityTests` | Succeeded, exit 0, 0 errors, 502 build-wide warnings | 0 total, 0 passed, 0 failed, 0 skipped; `unknown` |
+
+Warnings are build-wide Xcode result counts, including cached diagnostics, not a count of new defects. Strict SwiftLint passed on the two discovery files and all seven files in the Sync commit with zero violations. `git diff --check` passed. `scripts/build-holy-ghostty-core.sh verify` passed in both checkouts with fingerprint `df28bebb6ebfe4a473978513324c78da1f5148e4952f7f59d53e3806f7781141`, ReleaseFast, Zig 0.15.2. No ReleaseLocal production build is claimed.
+
+Raw logs, result bundles, and extracted JSON summaries remain under the isolated worktree's `.dev/verification/<child>/`. Earlier discovery build failures are retained: SwiftLint traversed generated/dependency content under `macos/.dev`; relocating DerivedData retained absolute Sparkle references; a DEBUG helper exposed a private result type. The final path was rebuilt cleanly outside the lint root, and the helper now returns a tuple without widening production visibility. The child report records every attempt; no failing receipt was replaced or hidden.
+
+### Concrete scope boundary and required next work
+
+The metadata child's sealed report is `.handoff/02-mn-56f896-p0-meta-preserve-notes-today-pins-titles-and-identity-across-lif.md`. It identifies the exact missing contracts: durable title-edit provenance in `Domain/HolyModels.swift`, and title/conflict support in `Tmux/HolyTmuxSessionMetadata.swift`. It also records stale archive values overwriting newer merged values, relaunch identity replacement, and roster-order lineage requirements. The proposed extension adds backward-compatible optional title provenance and an explicit conflict outcome to those existing contracts, then uses them in the already allowed lifecycle paths. It proposes no new dependency, parallel metadata store, or direct database repair. Today pins retain the current "pinned until unpinned" behavior.
+
+Source edits stopped before changing those two files because they are outside the gate's enumerated source scope and affect the serialized metadata contract. `Restore/`, `Archive/`, `Board/`, `Tmux/HolyTmuxCommandBuilder.swift`, `Persistence/`, and `Database/` remain untouched by this lane. The concurrent `mn-ca1805` owner retains its persistence/database scope. Authorize the concrete two-file extension before continuing the metadata child and then the remaining three children.
+
+Coord needs `mn-f92871-metadata-contract-scope` and `mn-f92871-executed-live-acceptance` preserve the two independent gaps. The live acceptance pass must be coordinated at close: execute the selected suites serially, validate 40 to 60 sessions across local/SSH hosts, verify the empty-history MacBook adoption and report, verify metadata on both installed hosts, and cover focus, lease expiry, and failed-surface detached creation after those children are implemented. Do not close the gate or report ready-to-install from these build receipts.
+
+Lessons logged: 5 (new) | Decisions logged: 0 (new). Lesson IDs: `les-b2435b`, `les-a8a129`, `les-d024d6`, `les-e1852a`, `les-5985f5`. The ZPC harvest dry run found no lesson-format issues; no broad lessons-file rewrite was performed.
