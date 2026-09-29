@@ -258,13 +258,18 @@ struct HolyModeClipboardTests {
     }
 
     @Test func unhandledBoardCopyUsesSelectedIDAndTitleOnlyInBoard() async throws {
-        let fixture = try ClipboardFixture()
+        let fixture = try ClipboardFixture(activate: false)
         defer { fixture.tearDown() }
         fixture.present(.board)
         try await eventually { fixture.board.selectedItem != nil }
         #expect(fixture.board.selectedRowCopyText == "mn-123456 Clipboard fixture")
         #expect(fixture.window.makeFirstResponder(nil))
-        try await fixture.sendKey("c", code: 8)
+        // Start at this window's real responder chain, independent of which
+        // application the console permits to own system keyboard focus.
+        // Command-key dispatch is covered separately by the editing tests.
+        let responder = try #require(fixture.window.firstResponder)
+        let copiedRow = responder.tryToPerform(#selector(NSText.copy(_:)), with: nil)
+        #expect(copiedRow)
         #expect(NSPasteboard.general.string(forType: .string) == fixture.board.selectedRowCopyText)
 
         let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
@@ -274,14 +279,18 @@ struct HolyModeClipboardTests {
         #expect(fixture.window.makeFirstResponder(text))
         text.setSelectedRange(NSRange(location: 0, length: 0))
         fixture.clipboard("empty selection sentinel")
-        try await fixture.sendKey("c", code: 8)
+        // This is the production read-only selection fallback. It must work
+        // for an explicitly delivered event without NSApplication.sendEvent.
+        let copiedUnselectedText = fixture.window.performKeyEquivalent(with: try fixture.key("c", code: 8))
+        #expect(copiedUnselectedText)
         #expect(NSPasteboard.general.string(forType: .string) == fixture.board.selectedRowCopyText)
 
         // An empty selection in an editable field must retain normal Copy
         // semantics rather than replacing the clipboard with a ledger row.
         text.isEditable = true
         fixture.clipboard("editor sentinel")
-        try await fixture.sendKey("c", code: 8)
+        let copiedEditableText = text.tryToPerform(#selector(NSText.copy(_:)), with: nil)
+        #expect(copiedEditableText)
         #expect(NSPasteboard.general.string(forType: .string) == "editor sentinel")
 
         fixture.dismiss(.board)
@@ -380,7 +389,7 @@ private final class ClipboardFixture {
     private let directory: URL
     private let savedClipboard: [[NSPasteboard.PasteboardType: Data]]
 
-    init() throws {
+    init(activate: Bool = true) throws {
         savedClipboard = (NSPasteboard.general.pasteboardItems ?? []).map { item in
             Dictionary(uniqueKeysWithValues: item.types.compactMap { type in
                 item.data(forType: type).map { (type, $0) }
@@ -413,9 +422,11 @@ private final class ClipboardFixture {
         // Failed clipboard expectations must report synthetic text, never the
         // user's saved clipboard. The original formats remain in memory only.
         clipboard("clipboard fixture sentinel")
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-        window.makeMain()
+        if activate {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            window.makeMain()
+        }
     }
 
     func present(_ mode: HolyWorkspaceWindow.Mode) {

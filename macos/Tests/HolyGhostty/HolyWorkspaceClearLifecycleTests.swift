@@ -9,7 +9,7 @@ import Testing
 @Suite(.serialized)
 struct HolyWorkspaceClearLifecycleTests {
     @Test func queuedMouseShapeAfterViewReleaseDoesNotDereferenceFreedView() async throws {
-        let config = try TemporaryConfig("command = /bin/sleep 60\nshell-integration = none\n")
+        let config = try TemporaryConfig("command = /bin/sleep 60\nshell-integration = none\nwindow-vsync = false\n")
         let ghostty = Ghostty.App(configPath: config.temporaryFile.path)
         let app = try #require(ghostty.app)
 
@@ -52,6 +52,7 @@ struct HolyWorkspaceClearLifecycleTests {
         let config = try TemporaryConfig("""
         command = /bin/sleep 60
         shell-integration = none
+        window-vsync = false
         quit-after-last-window-closed = \(quitAfterLastWindow)
         """)
         let ghostty = Ghostty.App(configPath: config.temporaryFile.path)
@@ -76,8 +77,9 @@ struct HolyWorkspaceClearLifecycleTests {
             archiveDatabaseURL: archiveURL
         )
         let window = try #require(controller.window)
+        let contentController = try #require(window.contentViewController)
         defer { window.close() }
-        window.makeKeyAndOrderFront(nil)
+        window.orderFront(nil)
         var spec = HolySessionLaunchSpec.interactiveShell(title: "Synthetic Clear regression")
         spec.command = "/bin/sleep 60"
         spec.workingDirectory = config.temporaryFile.deletingLastPathComponent().path
@@ -96,8 +98,13 @@ struct HolyWorkspaceClearLifecycleTests {
         #expect(Set(store.archivedSessions.map(\.sourceSessionID)) == originalIDs)
         #expect(savedSnapshot?.sessions.isEmpty == true)
         #expect(window.isVisible)
-        #expect(window.isKeyWindow)
-        #expect(window.contentViewController != nil)
+        #expect(controller.window === window)
+        #expect(window.contentViewController === contentController)
+        // An inactive app cannot own the system key window. Clear's invariant
+        // is that the same mounted workspace still accepts a first responder.
+        let acceptsEmptyResponder = window.makeFirstResponder(nil)
+        #expect(acceptsEmptyResponder)
+        #expect(window.firstResponder === window)
         #expect(HolyWorkspaceWindowController.all.contains { $0 === controller })
         #expect(!AppDelegate.shouldAutomaticallyQuitAfterLastWindowClosed(configured: quitAfterLastWindow))
 
@@ -106,7 +113,9 @@ struct HolyWorkspaceClearLifecycleTests {
         let created = store.createSession(with: spec) != nil
         #expect(created)
         #expect(store.sessions.count == 1)
-        #expect(window.isKeyWindow)
+        let acceptsResponderAfterReuse = window.makeFirstResponder(nil)
+        #expect(acceptsResponderAfterReuse)
+        #expect(window.firstResponder === window)
         store.detachAllSessions()
         for _ in 0..<10 { await Task.yield() }
         withExtendedLifetime(ghostty) {}
