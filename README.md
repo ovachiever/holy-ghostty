@@ -5,7 +5,7 @@
 <h1 align="center">Holy Ghostty</h1>
 
 <p align="center">
-  macOS control surface for durable local and SSH/tmux coding sessions, built on Ghostty.
+  An operating system for AI coding agents, built into a macOS terminal.
 </p>
 
 <p align="center">
@@ -16,15 +16,67 @@
   <a href="./docs/holy-ghostty/agent-sessions-interoperability.md">Interoperability</a>
   ·
   <a href="./CHANGELOG.md">Changelog</a>
+  ·
+  <a href="https://erikfritsch.substack.com/p/the-terminal-became-the-holy-ghost">The Essay</a>
 </p>
 
 <p align="center">
   <img src="./docs/holy-ghostty/assets/holy-ghostty-app.jpg" alt="Holy Ghostty workspace" width="920">
 </p>
 
-Holy Ghostty runs durable coding sessions and puts project work and conversation
-history beside the terminal. Ghostty provides terminal rendering. The native
-macOS workspace manages sessions, Board, Archive, and GitHub attention.
+## What this is
+
+Every AI company is selling better coding agents. Nobody sells the place where
+a fleet of them works for one person. Holy Ghostty is that place: a native
+macOS workspace, grown out of a fork of the [Ghostty](https://github.com/ghostty-org/ghostty)
+terminal, that runs AI coding agents the way an operating system runs
+processes.
+
+The parts map one to one:
+
+- **The roster is the process table.** Every session, on this machine or on
+  any machine you reach over SSH, survives reboots because tmux never hangs
+  up, and every row reports its true state: working, needs you, asleep.
+- **The board is the scheduler.** Work lives on a git-backed ledger as items
+  with sealed work orders. Dispatch is one confirmation: pick the item, pick
+  how much intelligence the job deserves, and a worker spawns in the right
+  repository already holding its orders.
+- **The archive is long-term memory.** Every conversation with every AI coding
+  tool on the machine is indexed into one searchable place that answers
+  questions with citations into its own history.
+- **The usage guard is the resource governor.** Account burn rides in the
+  status bar. The fleet gets warned as usage climbs, new hiring stops near the
+  cap, and running work is asked to checkpoint before the lights go out.
+- **The inbox is attention.** GitHub activity for your repositories sits
+  beside the work instead of in another browser tab.
+
+## Why you'd care
+
+If you run one agent in one repository, a chat window is fine. The moment you
+run several agents across several projects, the chat window becomes the
+bottleneck: tab-hunting, lost context, and no shared truth about who is doing
+what. Holy Ghostty exists for the person who wants to build many things at
+once, with a day that feels like running a shop rather than refereeing
+browser tabs.
+
+## Why there's nothing else like it
+
+- **It runs harnesses, not a vendor.** Claude Code, Codex, OpenCode, Factory's
+  Droid: full workers with their own habits, whatever brain each one carries.
+  They all read the same board, write to the same ledger, land in the same
+  archive. The house rule is written down: vendors sell features, you keep the
+  protocol.
+- **Agents coordinate through a ledger, never chat.** There is no message
+  plane between workers. If something is true, it is written where everyone
+  can read it, in work orders sealed by hash that refuse to open if they
+  drift. One shop, one truth, and the truth has receipts.
+- **Sessions are durable by construction.** tmux owns the processes. Macs
+  attach and detach, reboots don't end work, and every attached machine shares
+  the same read on session state.
+
+The longer story, and why a terminal turned out to be the right bones for all
+of this, is in the launch essay:
+[The Terminal Became the Holy Ghost](https://erikfritsch.substack.com/p/the-terminal-became-the-holy-ghost).
 
 ## Workspace
 
