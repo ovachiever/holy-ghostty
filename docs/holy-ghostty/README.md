@@ -68,7 +68,7 @@ into an immediate kill control. Kills report failures inline on the row.
 
 ## Board
 
-Board requires `agent-do` on the selected host and a Manna board in the project.
+Board requires [`agent-do`](https://github.com/ovachiever/agent-do) on the selected host and a Manna board in the project.
 Its estate view lists available boards. Select a board to inspect its work,
 asks, peers, claims, needs, drops, and health. The board context follows the
 selected session's repository or working directory unless you choose a board

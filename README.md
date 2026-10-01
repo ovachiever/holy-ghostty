@@ -70,7 +70,7 @@ commands.
 
 ## Board and Archive
 
-Board requires `agent-do` and a Manna board on the selected host. It reads
+Board requires [`agent-do`](https://github.com/ovachiever/agent-do) and a Manna board on the selected host. It reads
 `manna state --json` and `manna estate --json`. Changes require confirmation.
 Type to filter the board; press Enter to ask a question. Answers link to cited
 items. `Claim & build` opens a confirmed worker with the item's sealed handoff.
@@ -111,7 +111,7 @@ Claude sessions. Provider limits still determine when requests are accepted.
 - Zig 0.15.2 for the Ghostty core.
 - tmux and the selected runtime executable on each session host.
 - SSH access and Python 3 on remote hosts for metadata and archive queries.
-- `agent-do` on hosts used for Board; authenticated GitHub access for the Inbox.
+- [`agent-do`](https://github.com/ovachiever/agent-do) on hosts used for Board; authenticated GitHub access for the Inbox.
 
 Install the Xcode component if needed:
 
